@@ -861,6 +861,93 @@ export interface CommandResult {
   durationMs: number;
 }
 
+/**
+ * The most of one command's output worth keeping on the record.
+ *
+ * A validation result stores the whole of what a command printed, and a test
+ * suite prints a great deal: measured, the integration row is one of the two
+ * things that make a task cost up to a hundred and sixty kilobytes of stored
+ * JSON. Nothing reads it. Every consumer of `validation` takes
+ * `command.label` and `exitCode` — the handoff, the overlay, the rollback,
+ * the worker's own audit line — and the single reader of the text takes
+ * `stderr.trim().slice(-300)` to quote why something failed.
+ *
+ * So this is thirteen times what anything actually reads, which leaves a tail
+ * a person can page through while bounding a row that was previously bounded
+ * only by how noisy somebody's test runner is.
+ */
+export const MAX_COMMAND_OUTPUT_CHARS = 4_000;
+
+/**
+ * Keeps the END of a command's output rather than the start.
+ *
+ * Deliberate and load-bearing: the one reader of this text quotes the last
+ * three hundred characters, because that is where a failing command says what
+ * went wrong. A cap that kept the head would preserve the size limit and
+ * throw away the only part anybody looks at — the build banner survives and
+ * the stack trace does not.
+ */
+export function boundCommandOutput(
+  text: string,
+  max = MAX_COMMAND_OUTPUT_CHARS,
+): string {
+  return text.length <= max
+    ? text
+    : `[…${text.length - max} earlier characters dropped]\n${text.slice(-max)}`;
+}
+
+/** One command's result with its output bounded — see {@link boundCommandOutput}. */
+export function boundValidation(
+  validation: readonly CommandResult[],
+): CommandResult[] {
+  return validation.map((entry) => ({
+    ...entry,
+    stdout: boundCommandOutput(entry.stdout),
+    stderr: boundCommandOutput(entry.stderr),
+  }));
+}
+
+/**
+ * What an `ownership_granted` audit event should carry instead of every lease.
+ *
+ * The full `ResourceLease[]` was measured as the single largest thing a task
+ * writes — it scales with how many symbols plan enrichment pulled out of the
+ * declared files, not with the size of the change, so an eight-file plan
+ * writes hundreds of entries for a change that touched eight files.
+ *
+ * Nothing reads it. The grants that are actually read back live in three
+ * durable places written in the same moment: the `resource_leases` rows, the
+ * plan JSON on `work_leases` (which is what a later admission reseeds
+ * ownership from), and the decision JSON on the task. The audit copy is the
+ * fourth, and the only one no code path consults.
+ *
+ * So it keeps what a person reading the log needs — how many, over what, and
+ * the files themselves — and drops the per-symbol tail that made it large.
+ * Files, because a file lease is the one kind anything downstream reads; the
+ * symbol leases enrichment adds are all `observe`, which by construction can
+ * neither block nor be blocked.
+ */
+export function summariseGrants(leases: readonly ResourceLease[]): {
+  count: number;
+  files: string[];
+  symbols: number;
+} {
+  const files = [
+    ...new Set(
+      leases
+        .filter((lease) => lease.resourceType === "file")
+        .map((lease) => lease.resourceId),
+    ),
+  ];
+  return {
+    count: leases.length,
+    // Bounded in its own right: a plan may touch more files than anybody will
+    // read in a log line, and this must not become the new unbounded field.
+    files: files.slice(0, 50),
+    symbols: leases.filter((lease) => lease.resourceType !== "file").length,
+  };
+}
+
 export interface TestResult {
   name: string;
   status: "passed" | "failed" | "skipped";
@@ -2867,4 +2954,112 @@ export function rankTouchedFiles(
  */
 export function localAgentsOnly(): boolean {
   return process.env["COORD_LOCAL_AGENTS_ONLY"] === "1";
+}
+
+/**
+ * Names an agent can be dealt, so it is somebody rather than a vendor label.
+ *
+ * Here rather than in the web app because both ends assign one now: the app
+ * when a credential is connected, and the gateway when an agent is created
+ * without a credential at all. A second copy would drift, and the one thing
+ * this list has to guarantee is that no two agents on a deployment are both
+ * Hermes.
+ *
+ * Greek only. It used to carry the Roman counterparts as well — Jupiter beside
+ * Zeus, Minerva beside Athena, Proserpina beside Persephone — which is twenty
+ * pairs where two agents in the same room are named after the same god. That
+ * is not a longer list, it is a shorter one with each entry printed twice
+ * under two spellings, and it produced exactly the confusion it looks like it
+ * would: somebody @mentioned Proserpina and read Persephone's reply as the
+ * wrong agent answering. Names that a person has to keep apart at a glance
+ * cannot be synonyms of each other.
+ */
+export const AGENT_CALL_SIGNS = [
+  // Olympians and kin
+  "Zeus", "Hera", "Poseidon", "Demeter", "Athena", "Apollo", "Artemis",
+  "Ares", "Aphrodite", "Hephaestus", "Hermes", "Hestia", "Dionysus",
+  "Hades", "Persephone",
+  // Titans and primordials
+  "Cronus", "Rhea", "Oceanus", "Tethys", "Hyperion", "Theia", "Themis",
+  "Mnemosyne", "Atlas", "Prometheus", "Epimetheus", "Gaia", "Uranus",
+  "Nyx", "Erebus", "Eos", "Helios", "Selene", "Iris",
+  // Winds and lesser gods
+  "Boreas", "Zephyrus", "Notus", "Eurus", "Pan", "Morpheus", "Nemesis",
+  "Nike", "Tyche", "Eris", "Hebe",
+  // Muses, Fates and Graces — the room the Roman counterparts left
+  "Calliope", "Clio", "Erato", "Euterpe", "Melpomene", "Polyhymnia",
+  "Terpsichore", "Thalia", "Urania",
+  "Clotho", "Lachesis", "Atropos",
+  "Aglaia", "Euphrosyne",
+  // Nymphs, heroes and the rest of the pantheon's working population
+  "Echo", "Daphne", "Calypso", "Thetis", "Amphitrite", "Galatea",
+  "Ariadne", "Andromeda", "Cassandra", "Penelope", "Perseus", "Orpheus",
+  "Icarus", "Daedalus", "Theseus", "Jason", "Hector", "Achilles",
+  "Odysseus", "Argus", "Triton", "Nereus", "Proteus", "Charon",
+  "Hypnos", "Thanatos", "Hecate", "Asclepius", "Chiron", "Aeolus",
+] as const;
+
+/**
+ * The name this agent gets, derived rather than dealt.
+ *
+ * An agent's name has to be *constant*. It is how a person addresses it, so a
+ * name that changes is a name that stops working — and both ends used to pick
+ * one at random and store it, which made the name a property of the storage
+ * rather than of the agent. Every way the storage could be lost was a way the
+ * name could change: a disconnect (which clears the record), a reconnect after
+ * it, a control plane restarted onto a filesystem that did not outlive the
+ * container, a database wiped and rebuilt.
+ *
+ * Deriving it from the agent's own identity removes the whole class. The same
+ * person's Claude agent is the same name on a fresh deployment, after a
+ * disconnect, after a restore from nothing — because nothing was stored for it
+ * to lose. The durable record is still written, and is still what a *rename*
+ * lives in; it simply stopped being what makes the default stable.
+ *
+ * Order is not identity: walking the list would have made every deployment
+ * produce Zeus first, so the name would say who connected first and nothing
+ * else. The hash spreads the starting point instead, and collisions probe
+ * forward from it, deterministically — so two agents that want the same name
+ * still resolve the same way every time anybody asks.
+ *
+ * `taken` is compared case-insensitively, since that is how the callers hold
+ * their sets and how a person reads a name.
+ */
+export function deriveCallSign(
+  userId: string,
+  provider: string,
+  taken: ReadonlySet<string> = new Set(),
+): string | undefined {
+  const claimed = new Set(
+    [...taken].map((name) => name.trim().toLowerCase()),
+  );
+  const start = callSignHash(`${userId}\0${provider}`) % AGENT_CALL_SIGNS.length;
+  for (let step = 0; step < AGENT_CALL_SIGNS.length; step += 1) {
+    const candidate =
+      AGENT_CALL_SIGNS[(start + step) % AGENT_CALL_SIGNS.length];
+    if (candidate !== undefined && !claimed.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * FNV-1a, 32-bit.
+ *
+ * Written out rather than taken from `node:crypto` because this module is
+ * imported by the browser bundle as well, and because the property that
+ * matters is not cryptographic strength but that every process computes the
+ * same number from the same string — including a browser, a gateway and a
+ * worker on three different machines.
+ */
+function callSignHash(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    // The FNV prime, by shifts, so this stays in 32-bit integer arithmetic
+    // instead of losing precision through a float multiply.
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
 }

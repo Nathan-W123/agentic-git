@@ -41,7 +41,25 @@ import {
   resolveServer,
   verifyServer,
 } from "../dist/server-address.js";
+// Imported, which it was not. `detectAgents` was called by the handler the
+// dashboard asks "what is installed here" and by the menu that reports it,
+// and was never brought into this module — so both threw ReferenceError on
+// every call, on every launch, since the day the handler was written.
+//
+// Nothing said so. The renderer's `.catch(() => undefined)` turned the throw
+// into "no answer", and the setup that answer gates — the CLI check, the
+// install offer, the sign-in — was skipped in silence. Agents connected,
+// looked connected, and could run nothing.
+import { detectAgents } from "./agents.mjs";
 import { setStayAwake, startWorker, stopWorker } from "./worker.mjs";
+import { readVendorUsage } from "./usage.mjs";
+import {
+  INSTALLABLE_VENDORS,
+  VENDOR_LABELS,
+  installPlan,
+  openSignIn,
+  runInstall,
+} from "./installers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -376,6 +394,85 @@ function noteWorkerState(event) {
         ? "Reconnecting…"
         : `Not running — ${event.detail}`;
   Menu.setApplicationMenu(buildMenu());
+  if (event.reason === "no-cli") {
+    void offerToInstallACli();
+  }
+}
+
+/**
+ * Whether this run has already offered to install a CLI.
+ *
+ * The worker restarts, and every restart on a machine with nothing installed
+ * would ask again. Once per run is the right number: somebody who said no is
+ * saying no to this session, not to the idea forever, and the offer is still
+ * on the Agents screen whenever they want it.
+ */
+let offeredInstall = false;
+
+/**
+ * The dead end this app used to have, and the way out of it.
+ *
+ * Nothing here can run an agent until one of three vendors' CLIs is on the
+ * machine, and the worker refuses to start without one — correctly, because a
+ * worker advertising adapters it cannot drive takes work it will fail. But
+ * refusing was the whole of it. The reason went into a menu, the dashboard
+ * said nothing, and an agent connected from a machine in that state accepted
+ * every task and did none of them.
+ *
+ * There was never a reason a person needed a CLI *first*. This app knows how
+ * to install all three, has known since the install table was written, and
+ * only ever offered it from a screen somebody had to go and find. So it asks
+ * here, at the moment it discovers the gap, and installing takes effect
+ * immediately: `runInstall`'s own handler stops and restarts the worker, so
+ * the scan runs again and the machine starts advertising what it just got.
+ */
+async function offerToInstallACli() {
+  if (offeredInstall || session === undefined || here === undefined) {
+    return;
+  }
+  offeredInstall = true;
+  const labels = INSTALLABLE_VENDORS.map(
+    (vendor) => VENDOR_LABELS[vendor] ?? vendor,
+  );
+  const choice = await dialog.showMessageBox({
+    type: "question",
+    title: "Kumi needs an agent on this machine",
+    message: "No agent CLI is installed here yet",
+    detail:
+      "Kumi runs agents on your own machine, under your own vendor login, so " +
+      "one of these has to be installed before an agent can do any work. " +
+      "Kumi can install it for you now — you will still sign in to the " +
+      "vendor yourself afterwards.",
+    buttons: [...labels, "Not now"],
+    defaultId: 0,
+    cancelId: labels.length,
+    noLink: true,
+  });
+  const vendor = INSTALLABLE_VENDORS[choice.response];
+  if (vendor === undefined) {
+    return;
+  }
+  // The same path the dashboard uses, so there is one installer and one set of
+  // commands rather than a second copy that drifts. Output is not relayed
+  // anywhere here — there is no window asking — so a failure is reported as
+  // its own message rather than as silence.
+  const result = await runInstall(vendor, () => undefined);
+  if (!result.ok) {
+    dialog.showErrorBox(
+      `Could not install ${VENDOR_LABELS[vendor] ?? vendor}`,
+      `${result.detail ?? "The installer did not finish."}\n\n` +
+        "You can install it yourself and restart Kumi, or try again from " +
+        "Settings → Agents in the dashboard.",
+    );
+    return;
+  }
+  // Installed, and the worker is already restarting behind this. The sign-in
+  // is the one step nobody can do for somebody else: every vendor's login is
+  // an interactive flow it owns, and the most this can do is put them in
+  // front of it with nothing left to type.
+  stopWorker();
+  void startWorker(here, session, noteWorkerState);
+  openSignIn(vendor);
 }
 
 async function openDashboard() {
@@ -498,6 +595,57 @@ async function start() {
   void startWorker(here, session, noteWorkerState);
   await openDashboard();
 }
+
+// Installing a vendor CLI, asked for by name.
+//
+// The renderer is a remote document, so it names a vendor and this process
+// decides what that means — a command string never travels from the page to a
+// shell. `installers.mjs` holds the table, and the plan the page displays is
+// read back from it, so what somebody agrees to and what runs cannot differ.
+ipcMain.handle("kumi:install-plan", (_event, vendor) => installPlan(vendor));
+
+ipcMain.handle("kumi:install-run", async (event, vendor) => {
+  const result = await runInstall(vendor, (line) => {
+    // Relayed to the window that asked, as it arrives. These commands fail for
+    // ordinary legible reasons and the vendor's own words say which; a spinner
+    // that ends in "failed" would put the reader back where they began.
+    if (!event.sender.isDestroyed()) {
+      event.sender.send("kumi:install-output", line);
+    }
+  });
+  if (result.ok && here !== undefined && session !== undefined) {
+    // The scan deciding which agents this machine advertises runs at worker
+    // start, so a CLI installed afterwards stays invisible until the worker
+    // restarts. Doing it here is what lets an install take effect without
+    // asking somebody to quit the app they are in the middle of using.
+    stopWorker();
+    void startWorker(here, session, noteWorkerState);
+  }
+  return result;
+});
+
+ipcMain.handle("kumi:install-sign-in", (_event, vendor) => openSignIn(vendor));
+
+// What the vendor says is left, read here rather than on the control plane.
+//
+// The server's copy of this needed a stored vendor credential, and that
+// credential was the whole reason connecting an agent asked for a second
+// sign-in — nothing else wanted it, since the agent runs here under the login
+// this machine already holds. Raw output goes back; the server parses it, and
+// keeps the last reading so the figure survives this machine being asleep.
+ipcMain.handle("kumi:agent-usage", async (_event, vendor) =>
+  await readVendorUsage(vendor),
+);
+
+// What this machine actually has, asked for by the connect screen.
+//
+// The same scan the worker registers from, so the page and the worker cannot
+// disagree about whether an agent can run here. Adapter ids, not paths: the
+// page needs to know whether to offer an install, and has no business knowing
+// where anything lives.
+ipcMain.handle("kumi:machine-agents", async () =>
+  Object.values(await detectAgents()).map((agent) => agent.adapter),
+);
 
 // The renderer asks for the token here instead of being handed it on its
 // command line. Only the top frame of a window running our preload can reach

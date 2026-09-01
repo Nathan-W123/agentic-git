@@ -45,6 +45,21 @@ const RESTART_DELAYS_MS = [1_000, 5_000, 15_000, 60_000];
 const HEALTHY_RUN_MS = 60_000;
 
 let child;
+/**
+ * The start already in flight, so a second caller joins it rather than racing.
+ *
+ * `child` is the obvious guard and it is not enough: it is assigned only after
+ * five awaits — the bundle check, the agent scan, the tenancy lookup, the
+ * project write — and there are three call sites. Two overlapping calls both
+ * read `child` as undefined, both walk that gap, and both fork. The second
+ * assignment then orphans the first child: it is still running, still
+ * registered, still polling, and `stopWorker` can no longer reach it.
+ *
+ * A deployment accumulated more than fifty worker registrations for one
+ * computer this way, in pairs a second apart, each one a machine the control
+ * plane believed was available.
+ */
+let starting;
 let stopping = false;
 /** The id of the sleep block currently held, if any. */
 let awake;
@@ -153,6 +168,17 @@ export async function startWorker(here, session, onEvent) {
   if (child !== undefined) {
     return;
   }
+  // Joined, not restarted. The whole body below is the critical section.
+  if (starting !== undefined) {
+    return await starting;
+  }
+  starting = startWorkerOnce(here, session, onEvent).finally(() => {
+    starting = undefined;
+  });
+  return await starting;
+}
+
+async function startWorkerOnce(here, session, onEvent) {
   stopping = false;
   const bundle = bundlePath(here);
   if (!(await exists(bundle))) {
@@ -165,8 +191,15 @@ export async function startWorker(here, session, onEvent) {
 
   const agents = await detectAgents();
   if (Object.keys(agents).length === 0) {
+    // Named, not just described. This is the one stop the app can do something
+    // about — every other one is a crash, a bad token or a server that did not
+    // answer — and until it carried a reason the only trace of it was a line
+    // of text in a menu nobody opens. Somebody would install the app, connect
+    // an agent, watch it accept work and never do any, and have no way at all
+    // to find out that nothing on the machine could run it.
     onEvent?.({
       state: "stopped",
+      reason: "no-cli",
       detail:
         "No agent CLI found on this machine. Install and sign in to Claude Code or Codex, then try again.",
     });

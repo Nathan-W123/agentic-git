@@ -18,6 +18,8 @@ import {
   ProviderChatService,
   parseClaudeStreamJson,
   parseClaudeUsage,
+  parseCursorAccount,
+  parseReportedUsage,
   parseCursorModelList,
   saysSignedIn,
   parseCodexAppServerRateLimits,
@@ -2239,6 +2241,107 @@ test("a connection made before call signs existed is named on the next read", as
   assert.equal(again, named);
 });
 
+/**
+ * Disconnecting has to remove the agent, not only its secret.
+ *
+ * The roster is a union of stored credentials and durable call-sign records,
+ * so an agent whose credential was destroyed went on being listed in every
+ * channel under the name it was dealt — disconnected everywhere except where
+ * it mattered. The credential was the identity once; forgetting the record is
+ * what makes the button mean what it says now.
+ */
+test("disconnecting forgets the agent's durable record too", async () => {
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-named-then-removed",
+  });
+  // Connecting deals a name, which is the record this has to clear.
+  await service.list({ userId: "u1", systemAdmin: false });
+  assert.equal(callSigns.rows.size, 1, "connecting recorded the agent");
+
+  await service.disconnect({ userId: "u1", provider: "anthropic" });
+  assert.equal(callSigns.rows.size, 0, "and disconnecting removed it");
+});
+
+/**
+ * And it stays removed once the reconciler has had a look.
+ *
+ * `nameUnnamedConnections` runs on the way through `list` and deals a fresh
+ * name to any connection missing one, writing it back to the durable table. So
+ * removing the record alone does not remove the agent: it leaves a connection
+ * for the reconciler to rename, and the next roster read brings the agent back
+ * under a name nobody chose. Verified by mutation — this test fails when the
+ * connections-file removal is taken out of `disconnect`, and passes when the
+ * two removals are swapped, which is how it is known that both are needed and
+ * that their order is not what matters.
+ */
+test("a disconnected agent is not recreated by the next roster read", async () => {
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-reconciled",
+  });
+  await service.list({ userId: "u1", systemAdmin: false });
+  assert.equal(callSigns.rows.size, 1);
+
+  await service.disconnect({ userId: "u1", provider: "anthropic" });
+
+  // The read that would resurrect it.
+  const after = await service.list({ userId: "u1", systemAdmin: false });
+  assert.deepEqual(
+    await callSigns.listAgentCallSigns(),
+    [],
+    "the reconciler must not deal a name to an agent that was removed",
+  );
+  assert.equal(
+    after.find((entry) => entry.id === "anthropic")?.callSign,
+    undefined,
+  );
+});
+
+/**
+ * The other half, and the reason this route exists at all: an agent that
+ * never had a credential. Local execution runs the vendor CLI under the
+ * machine's own login, so there is no secret here to destroy — the record is
+ * the only thing there is, and without this there was no way to remove such
+ * an agent at all.
+ */
+test("disconnecting removes an agent that never had a credential", async () => {
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  await callSigns.setAgentCallSign("u1", "openai", "Eris");
+
+  // No credential, no connection — every other step is a no-op, and this must
+  // not throw on the nothing it finds.
+  await service.disconnect({ userId: "u1", provider: "openai" });
+  assert.deepEqual(await callSigns.listAgentCallSigns(), []);
+
+  // And again, on an agent that is already gone.
+  await service.disconnect({ userId: "u1", provider: "openai" });
+});
+
 /** The two-method slice of the coordination store, kept in memory. */
 function fakeCallSignStore() {
   const rows = new Map<string, { userId: string; provider: string; callSign: string }>();
@@ -3267,4 +3370,184 @@ test("an account with no models reads as no list rather than a bad one", () => {
   assert.deepEqual(parseCursorModelList(""), []);
   // The tip alone, with no header, is not a model list either.
   assert.deepEqual(parseCursorModelList("Tip: use --model <id> to switch."), []);
+});
+
+/**
+ * The quota figure comes from the machine that holds the login.
+ *
+ * Reading it here needed a vendor credential stored here, and that credential
+ * was the whole reason connecting an agent asked for a second sign-in —
+ * nothing else wanted it, since the agent runs on somebody's own machine under
+ * the login its CLI already has. Worse, with no credential the question was
+ * put to the container's own login, so the card answered a question about one
+ * account with another account's numbers.
+ */
+test("a usage reading from the machine is preferred over asking here", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+  });
+
+  const parsed = await service.reportUsage({
+    userId: "u1",
+    provider: "anthropic",
+    raw: JSON.stringify({
+      result:
+        "Current session: 36% used · resets Jul 29, 10:59am (America/Los_Angeles)",
+    }),
+  });
+  assert.equal(parsed.windows.length, 1);
+  assert.equal(parsed.windows[0]?.percentUsed, 36);
+
+  const shown = await service.usage({ userId: "u1", provider: "anthropic" });
+  assert.equal(shown.windows[0]?.percentUsed, 36);
+  // Stamped, because a machine that has been asleep for a day is not
+  // reporting today's quota and the card has to be able to say so.
+  assert.ok(shown.asOf !== undefined, JSON.stringify(shown));
+  assert.doesNotThrow(() => new Date(String(shown.asOf)).toISOString());
+});
+
+/**
+ * And it stands while the machine is off. That is the point of keeping it: an
+ * agent asleep is exactly when somebody looks at the card wondering where
+ * their quota went, and an empty card answers nothing.
+ */
+test("the last reading survives the machine going away", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    // A runner that fails every call, standing in for a machine that is gone
+    // and a control plane with no credential to fall back on.
+    runner: async () => {
+      throw new Error("no CLI here");
+    },
+  });
+  await service.reportUsage({
+    userId: "u1",
+    provider: "anthropic",
+    raw: JSON.stringify({ result: "Current week (all models): 19% used · resets Jul 31, 9:59am (x)" }),
+  });
+
+  const shown = await service.usage({ userId: "u1", provider: "anthropic" });
+  assert.equal(shown.windows[0]?.percentUsed, 19);
+  assert.equal(shown.unavailableReason, undefined, "a kept figure is not a failure");
+
+  // One person's figure is never handed to the next person who asks.
+  const other = await service.usage({ userId: "u2", provider: "anthropic" });
+  assert.notEqual(other.windows[0]?.percentUsed, 19);
+});
+
+/**
+ * The other two vendors, read the same way.
+ *
+ * Claude was the only one a machine could report, which left Codex still
+ * shelling out on the control plane — against the operator's login, on a
+ * deployment where everybody signs in as themselves — and Cursor showing
+ * nothing at all. All three are asked on the machine now, and the parsing
+ * here is the same parsing that already ran when this process did the asking.
+ */
+test("a machine can report Codex quota, through whichever reader answered", () => {
+  // What `account/rateLimits/read` replies with: the documented interface,
+  // tried first because a rename inside the status view must not outrank it.
+  const appServer = parseReportedUsage(
+    "openai",
+    `${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        rateLimits: {
+          primary: { usedPercent: 41, windowDurationMins: 300 },
+          secondary: { usedPercent: 12, windowDurationMins: 10_080 },
+        },
+      },
+    })}\n`,
+  );
+  assert.equal(appServer.windows.length, 2);
+  assert.equal(appServer.windows[0]?.percentUsed, 41);
+
+  // And the fallback, for a CLI too old to have that method.
+  const status = parseReportedUsage(
+    "openai",
+    JSON.stringify({
+      rate_limits: { primary: { used_percent: 55, window_minutes: 300 } },
+    }),
+  );
+  assert.equal(status.windows[0]?.percentUsed, 55);
+});
+
+/**
+ * An account with no subscription quota is not a fault to go looking for.
+ *
+ * A Codex account billed by API key answers the quota question with a
+ * perfectly healthy reply carrying no rate limits, and an empty card sent
+ * three rounds of diagnosis after a break that was never there.
+ */
+test("a Codex reply with no rate limits says why rather than showing nothing", () => {
+  const report = parseReportedUsage("openai", JSON.stringify({ result: {} }));
+  assert.deepEqual(report.windows, []);
+  assert.match(String(report.unavailableReason), /API key/u);
+
+  const silent = parseReportedUsage("openai", "");
+  assert.match(String(silent.unavailableReason), /reported nothing/u);
+
+  // And a CLI that complained instead of replying is quoted rather than
+  // diagnosed. Saying "API key" about this blamed a healthy account's billing
+  // for a CLI too old to have the method that was asked.
+  const complaint = parseReportedUsage(
+    "openai",
+    "error: unrecognized subcommand 'app-server'",
+  );
+  assert.doesNotMatch(String(complaint.unavailableReason), /API key/u);
+  assert.match(String(complaint.unavailableReason), /unrecognized subcommand/u);
+});
+
+/**
+ * Cursor publishes no quota, so the machine reports the one fact its status
+ * view does carry: which account is signed in there. That is what somebody is
+ * actually checking when they open this card, and it is a reading rather than
+ * a number invented to fill the space.
+ */
+test("Cursor reports the signed-in account, and no invented quota", () => {
+  const report = parseReportedUsage(
+    "cursor",
+    ["Cursor Agent CLI 2026.4.1", "Logged in as: dev@example.com", "Plan: pro"].join("\n"),
+  );
+  assert.deepEqual(report.windows, []);
+  assert.match(String(report.unavailableReason), /dev@example\.com/u);
+  assert.match(String(report.unavailableReason), /no usage figure/u);
+
+  // An unrecognised status view is reported as no account, not guessed at.
+  const unknown = parseReportedUsage("cursor", "Cursor Agent CLI 2026.4.1");
+  assert.equal(parseCursorAccount("Cursor Agent CLI 2026.4.1"), undefined);
+  assert.match(String(unknown.unavailableReason), /no quota to show/u);
+});
+
+/**
+ * And a reading beats the per-vendor answer this process would otherwise
+ * give. Cursor is the one that proves it: the reasoning used to return before
+ * the kept reading was even consulted, so a machine could report and the card
+ * would still say Cursor usage is not reported.
+ */
+test("a machine reading is preferred for every vendor, not only the two we can run", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: async () => {
+      throw new Error("nothing runs here");
+    },
+  });
+  await service.reportUsage({
+    userId: "u1",
+    provider: "cursor",
+    raw: "Logged in as: dev@example.com",
+  });
+
+  const shown = await service.usage({ userId: "u1", provider: "cursor" });
+  assert.match(String(shown.unavailableReason), /dev@example\.com/u);
+  assert.ok(shown.asOf !== undefined);
+
+  // Nobody has reported for this one, so it still says the plain thing.
+  const unreported = await service.usage({ userId: "u2", provider: "cursor" });
+  assert.equal(unreported.unavailableReason, "Cursor usage not reported.");
 });

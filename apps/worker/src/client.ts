@@ -394,9 +394,20 @@ export class WorkerClient {
     }
   }
 
-  public async bundle(leaseId: string): Promise<Buffer> {
+  /**
+   * The repository snapshot for a lease.
+   *
+   * `have` names a commit this machine already holds, and the control plane
+   * packs only what is missing above it. Omitted on a first fetch, and
+   * ignored by a control plane too old to read it — which then sends the
+   * whole history exactly as before, so an upgrade in either direction is
+   * safe on its own.
+   */
+  public async bundle(leaseId: string, have?: string): Promise<Buffer> {
     const { bytes } = await this.request(
-      `/api/v1/workers/leases/${leaseId}/bundle`,
+      `/api/v1/workers/leases/${leaseId}/bundle${
+        have === undefined ? "" : `?have=${encodeURIComponent(have)}`
+      }`,
       { expectBinary: true },
     );
     if (bytes === undefined) {

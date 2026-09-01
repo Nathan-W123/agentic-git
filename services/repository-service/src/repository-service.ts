@@ -1557,6 +1557,8 @@ export class RepositoryService {
     repository: CanonicalRepository,
     revision: string,
     refName: string,
+    /** A commit the caller already holds, so only the difference is packed. */
+    have?: string,
   ): Promise<Buffer> {
     await this.assertRefName(refName);
     const key = `${repository.path}\0${refName}`;
@@ -1609,6 +1611,72 @@ export class RepositoryService {
           "",
         ]);
         createdReference = true;
+        // A worker that already holds an ancestor gets only what it lacks.
+        //
+        // Without this, every task on every machine transfers the repository's
+        // whole reachable history — 41 MB for a modest one — over the network,
+        // on every mention, for a change that is usually a handful of commits.
+        // Egress is billed and the wait belongs to the person who asked, so
+        // the same bytes were being paid for twice on each dispatch.
+        //
+        // `have` is a claim a remote worker makes about its own cache, so it
+        // is checked rather than trusted: the shape first, then whether this
+        // repository actually holds that commit. A bundle whose prerequisite
+        // the receiver cannot resolve is worse than a large one, because it
+        // fails to unbundle at all — so anything unverifiable falls back to
+        // full history, which is exactly the behaviour that came before.
+        const holds = async (commit: string): Promise<boolean> =>
+          (
+            await this.git.run(
+              [
+                `--git-dir=${repository.path}`,
+                "cat-file",
+                "-e",
+                `${commit}^{commit}`,
+              ],
+              { allowFailure: true },
+            )
+          ).exitCode === 0;
+        const usable =
+          have !== undefined &&
+          /^[0-9a-f]{40}$/u.test(have) &&
+          (await holds(have));
+        // What to leave out, which is not simply "everything the worker has".
+        //
+        // A bundle must carry at least one object beyond its prerequisites;
+        // `git bundle create` answers an empty one with `fatal: Refusing to
+        // create empty bundle` and a non-zero exit. Excluding exactly what the
+        // worker holds produces precisely that whenever canonical has not moved
+        // since its last task — which is not a corner case, it is the ordinary
+        // second task on a repository. The first mention after a cache filled
+        // worked, every one after it failed on an unhandled 500, and the agent
+        // relayed it into the room as "I could not finish this".
+        //
+        // So the exclusion is walked back one commit when the difference is
+        // empty. The bundle then carries the one commit the worker already has
+        // — a few hundred bytes — and, importantly, the ref that names it,
+        // which is the thing the worker actually fetches. A root commit has no
+        // parent to step back to, so that falls through to a full bundle, which
+        // for a single-commit history is the same thing.
+        const exclusion = !usable
+          ? undefined
+          : (
+                await this.git.run(
+                  [
+                    `--git-dir=${repository.path}`,
+                    "rev-list",
+                    "--count",
+                    "--end-of-options",
+                    refName,
+                    `^${have}`,
+                  ],
+                  { allowFailure: true },
+                )
+              ).stdout.trim() !== "0"
+            ? `^${have}`
+            : (await holds(`${have}~1`))
+              ? `^${have}~1`
+              : undefined;
         await this.git.run([
           `--git-dir=${repository.path}`,
           "bundle",
@@ -1616,6 +1684,7 @@ export class RepositoryService {
           bundlePath,
           "--end-of-options",
           refName,
+          ...(exclusion === undefined ? [] : [exclusion]),
         ]);
         return await readFile(bundlePath);
       } finally {

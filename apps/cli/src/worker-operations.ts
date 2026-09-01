@@ -69,6 +69,7 @@ import {
   type ScopeChangeRequest,
   type TaskDefinition,
   type TaskId,
+  summariseGrants,
 } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
@@ -648,6 +649,8 @@ export async function leaseBundle(
   store: CoordinationStore,
   leaseId: string,
   repositories = new RepositoryService(),
+  /** What the worker says it already has, so only the delta is packed. */
+  have?: string,
 ): Promise<Buffer | undefined> {
   const now = new Date().toISOString();
   await store.expireWorkLeases(now);
@@ -663,6 +666,7 @@ export async function leaseBundle(
     canonical(repository),
     lease.baseRevision,
     bundleRefFor(lease.id),
+    have,
   );
 }
 
@@ -1727,7 +1731,7 @@ export async function admitWorkPlan(
             projectId: task.projectId,
             repositoryId: task.repositoryId,
             leaseId: lease.id,
-            leases: grants,
+            grants: summariseGrants(grants),
           });
         }
         return { outcome: "admitted", admission };
@@ -1898,7 +1902,7 @@ export async function admitWorkPlan(
         projectId: task.projectId,
         repositoryId: task.repositoryId,
         leaseId: lease.id,
-        leases: admission.ownershipGrants,
+        grants: summariseGrants(admission.ownershipGrants),
       });
     }
     return { outcome: "admitted", admission };
@@ -2334,7 +2338,7 @@ export async function arbitrateScopeChange(
       projectId: task.projectId,
       repositoryId: task.repositoryId,
       leaseId: lease.id,
-      leases: admission.ownershipGrants,
+      grants: summariseGrants(admission.ownershipGrants),
       stage: "remote_scope_change",
     });
   }
@@ -3360,8 +3364,8 @@ export function workerOperations(
       projectId: string;
       repositoryId?: string;
     }) => await leaseWork(store, input, repositories, project),
-    leaseBundle: async (leaseId: string) =>
-      await leaseBundle(store, leaseId, repositories),
+    leaseBundle: async (leaseId: string, have?: string) =>
+      await leaseBundle(store, leaseId, repositories, have),
     admitWorkPlan: async (input: WorkPlanInput) => {
       const lease = await store.getWorkLease(input.leaseId);
       const key = lease?.repositoryId ?? input.leaseId;

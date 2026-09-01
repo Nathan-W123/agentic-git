@@ -1893,6 +1893,357 @@ test("Settings Agents rows show the provider, then Connected as the call sign", 
   );
 });
 
+/**
+ * The row drew "Not connected" with a Connect button beside an agent somebody
+ * had just finished connecting, because every control on it asked whether a
+ * *credential* was stored — which stopped being what having an agent means
+ * once local execution started running the vendor CLI under the machine's own
+ * login. Three controls, one question, and they must keep sharing it: the
+ * regression was the status line and the button disagreeing.
+ */
+test("Settings Agents rows ask whether the agent exists, not whether a secret is stored", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const start = app.indexOf("function agentsCard()");
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+
+  // Computed once, so the status line and the buttons cannot drift.
+  assert.match(body, /const localAgent =\s*\n\s*state\.localAgentsOnly === true &&/u);
+  assert.equal(
+    (body.match(/localAgent/gu) ?? []).length >= 4,
+    true,
+    "the status line, the rename control and the connect control all read it",
+  );
+  // An agent that exists says so, and is not asked to sign in a second time
+  // to prove it: the row offers the machine and nothing else.
+  assert.match(body, /runs on this machine/u);
+  assert.doesNotMatch(body, /data-act="agent-link-account"/u);
+
+  // Both halves of the signal reach the browser. `exists` is the server's
+  // answer, and the flag has to be readable from Settings — which can be
+  // opened without ever visiting the channel whose roster also carries it.
+  assert.match(data, /exists: provider\.exists === true/u);
+  assert.match(
+    data,
+    /if \(response\.localAgentsOnly !== undefined\) \{\s*\n\s*state\.localAgentsOnly = response\.localAgentsOnly === true;/u,
+  );
+});
+
+/**
+ * An agent can be removed, and is asked about before it is.
+ *
+ * The button said "Disconnect" and destroyed a credential, which was the
+ * whole of removing an agent while the credential was the identity. Once an
+ * agent got a record of its own the button drifted in two directions at once:
+ * on an agent with a credential it left the agent itself in every channel,
+ * and on one without — every agent on a deployment that runs them locally —
+ * it was not offered at all, so an agent could be created and never removed.
+ */
+test("an agent can be disconnected, including one with no credential", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const start = app.indexOf("function agentsCard()");
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+
+  // Offered on the local-agent row, beside the CLI check it sits with.
+  assert.match(body, /data-act="agent-check-cli"/u);
+  assert.match(
+    body.slice(body.indexOf('data-act="agent-check-cli"')),
+    /data-act="agent-disconnect"/u,
+    "the row that offers Check the CLI must also offer Disconnect",
+  );
+
+  // The click goes through the flow, not straight at the route. The bare
+  // fetch it replaced asked nothing and removed only the secret.
+  assert.match(app, /void disconnectAgent\(value, render\)/u);
+  assert.doesNotMatch(
+    app,
+    /case "agent-disconnect":\s*\n\s*void api\(/u,
+    "disconnect must not fire straight off a click",
+  );
+
+  // And the menu asks the same question the row does.
+  assert.match(app, /const exists = mine \|\| provider\?\.exists === true/u);
+
+  // The flow confirms, names the agent rather than the vendor, and says what
+  // survives — nothing is uninstalled and the vendor account is untouched.
+  assert.match(agents, /export async function disconnectAgent/u);
+  assert.match(agents, /title: `Disconnect \$\{name\}\?`/u);
+  assert.match(agents, /Nothing is uninstalled/u);
+  assert.match(agents, /forgetAgentInLoadedRosters\(providerId\)/u);
+
+  // Removing an agent mid-run is the one part that connecting another cannot
+  // undo: the run finishes, but mentions resolve through the roster on every
+  // read, so nothing answers to the name afterwards. Said before, not after.
+  assert.match(agents, /const busy = agent\?\.task !== undefined/u);
+  assert.match(agents, /is working right now/u);
+});
+
+/**
+ * A connected row offers no vendor sign-in at all.
+ *
+ * The credential stopped being what makes an agent, and the usage figure was
+ * the last thing it still bought. That figure now comes from this machine's
+ * own CLI — the one already signed in, doing the work — so there is nothing
+ * left for a second sign-in to be an extra for.
+ *
+ * The button that offered it had to go rather than be relabelled. A connected
+ * agent has no Connect button, because it is connected, so the row read
+ * Rename, Link for usage, Disconnect: somebody who had just disconnected an
+ * agent and wanted it back pressed the only one of those that sounded like
+ * connecting and landed on the vendor's sign-in page. It happened to the
+ * first person who tried it.
+ */
+test("a connected local row offers no second vendor sign-in", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+
+  // Gone from the row, from the dispatch, and from the module — a dispatch
+  // case with no button is how a removed control comes back by accident.
+  assert.doesNotMatch(app, /agent-link-account/u);
+  assert.doesNotMatch(agents, /linkAgentAccount/u);
+
+  // And the local branch of the sign-in has no exception left to take. The
+  // guard existed only so the removed button could reach past it.
+  assert.match(
+    agents,
+    /if \(state\.localAgentsOnly === true\) \{\s*\n\s*return await connectLocalAgent/u,
+  );
+  assert.doesNotMatch(agents, /link-account/u);
+});
+
+/**
+ * A running agent is not queued work.
+ *
+ * The panel bucketed every `claimed` task as queued, so an agent visibly
+ * planning and reading code was filed under "Queued · 1" with an empty
+ * current-work headline — while the dot two inches away called the same task
+ * working, because `WORKING_STATUS` in data.js has always counted `claimed`.
+ * Two halves of one screen disagreeing about one task.
+ *
+ * The original reasoning was sound and its test was not: a worker that claimed
+ * and then went offline does leave a stranded row somebody needs to cancel.
+ * That is now what is actually asked.
+ */
+test("a claimed task counts as running unless its machine has gone", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function taskIsQueued");
+  assert.notEqual(start, -1, "the split must be a predicate, not a status set");
+  const body = chats.slice(start, chats.indexOf("\n\nfunction", start));
+
+  // Submitted is always queued; claimed only when nothing is listening.
+  assert.match(body, /task\.status === "submitted"/u);
+  assert.match(
+    body,
+    /task\.status === "claimed" && agentOwnerOffline\(agent\)/u,
+  );
+
+  // And the status set it replaced is gone, so nothing can drift back to
+  // bucketing by status alone.
+  assert.doesNotMatch(chats, /QUEUED_TASK_STATUS/u);
+
+  // Both sides of the split read the same predicate.
+  assert.match(chats, /queuedTasks = agentTasks\.filter\(\(candidate\) =>\s*\n\s*taskIsQueued\(candidate, agent\)/u);
+  assert.match(chats, /!taskIsQueued\(candidate, agent\)/u);
+});
+
+/**
+ * A loader that takes an optional rerender must treat it as optional.
+ *
+ * `ensureChannelRoster` called `rerender()` unconditionally while one caller
+ * preloads every repository's roster in a loop and renders once at the end —
+ * so it threw on the first iteration, the loop never reached the rest, and it
+ * never reached its own `render()`. Opening an agent's details left every
+ * roster unloaded, with a TypeError in the console as the only evidence.
+ */
+test("roster and usage loaders survive a caller that renders once at the end", async () => {
+  const data = await publicFile("data.js");
+  const app = await publicFile("app.js");
+
+  // The call that has no rerender to give, and the guard that lets it work.
+  assert.match(app, /await ensureChannelRoster\(repository\.id\);/u);
+  const start = data.indexOf("export async function ensureChannelRoster");
+  assert.notEqual(start, -1);
+  const body = data.slice(start, data.indexOf("\n/**", start));
+  assert.match(body, /rerender\?\.\(\)/u);
+  assert.doesNotMatch(
+    body,
+    /(?<!\?\.)\brerender\(\)/u,
+    "an optional callback must never be called unguarded",
+  );
+});
+
+/**
+ * The usage figure surfaces itself.
+ *
+ * It used to need a credential stored on the control plane, and the only way
+ * to get one there was a second vendor sign-in — for a number about an account
+ * that is already signed in on the machine doing the work. So the question is
+ * asked where the answer is: the page asks this machine's own CLI whenever it
+ * is about to show the card, and files what it said. Nothing is pressed.
+ */
+test("usage is read from this machine whenever the card is about to be shown", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("async function reportMachineUsage");
+  assert.notEqual(start, -1);
+  const body = data.slice(start, data.indexOf("\nexport async function ensureProviderUsage", start));
+
+  // Through the desktop bridge, keyed by vendor — "anthropic" issues the
+  // credential, `claude` is the program with the login.
+  assert.match(body, /window\.KUMI_INSTALL/u);
+  assert.match(body, /PROVIDER_VENDOR\[providerId\]/u);
+  assert.match(body, /bridge\.usage\(vendor\)/u);
+
+  // One table, in the module both the reader and the connect flow import.
+  // Two copies is how the roster's vendor names drifted from the server's.
+  assert.match(data, /export const PROVIDER_VENDOR = \{/u);
+  const agents = await publicFile("screen-agents.js");
+  assert.doesNotMatch(agents, /^const PROVIDER_VENDOR = \{/mu);
+  assert.match(agents, /\n  PROVIDER_VENDOR,\n/u);
+
+  // A browser has no bridge, and that is not a failure — it falls through to
+  // the server's answer exactly as before.
+  assert.match(body, /return undefined;/u);
+  // Nor is a CLI that is absent or would not answer: filing an empty reading
+  // would stand as this account's usage until something replaced it.
+  assert.match(body, /reading\?\.ok !== true/u);
+
+  // And the fetch it feeds asks the machine first, for one's own agent only.
+  // The roster shows other people's agents, and this machine's CLI is signed
+  // in as this account — asking it about theirs reports the wrong quota under
+  // their name.
+  assert.match(
+    data,
+    /const fromMachine = ownerId \? undefined : await reportMachineUsage\(providerId\);/u,
+  );
+});
+
+/**
+ * The machine half of an agent has to be reachable after connecting, not only
+ * during it.
+ *
+ * `finishLocalSetup` — the install, and the sign-in — ran only as the tail of
+ * connecting, and a connected row has no Connect button, because it is
+ * connected. So an agent whose CLI was never installed, or whose CLI has since
+ * signed out, had no route to either: the row offered a rename, a vendor web
+ * sign-in and a delete, none of which touch the machine. Somebody ended up
+ * with three connected agents, no CLI behind any of them, and nothing on any
+ * screen able to say so.
+ */
+test("a connected agent can have its CLI checked without disconnecting", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const start = app.indexOf("function agentsCard()");
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+
+  // On the connected row, before the disconnect — the row that has no Connect.
+  const check = body.indexOf('data-act="agent-check-cli"');
+  assert.notEqual(check, -1);
+  assert.ok(body.indexOf('data-act="agent-disconnect"', check) > check);
+  assert.match(app, /void checkLocalCli\(value, render\)/u);
+
+  // The same setup connecting runs, not a second copy of it.
+  assert.match(agents, /export async function checkLocalCli/u);
+  assert.match(agents, /await finishLocalSetup\(providerId, rerender\)/u);
+  // And it says so in a browser rather than doing nothing, because a web page
+  // cannot see the machine and silence is what caused this in the first place.
+  assert.match(agents, /window\.KUMI_INSTALL === undefined/u);
+  assert.match(agents, /Open the Kumi app on the machine/u);
+  // A browser and an out-of-date app are different problems with different
+  // remedies, and only one of them is fixed by opening the app. `KUMI_SERVER`
+  // predates the install bridge by a long way, so its presence is what tells
+  // them apart — without it, somebody already inside the app is told to go and
+  // open the app.
+  assert.match(agents, /window\.KUMI_SERVER === undefined/u);
+  assert.match(agents, /too old to install or check a CLI/u);
+});
+
+/**
+ * Nothing says the connect worked until the machine has been asked.
+ *
+ * The success toast used to fire before a single question had been put to the
+ * machine, and it was the same message whether the CLI was installed and
+ * signed in or whether nothing on the computer could run the agent at all.
+ * Somebody connected three agents that way and was told three times that it
+ * had worked; every one of them then accepted work and did none of it.
+ */
+test("connecting checks the machine before it reports success", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const connect = agents.slice(
+    agents.indexOf("async function connectLocalAgent"),
+    agents.indexOf("export async function disconnectAgent"),
+  );
+
+  // Order is the whole fix: the machine, then the message.
+  const setup = connect.indexOf("await finishLocalSetup(");
+  const said = connect.indexOf("toast(outcome.text");
+  assert.notEqual(setup, -1, "the machine must be checked during connect");
+  assert.ok(setup < said, "it must be checked before anything claims success");
+
+  // And the message distinguishes the outcomes rather than always cheering.
+  assert.match(connect, /is not installed on this machine yet/u);
+  assert.match(connect, /Open the Kumi app on the machine that will run it/u);
+  assert.match(connect, /could not be added to every repository/u);
+
+  // The report is earned, not assumed: an install that was declined or failed
+  // must not come back as ready just because an installer was offered.
+  const finish = agents.slice(agents.indexOf("async function finishLocalSetup"));
+  assert.match(finish.slice(0, 2_600), /const after = await bridge\.detected\(\)/u);
+  assert.match(finish.slice(0, 2_600), /\? "ready" : "missing"/u);
+});
+
+/**
+ * An agent that runs on somebody's machine can still be put into a channel.
+ *
+ * `connected` means a credential is stored here, and since an agent stopped
+ * requiring a vendor sign-in that is false for every agent on a local
+ * deployment. Two places still asked it: the channel roster's own-agent
+ * filter, and the menu for adding an agent to a room. So an agent that
+ * existed, was named, and ran perfectly well appeared in neither — and once
+ * disconnected there was no way to put it back into a repository at all.
+ *
+ * The same wrong question as the settings row and the agent menu, in the last
+ * two places that had not been corrected.
+ */
+test("a credential-less agent is listed in channels and offered to rooms", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+
+  // The roster: exists, not connected — and an expired sign-in still excluded,
+  // because that one genuinely cannot work.
+  const roster = data.slice(data.indexOf("const mine = myAgents()"));
+  assert.match(roster.slice(0, 1_400), /agent\.exists === true \|\| agent\.connected === true/u);
+  assert.match(roster.slice(0, 1_400), /agent\.needsReconnect !== true/u);
+
+  // The picker that puts an agent into a room.
+  const menu = app.slice(app.indexOf('case "channel-agent-menu"'));
+  assert.match(
+    menu.slice(0, 2_400),
+    /agent\.exists === true && agent\.needsReconnect !== true/u,
+  );
+  assert.doesNotMatch(
+    menu.slice(0, 2_400),
+    /agent\.mine === true && agent\.connected === true,\s*\n\s*\);/u,
+    "the picker must not gate on a stored credential",
+  );
+});
+
+/**
+ * The button whose job is to explain why an agent cannot work must not fail
+ * silently. Asking the machine what it has can throw — a scan that failed, a
+ * channel closed under a reloading window — and returning quietly is the whole
+ * of "I pressed it and nothing happened".
+ */
+test("check the CLI says something when the machine cannot be asked", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const setup = agents.slice(agents.indexOf("async function finishLocalSetup"));
+  assert.match(setup.slice(0, 2_600), /detected === undefined/u);
+  assert.match(
+    setup.slice(0, 2_600),
+    /Could not ask this machine what is installed/u,
+  );
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may
@@ -2005,9 +2356,17 @@ test("adding another agent always begins with a provider choice", async () => {
     app.indexOf('case "channel-agent-pick"', channelMenuStart),
   );
   assert.notEqual(channelMenuStart, -1);
+  // Which agents the menu offers, asked the way it is asked everywhere else
+  // now. This line used to pin `mine && connected` — a stored credential —
+  // which stopped being what having an agent means when an agent stopped
+  // requiring a vendor sign-in. Under that rule the menu offered none of the
+  // agents on a local deployment, so a disconnected one could never be put
+  // back into a room. The assertion was incidental to what this test is about
+  // (that the plus always leaves a way forward) and was quietly holding the
+  // wrong rule in place.
   assert.match(
     channelMenu,
-    /agent\.mine === true && agent\.connected === true/u,
+    /agent\.exists === true && agent\.needsReconnect !== true/u,
   );
   assert.match(channelMenu, /disabled: inChannel\.has\(agent\.id\)/u);
   assert.match(channelMenu, /act: "agent-add"/u);

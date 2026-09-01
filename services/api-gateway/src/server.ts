@@ -69,6 +69,7 @@ import {
   ANSWER_NOT_STATUS_DIRECTIVE,
   assertProjectPolicy,
   createId,
+  deriveCallSign,
   describeError,
   DO_NOT_CODE_DIRECTIVE,
   FORCE_QUESTION_MARKER,
@@ -180,6 +181,46 @@ type AgentVendor =
   | "cursor"
   | "copilot"
   | "kiro";
+
+/**
+ * How a person installs the CLI an agent needs, on the machine that runs it.
+ *
+ * Local execution means the vendor's own CLI has to be on the machine, signed
+ * in, before an agent can do anything — and until this existed, nothing said
+ * so. An agent with no CLI looked exactly like one that was working: it took
+ * the mention, said it had started, and the task waited forever. Finding out
+ * why cost an afternoon of reading process lists.
+ *
+ * Only commands verified against the vendor's own published instructions are
+ * here. A wrong install command is worse than none: it sends somebody to a
+ * package that is not the CLI — npm has one called `cursor-agent` that is
+ * somebody else's project entirely — and the result looks like the agent
+ * being broken rather than the advice being wrong. A vendor missing from this
+ * table gets its documentation link and no command.
+ */
+const VENDOR_CLI_SETUP: Record<
+  string,
+  { windows?: string; posix?: string; docs: string; signIn: string }
+> = {
+  claude: {
+    windows: "npm install -g @anthropic-ai/claude-code",
+    posix: "npm install -g @anthropic-ai/claude-code",
+    docs: "https://docs.claude.com/en/docs/claude-code/overview",
+    signIn: "claude",
+  },
+  codex: {
+    windows: "npm install -g @openai/codex",
+    posix: "npm install -g @openai/codex",
+    docs: "https://developers.openai.com/codex",
+    signIn: "codex",
+  },
+  cursor: {
+    windows: "irm 'https://cursor.com/install?win32=true' | iex",
+    posix: "curl https://cursor.com/install -fsS | bash",
+    docs: "https://cursor.com/docs/cli/installation",
+    signIn: "agent",
+  },
+};
 
 const PROVIDER_TO_VENDOR: Record<string, AgentVendor> = {
   anthropic: "claude",
@@ -1661,6 +1702,37 @@ const THREAD_RECONCILE_INTERVAL_MS = 60_000;
  * hundred reads a day on knowing its billing is right.
  */
 const BILLING_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+
+/**
+ * How long the live audit log keeps an event before it is compacted away.
+ *
+ * The log is the one table that grows with every task forever: measured, a
+ * task writes about twenty-one events, so a deployment doing ten thousand
+ * tasks a day writes six million rows a month and has never deleted one. The
+ * machinery to bound it — archive, checkpoint, prune — has existed since the
+ * log did and had no caller outside a command an operator had to remember to
+ * run.
+ *
+ * Thirty days because that is this deployment's stated retention, and because
+ * the checkpoint survives the prune: what is lost is the ability to re-derive
+ * a segment's contents, never the attestation that it was there.
+ */
+const AUDIT_RETENTION_DAYS = 30;
+const AUDIT_RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+
+/**
+ * The configured retention window, or the default when nothing sensible is
+ * set. Zero is honoured — it means keep everything — but a negative or
+ * unreadable value is not a request for anything, so it falls back rather
+ * than being treated as "off". Getting that backwards would silently disable
+ * the sweep on a typo, which is exactly the failure this exists to end.
+ */
+function auditRetentionDays(configured: string | undefined): number {
+  const parsed = Number.parseInt(configured ?? "", 10);
+  return Number.isSafeInteger(parsed) && parsed >= 0
+    ? parsed
+    : AUDIT_RETENTION_DAYS;
+}
 
 /**
  * Whether a terminal event is itself the thing the reader asked for.
@@ -3785,7 +3857,11 @@ export interface ApiOperations {
     /** What this worker can execute. Absent means work alone. */
     kinds?: readonly ("task" | "question")[];
   }): Promise<WorkAssignment | undefined>;
-  leaseBundle?(leaseId: string): Promise<Buffer | undefined>;
+  leaseBundle?(
+    leaseId: string,
+    /** A commit the worker already holds; only the delta above it is packed. */
+    have?: string,
+  ): Promise<Buffer | undefined>;
   /**
    * Arbitrates a worker's plan before it executes. A deployment that omits
    * this cannot run plan-first workers, and the endpoint says so.
@@ -3870,6 +3946,16 @@ export interface GitHubCredentialOperations {
  */
 export interface ChatProviderOperations {
   list(input: { userId: string; systemAdmin: boolean }): Promise<unknown>;
+  /**
+   * Takes a usage reading from the machine an agent runs on, rather than
+   * reading it here. Optional, because a deployment that executes agents
+   * itself has no machine to hear from.
+   */
+  reportUsage?(input: {
+    userId: string;
+    provider: string;
+    raw: string;
+  }): Promise<unknown>;
   /** Launches the provider's own browser sign-in flow on the host. */
   signIn(input: {
     systemAdmin: boolean;
@@ -4176,6 +4262,17 @@ export interface ApiGatewayOptions {
    * intents swept. A test that is about the pass cannot wait out six hours.
    */
   billingReconcileIntervalMs?: number;
+  /**
+   * How long the live audit log keeps an event, in days. Zero keeps
+   * everything, which is what a deployment under a legal hold wants. Defaults
+   * to `COORD_AUDIT_RETENTION_DAYS`, and failing that to thirty.
+   */
+  auditRetentionDays?: number;
+  /**
+   * How often the retention sweep runs. A test about the sweep cannot wait
+   * out six hours, for the same reason the billing one is settable.
+   */
+  auditRetentionSweepIntervalMs?: number;
   /**
    * How long a held `/plan` waits for somebody to start it before it lapses.
    * Defaults to `COORD_PLAN_HOLD_TTL_MINUTES`, and failing that to
@@ -4899,6 +4996,8 @@ export class ApiGateway {
   private threadReconcileTimer: NodeJS.Timeout | undefined;
 
   private billingReconcileTimer: NodeJS.Timeout | undefined;
+
+  private auditRetentionTimer: NodeJS.Timeout | undefined;
   /**
    * The coordinator's temporary conflict lines currently standing in a room,
    * by message id.
@@ -5234,6 +5333,7 @@ export class ApiGateway {
     this.startAuditorWatch();
     this.startThreadReconcile();
     this.startBillingReconcile();
+    this.startAuditRetention();
   }
 
   /**
@@ -5263,6 +5363,81 @@ export class ApiGateway {
       void this.lapseStalePlanHolds().catch(() => undefined);
     }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
+  }
+
+  /**
+   * Compacts the audit log so it stops being the one table that only grows.
+   *
+   * Every other cost in this system went flat when execution moved to the
+   * machines that do the work. This one did not: the log is written here
+   * whatever runs where, about twenty-one rows and up to a hundred and sixty
+   * kilobytes a task, and nothing has ever removed one. At ten thousand tasks
+   * a day that is tens of gigabytes a month, forever, on a deployment whose
+   * agents cost it nothing.
+   *
+   * Two steps, in the order the store demands. `archiveAuditEvents` moves the
+   * old segment out of the live log and writes a checkpoint over it, refusing
+   * outright if the chain does not verify — a checkpoint over a broken segment
+   * would launder the break into an attestation. `pruneArchivedAuditEvents`
+   * then drops the moved rows. The checkpoint stays either way, so the chain
+   * still verifies end to end; what a prune costs is the ability to read back
+   * what a sealed segment said.
+   *
+   * Six-hourly and unref'd, like the billing sweep it sits beside: this is
+   * housekeeping, not a deadline, and it must never be the reason a process
+   * refuses to exit. It is deliberately not hung off a request the way the
+   * in-memory prunes are — those touch a map, this takes the deployment-wide
+   * write lock, and making somebody's message the thing that pays for it is
+   * how a sweep becomes a latency incident.
+   */
+  private startAuditRetention(): void {
+    if (this.auditRetentionTimer !== undefined) {
+      return;
+    }
+    const days =
+      this.options.auditRetentionDays ??
+      auditRetentionDays(process.env["COORD_AUDIT_RETENTION_DAYS"]);
+    // Zero is off, and off is a real answer: a deployment under a legal hold
+    // wants every event kept, and would rather pay for the disk.
+    if (days <= 0) {
+      return;
+    }
+    void this.sweepAuditRetention(days).catch(() => undefined);
+    this.auditRetentionTimer = setInterval(() => {
+      void this.sweepAuditRetention(days).catch(() => undefined);
+    }, this.options.auditRetentionSweepIntervalMs ?? AUDIT_RETENTION_SWEEP_INTERVAL_MS);
+    this.auditRetentionTimer.unref?.();
+  }
+
+  private async sweepAuditRetention(days: number): Promise<void> {
+    const before = new Date(Date.now() - days * 24 * 60 * 60 * 1_000)
+      .toISOString();
+    // Failure here is loud in the log and fatal to nothing. A sweep that
+    // cannot run leaves the log exactly as it was — larger than it needs to
+    // be, and completely correct — so there is nothing to roll back and no
+    // reason to take a request path down with it.
+    const archived = await this.options.store
+      .archiveAuditEvents({ before })
+      .catch((error: unknown) => {
+        process.stderr.write(
+          `[audit] archiving events before ${before} failed: ` +
+            `${describeError(error)}\n`,
+        );
+        return undefined;
+      });
+    if (archived === undefined) {
+      return;
+    }
+    // Only ever through the checkpoint just written. Pruning further would
+    // reach rows whose segment has not been sealed, which the store's own
+    // guard refuses anyway — this is the same rule, said before it is hit.
+    await this.options.store
+      .pruneArchivedAuditEvents(archived.checkpoint.throughSequence)
+      .catch((error: unknown) => {
+        process.stderr.write(
+          `[audit] pruning archived events failed: ${describeError(error)}\n`,
+        );
+      });
   }
 
   /**
@@ -5410,6 +5585,10 @@ export class ApiGateway {
     if (this.billingReconcileTimer !== undefined) {
       clearInterval(this.billingReconcileTimer);
       this.billingReconcileTimer = undefined;
+    }
+    if (this.auditRetentionTimer !== undefined) {
+      clearInterval(this.auditRetentionTimer);
+      this.auditRetentionTimer = undefined;
     }
     if (this.threadReconcileTimer !== undefined) {
       clearInterval(this.threadReconcileTimer);
@@ -6799,8 +6978,11 @@ export class ApiGateway {
       }
 
       const nowIso = new Date().toISOString();
-      // Reclaim anything a dead worker was holding before handing out new work.
-      await this.options.store.expireWorkLeases(nowIso);
+      // Reclaim anything a dead worker was holding before handing out new
+      // work — and say so. This route runs every five seconds per worker, so
+      // it is the caller that almost always settles the row, and it used to
+      // discard it.
+      await this.expireLeasesAndSay(nowIso);
       await this.options.store.touchWorker(workerId, nowIso);
 
       const repositoryId = stringField(body["repositoryId"], "repositoryId", {
@@ -7013,7 +7195,7 @@ export class ApiGateway {
           new Date(now.getTime() + WORK_LEASE_TTL_MS).toISOString(),
         );
         if (extended === undefined) {
-          await this.options.store.expireWorkLeases(now.toISOString());
+          await this.expireLeasesAndSay(now.toISOString());
           throw new HttpError(
             409,
             "lease_lost",
@@ -7034,7 +7216,18 @@ export class ApiGateway {
             "This deployment cannot serve repository bundles",
           );
         }
-        const bundle = await bundleOperation(leaseId);
+        // What the worker already holds, so the control plane can pack only
+        // what is missing. Validated here as well as at the far end: this is
+        // a value from a remote worker on its way to a Git invocation, and a
+        // shape check at the boundary costs nothing. Anything else is simply
+        // dropped rather than refused — a worker asking for less than it
+        // could get is not an error, and the full bundle is always correct.
+        const requested = url.searchParams.get("have") ?? undefined;
+        const have =
+          requested !== undefined && /^[0-9a-f]{40}$/u.test(requested)
+            ? requested
+            : undefined;
+        const bundle = await bundleOperation(leaseId, have);
         if (bundle === undefined) {
           throw new HttpError(
             409,
@@ -7111,7 +7304,7 @@ export class ApiGateway {
           "released by worker",
         );
         if (!released) {
-          await this.options.store.expireWorkLeases(new Date().toISOString());
+          await this.expireLeasesAndSay(new Date().toISOString());
           throw new HttpError(
             409,
             "lease_lost",
@@ -8796,9 +8989,7 @@ export class ApiGateway {
         // always happens while somebody is looking at that dot, so the sweep
         // happens here too. It is the same idempotent call the worker routes
         // make, and it must never be able to fail a read.
-        await this.options.store
-          .expireWorkLeases(new Date().toISOString())
-          .catch(() => undefined);
+        await this.expireLeasesAndSay(new Date().toISOString());
         const tasks = await this.options.store.listSubmittedTasks({
           projectId,
           ...(status === undefined ? {} : { status }),
@@ -11260,6 +11451,30 @@ export class ApiGateway {
         // see `CredentialVisibility`. Metadata, not a secret; safe for every
         // repository collaborator to see, same as the vendor name itself.
         visibility: connection.visibility,
+        // What to install, when nothing can run this agent.
+        //
+        // Sent only for an agent no live machine advertises, so a working
+        // roster carries none of it. The reader is a person whose agent just
+        // went grey and whose next question is "why" — the answer is almost
+        // always that the CLI is not on their machine, and the command is the
+        // shortest possible route from that question to a working agent.
+        ...(ApiGateway.agentIsLive(
+          liveOwners,
+          connection.userId,
+          connection.provider,
+        )
+          ? {}
+          : {
+              setup: ((vendor) =>
+                vendor === undefined || VENDOR_CLI_SETUP[vendor] === undefined
+                  ? undefined
+                  : // The vendor travels with it: the desktop app installs by
+                    // name, never by command, so the page needs the name to
+                    // ask with and must not have to derive it from a label.
+                    { vendor, ...VENDOR_CLI_SETUP[vendor] })(
+                PROVIDER_TO_VENDOR[connection.provider],
+              ),
+            }),
         /**
          * Whether this agent's owner has a machine listening right now.
          *
@@ -12061,8 +12276,37 @@ export class ApiGateway {
       };
 
       if (path === `${API_PREFIX}/chat/providers` && method === "GET") {
+        const listed = await performChat(() => chatOperations.list(identity));
+        // Whether an agent for this vendor exists at all, which is no longer
+        // the same question as whether a credential is stored. The settings
+        // screen needs both: one decides "Connect" from "Link for usage", and
+        // the credential alone can no longer answer it.
+        const owned = new Set(
+          (await this.options.store.listAgentCallSigns().catch((): [] => []))
+            .filter((sign) => sign.userId === principal.user.id)
+            .map((sign) => sign.provider),
+        );
         this.sendJson(response, 200, {
-          providers: await performChat(() => chatOperations.list(identity)),
+          // Deployment-wide, and sent here because this is the response the
+          // Settings screen loads. It also arrives on a channel's roster, but
+          // Settings can be opened without ever visiting a channel — and when
+          // it was, the screen fell back to "false" and drew the connect
+          // button for agents that already existed.
+          localAgentsOnly: localAgentsOnly(),
+          providers: (Array.isArray(listed) ? listed : []).map((entry) => {
+            // `ownCredential`, not `mine`: `mine` is the browser's word for
+            // this, computed in `myAgents`, and testing for it here was
+            // testing a field the provider list has never carried. Harmless
+            // only because the call-sign lookup answers the same question for
+            // every connection made since agents got names.
+            const provider = entry as { id?: unknown; ownCredential?: unknown };
+            return {
+              ...provider,
+              exists:
+                provider.ownCredential !== undefined ||
+                (typeof provider.id === "string" && owned.has(provider.id)),
+            };
+          }),
         });
         return;
       }
@@ -12077,7 +12321,7 @@ export class ApiGateway {
         path,
         new RegExp(
           `^${API_PREFIX}/chat/providers/(anthropic|openai|google|cursor|copilot|kiro)` +
-            `/(signin|options|settings|usage|credential|device-auth)$`,
+            `/(signin|options|settings|usage|credential|device-auth|agent)$`,
           "u",
         ),
       );
@@ -12092,6 +12336,83 @@ export class ApiGateway {
               }),
             ),
           });
+          return;
+        }
+        if (action === "agent" && method === "POST") {
+          // Creating an agent without handing this server a vendor credential.
+          //
+          // The roster used to be built by walking the credential store, so
+          // connecting an agent meant a vendor sign-in whose credential local
+          // execution then never reads — the CLI runs under the machine's own
+          // login. Two sign-ins, one of them for nothing, and a stored secret
+          // this deployment is responsible for and does not use.
+          //
+          // The durable record keyed by (user, provider) is what an agent
+          // actually is. This writes one. A credential may still be linked
+          // afterwards, and is what server-side execution and the usage
+          // figures need — but it is no longer the price of having an agent.
+          const agentBody = objectBody(await this.readJson(request));
+          const visibilityField = stringField(
+            agentBody["visibility"],
+            "visibility",
+            { max: 20, optional: true },
+          );
+          if (
+            visibilityField !== undefined &&
+            visibilityField !== "personal" &&
+            visibilityField !== "org"
+          ) {
+            throw new HttpError(
+              400,
+              "invalid_request",
+              'visibility must be "personal" or "org"',
+            );
+          }
+          const owner = await this.options.store.getUser(identity.userId);
+          if (owner === undefined) {
+            throw new HttpError(404, "not_found", "User was not found");
+          }
+          const existing = (
+            await this.options.store.listAgentCallSigns().catch((): [] => [])
+          ).find(
+            (sign) =>
+              sign.userId === identity.userId && sign.provider === provider,
+          );
+          // A name is only ever assigned once. Re-running this must not rename
+          // an agent people have learned, which is the same rule
+          // `assignCallSign` follows on the credential path.
+          // A name is derived, not dealt. `defaultChannelAgentName` returns
+          // "Claude (Nathan)" when there is no call sign — a *label*, and
+          // storing it here would freeze the placeholder as the agent's
+          // permanent name, which is the exact complaint the durable table
+          // was added to fix. So a sign is derived from the agent's own
+          // identity, and the label is only the fallback for a deployment
+          // that has exhausted the pantheon.
+          const taken = new Set(
+            (await this.options.store.listAgentCallSigns().catch((): [] => []))
+              .map((sign) => sign.callSign),
+          );
+          const callSign =
+            existing?.callSign ??
+            stringField(agentBody["callSign"], "callSign", {
+              max: 40,
+              optional: true,
+            }) ??
+            // The same name every time this account asks, which is what makes
+            // disconnecting and reconnecting give an agent back rather than
+            // give back a stranger. See `deriveCallSign`.
+            deriveCallSign(identity.userId, provider, taken) ??
+            defaultChannelAgentName({
+              provider,
+              userName: owner.displayName,
+            });
+          const agent = await this.options.store.setAgentCallSign(
+            identity.userId,
+            provider,
+            callSign,
+            visibilityField ?? existing?.visibility ?? "personal",
+          );
+          this.sendJson(response, 200, { agent });
           return;
         }
         if (action === "credential" && method === "POST") {
@@ -12273,6 +12594,35 @@ export class ApiGateway {
           });
           return;
         }
+        if (action === "usage" && method === "POST") {
+          // Reported by the machine that holds the vendor login, which is the
+          // only place the number is about the right account. This is what
+          // makes the second sign-in unnecessary: nothing has to be stored
+          // here for the figure to be readable.
+          const reportOperation = chatOperations.reportUsage;
+          if (reportOperation === undefined) {
+            throw new HttpError(
+              501,
+              "not_supported",
+              "This deployment does not take usage readings from machines",
+            );
+          }
+          const body = objectBody(await this.readJson(request));
+          // Only ever about the caller's own agent. A reading is a claim about
+          // an account, and the only account somebody may make claims about is
+          // their own.
+          const raw = stringField(body["raw"], "raw", { max: 64_000 }) ?? "";
+          this.sendJson(response, 200, {
+            usage: await performChat(() =>
+              reportOperation({
+                userId: identity.userId,
+                provider,
+                raw,
+              }),
+            ),
+          });
+          return;
+        }
         if (action === "settings" && method === "POST") {
           const body = objectBody(await this.readJson(request));
           const model = stringField(body["model"], "model", {
@@ -12359,6 +12709,18 @@ export class ApiGateway {
         if (method === "DELETE") {
           await performChat(() =>
             chatOperations.disconnect({ userId: identity.userId, provider }),
+          );
+          // The names this agent was given in particular rooms go with it,
+          // for a stronger version of the reason a rename clears them. An
+          // override naming this agent in one channel outranks its call sign
+          // there, and the key is `${userId}:${provider}` — which the *next*
+          // agent dealt for this account and this vendor will also be. Left
+          // standing, they would hand a brand-new agent the removed one's
+          // name in every room the removed one had been named in. Roles,
+          // models and efforts are that channel's decision about a seat
+          // rather than a name for this agent, and stay.
+          await this.options.store.clearChannelAgentNameOverrides(
+            `${identity.userId}:${provider}`,
           );
           this.sendJson(response, 200, { disconnected: true });
           return;
@@ -13837,14 +14199,67 @@ export class ApiGateway {
    * exactly like a task in progress, and the only symptom is that it never
    * finishes.
    */
-  private async ownerHasLiveWorker(
+  /**
+   * Whether this agent's owner has a vendor credential of their own stored
+   * here, as opposed to nothing — in which case a completion runs on the
+   * deployment's own ambient login and the operator is the one billed.
+   *
+   * `listConnectionsFor` enumerates the credential store, so a provider
+   * present in its answer is a provider that account holds a secret for. The
+   * durable agent record is deliberately not consulted: an agent exists
+   * without a credential, which is the entire point of it, and the question
+   * here is only ever "whose account would this spend".
+   *
+   * False when the deployment cannot answer at all. A deployment with no
+   * provider chat has no per-user credentials to find, and guessing true
+   * would reopen exactly the hole this closes.
+   */
+  private async ownerHasOwnCredential(
+    candidate: ChannelMentionCandidate,
+  ): Promise<boolean> {
+    const chatOperations = this.options.operations.chatProviders;
+    if (chatOperations?.connectionsFor === undefined) {
+      return false;
+    }
+    const connections = await chatOperations
+      .connectionsFor([candidate.userId])
+      .catch(() => ({}) as Record<string, ReadonlyArray<{ provider: string }>>);
+    return (connections[candidate.userId] ?? []).some(
+      (connection) => connection.provider === candidate.provider,
+    );
+  }
+
+  /**
+   * Whether this agent has a machine that can actually run *it*.
+   *
+   * Per adapter, not per person. `agentIsLive` has answered this correctly for
+   * the roster since it was written, and its own comment says why the weaker
+   * question is not good enough — but the dispatch went on asking the weaker
+   * one, so the two disagreed about the same agent at the same moment. The
+   * dot said Poseidon could not work; the dispatch handed it a task anyway
+   * and posted that it had begun.
+   *
+   * That is the whole of "queued forever with no message". A machine with
+   * Claude and no Codex registers `claude` alone. The owner is listening, so
+   * the per-person check says yes, the task is filed and pinned to that
+   * owner, and `leaseWork` then skips it on every five-second poll because
+   * the adapter it needs is not advertised — silently, since a skipped
+   * candidate is not an error. Nothing hangs and nothing fails; the work
+   * waits forever behind a sentence saying it had started.
+   */
+  private async agentHasLiveMachine(
     projectId: string,
     ownerId: string,
+    provider: string,
   ): Promise<boolean> {
     const project = await this.options.store
       .getProject(projectId)
       .catch(() => undefined);
-    return (await this.liveWorkerOwners(project?.organizationId)).has(ownerId);
+    return ApiGateway.agentIsLive(
+      await this.liveWorkerOwners(project?.organizationId),
+      ownerId,
+      provider,
+    );
   }
 
   /**
@@ -14194,6 +14609,47 @@ export class ApiGateway {
         };
       });
     });
+    // Agents that exist without a stored credential.
+    //
+    // `connectionsFor` walks the credential store, so until now an agent
+    // existed if and only if a vendor credential was saved for that user —
+    // which made the credential the identity and forced a vendor sign-in that
+    // local execution then never uses. The durable record keyed the same way
+    // is what an agent actually is; a credential is one thing that may hang
+    // off it.
+    //
+    // Unioned rather than replacing, and the credential's answer wins on a
+    // collision: it is the record being edited when somebody changes their
+    // settings, and both halves describe the same agent. Only rows whose
+    // (user, provider) is not already present are added, so nobody is listed
+    // twice and no agent stops being mentionable.
+    const already = new Set(
+      reachable.map((connection) => `${connection.userId}\0${connection.provider}`),
+    );
+    const known = new Set(userIds);
+    for (const sign of await this.options.store
+      .listAgentCallSigns()
+      .catch((): [] => [])) {
+      const key = `${sign.userId}\0${sign.provider}`;
+      // Scoped to this repository's own people. The call-sign table is
+      // account-wide and has no idea which organization is asking, so without
+      // this a roster would list agents belonging to strangers.
+      if (already.has(key) || !known.has(sign.userId)) {
+        continue;
+      }
+      const user = users[userIds.indexOf(sign.userId)];
+      if (user === undefined) {
+        continue;
+      }
+      already.add(key);
+      reachable.push({
+        userId: sign.userId,
+        userName: user.displayName,
+        provider: sign.provider,
+        visibility: sign.visibility,
+        callSign: sign.callSign,
+      });
+    }
     if (!(await this.options.store.hasBackfilledChannelMembership(repositoryId))) {
       // The grandfather backfill lands in `#general`, which is where the
       // migration put everything that predates sub-channels. A room created
@@ -15707,7 +16163,11 @@ export class ApiGateway {
       // takes the task the moment it lands and the present tense is true.
       const waitingForAMachine =
         localAgentsOnly() &&
-        !(await this.ownerHasLiveWorker(projectId, candidate.userId));
+        !(await this.agentHasLiveMachine(
+          projectId,
+          candidate.userId,
+          candidate.provider,
+        ));
       const acknowledgement = await this.appendChannelThreadReply({
         projectId,
         repositoryId,
@@ -16263,7 +16723,7 @@ export class ApiGateway {
     //
     // Both halves are required. `localAgentsOnly()` alone would leave a
     // question queued on a deployment that is perfectly willing to answer it,
-    // and `ownerHasLiveWorker` alone would change every existing install —
+    // and `agentHasLiveMachine` alone would change every existing install —
     // including the local CLI, where the control plane *is* the executor and
     // routing a question to a worker that is the same process is a long way
     // round to the same answer.
@@ -16274,7 +16734,11 @@ export class ApiGateway {
     // answers, the sweep says so.
     if (
       localAgentsOnly() &&
-      (await this.ownerHasLiveWorker(projectId, candidate.userId))
+      (await this.agentHasLiveMachine(
+        projectId,
+        candidate.userId,
+        candidate.provider,
+      ))
     ) {
       await this.options.operations.submitTask({
         projectId,
@@ -16295,6 +16759,42 @@ export class ApiGateway {
           : { answerTo: referencedMessageId }),
       });
       this.notifyWorkers(projectId);
+      return undefined;
+    }
+    // Nothing here answers on the house account.
+    //
+    // Falling through to `askAgent` with no credential of the owner's does
+    // exactly that: `withCompletionEnv` runs the vendor CLI with no credential
+    // environment, which lands on the container's own ambient login. The
+    // operator pays — for a full agent run with a repository checkout, posted
+    // under the agent's own name, indistinguishable in the channel from the
+    // same agent answering on its owner's machine. Invisible by construction,
+    // which is what makes it worth refusing rather than metering.
+    //
+    // It was a rare case while a vendor sign-in was the price of having an
+    // agent, because then every agent had a credential. It became the common
+    // one when that stopped being true: "no credential" is now the ordinary
+    // state of a perfectly healthy agent that runs locally. A deployment that
+    // has declared it will not spend agents on its own behalf cannot also be
+    // the thing that pays for this.
+    //
+    // Said rather than dropped. The person asked a question and is owed an
+    // answer about why there isn't one — and this is the rare failure whose
+    // remedy is entirely in the reader's hands.
+    if (localAgentsOnly() && !(await this.ownerHasOwnCredential(candidate))) {
+      await this.appendChannelEntry({
+        projectId,
+        repositoryId,
+        kind: "agent",
+        authorId: `${candidate.userId}:${candidate.provider}`,
+        content:
+          `I answer on ${candidate.userName}'s machine, and it is not ` +
+          "listening right now. Start the Kumi app there and ask me again — " +
+          "or, to have me answer here when the machine is away, " +
+          `${candidate.userName} can link a ${candidate.vendor} account from ` +
+          "Settings → Agents.",
+        ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
+      });
       return undefined;
     }
     const answer = await this.askAgent(
@@ -16520,10 +17020,20 @@ export class ApiGateway {
       taskId: root.taskId,
       actorId: input.viewerId,
     });
-    const candidates = await this.resolveChannelMentionCandidates(
-      input.projectId,
-      input.repositoryId,
-    );
+    // Scoped to the room this thread is in, exactly as the channel path
+    // scopes it. Left unscoped, the store reads `channelId === undefined` as
+    // "every sub-channel", so a mention typed in a thread in #frontend could
+    // resolve to an agent that is only a member of #backend — which then
+    // answered into #frontend, under a name the sender's own picker had
+    // never offered them.
+    const [candidates, people] = await Promise.all([
+      this.resolveChannelMentionCandidates(
+        input.projectId,
+        input.repositoryId,
+        root.channelId,
+      ),
+      this.resolveChannelPeople(input.projectId, input.repositoryId),
+    ]);
     // A provider that is already running a task cannot also service the
     // direct-answer turn below. Treat a reply to that agent as follow-on work
     // and let persistence chain it behind the active task; otherwise this
@@ -16552,8 +17062,8 @@ export class ApiGateway {
       // Legacy tasks may not resolve against the current configured-agent
       // list. An explicit mention in their root remains an unambiguous
       // fallback.
-      const namedAtRoot = candidates.find(
-        (entry) => root.content.includes(`@${entry.name}`),
+      const namedAtRoot = candidates.find((entry) =>
+        textMentionsName(root.content, entry.name),
       );
       if (threadAuthorId === undefined && namedAtRoot !== undefined) {
         threadAuthorId = `${namedAtRoot.userId}:${namedAtRoot.provider}`;
@@ -16576,12 +17086,12 @@ export class ApiGateway {
       // agent's own thread is. Only a thread whose root named nobody is a
       // conversation between people, and stays one.
       const inReply = question.includes("@")
-        ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+        ? candidates.filter((entry) => textMentionsName(question, entry.name))
         : [];
       const inRoot =
         inReply.length === 0 && root.content.includes("@")
           ? candidates.filter((entry) =>
-              root.content.includes(`@${entry.name}`),
+              textMentionsName(root.content, entry.name),
             )
           : [];
       const named = (inReply.length > 0 ? inReply : inRoot).filter(
@@ -16676,13 +17186,52 @@ export class ApiGateway {
     // matches, so "@Icarus" means the same thing in both places, and every
     // agent named gets to answer rather than only the first.
     //
+    // That claim used to be false, and it is the whole of this bug. The
+    // channel matches with `textMentionsName` — case-insensitive, and
+    // requiring a delimiter after the name. Here it was a raw
+    // `question.includes("@" + name)`: case-sensitive, and happy to match a
+    // name that is merely a prefix of what was typed. So "@persephone" in
+    // lowercase named nobody in a thread while naming her perfectly well in
+    // the room, and what happened next was worse than nothing happening —
+    // see below.
+    //
     // Naming nobody still reaches the thread's own agent: a thread hangs off
     // one agent's work, so a bare question in it is addressed to them by
     // construction. That is the behaviour this method was written for and it
     // stays the default.
     const mentioned = question.includes("@")
-      ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+      ? candidates.filter((entry) => textMentionsName(question, entry.name))
       : [];
+    // But only for a reply that named nobody at all. A reply that addressed a
+    // name and matched none of them is not a bare question, and answering it
+    // as though it were is precisely how somebody addresses one agent and a
+    // different one replies: silently, under that other agent's name, with
+    // nothing anywhere saying the name they typed went unread.
+    //
+    // The three exemptions are the channel's own, for the channel's reasons:
+    // a person's name is a ping and not an instruction, `@everyone` stands in
+    // for having named each of them, and a stray "@" that does not read as an
+    // address at all — an email in a stack trace — is not a mention to
+    // report.
+    if (
+      mentioned.length === 0 &&
+      !people.some((person) => textMentionsName(question, person.name)) &&
+      !EVERYONE_RE.test(question) &&
+      ADDRESSED_RE.test(question)
+    ) {
+      await this.postChannelSystemMessage(
+        input.projectId,
+        input.repositoryId,
+        candidates.length === 0
+          ? "Nobody here answers to that yet — this channel has no agents " +
+              "the server can reach. Connect one from Agents, then add it to " +
+              "this channel from the roster."
+          : "Nobody here answers to that. In this channel you can mention: " +
+              `${candidates.map((candidate) => `@${candidate.name}`).join(", ")}.`,
+        root.channelId,
+      );
+      return;
+    }
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
     const firstAnswering = answering[0];
     const queueAfterCurrent =
@@ -21232,10 +21781,76 @@ export class ApiGateway {
     });
   }
 
+  /**
+   * Expires stale leases and says so, which is the half that went missing.
+   *
+   * The store hands each expired row to exactly one caller — that is what
+   * makes "the room is told once" true however many sweeps race for it. The
+   * corollary is that whoever consumes a row owes the room the sentence, and
+   * this process consumed rows in four places and wrote nothing in any of
+   * them.
+   *
+   * It was not a rare race, it was the normal outcome. A polling worker calls
+   * `POST /workers/leases` every five seconds and that route expires leases
+   * before handing out work; the only caller that narrated ran on a sixty
+   * second timer. So the poll won roughly twelve times out of thirteen, the
+   * row was settled silently, and `lease_expired` — a message that exists,
+   * and says exactly the right thing — was almost never written.
+   *
+   * What that looked like: a machine that lost contact for five minutes (a
+   * redeploy, a sleep, a dropped connection) had its lease expired and its
+   * task requeued, while the thread went on reading "I've taken this task and
+   * I'm working on it" forever. Which is the same symptom as a hang, and is
+   * why it was diagnosed as one.
+   *
+   * Narration never blocks recovery: putting the work back is the job, and a
+   * run that could not be narrated is still a run that has to be requeued.
+   */
+  private async expireLeasesAndSay(nowIso: string): Promise<void> {
+    const expired = await this.options.store
+      .expireWorkLeases(nowIso)
+      .catch((): [] => []);
+    for (const lease of expired) {
+      await this.options.store
+        .appendAudit(undefined, {
+          type: "lease_expired",
+          taskId: lease.taskId,
+          data: {
+            projectId: lease.projectId,
+            repositoryId: lease.repositoryId,
+            workerId: lease.workerId,
+            leaseId: lease.id,
+          },
+        })
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Whose agent a finished task belongs to, for attributing what it said.
+   *
+   * The name this resolves to becomes the author of the message, so getting
+   * it wrong puts one person's words under another person's agent — and this
+   * runs on every routed answer, which on a deployment that executes nothing
+   * itself is every question anybody asks.
+   *
+   * It used to match `entry.provider === task.agentId`, which is comparing a
+   * provider id against a key from the operator's `.coordinator/config.json`
+   * — two different namespaces that only coincide by accident, and when they
+   * did coincide the search was over the *whole room*, so the first agent on
+   * that vendor won whoever had actually been asked. The owner was never
+   * consulted at all.
+   *
+   * So the owner is consulted first, and it is not a heuristic: `submittedBy`
+   * is what the dispatch pinned the row to (`actorId: candidate.userId`) and
+   * what decides whose machine may claim it, so it is the same fact, read
+   * back. The vendor then picks between that person's own agents, exactly as
+   * `channelTaskAuthorId` picks.
+   */
   private async watchedTaskAgent(
     task: SubmittedTask,
   ): Promise<{ ownerId: string; provider: string } | undefined> {
-    if (task.projectId === undefined) {
+    if (task.projectId === undefined || task.submittedBy === undefined) {
       return undefined;
     }
     const candidates: ChannelMentionCandidate[] =
@@ -21243,11 +21858,27 @@ export class ApiGateway {
         task.projectId,
         task.repositoryId,
       ).catch(() => []);
-    const candidate = candidates.find(
-      (entry) =>
-        `${entry.userId}:${entry.provider}` === task.agentId ||
-        entry.provider === task.agentId,
+    const owned = candidates.filter(
+      (entry) => entry.userId === task.submittedBy,
     );
+    if (owned.length === 0) {
+      return undefined;
+    }
+    const configured = await Promise.resolve(
+      this.options.operations.listAgents?.(),
+    ).catch(() => undefined);
+    const adapter = configured?.find(
+      (agent) => agent.id === task.agentId,
+    )?.adapter;
+    const matched = owned.find((entry) =>
+      adapter === undefined
+        ? task.agentId.toLowerCase().includes(entry.vendor)
+        : entry.vendor === adapter,
+    );
+    // One agent owned by this person is unambiguous whatever the id says;
+    // several are not, and guessing between them is how the wrong name ends
+    // up on somebody's answer. Nothing is better than the wrong somebody.
+    const candidate = matched ?? (owned.length === 1 ? owned[0] : undefined);
     return candidate === undefined
       ? undefined
       : { ownerId: candidate.userId, provider: candidate.provider };
@@ -23777,6 +24408,28 @@ export class ApiGateway {
                 code: "internal_error",
                 message: "The request could not be completed",
               };
+    // An unexpected failure is the one kind nobody can look up.
+    //
+    // `HttpError` and `AuthenticationError` are deliberate: they carry their
+    // own words to the caller, and logging them would bury the log in ordinary
+    // 404s and 401s. Everything else reaching here is a bug — an exception no
+    // route expected — and it was answered with an opaque sentence, a request
+    // id, and no record anywhere of what actually threw. The id matched
+    // nothing. An agent reporting "I could not finish this: The request could
+    // not be completed" was therefore the end of the investigation rather than
+    // the start of one.
+    //
+    // Written with the id the caller was given, so the sentence on somebody's
+    // screen and the stack in the log are one grep apart.
+    if (normalized.code === "internal_error") {
+      process.stderr.write(
+        `[gateway] ${requestId} unhandled: ${
+          error instanceof Error
+            ? `${error.stack ?? error.message}`
+            : String(error)
+        }\n`,
+      );
+    }
     this.sendJson(response, normalized.status, {
       error: {
         code: normalized.code,

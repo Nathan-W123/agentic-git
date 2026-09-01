@@ -205,7 +205,10 @@ import {
 import {
   TERMINAL_TASK_STATUS,
   cancelTask,
+  checkLocalCli,
   connectAgent,
+  disconnectAgent,
+  installVendorCli,
   connectGitHubAccount,
   pauseTask,
   resumeTask,
@@ -2260,6 +2263,20 @@ function agentsCard() {
               // stopped authenticating. Saying "connected" about the second or
               // the fourth is what let every task an agent was given fail
               // without the screen ever admitting anything was wrong.
+              // The one question the whole row turns on, asked once so the
+              // status line and the buttons cannot answer it differently.
+              // An agent used to *be* a stored credential, so "is a
+              // credential stored" and "is there an agent" were one question
+              // with one answer. Local execution split them: the CLI runs
+              // under this machine's own vendor login, so the agent it runs
+              // has no credential here and never will. Every control below
+              // was still asking the credential question — which is why an
+              // agent somebody had just finished connecting read "Not
+              // connected" and offered to connect it again.
+              const localAgent =
+                state.localAgentsOnly === true &&
+                agent.exists === true &&
+                !agent.mine;
               const state_ = agent.needsReconnect
                 ? { text: "Sign-in expired", cls: " sr-warn" }
                 : agent.mine
@@ -2270,12 +2287,20 @@ function agentsCard() {
                           : "Connected as you",
                       cls: "",
                     }
-                  : agent.hostAccount
+                  : localAgent
                     ? {
-                        text: "Available on this deployment — using this machine's account",
+                        // Named, because the name is the thing that just
+                        // happened: the sign was dealt when the agent was
+                        // created, and this row is where somebody reads it.
+                        text: `Connected as ${callSign} — runs on this machine`,
                         cls: "",
                       }
-                    : { text: "Not connected", cls: "" };
+                    : agent.hostAccount
+                      ? {
+                          text: "Available on this deployment — using this machine's account",
+                          cls: "",
+                        }
+                      : { text: "Not connected", cls: "" };
               return `<div class="set-row">
                 <span class="sr-body">
                   ${
@@ -2299,7 +2324,10 @@ function agentsCard() {
                     // rename on a vendor this account has never connected,
                     // and the server says so rather than guessing. An expired
                     // sign-in still has one, so it can still be renamed.
-                    renaming || !(agent.mine || agent.needsReconnect)
+                    // A local agent has a call sign in the same durable
+                    // table a connected one does, so it renames the same way.
+                    renaming ||
+                    !(agent.mine || agent.needsReconnect || localAgent)
                       ? ""
                       : `<button type="button" class="btn btn-sm"
                           data-act="agent-rename-toggle"
@@ -2314,6 +2342,24 @@ function agentsCard() {
                     // account at all.
                     agent.mine && !agent.needsReconnect
                       ? `<button type="button" class="btn btn-sm"
+                          data-act="agent-disconnect"
+                          data-value="${esc(agent.id)}">Disconnect</button>`
+                      : localAgent
+                        ? // The agent already exists — it was created without a
+                          // credential, which is all a local deployment needs.
+                          // No vendor sign-in is offered here any more: the
+                          // usage figure was the last thing it bought, and
+                          // that now comes from this machine's own CLI, which
+                          // is signed in already. A button that reads like
+                          // connecting, on a row that is connected, is what
+                          // sent the first person who tried it to a second
+                          // vendor sign-in they never needed.
+                          `<button type="button" class="btn btn-sm"
+                          data-act="agent-check-cli"
+                          data-value="${esc(agent.id)}"
+                          title="Check that this agent's CLI is installed and signed in on this machine"
+                          >Check the CLI</button>
+                          <button type="button" class="btn btn-sm"
                           data-act="agent-disconnect"
                           data-value="${esc(agent.id)}">Disconnect</button>`
                       : (() => {
@@ -9453,6 +9499,24 @@ document.addEventListener("click", (event) => {
     case "offline-dismiss":
       dismissOfflinePrompt(render);
       return;
+    case "offline-install":
+      void installVendorCli(value, render);
+      return;
+    case "offline-copy":
+      // The install command, onto the clipboard, because the alternative is
+      // retyping a URL piped into a shell by hand and getting it subtly
+      // wrong. `writeText` is refused outside a secure context and in a
+      // window that has lost focus, so the failure is caught and said out
+      // loud rather than leaving a button that looks like it worked.
+      void navigator.clipboard
+        ?.writeText(value)
+        .then(() => {
+          toast("Command copied — run it in a terminal on this machine.");
+        })
+        .catch(() => {
+          toast("Could not copy. Select the command and copy it.", "error");
+        });
+      return;
     case "thread-composer-focus":
       // The header's reply affordance belongs to the thread already on
       // screen; it must not close that thread and silently move the draft to
@@ -10254,6 +10318,12 @@ document.addEventListener("click", (event) => {
     case "agent-connect":
       void connectAgent(value, render);
       return;
+    case "agent-check-cli":
+      // The machine half of an agent, on demand. Connecting used to be the
+      // only thing that ran it, which left an agent whose CLI was missing or
+      // signed out with no way to reach the installer at all.
+      void checkLocalCli(value, render);
+      return;
     case "github-connect":
       void connectGitHubAccount(render);
       return;
@@ -10270,28 +10340,30 @@ document.addEventListener("click", (event) => {
       void startAddAgentFlow(render);
       return;
     case "agent-disconnect":
-      void api(`/chat/providers/${encodeURIComponent(value)}`, {
-        method: "DELETE",
-      })
-        .then(() => loadProviders())
-        .then(() => {
-          toast("Disconnected", "ok");
-          render();
-        })
-        .catch((error) => toast(error.message, "error"));
+      // Asks before it destroys, and removes the agent rather than only its
+      // secret. Both are `disconnectAgent`'s job — this used to fire the
+      // DELETE straight off a click, on a button whose meaning had quietly
+      // changed underneath it.
+      void disconnectAgent(value, render);
       return;
     case "agent-switch": {
       const agent = myAgents().find((entry) => entry.id === value);
       const provider = state.providers.find((entry) => entry.id === value);
       const mine = provider?.ownCredential !== undefined;
+      // Whether there is an agent to remove, which is not the same as whether
+      // a secret is stored — the settings row learned that and this menu had
+      // not, so the one agent shape that cannot be removed anywhere else was
+      // missing its entry here too.
+      const exists = mine || provider?.exists === true;
       showMenu(node, [
-        ...(mine
+        ...(exists
           ? [
               {
                 act: "agent-disconnect",
                 value,
                 label: `Disconnect ${agentLabelOf(value)}`,
                 iconName: "logout",
+                danger: true,
               },
             ]
           : []),
@@ -10680,8 +10752,13 @@ document.addEventListener("click", (event) => {
               .map((agent) => agent.id)
           : [],
       );
+      // Every agent this account has, not only the ones with a secret stored
+      // here. `mine && connected` was the same question the settings row and
+      // the agent menu were asking, and the same wrong answer: an agent that
+      // runs on this machine has no credential and is never `connected`, so
+      // the one menu for putting an agent into a channel offered none of them.
       const connected = myAgents().filter(
-        (agent) => agent.mine === true && agent.connected === true,
+        (agent) => agent.exists === true && agent.needsReconnect !== true,
       );
       const canConnectAnother = state.providers.some(
         (provider) =>

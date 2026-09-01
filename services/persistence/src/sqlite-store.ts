@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  boundValidation,
   createId,
   CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
@@ -3037,6 +3038,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
     runId: string,
     result: IntegrationResult,
   ): Promise<void> {
+    // Bounded on the way in, not on the way out. The control plane is handed
+    // this by a remote worker, so the size of a row here is decided by how
+    // noisy somebody else's test runner is — and nothing reads the text
+    // anyway. See `boundValidation`.
+    const validation = boundValidation(result.validation);
     this.db
       .prepare(
         `INSERT INTO integrations
@@ -3060,7 +3066,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         result.canonicalVersion.branch,
         result.canonicalVersion.createdAt,
         result.candidateRevision ?? null,
-        JSON.stringify(result.validation),
+        JSON.stringify(validation),
         JSON.stringify(result.cleanupWarnings ?? []),
         result.explanation,
         new Date().toISOString(),
@@ -4492,6 +4498,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
       provider: text(row, "provider"),
       callSign: text(row, "call_sign"),
       assignedAt: text(row, "assigned_at"),
+      // Read through a guard rather than cast: rows written before this
+      // column existed carry the default, and anything else on a row is not
+      // a visibility this system knows how to honour. `personal` is the safe
+      // reading of an unanswerable value — it withholds rather than widens.
+      visibility: text(row, "visibility") === "org" ? "org" : "personal",
     }));
   }
 
@@ -4499,22 +4510,26 @@ export class SqliteCoordinationStore implements CoordinationStore {
     userId: string,
     provider: string,
     callSign: string,
+    visibility: "personal" | "org" = "personal",
   ): Promise<AgentCallSign> {
     const record: AgentCallSign = {
       userId,
       provider,
       callSign,
       assignedAt: new Date().toISOString(),
+      visibility,
     };
     this.db
       .prepare(
-        `INSERT INTO agent_call_signs (user_id, provider, call_sign, assigned_at)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO agent_call_signs
+           (user_id, provider, call_sign, assigned_at, visibility)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(user_id, provider) DO UPDATE SET
            call_sign = excluded.call_sign,
-           assigned_at = excluded.assigned_at`,
+           assigned_at = excluded.assigned_at,
+           visibility = excluded.visibility`,
       )
-      .run(userId, provider, callSign, record.assignedAt);
+      .run(userId, provider, callSign, record.assignedAt, visibility);
     return record;
   }
 

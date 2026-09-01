@@ -1203,6 +1203,14 @@ export async function loadProviders() {
   const response = await apiOptional("/chat/providers", { providers: [] });
   state.providers = response.providers ?? [];
   state.providersLoaded = true;
+  // A channel's roster carries this too, but Settings can be opened without
+  // ever visiting a channel — and the agent rows read it to tell an agent
+  // waiting to be connected apart from one already connected. Assigned only
+  // when the field actually arrived, so a failed request (which falls back to
+  // an empty object) cannot quietly turn a true flag false.
+  if (response.localAgentsOnly !== undefined) {
+    state.localAgentsOnly = response.localAgentsOnly === true;
+  }
   if (!state.providers.some((entry) => entry.id === state.selectedAgent)) {
     state.selectedAgent =
       state.providers.find((entry) => entry.connected)?.id ??
@@ -1390,6 +1398,60 @@ export function usageKey(providerId, ownerId) {
   return ownerId ? `${ownerId}:${providerId}` : providerId;
 }
 
+/**
+ * The vendor CLI behind each provider account.
+ *
+ * A provider is the account somebody signs into; a vendor is the program that
+ * runs on their machine. They are named differently by their own owners —
+ * "anthropic" issues the credential, `claude` does the work — and the desktop
+ * installs by the second. Mirrors `PROVIDER_TO_VENDOR` on the server.
+ */
+export const PROVIDER_VENDOR = {
+  anthropic: "claude",
+  openai: "codex",
+  google: "gemini",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
+};
+
+/**
+ * Asks this machine what is left of a vendor's quota, and files the answer.
+ *
+ * This is the whole reason the usage figure no longer needs a button. The
+ * account is signed in *here* — in the CLI that does the work — so the number
+ * is a spawn away on the machine already looking at the card, and asking is
+ * cheap enough to do whenever the card is about to be shown. The control
+ * plane, by contrast, can only ask its own login, which on a deployment where
+ * everybody signs in as themselves is nobody.
+ *
+ * A browser has no bridge and gets `undefined`, which is not a failure: it
+ * simply falls through to the server's answer below, exactly as before.
+ */
+async function reportMachineUsage(providerId) {
+  const bridge = window.KUMI_INSTALL;
+  const vendor = PROVIDER_VENDOR[providerId];
+  if (bridge?.usage === undefined || vendor === undefined) {
+    return undefined;
+  }
+  const reading = await bridge.usage(vendor).catch(() => undefined);
+  // A CLI that is not installed here, or would not answer, has not reported
+  // anything — and reporting an empty string would file "nothing to show" as
+  // this account's usage until something replaced it.
+  if (reading?.ok !== true || typeof reading.raw !== "string") {
+    return undefined;
+  }
+  try {
+    const response = await api(
+      `/chat/providers/${encodeURIComponent(providerId)}/usage`,
+      { method: "POST", body: { raw: reading.raw } },
+    );
+    return response.usage;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function ensureProviderUsage(providerId, rerender, ownerId) {
   const key = usageKey(providerId, ownerId);
   if (!providerId || state.providerUsage[key] !== undefined) {
@@ -1397,14 +1459,21 @@ export async function ensureProviderUsage(providerId, rerender, ownerId) {
   }
   state.providerUsage[key] = { loading: true };
   try {
-    const response = await api(
-      `/chat/providers/${encodeURIComponent(providerId)}/usage${
-        ownerId ? `?owner=${encodeURIComponent(ownerId)}` : ""
-      }`,
-    );
-    state.providerUsage[key] = response.usage ?? {
-      unavailableReason: "This deployment reported no usage.",
-    };
+    // Only ever for one's own agent. A reading is a claim about an account,
+    // and this machine's CLI is signed in as this account — asking it about
+    // somebody else's would report the wrong person's quota under their name.
+    const fromMachine = ownerId ? undefined : await reportMachineUsage(providerId);
+    state.providerUsage[key] =
+      fromMachine ??
+      (
+        await api(
+          `/chat/providers/${encodeURIComponent(providerId)}/usage${
+            ownerId ? `?owner=${encodeURIComponent(ownerId)}` : ""
+          }`,
+        )
+      ).usage ?? {
+        unavailableReason: "This deployment reported no usage.",
+      };
   } catch (error) {
     state.providerUsage[key] = { unavailableReason: error.message };
   }
@@ -1477,6 +1546,23 @@ export async function connectProviderCredential(providerId, kind, secret, label,
  * abandon it if they close the dialog. The flow id is opaque and scoped to
  * the caller server-side, so it travels in the query string.
  */
+/**
+ * Creates an agent for a vendor without handing the server a credential.
+ *
+ * The roster used to be built by walking the credential store, so having an
+ * agent meant a vendor sign-in whose credential local execution never reads —
+ * the CLI runs under the machine's own login. This is the other half: the
+ * agent exists because somebody asked for it, and a credential is an optional
+ * extra that buys the usage figures and server-side execution.
+ */
+export async function createLocalAgent(providerId) {
+  const response = await api(
+    `/chat/providers/${encodeURIComponent(providerId)}/agent`,
+    { method: "POST", body: {} },
+  );
+  return response.agent;
+}
+
 export async function startProviderSignIn(providerId) {
   const response = await api(
     `/chat/providers/${encodeURIComponent(providerId)}/device-auth`,
@@ -3038,6 +3124,14 @@ export function myAgents() {
       // nothing, which is precisely the confusion the second card existed to
       // clear up. Both are carried here now, and one card says both.
       mine: provider.ownCredential !== undefined,
+      // Whether there is an agent here at all — which stopped being the same
+      // question as `mine` when an agent became a durable record rather than
+      // a side effect of storing a credential. Local execution runs the
+      // vendor's CLI under the machine's own login and never reads a stored
+      // secret, so an agent there has no credential and `mine` is false for
+      // it. The server answers this; the credential is the fallback for a
+      // deployment that has not shipped the field yet.
+      exists: provider.exists === true || provider.ownCredential !== undefined,
       hostAccount:
         provider.connected === true && provider.ownCredential === undefined,
       needsReconnect: expired !== undefined,
@@ -3527,7 +3621,16 @@ export function channelAgentsFor(repositoryId) {
   const mine = myAgents()
     .filter(
       (agent) =>
-        agent.connected &&
+        // Exists, rather than connected. `connected` means a credential is
+        // stored here — and since an agent stopped requiring a vendor sign-in
+        // that is false for every agent that runs on somebody's own machine,
+        // which is all of them on a local deployment. Asking the old question
+        // kept those agents out of every channel roster: not listed, not
+        // offered by the picker, and impossible to put back into a repository
+        // after being disconnected. An expired sign-in is still excluded,
+        // because that one genuinely cannot work.
+        (agent.exists === true || agent.connected === true) &&
+        agent.needsReconnect !== true &&
         (myMemberProviders === undefined || myMemberProviders.has(agent.provider)),
     )
     .map((agent) => ({ ...agent, mine: true, userId: myId }));
@@ -3590,6 +3693,10 @@ export function channelAgentsFor(repositoryId) {
           // built from the whole roster and applied to every agent, so it is
           // the one place a server fact reaches both.
           ownerOnline: entry.ownerOnline,
+          // Sent only for an agent no live machine can run — the vendor CLI
+          // to install, and where. Reaches both halves of the roster for the
+          // same reason `ownerOnline` does.
+          setup: entry.setup,
         },
       ]),
   );
@@ -3623,6 +3730,9 @@ export function channelAgentsFor(repositoryId) {
         // however long its owner's machine had been off, and the whole
         // offline path was dead while appearing to be wired.
         ownerOnline: server.ownerOnline,
+        // Same rule, same reason: sent only for an agent nothing can run, and
+        // dropped here if it is not named.
+        setup: server.setup,
       };
     }
     // Before the roster resolves — the "paint immediately" floor — and for an
@@ -5049,7 +5159,14 @@ export async function ensureChannelRoster(repositoryId, rerender) {
   } finally {
     state.channelRosterLoadingId = undefined;
   }
-  rerender();
+  // Optional, like every other loader here. One caller preloads every
+  // repository's roster in a loop and renders once at the end — deliberately,
+  // rather than repainting per repository — so it passes nothing, and this
+  // threw `rerender is not a function` on the *first* iteration. The loop then
+  // never reached the rest, and never reached its own `render()`, so opening
+  // an agent's details left every roster unloaded and the console carrying the
+  // only evidence.
+  rerender?.();
 }
 
 /** When each repository's liveness was last re-read — see `refreshChannelLiveness`. */
@@ -5868,6 +5985,28 @@ export function addChannelAgent(repositoryId, agentId) {
  * at connection time, instead of deriving membership on every read and
  * silently undoing a later removal.
  */
+/**
+ * Drops an agent out of every channel roster already loaded in this tab.
+ *
+ * The server has forgotten it, so any roster fetched from here on lists it
+ * nowhere — but a channel already on screen holds its own copy and would go
+ * on showing an agent that no longer exists until something else forced a
+ * reload. The mirror image of the patch {@link addAgentToAllRepositories}
+ * applies when an agent joins, and for the same reason.
+ *
+ * Scoped to this account's own agents. Somebody else's agent for the same
+ * vendor is a different agent, and removing mine must not take theirs off
+ * the screen.
+ */
+export function forgetAgentInLoadedRosters(agentId) {
+  const mine = currentUserId();
+  for (const [repositoryId, roster] of Object.entries(state.channelRoster)) {
+    state.channelRoster[repositoryId] = roster.filter(
+      (entry) => !(entry.userId === mine && entry.provider === agentId),
+    );
+  }
+}
+
 export async function addAgentToAllRepositories(agentId) {
   if (!agentId || !state.projectId) {
     return [];

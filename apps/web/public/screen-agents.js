@@ -11,11 +11,15 @@ import {
   api,
   cancelGitHubSignIn,
   cancelProviderSignIn,
+  createLocalAgent,
   connectGitHub,
+  forgetAgentInLoadedRosters,
   connectProviderCredential,
   gitHubSignInStatus,
   loadGitHub,
   loadProviders,
+  myAgents,
+  PROVIDER_VENDOR,
   providerSignInStatus,
   startGitHubSignIn,
   startProviderSignIn,
@@ -230,7 +234,378 @@ function pause(ms) {
  * Returns `true` when connected, `false` when retry should be offered, and
  * `null` when the user walked away.
  */
+/**
+ * Installs a vendor's CLI from inside the app, after showing what will run.
+ *
+ * The confirmation is the point. These are the vendors' own one-liners and two
+ * of them pipe a downloaded script into an interpreter — which is exactly what
+ * a person would paste by hand, and exactly why it should not happen because
+ * somebody pressed "Connect". So the command is displayed, agreed to, and only
+ * then run.
+ *
+ * The command shown is read back from the desktop rather than composed here.
+ * The page names a vendor and the app decides what that means, so a remote
+ * document cannot put a command on this machine's shell — and what is agreed
+ * to cannot differ from what executes, because they are the same value.
+ */
+export async function installVendorCli(vendor, rerender) {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge === undefined || vendor === "") {
+    return;
+  }
+  const plan = await bridge.plan(vendor).catch(() => undefined);
+  if (plan === undefined) {
+    toast("This machine has no published installer for that agent.", "error");
+    return;
+  }
+  const agreed = await showModal({
+    title: `Install the ${vendor} CLI`,
+    subtitle:
+      "Kumi runs agents on this machine, so the vendor's own CLI has to be " +
+      "here. This is what will run:",
+    body: `<pre class="install-command">${esc(plan.command)}</pre>
+      <p class="modal-hint">It comes from ${esc(vendor)}'s own published
+      instructions. You can copy it and run it yourself instead.</p>`,
+    confirm: "Run it",
+    cancel: "Not now",
+  });
+  if (agreed === undefined) {
+    return;
+  }
+
+  // The output is collected, not displayed while it runs. A dialog somebody
+  // has to dismiss between agreeing to an install and being asked to sign in
+  // is a step that asks nothing — and the modal helper puts a confirm button
+  // on it, so it read as a decision when there was none to make. It is kept
+  // for the one case that needs it: a failure, where the vendor's own words
+  // say whether this was a missing npm, a proxy, or a blocked script, and a
+  // bare "it failed" would leave somebody exactly where they started.
+  const lines = [];
+  const stop = bridge.onOutput((line) => {
+    lines.push(line);
+  });
+  toast(`Installing ${vendor}…`);
+  let result;
+  try {
+    result = await bridge.run(vendor);
+  } catch (error) {
+    result = { ok: false, detail: error?.message ?? "The install failed." };
+  } finally {
+    stop?.();
+  }
+
+  if (result?.ok !== true) {
+    await showModal({
+      title: `${esc(vendor)} was not installed`,
+      subtitle: result?.detail ?? "The installer did not finish.",
+      body: `<pre class="install-output">${esc(lines.join("").slice(-2000))}</pre>`,
+      confirm: "Close",
+    });
+    return;
+  }
+
+  // Installed, and still unusable until somebody signs in — the one step no
+  // app can take for them, because every vendor's login is an interactive
+  // flow it owns. The most this can do is put them in front of it with
+  // nothing left to type.
+  const now = await showModal({
+    title: `${esc(vendor)} is installed`,
+    subtitle:
+      `One thing left: sign in. Kumi uses this machine's own ${esc(vendor)} ` +
+      "login, so it has to be done here, once.",
+    body: `<p class="modal-hint">This opens a terminal already running
+      <code>${esc(plan.signIn)}</code>. Follow its sign-in, then come back —
+      Kumi picks it up on its own.</p>`,
+    confirm: "Open the sign-in",
+    cancel: "Later",
+  });
+  if (now !== undefined) {
+    const opened = await bridge.signIn(vendor).catch(() => false);
+    if (opened !== true) {
+      toast(
+        `Could not open a terminal. Run \`${plan.signIn}\` yourself to sign in.`,
+        "error",
+      );
+    }
+  }
+  rerender?.();
+}
+
+/**
+ * Connecting an agent where the machine, not the server, will run it.
+ *
+ * One sign-in: the CLI's own, which is the one that decides whether anything
+ * works. The agent record is created first so it exists even if somebody
+ * closes the installer — an agent that is there and grey is honest, and the
+ * prompt on its first mention will offer the same setup again.
+ */
+async function connectLocalAgent(providerId, rerender) {
+  state.providerConnecting?.add(providerId);
+  rerender();
+  let agent;
+  try {
+    agent = await createLocalAgent(providerId);
+  } catch (error) {
+    toast(
+      `Could not create the ${agentLabelOf(providerId)} agent — ${error.message}`,
+      "error",
+    );
+    return false;
+  } finally {
+    state.providerConnecting?.delete(providerId);
+  }
+  await loadProviders();
+  // Drawn before the machine is touched, so the agent and its name are on
+  // screen while an install runs — that can take a minute, and a blank wait
+  // after pressing Connect reads as nothing having happened.
+  rerender();
+
+  // The machine, *before* anything claims this worked.
+  //
+  // This used to run last, after a toast saying the agent was yours. So the
+  // success message was written before a single question had been asked of the
+  // machine, and it was the same message whether the CLI was installed and
+  // signed in or whether nothing on the computer could run the agent at all.
+  // Somebody connected three agents that way and was told three times that it
+  // had worked.
+  const ready = await finishLocalSetup(providerId, rerender);
+
+  const failedRepositories = await addAgentToAllRepositories(providerId);
+  const name = agent?.callSign ?? agentLabelOf(providerId);
+  const vendor = PROVIDER_VENDOR[providerId] ?? agentLabelOf(providerId);
+  // One message, saying which of the things that had to happen actually did.
+  // The agent exists either way — that part is done and is worth saying, so
+  // nobody presses Connect again on an agent they already have.
+  const outcome =
+    failedRepositories.length > 0
+      ? {
+          text: `${name} is yours, but could not be added to every repository`,
+          tone: "error",
+        }
+      : ready === "ready"
+        ? { text: `${name} is yours`, tone: "ok" }
+        : ready === "missing"
+          ? {
+              text: `${name} is yours, but ${vendor} is not installed on this machine yet — it cannot run until it is`,
+              tone: "error",
+            }
+          : ready === "no-machine"
+            ? {
+                text: `${name} is yours. Open the Kumi app on the machine that will run it to finish setting it up`,
+                tone: "error",
+              }
+            : {
+                text: `${name} is yours, but this machine could not be checked — use Check the CLI on its row`,
+                tone: "error",
+              };
+  toast(outcome.text, outcome.tone);
+  rerender();
+  return true;
+}
+
+/**
+ * Removing an agent.
+ *
+ * "Disconnect" used to mean deleting a stored credential, because the
+ * credential was the agent. It is not any more, and the button had drifted
+ * away from what it says in two directions at once: on an agent with a
+ * credential it deleted the secret and left the agent itself in every
+ * channel, and on an agent without one — which is every agent on a
+ * deployment that runs them locally — it was not offered at all, so an agent
+ * could be created and never removed.
+ *
+ * It asks first. Removing an agent is not undoable in the way that matters:
+ * the call sign goes back in the pool and the next agent dealt may take it,
+ * so the name people have learned can end up belonging to somebody else.
+ *
+ * What it deliberately does not touch is the vendor CLI on this machine and
+ * the vendor account behind it. Kumi installed the one and never owned the
+ * other, and signing somebody out of Codex because they tidied up a Kumi
+ * roster would be a surprise of an entirely different order.
+ */
+export async function disconnectAgent(providerId, rerender) {
+  const label = agentLabelOf(providerId);
+  const agent = myAgents().find((entry) => entry.id === providerId);
+  // The call sign if it has one, because that is the name on the screen and
+  // in every channel — asking "disconnect Codex?" about an agent everybody
+  // calls Eris is asking about something else.
+  const name = agent?.hasName === true ? agent.name : label;
+  // Whether it is mid-run. `myAgents` already worked this out to draw the
+  // busy dot, so saying it here costs nothing — and it is the one thing about
+  // removing an agent that cannot be undone by connecting another. Work
+  // already claimed runs to completion on its own machine; what goes is the
+  // ability to address it. Mentions resolve through the roster on every read
+  // rather than being stored, so once the agent is gone `@${name}` matches
+  // nothing and neither does cancelling by name.
+  const busy = agent?.task !== undefined;
+  const confirmed = await showModal({
+    title: `Disconnect ${name}?`,
+    subtitle:
+      `${name} leaves every channel it is in, and its name goes back in the ` +
+      "pool for another agent to be dealt.",
+    body:
+      (busy
+        ? `<p class="modal-hint sr-warn">${esc(name)} is working right now.
+            That run will finish on its own, but once the agent is gone you
+            will not be able to cancel it or reply to it by name.</p>`
+        : "") +
+      `<p class="modal-hint">Nothing is uninstalled, and your
+      ${esc(label)} account is untouched — you can connect it again whenever
+      you like.</p>`,
+    confirm: "Disconnect",
+    cancel: "Keep it",
+  });
+  if (confirmed === undefined) {
+    return false;
+  }
+  try {
+    await api(`/chat/providers/${encodeURIComponent(providerId)}`, {
+      method: "DELETE",
+    });
+  } catch (error) {
+    toast(`Could not disconnect ${label} — ${error.message}`, "error");
+    return false;
+  }
+  forgetAgentInLoadedRosters(providerId);
+  await loadProviders();
+  toast(`${name} disconnected`, "ok");
+  rerender();
+  return true;
+}
+
+/**
+ * The half of connecting that happens on this machine.
+ *
+ * A vendor sign-in gives Kumi an agent. It does not give the machine anything
+ * — the CLI that agent runs as still has to be installed here and logged into
+ * separately. Splitting those apart is how somebody could finish "Connect",
+ * see a green agent, @mention it, and only then be told nothing on their
+ * machine could run it. The gap was found the hard way: three agents
+ * connected, none of them runnable, and a morning spent reading process lists
+ * to work out why.
+ *
+ * So connecting finishes here instead. Only in the desktop app, which is the
+ * only thing that can see the machine; a browser has no business being asked
+ * and is left exactly as it was.
+ */
+/**
+ * Sorting out the machine, for an agent that already exists.
+ *
+ * `finishLocalSetup` only ever ran as the tail of connecting, so the install
+ * and the sign-in were reachable from exactly one button — and that button is
+ * absent from a connected row, because the row is connected. An agent whose
+ * CLI was never installed, or whose CLI has since signed out, therefore had no
+ * route to either: the row offered a rename, a vendor web sign-in and a
+ * delete, and none of those touch the machine.
+ *
+ * That is how somebody ended up with three connected agents, no CLI behind any
+ * of them, and nothing on any screen able to say so. Same dialog, same
+ * installer, asked for when it is wanted rather than only on the way past.
+ */
+export async function checkLocalCli(providerId, rerender) {
+  if (window.KUMI_INSTALL === undefined) {
+    // Two very different reasons, and telling them apart is the whole value of
+    // the message. `KUMI_SERVER` has been in the app's preload since the app
+    // was first something you could download; the install bridge beside it
+    // came much later. So a page with the first and not the second is the app,
+    // just an old one — and saying "open the app" to somebody who is already
+    // in it sends them to check the one thing that is not wrong.
+    //
+    // That mattered: a build without the bridge cannot install a CLI, cannot
+    // offer a sign-in, and cannot say that it cannot. Every agent connected
+    // from it looks connected and can run nothing, which is exactly how this
+    // was found.
+    toast(
+      window.KUMI_SERVER === undefined
+        ? "Open the Kumi app on the machine that runs this agent — a browser " +
+            "cannot see what is installed there."
+        : "This copy of the Kumi app is too old to install or check a CLI. " +
+            "Download the latest version and open it again — your agents and " +
+            "their names are kept.",
+      "error",
+    );
+    return;
+  }
+  await finishLocalSetup(providerId, rerender);
+}
+
+async function finishLocalSetup(providerId, rerender) {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge === undefined) {
+    // A browser, or an app too old to have the bridge. Either way nothing here
+    // can see the machine, and the caller has to say so rather than report a
+    // success it did not establish.
+    return "no-machine";
+  }
+  const vendor = PROVIDER_VENDOR[providerId];
+  if (vendor === undefined) {
+    return "unknown";
+  }
+  const detected = await bridge.detected().catch(() => undefined);
+  if (detected === undefined) {
+    // Asking the machine what it has can fail — a scan that threw, a channel
+    // closed under a reloading window — and returning here was silent. That is
+    // the whole of "I pressed Check the CLI and nothing happened": the one
+    // button whose job is to explain why an agent cannot work, explaining
+    // nothing.
+    toast(
+      `Could not ask this machine what is installed. Restart the Kumi app ` +
+        `and try again.`,
+      "error",
+    );
+    return "unknown";
+  }
+  if (!detected.includes(vendor)) {
+    // Nothing here can run it. `installVendorCli` shows what it will run,
+    // runs it, and opens the sign-in afterwards — the whole remaining setup,
+    // in the place somebody is already standing.
+    await installVendorCli(vendor, rerender);
+    // Asked again rather than assumed: the install may have been declined, or
+    // failed, and reporting a success because an installer was *offered* is
+    // the same mistake this ordering exists to fix.
+    const after = await bridge.detected().catch(() => undefined);
+    return after?.includes(vendor) === true ? "ready" : "missing";
+  }
+  // Installed, but nothing here can tell whether it is signed in — that lives
+  // inside the vendor's own config and reading it would be guessing at a
+  // format none of them promise. So it is offered rather than assumed, which
+  // is honest and costs one dismissed dialog for somebody already set up.
+  const now = await showModal({
+    title: `${agentLabelOf(providerId)} is installed on this machine`,
+    subtitle:
+      "One last thing: Kumi runs it under this machine's own login, so it " +
+      "has to be signed in here too.",
+    body: `<p class="modal-hint">Opens a terminal running the CLI. If it is
+      already signed in, close the window — nothing else to do.</p>`,
+    confirm: "Check the sign-in",
+    cancel: "Already done",
+  });
+  if (now !== undefined) {
+    await bridge.signIn(vendor).catch(() => false);
+  }
+  // Installed, and the sign-in has been offered. Whether they completed it is
+  // the vendor's own business and cannot be read from here without guessing at
+  // a config format none of them promise — so "ready" means the machine has
+  // what it needs, not that every login is live.
+  return "ready";
+}
+
 async function signInAgent(providerId, mode, rerender) {
+  // On a deployment that runs agents locally, the vendor sign-in below buys
+  // nothing the agent needs. It stores a credential this server then never
+  // reads — the CLI runs under the machine's own login — so somebody signed in
+  // twice and only the second one made anything work. Worse, the first was
+  // what created the agent at all, which is why "reconnect from Settings →
+  // Agents" was offered as the fix for a CLI that was not signed in, and could
+  // never have helped.
+  //
+  // So the agent is created outright and setup finishes on the machine. The
+  // last thing the credential still bought — the usage figures — now comes
+  // from this machine's own CLI, so on a local deployment there is nothing
+  // left for the vendor sign-in to be an extra for, and no route to it.
+  if (state.localAgentsOnly === true) {
+    return await connectLocalAgent(providerId, rerender);
+  }
   state.providerConnecting?.add(providerId);
   rerender();
   // Opened now, empty, and pointed at the vendor once the URL is known.
@@ -369,6 +744,7 @@ async function signInAgent(providerId, mode, rerender) {
       failedRepositories.length === 0 ? "ok" : "error",
     );
     rerender();
+    await finishLocalSetup(providerId, rerender);
     return true;
   }
 
@@ -404,6 +780,7 @@ async function signInAgent(providerId, mode, rerender) {
           failedRepositories.length === 0 ? "ok" : "error",
         );
         rerender();
+        await finishLocalSetup(providerId, rerender);
         return true;
       }
       if (state_.status !== "pending") {

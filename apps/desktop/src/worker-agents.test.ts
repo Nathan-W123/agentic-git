@@ -168,3 +168,261 @@ test("a real executable is pinned ahead of the extensionless npm script", async 
     }
   });
 });
+
+/**
+ * A machine with no CLI must not be a dead end.
+ *
+ * The worker refuses to start without one, and correctly — a worker
+ * advertising adapters it cannot drive takes work it will then fail. But
+ * refusing was the whole of it: the reason went into the application menu, the
+ * dashboard said nothing, and an agent connected from such a machine accepted
+ * every task and did none of them. Somebody installed the app, connected three
+ * agents, and had no way to discover that nothing on the machine could run
+ * them.
+ *
+ * Read as text rather than executed, because both files reach for Electron.
+ * The contract is small and worth pinning anyway: the worker names this stop,
+ * and the main process acts on that name.
+ */
+test("no CLI on the machine is a named stop the app offers to fix", async () => {
+  const worker = await readFile(path.join(electronDir, "worker.mjs"), "utf8");
+  const main = await readFile(path.join(electronDir, "main.mjs"), "utf8");
+
+  // Named, so it can be told apart from a crash, a bad token, or a server that
+  // did not answer — none of which installing anything would fix.
+  assert.match(worker, /reason: "no-cli"/u);
+  assert.match(worker, /No agent CLI found on this machine/u);
+
+  // And acted on, rather than only written into the menu.
+  assert.match(main, /event\.reason === "no-cli"/u);
+  assert.match(main, /offerToInstallACli/u);
+  // Offered from the same table the dashboard installs from, so there is one
+  // set of commands rather than a second copy that drifts out of step.
+  assert.match(main, /INSTALLABLE_VENDORS/u);
+  assert.match(main, /await runInstall\(vendor/u);
+  // Once per run: the worker restarts, and every restart on a bare machine
+  // would otherwise ask again.
+  assert.match(main, /if \(offeredInstall/u);
+  // Installing is not the end of it — the vendor's own sign-in still has to
+  // happen, and the machine has to start advertising what it just got.
+  assert.match(main, /startWorker\(here, session, noteWorkerState\)/u);
+  assert.match(main, /openSignIn\(vendor\)/u);
+  // A failed install is said out loud rather than swallowed.
+  assert.match(main, /Could not install \$\{VENDOR_LABELS/u);
+});
+
+/**
+ * One preload, three globals, and no shared fate between them.
+ *
+ * A preload is a single script: an exception part-way through stops everything
+ * after it, silently, and the page comes up with whichever globals were
+ * exposed before the throw. The token is fetched with a synchronous IPC call,
+ * so the value most likely to fail sat between the other two — and when it
+ * did, the page kept `KUMI_SERVER` and lost `KUMI_INSTALL`, which looks exactly
+ * like an app too old to have the bridge. Every agent connected from such a
+ * window looks connected and can run nothing.
+ */
+test("each preload global is exposed independently of the others", async () => {
+  const preload = await readFile(path.join(electronDir, "preload.cjs"), "utf8");
+
+  // Every exposure goes through the guard, so none can be fatal to the rest.
+  assert.equal(
+    (preload.match(/^expose\(/gmu) ?? []).length,
+    3,
+    "all three globals must be exposed through the guard",
+  );
+  assert.doesNotMatch(
+    preload,
+    /^contextBridge\.exposeInMainWorld/mu,
+    "a bare exposure is one that can take the others down with it",
+  );
+  // The one that can genuinely fail, and the one whose loss is invisible.
+  assert.match(preload, /expose\("KUMI_TOKEN", \(\) => ipcRenderer\.sendSync/u);
+  assert.match(preload, /expose\("KUMI_INSTALL", \(\) => \(\{/u);
+  // A failure is said somewhere a person can find it, not swallowed.
+  assert.match(preload, /could not expose \$\{name\}/u);
+});
+
+/**
+ * Everything main.mjs calls from a sibling module has to be imported from it.
+ *
+ * `detectAgents` was not. It was called by the handler the dashboard asks
+ * "what is installed here", and by the menu that reports the same, and was
+ * never brought into the module — so both threw ReferenceError on every call,
+ * on every launch, from the day the handler was written.
+ *
+ * Nothing said so, because the renderer catches that rejection and treats it
+ * as "no answer". The setup that answer gates — the CLI check, the install
+ * offer, the sign-in — was skipped in silence, so agents connected, looked
+ * connected, and could run nothing. It took reading a live main process to
+ * see it.
+ *
+ * Checked generically rather than by name: the same mistake in any other
+ * sibling call would be just as quiet.
+ */
+test("main.mjs imports every sibling function it calls", async () => {
+  const main = await readFile(path.join(electronDir, "main.mjs"), "utf8");
+  const siblings = ["agents.mjs", "installers.mjs", "worker.mjs", "usage.mjs"];
+
+  // What each sibling offers.
+  const exported = new Map<string, string>();
+  for (const file of siblings) {
+    const source = await readFile(path.join(electronDir, file), "utf8");
+    for (const m of source.matchAll(
+      /^export (?:async )?function ([A-Za-z_$][\w$]*)/gmu,
+    )) {
+      exported.set(String(m[1]), file);
+    }
+  }
+  assert.ok(exported.size > 5, "the siblings should export a good few things");
+
+  // What main.mjs has actually imported, from anywhere.
+  const imported = new Set<string>();
+  for (const m of main.matchAll(/import \{([^}]*)\} from/gu)) {
+    for (const name of String(m[1]).split(",")) {
+      const clean = name.trim().split(/\s+as\s+/u)[0]?.trim();
+      if (clean) imported.add(clean);
+    }
+  }
+
+  // Anything it calls that a sibling exports must be one of those.
+  const missing: string[] = [];
+  for (const [name, file] of exported) {
+    const called = new RegExp(`(?<![\\w$.])${name}\\s*\\(`, "u").test(main);
+    if (called && !imported.has(name)) {
+      missing.push(`${name} (exported by ${file})`);
+    }
+  }
+  assert.deepEqual(
+    missing,
+    [],
+    `main.mjs calls these without importing them: ${missing.join(", ")}`,
+  );
+});
+
+interface UsageModule {
+  readVendorUsage: (vendor: string) => Promise<{
+    ok: boolean;
+    raw?: string;
+    exitCode?: number;
+    detail?: string;
+  }>;
+}
+
+/** A directory of fake CLIs, put on `PATH` for the duration of one test. */
+async function withFakeClis(
+  files: Record<string, string>,
+  run: (usage: UsageModule) => Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "kumi-usage-"));
+  const previous = process.env["PATH"];
+  try {
+    for (const [name, body] of Object.entries(files)) {
+      const file = path.join(dir, name);
+      await writeFile(file, body, { mode: 0o755 });
+    }
+    // Deliberately *only* this directory, so a real vendor CLI installed on
+    // the machine running the suite can never be spawned by it.
+    process.env["PATH"] = `${dir}${path.delimiter}${path.dirname(process.execPath)}`;
+    const usage = (await import(
+      pathToFileURL(path.join(electronDir, "usage.mjs")).href
+    )) as UsageModule;
+    await run(usage);
+  } finally {
+    process.env["PATH"] = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A CLI too old for the documented interface must fall through to the older
+ * one, not win the attempt by complaining.
+ *
+ * Codex is asked for its quota twice: `account/rateLimits/read` on the
+ * app-server, which is the interface OpenAI documents, and `--status --json`
+ * for a CLI that predates it. The first cut merged the two output streams, so
+ * `error: unrecognized subcommand 'app-server'` counted as an answer — the
+ * fallback was never reached, and the card then blamed an API-key account for
+ * a CLI that had simply never been asked the question it understands.
+ *
+ * The exit code cannot settle it either: Claude exits non-zero merely for
+ * being signed out, while printing the status it was asked for. Which stream
+ * carried the words is what decides.
+ */
+test("a complaint on stderr is not an answer, so the older reader is reached", async () => {
+  await withFakeClis(
+    {
+      codex: [
+        "#!/usr/bin/env node",
+        "const args = process.argv.slice(2);",
+        "if (args[0] === 'app-server') {",
+        "  process.stderr.write(\"error: unrecognized subcommand 'app-server'\\n\");",
+        "  process.exit(2);",
+        "}",
+        "process.stdout.write(JSON.stringify({ rate_limits: { primary: { used_percent: 55 } } }));",
+      ].join("\n"),
+    },
+    async (usage) => {
+      const reading = await usage.readVendorUsage("codex");
+      assert.equal(reading.ok, true, JSON.stringify(reading));
+      assert.match(String(reading.raw), /used_percent/u);
+      assert.doesNotMatch(String(reading.raw), /unrecognized subcommand/u);
+    },
+  );
+});
+
+/**
+ * And the app-server reader has to stop when it has answered.
+ *
+ * It does not exit on its own — it waits for the next request — so an attempt
+ * that only ends on `close` spends its whole deadline after the answer is
+ * already in hand, and on a machine whose CLI predates the method the
+ * fallback is not reached until that deadline passes. Reading the card is not
+ * worth an eight-second stall, still less two.
+ */
+test("the app-server reader returns as soon as it has the answer", async () => {
+  await withFakeClis(
+    {
+      codex: [
+        "#!/usr/bin/env node",
+        "let seen = '';",
+        "process.stdin.on('data', (chunk) => {",
+        "  seen += chunk;",
+        "  if (!seen.includes('account/rateLimits/read')) return;",
+        "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 1,",
+        "    result: { rateLimits: { primary: { usedPercent: 41, windowDurationMins: 300 } } } }) + '\\n');",
+        // Exactly what the real app-server does: waits for more work.
+        "  setInterval(() => {}, 1000);",
+        "});",
+      ].join("\n"),
+    },
+    async (usage) => {
+      const started = Date.now();
+      const reading = await usage.readVendorUsage("codex");
+      assert.equal(reading.ok, true, JSON.stringify(reading));
+      assert.match(String(reading.raw), /usedPercent/u);
+      assert.ok(
+        Date.now() - started < 5_000,
+        "it must not sit out the deadline after answering",
+      );
+    },
+  );
+});
+
+/**
+ * A CLI that is not here has not reported anything, and saying so is the
+ * whole answer. Reporting an empty reading would file "nothing to show" as
+ * this account's usage until something replaced it.
+ */
+test("an absent CLI reports nothing rather than an empty reading", async () => {
+  await withFakeClis({}, async (usage) => {
+    const reading = await usage.readVendorUsage("codex");
+    assert.equal(reading.ok, false);
+    assert.match(String(reading.detail), /not installed on this machine/u);
+
+    // And a vendor with no usage command at all is a different sentence.
+    const none = await usage.readVendorUsage("gemini");
+    assert.equal(none.ok, false);
+    assert.match(String(none.detail), /publishes no usage command/u);
+  });
+});

@@ -1,3 +1,69 @@
+### 0.5.0 — one sign-in
+
+Connecting an agent used to sign you into the vendor twice. Once to give this
+deployment a credential, and once more to the CLI on your own machine — and on
+a deployment that runs agents locally, only the second one ever mattered. The
+first stored a secret the worker never reads, because the CLI runs under your
+machine's own login.
+
+It was also, accidentally, what made an agent exist: the roster was built by
+walking the credential store. That is why a failing agent was told to
+"reconnect from Settings → Agents", a remedy that could not possibly have
+helped a CLI that was not signed in.
+
+An agent is now a record of its own. Connecting creates it, then finishes on
+your machine — installing the CLI if it is missing, and opening its sign-in.
+One sign-in, the one that decides whether anything works.
+
+The vendor sign-in is still there, as what it actually buys: your remaining
+usage on the agent card, and server-side execution for a deployment that wants
+it. It is a "Link for usage" button on an agent you already have, rather than a
+gate you pass before finding out whether your CLI is installed.
+
+Deployments that run agents on the server are unchanged.
+
+### 0.4.9 — connecting an agent finishes the job
+
+Connecting an agent used to do half of what its name promised. It signed you
+into the vendor, which gives Kumi an agent — and stopped, without ever
+mentioning that the CLI that agent actually runs as was not on your machine.
+You found out later, when you @mentioned it and nothing happened.
+
+Connecting now checks this machine as its last step. If the CLI is missing it
+offers to install it, shows exactly what it will run, runs it, and opens a
+terminal for the sign-in. If it is already here it offers to check that
+sign-in, because nothing can tell from outside whether a CLI is logged in.
+
+Either way you finish where you started, with an agent that works.
+
+### 0.4.8 — Cursor runs, the repository stays, and setup explains itself
+
+**Cursor works.** It ships no CLI binary at all: `agent.cmd` runs PowerShell,
+which runs a script, which picks the newest version directory and runs that
+copy's own `node.exe`. Two shims and an interpreter — and the first is a batch
+file, which on Windows cannot carry an argument containing a quote or a
+newline. Cursor sends its whole prompt that way, so every task failed. The
+adapter now skips the shims and calls the interpreter directly.
+
+**The repository is kept between tasks.** Every task used to pull the whole
+repository from the deployment — 41 MB for a modest one — unpack it, and delete
+it when the task ended, so the next mention paid for all of it again. That is
+the entire reason a local agent felt slower than a server one: the server reads
+a clone off its own disk. Now so does your machine. The first task on a machine
+still transfers everything; every task after it transfers a few commits.
+
+**An agent that cannot run says what to install.** Kumi runs agents using the
+vendor's own CLI on your machine, and nothing in the product said so — an agent
+with no CLI looked exactly like one that worked, took the mention, and left the
+task waiting forever. When an agent goes grey it now shows the install command
+for its vendor, and in the app there is a button that runs it for you, after
+showing you exactly what will run. When it finishes, another opens a terminal
+already running the CLI so its sign-in starts.
+
+Only commands published by each vendor are offered. The app decides what a
+vendor name means; the page can only ask by name, so a command never travels
+from a web page to your shell.
+
 ### 0.4.7 — Codex runs, Cursor is called what Cursor calls it
 
 **Codex could not start, and said so precisely.** It resolved to `codex.cmd`,

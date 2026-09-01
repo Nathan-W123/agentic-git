@@ -14234,6 +14234,68 @@ dialog.modal[open]::backdrop {
   padding: 2px 8px;
 }
 
+/* What to install, above the choices rather than after them: the reader's
+   question is "why is this agent grey", and the answer has to arrive before
+   the options for deferring it. Set apart from the choices — it is not one of
+   them, it is the thing that stops the prompt happening again. */
+.ask-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-card-2);
+}
+
+.ask-setup small {
+  color: var(--text-3);
+  line-height: 1.45;
+}
+
+.ask-setup-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ask-setup-row code {
+  flex: 1;
+  min-width: 0;
+  /* The command is the payload. It scrolls rather than wrapping, because a
+     shell line broken across lines invites pasting half of it. */
+  overflow-x: auto;
+  white-space: pre;
+  padding: 6px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--bg-card);
+  font-size: 12px;
+}
+
+/* The command somebody is agreeing to run, and what it says while it runs.
+   Selectable, because "copy it and run it yourself" has to stay available to
+   anyone who would rather not hand the decision over. */
+.install-command,
+.install-output {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-card-2);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.install-output {
+  max-height: 260px;
+  overflow-y: auto;
+  color: var(--text-3);
+}
+
 /* The way out of the options: say something they did not think of, or hand
    this one decision back. */
 .ask-else {

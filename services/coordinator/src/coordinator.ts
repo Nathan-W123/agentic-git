@@ -68,6 +68,7 @@ import {
   planAdmissionApproved,
   planAdmissionPartial,
   rankTouchedFiles,
+  summariseGrants,
 } from "@coord/shared-types";
 import {
   filesOutsideClaim,
@@ -3672,7 +3673,7 @@ export class Coordinator {
         runAudit,
         "ownership_granted",
         entry.task.id,
-        { leases },
+        { grants: summariseGrants(leases) },
       );
 
       // A resumed conversation keeps its directory and catches the checkout

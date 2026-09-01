@@ -16,7 +16,11 @@ import {
   type CanonicalRepository,
   type ProcessOutput,
 } from "@coord/repository-service";
-import type { CanonicalVersion } from "@coord/shared-types";
+import {
+  AGENT_CALL_SIGNS,
+  deriveCallSign,
+  type CanonicalVersion,
+} from "@coord/shared-types";
 import {
   GitWorktreeWorkspaceManager,
   supportedCredentialKinds,
@@ -150,6 +154,13 @@ export interface ProviderUsageReport {
   windows: ProviderUsageWindow[];
   /** Set when the CLI publishes no consumption figure at all. */
   unavailableReason?: string;
+  /**
+   * When this reading was taken, for a figure that came from a machine rather
+   * than from asking just now. Absent means it is live. Present means the card
+   * should say so, because a machine that has been asleep for a day is not
+   * reporting today's quota.
+   */
+  asOf?: string;
   /** The subscription tier the account is on ("plus", "pro", ...). */
   planType?: string;
   /**
@@ -214,24 +225,10 @@ export interface ProviderSettings {
  * Order carries no meaning: assignment picks uniformly from whatever is still
  * free, so this reads as sections of a pantheon rather than as a queue.
  */
-export const AGENT_CALL_SIGNS = [
-  // Olympians and kin
-  "Zeus", "Hera", "Poseidon", "Demeter", "Athena", "Apollo", "Artemis",
-  "Ares", "Aphrodite", "Hephaestus", "Hermes", "Hestia", "Dionysus",
-  "Hades", "Persephone",
-  // Titans and primordials
-  "Cronus", "Rhea", "Oceanus", "Tethys", "Hyperion", "Theia", "Themis",
-  "Mnemosyne", "Atlas", "Prometheus", "Epimetheus", "Gaia", "Uranus",
-  "Nyx", "Erebus", "Eos", "Helios", "Selene", "Iris",
-  // Winds and lesser gods
-  "Boreas", "Zephyrus", "Notus", "Eurus", "Pan", "Morpheus", "Nemesis",
-  "Nike", "Tyche", "Eris", "Hebe", "Janus",
-  // Roman counterparts and originals
-  "Jupiter", "Juno", "Neptune", "Ceres", "Minerva", "Mars", "Venus",
-  "Vulcan", "Mercury", "Vesta", "Bacchus", "Pluto", "Proserpina",
-  "Saturn", "Ops", "Sol", "Luna", "Aurora", "Victoria", "Fortuna",
-  "Bellona", "Faunus", "Flora", "Pomona", "Terminus", "Quirinus",
-] as const;
+// Re-exported from where it now lives, so every existing importer of this
+// module is untouched. The gateway needs the same list — it assigns a name to
+// an agent created without a credential — and two copies would drift.
+export { AGENT_CALL_SIGNS };
 
 export interface ProviderCliState {
   detected: boolean;
@@ -1022,6 +1019,100 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
           ? "This account bills per API key, which has no subscription limit to report a percentage of."
           : "The claude CLI reported no usage percentage. That is expected unless the account is on a subscription with limits.",
       };
+}
+
+/**
+ * Turns what a machine reported into a usage card.
+ *
+ * The desktop runs the vendor's own usage command and sends back exactly what
+ * it printed, so this is the same parsing the control plane already does when
+ * it runs those commands itself — the same functions, in the same order —
+ * only fed from the machine that actually holds the login. That is what makes
+ * a figure possible without a second sign-in: nothing has to be stored here
+ * for the number to be about the right account.
+ *
+ * Exported for tests.
+ */
+export function parseReportedUsage(
+  provider: ProviderId,
+  raw: string,
+): ProviderUsageReport {
+  if (provider === "anthropic") {
+    return parseClaudeUsage(raw);
+  }
+  if (provider === "openai") {
+    // The order the machine tried them in, so whichever one answered is the
+    // one read. A reading that parses at all is the answer; the reasons below
+    // are for a reading that parses as nothing.
+    const parsed =
+      parseCodexAppServerRateLimits(raw) ??
+      parseCodexStatusRateLimits(raw) ??
+      parseCodexRateLimits(raw);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+    // A reply is the only thing that supports the API-key reading, so that is
+    // the only thing it is said about. Said of anything that failed to parse,
+    // it blamed a healthy account's billing for a CLI that had answered with
+    // a complaint — which is the wrong diagnosis handed out with confidence.
+    const replied = /"(?:result|rate_?[lL]imits)"/u.test(raw);
+    return {
+      source: PROVIDER_NAMES.openai,
+      windows: [],
+      unavailableReason: replied
+        ? "The Codex CLI on this machine answered without any rate limits, " +
+          "which is what an account billed by API key returns — that usage " +
+          "is reported in the OpenAI dashboard rather than here."
+        : raw.trim() === ""
+          ? "The Codex CLI on this machine reported nothing when asked for " +
+            "its quota."
+          : // Its own words, because they name the problem better than any
+            // guess made from here can.
+            `The Codex CLI on this machine did not report a quota. It said: ${
+              raw.trim().split("\n")[0]?.slice(0, 200) ?? ""
+            }`,
+    };
+  }
+  if (provider === "cursor") {
+    // Cursor publishes no quota at all: its status view reports account
+    // facts. Rather than a card that reads as a failure forever, the account
+    // it is signed in as is worth saying, because that is the fact somebody
+    // is actually checking when they open this.
+    const account = parseCursorAccount(raw);
+    return {
+      source: PROVIDER_NAMES.cursor,
+      windows: [],
+      unavailableReason:
+        account === undefined
+          ? "Cursor publishes no usage figure, so there is no quota to show."
+          : `Signed in as ${account} on this machine. Cursor publishes no ` +
+            "usage figure, so there is no quota to show.",
+    };
+  }
+  return {
+    source: PROVIDER_NAMES[provider],
+    windows: [],
+    unavailableReason: `No usage reading is understood for ${PROVIDER_NAMES[provider]}.`,
+  };
+}
+
+/**
+ * Pulls the signed-in account out of `cursor-agent status`.
+ *
+ * Deliberately only an email or a `Logged in as` line: the rest of that view
+ * is version and path detail that says nothing about whether the login works.
+ * Nothing is inferred when neither appears — an unrecognised status view is
+ * reported as no account rather than as a guess at one.
+ */
+export function parseCursorAccount(raw: string): string | undefined {
+  const labelled = /^\s*(?:logged in as|signed in as|account|email)\s*[:\-]?\s*(\S+@\S+\.\S+)/imu.exec(
+    raw,
+  );
+  if (labelled?.[1] !== undefined) {
+    return labelled[1];
+  }
+  const email = /[\w.+-]+@[\w-]+\.[\w.-]+/u.exec(raw);
+  return email?.[0];
 }
 
 /** Real `--effort` values the Claude CLI accepts. */
@@ -2232,6 +2323,24 @@ export class ProviderChatService {
    * so a key of provider alone would hand one person's consumption figures
    * to the next person who hovered.
    */
+  /**
+   * The last usage figure each machine reported for itself.
+   *
+   * Kept because the machine is not always on, and an agent asleep is exactly
+   * when somebody looks at the card wondering where their quota went. A stale
+   * number with a time on it is far more use than an empty card, so this is
+   * never expired — it is replaced when a fresher reading arrives and
+   * otherwise stands, labelled with when it was taken.
+   *
+   * In memory, so a deployment restart forgets it and the next reading fills
+   * it in again. Worth saying plainly rather than implying durability this
+   * does not have.
+   */
+  private readonly reportedUsage = new Map<
+    string,
+    { at: string; report: ProviderUsageReport }
+  >();
+
   private readonly usageCache = new Map<
     string,
     { at: number; report: ProviderUsageReport }
@@ -2353,10 +2462,10 @@ export class ProviderChatService {
         }
       }
     }
-    const free = AGENT_CALL_SIGNS.filter(
-      (sign) => !taken.has(sign.toLowerCase()),
-    );
-    const sign = free[Math.floor(Math.random() * free.length)];
+    // Derived from the agent's own identity rather than drawn, so the same
+    // account gets the same name on a deployment that has forgotten every
+    // name it ever handed out. See `deriveCallSign`.
+    const sign = deriveCallSign(userId, provider, taken);
     if (sign === undefined) {
       return undefined;
     }
@@ -2556,6 +2665,34 @@ export class ProviderChatService {
    * is the only place a consumed figure is published, so its lines are
    * parsed rather than any number being derived here.
    */
+  /**
+   * Takes a usage reading from the machine an agent actually runs on.
+   *
+   * The figure used to be read on the control plane, which needed a vendor
+   * credential stored there — and that credential was the entire reason
+   * connecting an agent asked for a second sign-in. Nothing else wanted it:
+   * the agent runs on somebody's own machine under the login its CLI already
+   * holds, so that is where the question has an answer.
+   *
+   * The raw text is parsed here rather than on the machine, because the
+   * parsers already live here and vendors change their output without
+   * warning; one copy is enough to keep in step. A reading that parses to
+   * nothing is still kept, because "the CLI said it has nothing to report" is
+   * a different card from "nobody has looked".
+   */
+  public async reportUsage(input: {
+    userId: string;
+    provider: ProviderId;
+    raw: string;
+  }): Promise<ProviderUsageReport> {
+    const report = parseReportedUsage(input.provider, input.raw);
+    this.reportedUsage.set(`${input.userId}:${input.provider}`, {
+      at: new Date().toISOString(),
+      report,
+    });
+    return report;
+  }
+
   public async usage(input: {
     provider: ProviderId;
     /**
@@ -2590,6 +2727,25 @@ export class ProviderChatService {
       });
       void withheld;
       return report;
+    }
+    // What the machine itself last said, which beats anything this process can
+    // work out. Asking here means running the vendor CLI on the control plane,
+    // and without a credential of the caller's that lands on the container's
+    // own login — the operator's account, reporting the operator's quota, as
+    // an answer to a question about somebody else's. A reading from the
+    // machine that holds the login is both cheaper and the only one that is
+    // actually about the right account.
+    //
+    // Consulted before the per-vendor answers below, and for every vendor
+    // rather than the two this process can run: a machine that reported
+    // something has answered, and the reasons below exist for the case where
+    // nobody has.
+    const reported =
+      input.userId === undefined
+        ? undefined
+        : this.reportedUsage.get(`${input.userId}:${input.provider}`);
+    if (reported !== undefined) {
+      return { ...reported.report, asOf: reported.at };
     }
     if (input.provider === "cursor") {
       // Cursor's CLI publishes no subscription figure: asking it produced a
@@ -4482,6 +4638,36 @@ export class ProviderChatService {
    * secret behind would mean a provider the user believes they detached still
    * holds a working key to their account.
    */
+  /**
+   * Removes an agent: its credential, its connection, and its record.
+   *
+   * Deleting the credential used to be the whole of disconnecting, because
+   * until agents got their own durable record the credential *was* the
+   * identity. It is not any more. The roster is a union of stored credentials
+   * and call-sign records, so an agent whose credential this deleted stayed in
+   * every channel, still mentionable, still answering to the name it was
+   * dealt — disconnected everywhere except where it mattered.
+   *
+   * It is also what makes this work for an agent that never had a credential.
+   * Local execution runs the vendor CLI under the machine's own login, so its
+   * agent has no secret here to delete; the two steps above are no-ops for it
+   * and the record is the only thing there is to remove. Without this there
+   * was no way to remove such an agent at all.
+   *
+   * Every step is safe to run against nothing — `delete` returns early on a
+   * vendor with no credential, the connections file is guarded, and
+   * `forgetCallSign` swallows its own failure — so disconnecting an agent
+   * that is already gone is a no-op rather than an error.
+   *
+   * Both of the last two steps are required, and neither is enough alone.
+   * `nameUnnamedConnections` reconciles the durable record against the
+   * connections file on the way through `list`, dealing a fresh name to any
+   * connection that has none — so removing only the record leaves a connection
+   * for the reconciler to rename, and the very next roster read brings the
+   * agent back under a name nobody chose. It skips a provider with no entry in
+   * that file, which is what makes removing the entry the other half of the
+   * job. Their order does not matter: nothing reads between them.
+   */
   public async disconnect(input: {
     userId: string;
     provider: ProviderId;
@@ -4495,6 +4681,7 @@ export class ProviderChatService {
       delete userConnections[input.provider];
       await this.writeConnections(file);
     }
+    await this.forgetCallSign(input.userId, input.provider);
   }
 
   /* ----------------------------------------------- settings/options ----- */
@@ -4917,6 +5104,30 @@ export class ProviderChatService {
         // vanishes, pointed the other way.
         await this.forgetCallSign(input.userId, input.provider);
       } else {
+        // Nobody else's name.
+        //
+        // A mention resolves by name and dispatches to *everyone* it matches,
+        // so two agents sharing one makes a single @mention start two runs on
+        // two accounts, and the second reply arrives from an agent the sender
+        // never addressed. Deriving the default avoided that among defaults;
+        // renaming went straight past it, because a typed name never consults
+        // the taken set at all.
+        //
+        // Compared case-insensitively, because that is how a mention matches
+        // and how a person reads a name.
+        const clash = (await this.storedCallSigns()).find(
+          (entry) =>
+            entry.callSign.trim().toLowerCase() === trimmed.toLowerCase() &&
+            !(entry.userId === input.userId && entry.provider === input.provider),
+        );
+        if (clash !== undefined) {
+          throw new ProviderChatError(
+            409,
+            "call_sign_taken",
+            `Another agent here is already called ${clash.callSign}. ` +
+              "Two agents with one name both answer to it — pick another.",
+          );
+        }
         settings.callSign = trimmed;
         await this.rememberCallSign(input.userId, input.provider, trimmed);
       }

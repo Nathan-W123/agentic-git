@@ -131,6 +131,7 @@ import {
   searchBox,
   segmented,
   showPopover,
+  showModal,
   toast,
 } from "./ui.js";
 
@@ -6014,10 +6015,10 @@ function agentSpec(agent, repositoryId) {
   // A task is in exactly one of these. Nothing running is an honest headline;
   // the zone already has those words.
   const queuedTasks = agentTasks.filter((candidate) =>
-    QUEUED_TASK_STATUS.has(candidate.status),
+    taskIsQueued(candidate, agent),
   );
   const runningTasks = agentTasks.filter(
-    (candidate) => !QUEUED_TASK_STATUS.has(candidate.status),
+    (candidate) => !taskIsQueued(candidate, agent),
   );
   const task =
     runningTasks.find(
@@ -6209,14 +6210,31 @@ function agentCurrentWorkZone(agent, repositoryId, { task, taskMessage, taskRepo
  * mis-click.
  */
 /**
- * Statuses that mean "filed, and nothing has picked it up".
+ * Filed, and nothing has picked it up.
  *
- * `claimed` sits here beside `submitted` because a claim is a lease, not a
- * start: a worker that claimed and then went offline leaves a row that reads
- * as taken and is going nowhere, and that is precisely the row somebody needs
- * to be able to cancel.
+ * `claimed` used to sit here unconditionally beside `submitted`, on the
+ * reasoning that a claim is a lease rather than a start: a worker that claimed
+ * and then went offline leaves a row that reads as taken and is going nowhere,
+ * and that is exactly the row somebody needs to be able to cancel.
+ *
+ * The concern is right and the test for it was not. It caught every claimed
+ * task, including one visibly planning and reading code a second earlier — so
+ * the panel filed a running agent under "Queued" and left its current-work
+ * headline empty, while the dot two inches away called the same task working
+ * (`WORKING_STATUS` in data.js has always counted `claimed`). Two halves of one
+ * screen disagreeing about one task.
+ *
+ * So the discriminator is the thing the comment was actually about: whether
+ * there is a machine listening. A claimed task on a live agent is running. A
+ * claimed task whose owner's machine has gone is the stranded row, and it
+ * stays in the queue where it can be cancelled.
  */
-const QUEUED_TASK_STATUS = new Set(["submitted", "claimed"]);
+function taskIsQueued(task, agent) {
+  if (task.status === "submitted") {
+    return true;
+  }
+  return task.status === "claimed" && agentOwnerOffline(agent);
+}
 
 function agentQueuedZone(agent, queued) {
   if (queued.length === 0) {
@@ -8753,6 +8771,68 @@ function askAboutOfflineAgents(repositoryId, offline, rerender) {
  * who has answered one of those should not have to learn a second vocabulary
  * to answer this.
  */
+/**
+ * The command that would make an offline agent runnable, for this machine.
+ *
+ * An agent goes grey for exactly one reason worth acting on: no machine that
+ * is listening can run its CLI. Saying so and stopping leaves the reader to
+ * work out that Kumi drives a vendor CLI at all, that it has to be installed
+ * where they are sitting, and which package that is — three facts nothing in
+ * the product tells them. The command closes all three.
+ *
+ * Chosen by the platform of the browser reading it, because that is the
+ * machine the person will type it on. `navigator.platform` is deprecated but
+ * still the most reliable signal available here, and getting it wrong costs a
+ * wrong shell for the same install rather than a broken one.
+ */
+function offlineAgentSetup(repositoryId, names) {
+  const roster = channelAgentsFor(repositoryId);
+  const missing = names
+    .map((name) => roster.find((agent) => agent.name === name))
+    .filter((agent) => agent?.setup !== undefined);
+  if (missing.length === 0) {
+    return "";
+  }
+  const windows = /win/iu.test(navigator.platform ?? "");
+  const seen = new Set();
+  const rows = [];
+  for (const agent of missing) {
+    const setup = agent.setup;
+    const command = windows ? setup.windows : setup.posix;
+    // One row per distinct command: two agents on the same vendor are one
+    // install, and printing it twice reads as two things to do.
+    const key = command ?? setup.docs;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    rows.push(
+      command === undefined
+        ? `<a class="link" href="${esc(setup.docs)}" target="_blank"
+             rel="noopener noreferrer">How to install ${esc(agent.name)}'s CLI</a>`
+        : `<code>${esc(command)}</code>
+           ${
+             // Only the desktop app can run it, and only it knows whether it
+             // can — the bridge is absent in a browser, where the command is
+             // there to be copied and run by hand instead.
+             window.KUMI_INSTALL === undefined
+               ? ""
+               : `<button type="button" class="btn btn-sm"
+                    data-act="offline-install"
+                    data-value="${esc(setup.vendor ?? "")}">Install</button>`
+           }
+           <button type="button" class="ask-step" data-act="offline-copy"
+             data-value="${esc(command)}" title="Copy" aria-label="Copy"
+             >${icon("copy")}</button>`,
+    );
+  }
+  return `<div class="ask-setup">
+    <small>Kumi runs agents on your own machine. Install the CLI here, then
+    sign in by running it once.</small>
+    ${rows.map((row) => `<div class="ask-setup-row">${row}</div>`).join("")}
+  </div>`;
+}
+
 function offlineAgentPrompt(repositoryId) {
   const pending = state.offlinePrompt;
   if (pending === undefined || pending.repositoryId !== repositoryId) {
@@ -8779,6 +8859,7 @@ function offlineAgentPrompt(repositoryId) {
             >${icon("close")}</button>
         </div>
       </div>
+      ${offlineAgentSetup(repositoryId, pending.names)}
       <div class="ask-options">
         <button type="button" class="ask-option${
           pending.choice === "queue" ? " is-picked" : ""

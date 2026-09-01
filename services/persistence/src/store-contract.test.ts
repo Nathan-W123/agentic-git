@@ -14,6 +14,7 @@ import type {
   ResourceLease,
   TaskDefinition,
 } from "@coord/shared-types";
+import { MAX_COMMAND_OUTPUT_CHARS } from "@coord/shared-types";
 
 import { InMemoryCoordinationStore } from "./memory-store.js";
 import { PostgresCoordinationStore } from "./postgres-store.js";
@@ -617,6 +618,77 @@ for (const backend of backends) {
         detail?.integrations.at(-1)?.cleanupWarnings,
         ["workspace cleanup failed"],
       );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a command's stored output is bounded, tail first`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      // What a real test runner does to a row: the control plane is handed
+      // this by a remote worker, so nothing here decides how much it is.
+      const noisy = `${"start-of-output ".repeat(2_000)}FAILED: the bit that matters`;
+      await store.saveIntegration(runId, {
+        ...INTEGRATION,
+        validation: [
+          {
+            command: { label: "tests", executable: "npm", args: ["test"] },
+            exitCode: 1,
+            stdout: noisy,
+            stderr: noisy,
+            startedAt: "2024-01-01T00:00:00.000Z",
+            durationMs: 12,
+          },
+        ],
+      });
+      const stored = (await store.getRun(runId))?.integrations.at(-1)
+        ?.validation[0];
+      assert.ok(stored !== undefined);
+      assert.ok(
+        stored.stdout.length < noisy.length,
+        "an unbounded row is the whole cost being fixed",
+      );
+      assert.ok(stored.stdout.length <= MAX_COMMAND_OUTPUT_CHARS + 200);
+      // The end, not the beginning. The one reader of this text quotes the
+      // last three hundred characters, because that is where a failing
+      // command says why — keeping the head would preserve the size limit and
+      // discard the only part anybody reads.
+      assert.match(stored.stdout, /FAILED: the bit that matters$/u);
+      assert.match(stored.stderr, /FAILED: the bit that matters$/u);
+      assert.match(stored.stdout, /earlier characters dropped/u);
+      // Untouched facts: every consumer of validation reads these two.
+      assert.equal(stored.exitCode, 1);
+      assert.equal(stored.command.label, "tests");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: output that already fits is stored verbatim`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      await store.saveIntegration(runId, {
+        ...INTEGRATION,
+        validation: [
+          {
+            command: { label: "lint", executable: "npm", args: ["run", "lint"] },
+            exitCode: 0,
+            stdout: "all good\n",
+            stderr: "",
+            startedAt: "2024-01-01T00:00:00.000Z",
+            durationMs: 3,
+          },
+        ],
+      });
+      const stored = (await store.getRun(runId))?.integrations.at(-1)
+        ?.validation[0];
+      assert.equal(stored?.stdout, "all good\n");
+      assert.equal(stored?.stderr, "");
     } finally {
       await store.close();
       await cleanup();
@@ -5149,9 +5221,38 @@ for (const backend of backends) {
       assert.equal(dealt.callSign, "Athena");
       assert.equal(dealt.userId, alice.id);
       assert.equal(dealt.provider, "anthropic");
-      await store.setAgentCallSign(bob.id, "openai", "Vesta");
+      // Visibility lives on the record now, because an agent exists whether or
+      // not a credential does — under local execution the vendor CLI runs on
+      // somebody's own machine and nothing here is read. `personal` is the
+      // default, which is what every row written before the column meant.
+      assert.equal(dealt.visibility, "personal");
+      await store.setAgentCallSign(bob.id, "openai", "Vesta", "org");
+      assert.equal(
+        (await store.listAgentCallSigns()).find(
+          (sign) => sign.userId === bob.id,
+        )?.visibility,
+        "org",
+      );
       // Keyed by (user, provider): renaming replaces rather than duplicates.
+      await store.setAgentCallSign(alice.id, "anthropic", "Icarus", "org");
+      // And the upsert carries visibility with it — a widened agent that
+      // narrowed itself on every rename would be a permission bug, not a
+      // naming one.
+      assert.equal(
+        (await store.listAgentCallSigns()).find(
+          (sign) => sign.userId === alice.id,
+        )?.visibility,
+        "org",
+      );
       await store.setAgentCallSign(alice.id, "anthropic", "Icarus");
+      assert.equal(
+        (await store.listAgentCallSigns()).find(
+          (sign) => sign.userId === alice.id,
+        )?.visibility,
+        "personal",
+        "an omitted visibility narrows rather than keeping what was there",
+      );
+      await store.setAgentCallSign(alice.id, "anthropic", "Icarus", "org");
       const signs = await store.listAgentCallSigns();
       assert.equal(signs.length, 2);
       assert.equal(

@@ -410,6 +410,10 @@ async function startRuntime(
     threadReconcileIntervalMs?: number;
     /** How long a held `/plan` waits before it lapses. */
     planHoldTtlMs?: number;
+    /** How long the audit log keeps an event. Zero keeps everything. */
+    auditRetentionDays?: number;
+    /** How often the retention sweep runs, so a test need not wait hours. */
+    auditRetentionSweepIntervalMs?: number;
     codexUsageReader?: CodexUsageReader;
     /**
      * Stands in for Stripe, so a test can watch what the seat count does to
@@ -591,8 +595,28 @@ async function startRuntime(
   };
   const operations: ApiOperations = {
     chatProviders: {
-      async list() {
-        return [];
+      // Faithful in the one respect the gateway acts on: the route decides,
+      // per provider, whether an agent exists at all, and it reads
+      // `ownCredential` to do it. A stub that answered `[]` meant that
+      // decision was made over an empty list and never exercised.
+      async list(input) {
+        const connections = chatConnections.get(input.userId) ?? [];
+        return ["anthropic", "openai", "cursor"].map((id) => {
+          const connection = connections.find((entry) => entry.provider === id);
+          return {
+            id,
+            name: id,
+            connected: connection !== undefined,
+            ...(connection === undefined
+              ? {}
+              : {
+                  ownCredential: {
+                    kind: "oauth_token",
+                    visibility: connection.visibility ?? "personal",
+                  },
+                }),
+          };
+        });
       },
       async signIn() {
         return {};
@@ -600,7 +624,19 @@ async function startRuntime(
       async connect() {
         return {};
       },
-      async disconnect() {},
+      // Faithful to the two things the real service tears down, because a
+      // stub that did nothing meant every test of disconnecting was really a
+      // test that the route returned 200. It removes the connection *and* the
+      // durable record — the roster is a union of both, so forgetting either
+      // one leaves the agent listed.
+      async disconnect(input: { userId: string; provider: string }) {
+        const connections = chatConnections.get(input.userId) ?? [];
+        chatConnections.set(
+          input.userId,
+          connections.filter((entry) => entry.provider !== input.provider),
+        );
+        await store.clearAgentCallSign(input.userId, input.provider);
+      },
       async options() {
         return {};
       },
@@ -1082,6 +1118,15 @@ async function startRuntime(
     ...(options.threadReconcileIntervalMs === undefined
       ? {}
       : { threadReconcileIntervalMs: options.threadReconcileIntervalMs }),
+    ...(options.auditRetentionDays === undefined
+      ? {}
+      : { auditRetentionDays: options.auditRetentionDays }),
+    ...(options.auditRetentionSweepIntervalMs === undefined
+      ? {}
+      : {
+          auditRetentionSweepIntervalMs:
+            options.auditRetentionSweepIntervalMs,
+        }),
     ...(options.planHoldTtlMs === undefined
       ? {}
       : { planHoldTtlMs: options.planHoldTtlMs }),
@@ -7484,6 +7529,120 @@ test("a reply that @mentions an agent in a person's thread reaches that agent", 
     /tackle this/u,
   );
   assert.equal(runtime.chatPrompts.length, 0);
+});
+
+/**
+ * A thread resolved mentions with a raw, case-sensitive substring while the
+ * channel two screens away used an anchored case-insensitive match — and the
+ * comment above the thread's copy asserted the two were the same. They were
+ * not, and the divergence was not a near miss: a reply that named an agent
+ * and matched nobody did not fail, it fell through to the agent whose thread
+ * it was, which answered under its own name. That is "@mention one agent, a
+ * different one replies", produced silently, with nothing anywhere saying the
+ * name that was typed went unread.
+ */
+test("a thread mention matches the way the channel matches, in any case", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-mention-case");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Zeus" },
+    })).status,
+    200,
+  );
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "found a bug in the composer" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Lowercase. The channel has always accepted this; the thread did not, and
+  // what it did instead was answer as somebody else.
+  runtime.chatAnswer.text = "On it.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(posted.data.message.id)}/replies`,
+    { method: "POST", body: { content: "@zeus can you tackle this" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "a lowercase mention in a thread never reached the agent",
+  );
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /tackle this/u);
+});
+
+/**
+ * And in an agent's own thread, a name that belongs to nobody is said out
+ * loud rather than quietly handed to that agent.
+ *
+ * This is the half that produced the report. A thread hangs off one agent's
+ * work, so a *bare* question in it is addressed to that agent by
+ * construction — that part is right and stays. But a reply that named
+ * somebody and matched nobody took the same branch, so the agent whose thread
+ * it was answered a message explicitly addressed to a different name, under
+ * its own, with nothing saying the name typed had gone unread.
+ */
+test("a name that belongs to nobody is not answered by the thread's own agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-mention-unknown");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Zeus" },
+    })).status,
+    200,
+  );
+  // Zeus's thread: the root names Zeus, so Zeus owns what follows.
+  runtime.chatAnswer.text = "On it.";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Zeus please look at the composer bug" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the root mention never dispatched",
+  );
+  const dispatchedByRoot = runtime.submittedTasks.length;
+
+  // A reply naming somebody who does not exist. Zeus must not take it.
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(posted.data.message.id)}/replies`,
+    { method: "POST", body: { content: "@Proserpina can you tackle this" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+
+  // The room says nobody answers to that, and names who would have.
+  await waitFor(async () => {
+    const messages = await owner.request(`${base}/messages`);
+    return (messages.data.messages ?? []).some((message: { content?: string }) =>
+      /Nobody here answers to that/u.test(String(message.content ?? "")),
+    );
+  }, "an unresolved mention in an agent's thread said nothing at all");
+
+  // And nothing was dispatched in the mentioned agent's place.
+  assert.equal(
+    runtime.submittedTasks.length,
+    dispatchedByRoot,
+    "a name that belongs to nobody must not dispatch work to the thread's agent",
+  );
 });
 
 test("a channel thread reply carries the message it quotes", async (t) => {
@@ -19845,4 +20004,468 @@ test("an @mention only reaches agents assigned to the room it was said in", asyn
     async () => runtime.submittedTasks.length > 0,
     "asking an agent that is in this room never became work",
   );
+});
+
+/**
+ * An agent exists because somebody asked for it, not because a secret is
+ * stored.
+ *
+ * The roster used to be built by walking the credential store, so having an
+ * agent required a vendor sign-in whose credential local execution then never
+ * reads — the CLI runs under the machine's own login. Two sign-ins, one of
+ * them for nothing, and a vendor secret this deployment was responsible for
+ * and never used. Worse, it made "reconnect from Settings → Agents" the
+ * offered remedy for a CLI that was not signed in, which it could not fix.
+ */
+test("an agent created without a credential is in the roster", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "credentialless");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  // Nothing connected: the credential store is empty and so is the roster.
+  const before = await owner.request(roster);
+  assert.equal(before.status, 200, JSON.stringify(before.data));
+  assert.equal(
+    (before.data.agents ?? []).some(
+      (agent: { provider: string }) => agent.provider === "anthropic",
+    ),
+    false,
+  );
+
+  const created = await owner.request("/api/v1/chat/providers/anthropic/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  // Dealt a name rather than handed the vendor label. Storing
+  // "Claude (Nathan)" would freeze the placeholder as the agent's permanent
+  // name, which is the complaint the durable table exists to answer.
+  const dealt = String(created.data.agent.callSign);
+  assert.ok(dealt.length > 0);
+  assert.doesNotMatch(dealt, /\(/u);
+  assert.equal(created.data.agent.visibility, "personal");
+
+  // Membership is a separate opt-in, exactly as it is on the credential path —
+  // `addAgentToAllRepositories` is what the connect flow calls next. Being
+  // reachable makes an agent eligible for a room; it does not put it in one.
+  const joined = await owner.request(`${roster}/anthropic/membership`, {
+    method: "POST",
+  });
+  assert.equal(joined.status, 200, JSON.stringify(joined.data));
+
+  const after = await owner.request(roster);
+  assert.equal(after.status, 200, JSON.stringify(after.data));
+  const listed = (after.data.agents ?? []).filter(
+    (agent: { provider: string }) => agent.provider === "anthropic",
+  );
+  assert.equal(listed.length, 1, "exactly one, never doubled");
+  assert.equal(listed[0].name, dealt);
+  assert.equal(listed[0].userId, account.user.id);
+});
+
+/**
+ * The Settings screen asks a different question than the roster, and until
+ * this it got the old answer.
+ *
+ * A row there drew "Not connected" with a Connect button next to an agent
+ * somebody had just finished connecting — because both the status line and
+ * the button branched on whether a *credential* was stored, which stopped
+ * being what having an agent means. The browser cannot work the difference
+ * out on its own: the provider list it reads is built from the credential
+ * store, so an agent with no credential is simply absent from it. The two
+ * fields asserted here are what let it ask the right question.
+ */
+test("the provider list says an agent exists without a credential", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const before = await owner.request("/api/v1/chat/providers");
+  assert.equal(before.status, 200, JSON.stringify(before.data));
+  // Deployment-wide, and carried here because Settings can be opened without
+  // ever visiting a channel — the roster response that also carries it may
+  // never have been fetched.
+  assert.equal(before.data.localAgentsOnly, true);
+  const listedBefore = (before.data.providers as Array<{ id: string; exists: boolean }>);
+  assert.equal(listedBefore.find((entry) => entry.id === "openai")?.exists, false);
+
+  const created = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+
+  const after = await owner.request("/api/v1/chat/providers");
+  const listed = after.data.providers as Array<{
+    id: string;
+    exists: boolean;
+    ownCredential?: unknown;
+  }>;
+  const openai = listed.find((entry) => entry.id === "openai");
+  assert.equal(openai?.exists, true, JSON.stringify(listed));
+  // And no credential was invented to say so — that is the whole point.
+  assert.equal(openai?.ownCredential, undefined);
+  // Untouched vendors stay untouched.
+  assert.equal(listed.find((entry) => entry.id === "cursor")?.exists, false);
+});
+
+/**
+ * A stored credential is still an agent. The field says so directly rather
+ * than leaving the browser to infer it, so a connection made before agents
+ * had their own record does not read as "connect this".
+ */
+test("a stored credential alone makes an agent exist", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  runtime.chatConnections.set(account.user.id, [{ provider: "anthropic" }]);
+
+  const listed = (await owner.request("/api/v1/chat/providers")).data
+    .providers as Array<{ id: string; exists: boolean }>;
+  assert.equal(listed.find((entry) => entry.id === "anthropic")?.exists, true);
+  assert.equal(listed.find((entry) => entry.id === "openai")?.exists, false);
+});
+
+/**
+ * The audit log is the one table that only grew.
+ *
+ * Every other cost went flat when execution moved to the machines that do the
+ * work; this one is written here whatever runs where — measured, about
+ * twenty-one rows a task — and nothing had ever removed one. The archive,
+ * checkpoint and prune machinery existed from the start and had no caller
+ * outside a command an operator had to remember.
+ */
+test("the audit log is compacted on a retention window", async (t) => {
+  const runtime = await startRuntime(t, {
+    // Everything already written is older than "zero days ago", so the first
+    // sweep has something to find without the test faking a clock.
+    auditRetentionDays: 0.000_001,
+    auditRetentionSweepIntervalMs: 50,
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "compacted");
+
+  const before = (await runtime.store.listAuditEvents()).length;
+  assert.ok(before > 0, "bootstrapping writes events worth compacting");
+
+  await waitFor(
+    async () => (await runtime.store.listAuditCheckpoints()).length > 0,
+    "the retention sweep never archived anything",
+  );
+  // Archived and then dropped: the rows are gone from the live log, and gone
+  // from the archive too, which is what actually reclaims the space.
+  await waitFor(
+    async () => (await runtime.store.listArchivedAuditEvents()).length === 0,
+    "archived events were never pruned, so nothing was reclaimed",
+  );
+  assert.ok(
+    (await runtime.store.listAuditEvents()).length < before,
+    "the live log must actually shrink",
+  );
+  // The attestation survives the contents. That is the whole bargain.
+  const checkpoints = await runtime.store.listAuditCheckpoints();
+  assert.ok(
+    (checkpoints[0]?.throughSequence ?? 0) >= 1,
+    JSON.stringify(checkpoints),
+  );
+});
+
+/**
+ * Zero is a real answer, not a missing one. A deployment under a legal hold
+ * keeps every event and pays for the disk.
+ */
+test("a retention of zero keeps everything", async (t) => {
+  const runtime = await startRuntime(t, {
+    auditRetentionDays: 0,
+    auditRetentionSweepIntervalMs: 50,
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const before = (await runtime.store.listAuditEvents()).length;
+  assert.ok(before > 0);
+
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal((await runtime.store.listAuditCheckpoints()).length, 0);
+  assert.ok((await runtime.store.listAuditEvents()).length >= before);
+});
+
+/**
+ * The deployment does not answer on its own account.
+ *
+ * A question whose agent has no live machine used to be answered here, and
+ * with no credential of the owner's the vendor CLI ran on the container's
+ * ambient login — the operator's account, for a full agent run, posted under
+ * the agent's own name and indistinguishable from the real thing. Rare while a
+ * vendor sign-in was the price of an agent; the default once it was not.
+ */
+test("with local agents only, a question is refused rather than billed here", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "no-house-account");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // An agent with a name and no credential — the ordinary local agent — and
+  // no worker anywhere, so nothing of its owner's can answer.
+  await owner.request("/api/v1/chat/providers/anthropic/agent", {
+    method: "POST",
+    body: {},
+  });
+  await owner.request(`${base}/agents/anthropic/membership`, { method: "POST" });
+  const roster = (await owner.request(`${base}/agents`)).data.agents as Array<{
+    provider: string;
+    name: string;
+  }>;
+  const mention = roster.find((agent) => agent.provider === "anthropic")?.name;
+  assert.ok(mention !== undefined, JSON.stringify(roster));
+
+  const before = runtime.chatPrompts.length;
+  const asked = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@${mention} what does the coordinator do?` },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+
+  // The load-bearing assertion: no model was run here at all.
+  assert.equal(
+    runtime.chatPrompts.length,
+    before,
+    "answering with no credential of the owner's spends the deployment's own",
+  );
+
+  // And the person who asked is told why, with the two things that fix it.
+  const messages = (await owner.request(`${base}/messages`)).data
+    .messages as Array<{ kind: string; content: string }>;
+  const reply = messages.filter((message) => message.kind === "agent").at(-1);
+  assert.ok(reply !== undefined, JSON.stringify(messages));
+  assert.match(String(reply.content), /machine/u);
+  assert.match(String(reply.content), /Settings → Agents/u);
+});
+
+/**
+ * The other side of the same gate: an owner who *has* linked an account is
+ * spending their own, so answering here is exactly what they asked for.
+ */
+test("with local agents only, a linked account is still answered here", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "linked-account");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(account.user.id, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await owner.request(`${base}/agents/anthropic/membership`, { method: "POST" });
+
+  const before = runtime.chatPrompts.length;
+  const asked = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Athena what does the coordinator do?" },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+  assert.equal(
+    runtime.chatPrompts.length > before,
+    true,
+    "a credential of one's own is the thing that makes answering here fine",
+  );
+});
+
+/**
+ * An agent can be removed, including the kind that has no credential to
+ * remove.
+ *
+ * Disconnecting used to mean destroying a stored secret, which was the whole
+ * of it while the secret was the identity. Once an agent became a record of
+ * its own, that left two holes at once: an agent with a credential stayed in
+ * every channel after being "disconnected", and an agent without one could be
+ * created and never removed.
+ */
+test("disconnecting an agent with no credential removes it everywhere", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "removable");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  const created = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  await owner.request(`${roster}/openai/membership`, { method: "POST" });
+
+  const listed = (await owner.request(roster)).data.agents as Array<{
+    provider: string;
+  }>;
+  assert.equal(listed.some((agent) => agent.provider === "openai"), true);
+
+  const removed = await owner.request("/api/v1/chat/providers/openai", {
+    method: "DELETE",
+  });
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+
+  // Gone from the roster, so nothing can @mention it into work any more.
+  const after = (await owner.request(roster)).data.agents as Array<{
+    provider: string;
+  }>;
+  assert.equal(
+    after.some((agent) => agent.provider === "openai"),
+    false,
+    "a membership row must not keep a removed agent in the room",
+  );
+  // And gone from the Settings screen's own question.
+  const providers = (await owner.request("/api/v1/chat/providers")).data
+    .providers as Array<{ id: string; exists: boolean }>;
+  assert.equal(providers.find((entry) => entry.id === "openai")?.exists, false);
+});
+
+/**
+ * The same button, on the shape it was written for. Destroying the credential
+ * was never enough on its own: the record outlived it and went on naming an
+ * agent in every channel.
+ */
+test("disconnecting an agent with a credential removes its record too", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "credentialed-removal");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+  runtime.chatConnections.set(account.user.id, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await runtime.store.setAgentCallSign(account.user.id, "anthropic", "Athena");
+  await owner.request(`${roster}/anthropic/membership`, { method: "POST" });
+  assert.equal(
+    ((await owner.request(roster)).data.agents as Array<{ provider: string }>)
+      .some((agent) => agent.provider === "anthropic"),
+    true,
+  );
+
+  await owner.request("/api/v1/chat/providers/anthropic", { method: "DELETE" });
+
+  assert.equal(
+    ((await owner.request(roster)).data.agents as Array<{ provider: string }>)
+      .some((agent) => agent.provider === "anthropic"),
+    false,
+    "the record outliving the credential is what kept it listed",
+  );
+});
+
+/**
+ * A removed agent must not leave its name behind in a room.
+ *
+ * A per-channel override outranks the call sign there, and it is keyed
+ * `${userId}:${provider}` — which the next agent dealt for that account and
+ * vendor also is. Left standing, a brand-new agent inherits the removed one's
+ * name in every room the removed one had been named in. The rename path
+ * already clears these for the weaker version of the same reason.
+ */
+test("disconnecting clears the names an agent was given in rooms", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "named-in-a-room");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  await owner.request(`${roster}/openai/membership`, { method: "POST" });
+  // Named in this one room, and given a role, which is a different kind of
+  // fact and must survive.
+  await runtime.store.setChannelAgentOverride(repo, `${account.user.id}:openai`, {
+    name: "Eris",
+    role: "Lead Developer",
+  });
+
+  await owner.request("/api/v1/chat/providers/openai", { method: "DELETE" });
+
+  const overrides = await runtime.store.listChannelAgentOverrides(repo);
+  const mine = overrides[`${account.user.id}:openai`];
+  assert.equal(mine?.name, undefined, "the name must not outlive the agent");
+  assert.equal(mine?.role, "Lead Developer", "the seat's own decision stays");
+});
+
+/**
+ * Both halves describe the same agent, so the roster must not list it twice.
+ *
+ * This is the load-bearing risk of the union: the same set feeds @mention
+ * dispatch, and a duplicate there means two agents answering one mention while
+ * a miss means an agent nobody can reach.
+ */
+test("a credential and a record for one agent are one row", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "both-halves");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  // A credential exists, as it would for anyone who connected before this.
+  runtime.chatConnections.set(account.user.id, [
+    { provider: "anthropic", visibility: "org", callSign: "Athena" },
+  ]);
+  await owner.request("/api/v1/chat/providers/anthropic/agent", {
+    method: "POST",
+    body: {},
+  });
+  await owner.request(`${roster}/anthropic/membership`, { method: "POST" });
+
+  const after = await owner.request(roster);
+  const listed = (after.data.agents ?? []).filter(
+    (agent: { provider: string }) => agent.provider === "anthropic",
+  );
+  assert.equal(listed.length, 1, "the union deduplicates by (user, provider)");
+  // The credential's answer wins: it is the record being edited when somebody
+  // changes their settings, and both halves describe the same agent.
+  assert.equal(listed[0].name, "Athena");
+  assert.equal(listed[0].visibility, "org");
+});
+
+/**
+ * The call-sign table is account-wide and knows nothing about organizations.
+ * Reading it into a roster unscoped would list agents belonging to strangers.
+ */
+test("a record for somebody outside the repository is not listed", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "scoped");
+
+  await runtime.store.setAgentCallSign("user_stranger", "openai", "Vesta");
+
+  const after = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  assert.equal(
+    (after.data.agents ?? []).some(
+      (agent: { name: string }) => agent.name === "Vesta",
+    ),
+    false,
+  );
+});
+
+/** Re-running connect must not rename an agent people have learned. */
+test("creating an agent twice keeps the name it was dealt", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const first = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  const again = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(again.data.agent.callSign, first.data.agent.callSign);
 });
