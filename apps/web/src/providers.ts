@@ -5104,6 +5104,30 @@ export class ProviderChatService {
         // vanishes, pointed the other way.
         await this.forgetCallSign(input.userId, input.provider);
       } else {
+        // Nobody else's name.
+        //
+        // A mention resolves by name and dispatches to *everyone* it matches,
+        // so two agents sharing one makes a single @mention start two runs on
+        // two accounts, and the second reply arrives from an agent the sender
+        // never addressed. Deriving the default avoided that among defaults;
+        // renaming went straight past it, because a typed name never consults
+        // the taken set at all.
+        //
+        // Compared case-insensitively, because that is how a mention matches
+        // and how a person reads a name.
+        const clash = (await this.storedCallSigns()).find(
+          (entry) =>
+            entry.callSign.trim().toLowerCase() === trimmed.toLowerCase() &&
+            !(entry.userId === input.userId && entry.provider === input.provider),
+        );
+        if (clash !== undefined) {
+          throw new ProviderChatError(
+            409,
+            "call_sign_taken",
+            `Another agent here is already called ${clash.callSign}. ` +
+              "Two agents with one name both answer to it — pick another.",
+          );
+        }
         settings.callSign = trimmed;
         await this.rememberCallSign(input.userId, input.provider, trimmed);
       }

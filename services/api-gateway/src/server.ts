@@ -16988,10 +16988,20 @@ export class ApiGateway {
       taskId: root.taskId,
       actorId: input.viewerId,
     });
-    const candidates = await this.resolveChannelMentionCandidates(
-      input.projectId,
-      input.repositoryId,
-    );
+    // Scoped to the room this thread is in, exactly as the channel path
+    // scopes it. Left unscoped, the store reads `channelId === undefined` as
+    // "every sub-channel", so a mention typed in a thread in #frontend could
+    // resolve to an agent that is only a member of #backend — which then
+    // answered into #frontend, under a name the sender's own picker had
+    // never offered them.
+    const [candidates, people] = await Promise.all([
+      this.resolveChannelMentionCandidates(
+        input.projectId,
+        input.repositoryId,
+        root.channelId,
+      ),
+      this.resolveChannelPeople(input.projectId, input.repositoryId),
+    ]);
     // A provider that is already running a task cannot also service the
     // direct-answer turn below. Treat a reply to that agent as follow-on work
     // and let persistence chain it behind the active task; otherwise this
@@ -17020,8 +17030,8 @@ export class ApiGateway {
       // Legacy tasks may not resolve against the current configured-agent
       // list. An explicit mention in their root remains an unambiguous
       // fallback.
-      const namedAtRoot = candidates.find(
-        (entry) => root.content.includes(`@${entry.name}`),
+      const namedAtRoot = candidates.find((entry) =>
+        textMentionsName(root.content, entry.name),
       );
       if (threadAuthorId === undefined && namedAtRoot !== undefined) {
         threadAuthorId = `${namedAtRoot.userId}:${namedAtRoot.provider}`;
@@ -17044,12 +17054,12 @@ export class ApiGateway {
       // agent's own thread is. Only a thread whose root named nobody is a
       // conversation between people, and stays one.
       const inReply = question.includes("@")
-        ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+        ? candidates.filter((entry) => textMentionsName(question, entry.name))
         : [];
       const inRoot =
         inReply.length === 0 && root.content.includes("@")
           ? candidates.filter((entry) =>
-              root.content.includes(`@${entry.name}`),
+              textMentionsName(root.content, entry.name),
             )
           : [];
       const named = (inReply.length > 0 ? inReply : inRoot).filter(
@@ -17144,13 +17154,52 @@ export class ApiGateway {
     // matches, so "@Icarus" means the same thing in both places, and every
     // agent named gets to answer rather than only the first.
     //
+    // That claim used to be false, and it is the whole of this bug. The
+    // channel matches with `textMentionsName` — case-insensitive, and
+    // requiring a delimiter after the name. Here it was a raw
+    // `question.includes("@" + name)`: case-sensitive, and happy to match a
+    // name that is merely a prefix of what was typed. So "@persephone" in
+    // lowercase named nobody in a thread while naming her perfectly well in
+    // the room, and what happened next was worse than nothing happening —
+    // see below.
+    //
     // Naming nobody still reaches the thread's own agent: a thread hangs off
     // one agent's work, so a bare question in it is addressed to them by
     // construction. That is the behaviour this method was written for and it
     // stays the default.
     const mentioned = question.includes("@")
-      ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+      ? candidates.filter((entry) => textMentionsName(question, entry.name))
       : [];
+    // But only for a reply that named nobody at all. A reply that addressed a
+    // name and matched none of them is not a bare question, and answering it
+    // as though it were is precisely how somebody addresses one agent and a
+    // different one replies: silently, under that other agent's name, with
+    // nothing anywhere saying the name they typed went unread.
+    //
+    // The three exemptions are the channel's own, for the channel's reasons:
+    // a person's name is a ping and not an instruction, `@everyone` stands in
+    // for having named each of them, and a stray "@" that does not read as an
+    // address at all — an email in a stack trace — is not a mention to
+    // report.
+    if (
+      mentioned.length === 0 &&
+      !people.some((person) => textMentionsName(question, person.name)) &&
+      !EVERYONE_RE.test(question) &&
+      ADDRESSED_RE.test(question)
+    ) {
+      await this.postChannelSystemMessage(
+        input.projectId,
+        input.repositoryId,
+        candidates.length === 0
+          ? "Nobody here answers to that yet — this channel has no agents " +
+              "the server can reach. Connect one from Agents, then add it to " +
+              "this channel from the roster."
+          : "Nobody here answers to that. In this channel you can mention: " +
+              `${candidates.map((candidate) => `@${candidate.name}`).join(", ")}.`,
+        root.channelId,
+      );
+      return;
+    }
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
     const firstAnswering = answering[0];
     const queueAfterCurrent =
@@ -21700,10 +21749,31 @@ export class ApiGateway {
     });
   }
 
+  /**
+   * Whose agent a finished task belongs to, for attributing what it said.
+   *
+   * The name this resolves to becomes the author of the message, so getting
+   * it wrong puts one person's words under another person's agent — and this
+   * runs on every routed answer, which on a deployment that executes nothing
+   * itself is every question anybody asks.
+   *
+   * It used to match `entry.provider === task.agentId`, which is comparing a
+   * provider id against a key from the operator's `.coordinator/config.json`
+   * — two different namespaces that only coincide by accident, and when they
+   * did coincide the search was over the *whole room*, so the first agent on
+   * that vendor won whoever had actually been asked. The owner was never
+   * consulted at all.
+   *
+   * So the owner is consulted first, and it is not a heuristic: `submittedBy`
+   * is what the dispatch pinned the row to (`actorId: candidate.userId`) and
+   * what decides whose machine may claim it, so it is the same fact, read
+   * back. The vendor then picks between that person's own agents, exactly as
+   * `channelTaskAuthorId` picks.
+   */
   private async watchedTaskAgent(
     task: SubmittedTask,
   ): Promise<{ ownerId: string; provider: string } | undefined> {
-    if (task.projectId === undefined) {
+    if (task.projectId === undefined || task.submittedBy === undefined) {
       return undefined;
     }
     const candidates: ChannelMentionCandidate[] =
@@ -21711,11 +21781,27 @@ export class ApiGateway {
         task.projectId,
         task.repositoryId,
       ).catch(() => []);
-    const candidate = candidates.find(
-      (entry) =>
-        `${entry.userId}:${entry.provider}` === task.agentId ||
-        entry.provider === task.agentId,
+    const owned = candidates.filter(
+      (entry) => entry.userId === task.submittedBy,
     );
+    if (owned.length === 0) {
+      return undefined;
+    }
+    const configured = await Promise.resolve(
+      this.options.operations.listAgents?.(),
+    ).catch(() => undefined);
+    const adapter = configured?.find(
+      (agent) => agent.id === task.agentId,
+    )?.adapter;
+    const matched = owned.find((entry) =>
+      adapter === undefined
+        ? task.agentId.toLowerCase().includes(entry.vendor)
+        : entry.vendor === adapter,
+    );
+    // One agent owned by this person is unambiguous whatever the id says;
+    // several are not, and guessing between them is how the wrong name ends
+    // up on somebody's answer. Nothing is better than the wrong somebody.
+    const candidate = matched ?? (owned.length === 1 ? owned[0] : undefined);
     return candidate === undefined
       ? undefined
       : { ownerId: candidate.userId, provider: candidate.provider };

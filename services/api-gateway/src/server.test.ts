@@ -7531,6 +7531,120 @@ test("a reply that @mentions an agent in a person's thread reaches that agent", 
   assert.equal(runtime.chatPrompts.length, 0);
 });
 
+/**
+ * A thread resolved mentions with a raw, case-sensitive substring while the
+ * channel two screens away used an anchored case-insensitive match — and the
+ * comment above the thread's copy asserted the two were the same. They were
+ * not, and the divergence was not a near miss: a reply that named an agent
+ * and matched nobody did not fail, it fell through to the agent whose thread
+ * it was, which answered under its own name. That is "@mention one agent, a
+ * different one replies", produced silently, with nothing anywhere saying the
+ * name that was typed went unread.
+ */
+test("a thread mention matches the way the channel matches, in any case", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-mention-case");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Zeus" },
+    })).status,
+    200,
+  );
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "found a bug in the composer" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Lowercase. The channel has always accepted this; the thread did not, and
+  // what it did instead was answer as somebody else.
+  runtime.chatAnswer.text = "On it.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(posted.data.message.id)}/replies`,
+    { method: "POST", body: { content: "@zeus can you tackle this" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "a lowercase mention in a thread never reached the agent",
+  );
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /tackle this/u);
+});
+
+/**
+ * And in an agent's own thread, a name that belongs to nobody is said out
+ * loud rather than quietly handed to that agent.
+ *
+ * This is the half that produced the report. A thread hangs off one agent's
+ * work, so a *bare* question in it is addressed to that agent by
+ * construction — that part is right and stays. But a reply that named
+ * somebody and matched nobody took the same branch, so the agent whose thread
+ * it was answered a message explicitly addressed to a different name, under
+ * its own, with nothing saying the name typed had gone unread.
+ */
+test("a name that belongs to nobody is not answered by the thread's own agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-mention-unknown");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Zeus" },
+    })).status,
+    200,
+  );
+  // Zeus's thread: the root names Zeus, so Zeus owns what follows.
+  runtime.chatAnswer.text = "On it.";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Zeus please look at the composer bug" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the root mention never dispatched",
+  );
+  const dispatchedByRoot = runtime.submittedTasks.length;
+
+  // A reply naming somebody who does not exist. Zeus must not take it.
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(posted.data.message.id)}/replies`,
+    { method: "POST", body: { content: "@Proserpina can you tackle this" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+
+  // The room says nobody answers to that, and names who would have.
+  await waitFor(async () => {
+    const messages = await owner.request(`${base}/messages`);
+    return (messages.data.messages ?? []).some((message: { content?: string }) =>
+      /Nobody here answers to that/u.test(String(message.content ?? "")),
+    );
+  }, "an unresolved mention in an agent's thread said nothing at all");
+
+  // And nothing was dispatched in the mentioned agent's place.
+  assert.equal(
+    runtime.submittedTasks.length,
+    dispatchedByRoot,
+    "a name that belongs to nobody must not dispatch work to the thread's agent",
+  );
+});
+
 test("a channel thread reply carries the message it quotes", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
