@@ -2051,6 +2051,55 @@ test("a connected agent can have its CLI checked without disconnecting", async (
   assert.match(agents, /too old to install or check a CLI/u);
 });
 
+/**
+ * An agent that runs on somebody's machine can still be put into a channel.
+ *
+ * `connected` means a credential is stored here, and since an agent stopped
+ * requiring a vendor sign-in that is false for every agent on a local
+ * deployment. Two places still asked it: the channel roster's own-agent
+ * filter, and the menu for adding an agent to a room. So an agent that
+ * existed, was named, and ran perfectly well appeared in neither — and once
+ * disconnected there was no way to put it back into a repository at all.
+ *
+ * The same wrong question as the settings row and the agent menu, in the last
+ * two places that had not been corrected.
+ */
+test("a credential-less agent is listed in channels and offered to rooms", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+
+  // The roster: exists, not connected — and an expired sign-in still excluded,
+  // because that one genuinely cannot work.
+  const roster = data.slice(data.indexOf("const mine = myAgents()"));
+  assert.match(roster.slice(0, 1_400), /agent\.exists === true \|\| agent\.connected === true/u);
+  assert.match(roster.slice(0, 1_400), /agent\.needsReconnect !== true/u);
+
+  // The picker that puts an agent into a room.
+  const menu = app.slice(app.indexOf('case "channel-agent-menu"'));
+  assert.match(
+    menu.slice(0, 2_400),
+    /agent\.exists === true && agent\.needsReconnect !== true/u,
+  );
+  assert.doesNotMatch(
+    menu.slice(0, 2_400),
+    /agent\.mine === true && agent\.connected === true,\s*\n\s*\);/u,
+    "the picker must not gate on a stored credential",
+  );
+});
+
+/**
+ * The button whose job is to explain why an agent cannot work must not fail
+ * silently. Asking the machine what it has can throw — a scan that failed, a
+ * channel closed under a reloading window — and returning quietly is the whole
+ * of "I pressed it and nothing happened".
+ */
+test("check the CLI says something when the machine cannot be asked", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const setup = agents.slice(agents.indexOf("async function finishLocalSetup"));
+  assert.match(setup.slice(0, 900), /detected === undefined/u);
+  assert.match(setup.slice(0, 900), /Could not ask this machine what is installed/u);
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may
@@ -2163,9 +2212,17 @@ test("adding another agent always begins with a provider choice", async () => {
     app.indexOf('case "channel-agent-pick"', channelMenuStart),
   );
   assert.notEqual(channelMenuStart, -1);
+  // Which agents the menu offers, asked the way it is asked everywhere else
+  // now. This line used to pin `mine && connected` — a stored credential —
+  // which stopped being what having an agent means when an agent stopped
+  // requiring a vendor sign-in. Under that rule the menu offered none of the
+  // agents on a local deployment, so a disconnected one could never be put
+  // back into a room. The assertion was incidental to what this test is about
+  // (that the plus always leaves a way forward) and was quietly holding the
+  // wrong rule in place.
   assert.match(
     channelMenu,
-    /agent\.mine === true && agent\.connected === true/u,
+    /agent\.exists === true && agent\.needsReconnect !== true/u,
   );
   assert.match(channelMenu, /disabled: inChannel\.has\(agent\.id\)/u);
   assert.match(channelMenu, /act: "agent-add"/u);

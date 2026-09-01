@@ -521,6 +521,16 @@ async function finishLocalSetup(providerId, rerender) {
   }
   const detected = await bridge.detected().catch(() => undefined);
   if (detected === undefined) {
+    // Asking the machine what it has can fail — a scan that threw, a channel
+    // closed under a reloading window — and returning here was silent. That is
+    // the whole of "I pressed Check the CLI and nothing happened": the one
+    // button whose job is to explain why an agent cannot work, explaining
+    // nothing.
+    toast(
+      `Could not ask this machine what is installed. Restart the Kumi app ` +
+        `and try again.`,
+      "error",
+    );
     return;
   }
   if (!detected.includes(vendor)) {
