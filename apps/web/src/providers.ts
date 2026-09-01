@@ -1005,20 +1005,52 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
       ...(match[3] === undefined ? {} : { resetsAt: match[3].trim() }),
     });
   }
-  return windows.length > 0
-    ? { windows }
-    : {
-        windows: [],
-        // Percentages exist because a *subscription* has limits to be a
-        // percentage of; `/usage` opens with "You are currently using your
-        // subscription to power your Claude Code usage" when it has them. An
-        // API key has no such ceiling, so there is nothing to report and no
-        // fault to find — saying only "did not report" sent people looking
-        // for a break that was not there.
-        unavailableReason: /api\s*key/iu.test(text)
-          ? "This account bills per API key, which has no subscription limit to report a percentage of."
-          : "The claude CLI reported no usage percentage. That is expected unless the account is on a subscription with limits.",
-      };
+  if (windows.length > 0) {
+    return { windows };
+  }
+  // Percentages exist because a *subscription* has limits to be a percentage
+  // of; `/usage` opens with "You are currently using your subscription to
+  // power your Claude Code usage" when it has them. An API key has no such
+  // ceiling, so there is nothing to report and no fault to find.
+  if (/api\s*key/iu.test(text)) {
+    return {
+      windows: [],
+      unavailableReason:
+        "This account bills per API key, which has no subscription limit to report a percentage of.",
+    };
+  }
+  // The CLI ran the slash command as a prompt and handed back a session.
+  //
+  // `claude -p "/usage"` is a *prompt* that happens to begin with a slash, not
+  // an invocation of the interactive `/usage` view, and on a CLI that does not
+  // recognise it as a command the answer is the ordinary end-of-session
+  // summary — "Total cost", "Total duration", token counts. No percentage is
+  // in it and none ever will be.
+  //
+  // That is a different fact from the one this used to state. It said the
+  // account was probably not on a subscription, which is a claim about
+  // somebody's billing made from evidence that says nothing about it — so a
+  // person on a perfectly ordinary subscription plan was told their plan was
+  // the reason, and had nowhere to go from there.
+  if (/Total cost|Total duration|tokens? used/iu.test(text)) {
+    return {
+      windows: [],
+      unavailableReason:
+        "This Claude CLI does not publish a usage figure outside its own " +
+        "interactive `/usage` view — it answered with a session summary " +
+        "instead. Nothing is wrong with the account; the number is not " +
+        "available to ask for.",
+    };
+  }
+  return {
+    windows: [],
+    // Its own words, bounded. A reader can tell a signed-out CLI from an
+    // unrecognised one; this side cannot, and guessing is what produced the
+    // sentence above.
+    unavailableReason:
+      "The claude CLI reported no usage percentage. It said: " +
+      `${text.trim().split("\n")[0]?.slice(0, 160) ?? "(nothing)"}`,
+  };
 }
 
 /**

@@ -2927,6 +2927,45 @@ test("Cursor's reported model list is read back, markers and colours and all", (
   ]);
 });
 
+/**
+ * A card must not diagnose somebody's billing from evidence that says nothing
+ * about it.
+ *
+ * `claude -p "/usage"` is a prompt that happens to begin with a slash, not an
+ * invocation of the interactive `/usage` view. A CLI that does not recognise
+ * it as a command answers with the ordinary end-of-session summary — "Total
+ * cost", "Total duration", token counts — and no percentage is in it. The card
+ * read that as "expected unless the account is on a subscription with limits",
+ * so somebody on an ordinary subscription was told their plan was the reason
+ * and had nowhere to go from there.
+ */
+test("a session summary is reported as the CLI not publishing a figure, not as a billing verdict", () => {
+  const report = parseClaudeUsage(
+    JSON.stringify({
+      result: [
+        "Total cost:            $0.0312",
+        "Total duration (API):  4s",
+        "Usage:                 120 input, 340 output",
+      ].join("\n"),
+    }),
+  );
+  assert.deepEqual(report.windows, []);
+  assert.match(String(report.unavailableReason), /does not publish a usage figure/u);
+  assert.match(String(report.unavailableReason), /Nothing is wrong with the account/u);
+  assert.doesNotMatch(String(report.unavailableReason), /unless the account is on a subscription/u);
+
+  // An API-key account is still named as such, because that reading is
+  // supported by what the CLI actually said.
+  assert.match(
+    String(parseClaudeUsage(JSON.stringify({ result: "Using API key billing" })).unavailableReason),
+    /API key/u,
+  );
+
+  // And anything else is quoted rather than diagnosed.
+  const odd = parseClaudeUsage(JSON.stringify({ result: "Not logged in." }));
+  assert.match(String(odd.unavailableReason), /It said: Not logged in\./u);
+});
+
 test("cursor usage reports that Cursor usage is not reported without running the CLI", async () => {
   // Cursor's `status` answers with an account, a plan and a version, and no
   // subscription figure — so the card was filled with facts nobody asked a
