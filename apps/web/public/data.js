@@ -1398,6 +1398,60 @@ export function usageKey(providerId, ownerId) {
   return ownerId ? `${ownerId}:${providerId}` : providerId;
 }
 
+/**
+ * The vendor CLI behind each provider account.
+ *
+ * A provider is the account somebody signs into; a vendor is the program that
+ * runs on their machine. They are named differently by their own owners —
+ * "anthropic" issues the credential, `claude` does the work — and the desktop
+ * installs by the second. Mirrors `PROVIDER_TO_VENDOR` on the server.
+ */
+export const PROVIDER_VENDOR = {
+  anthropic: "claude",
+  openai: "codex",
+  google: "gemini",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
+};
+
+/**
+ * Asks this machine what is left of a vendor's quota, and files the answer.
+ *
+ * This is the whole reason the usage figure no longer needs a button. The
+ * account is signed in *here* — in the CLI that does the work — so the number
+ * is a spawn away on the machine already looking at the card, and asking is
+ * cheap enough to do whenever the card is about to be shown. The control
+ * plane, by contrast, can only ask its own login, which on a deployment where
+ * everybody signs in as themselves is nobody.
+ *
+ * A browser has no bridge and gets `undefined`, which is not a failure: it
+ * simply falls through to the server's answer below, exactly as before.
+ */
+async function reportMachineUsage(providerId) {
+  const bridge = window.KUMI_INSTALL;
+  const vendor = PROVIDER_VENDOR[providerId];
+  if (bridge?.usage === undefined || vendor === undefined) {
+    return undefined;
+  }
+  const reading = await bridge.usage(vendor).catch(() => undefined);
+  // A CLI that is not installed here, or would not answer, has not reported
+  // anything — and reporting an empty string would file "nothing to show" as
+  // this account's usage until something replaced it.
+  if (reading?.ok !== true || typeof reading.raw !== "string") {
+    return undefined;
+  }
+  try {
+    const response = await api(
+      `/chat/providers/${encodeURIComponent(providerId)}/usage`,
+      { method: "POST", body: { raw: reading.raw } },
+    );
+    return response.usage;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function ensureProviderUsage(providerId, rerender, ownerId) {
   const key = usageKey(providerId, ownerId);
   if (!providerId || state.providerUsage[key] !== undefined) {
@@ -1405,14 +1459,21 @@ export async function ensureProviderUsage(providerId, rerender, ownerId) {
   }
   state.providerUsage[key] = { loading: true };
   try {
-    const response = await api(
-      `/chat/providers/${encodeURIComponent(providerId)}/usage${
-        ownerId ? `?owner=${encodeURIComponent(ownerId)}` : ""
-      }`,
-    );
-    state.providerUsage[key] = response.usage ?? {
-      unavailableReason: "This deployment reported no usage.",
-    };
+    // Only ever for one's own agent. A reading is a claim about an account,
+    // and this machine's CLI is signed in as this account — asking it about
+    // somebody else's would report the wrong person's quota under their name.
+    const fromMachine = ownerId ? undefined : await reportMachineUsage(providerId);
+    state.providerUsage[key] =
+      fromMachine ??
+      (
+        await api(
+          `/chat/providers/${encodeURIComponent(providerId)}/usage${
+            ownerId ? `?owner=${encodeURIComponent(ownerId)}` : ""
+          }`,
+        )
+      ).usage ?? {
+        unavailableReason: "This deployment reported no usage.",
+      };
   } catch (error) {
     state.providerUsage[key] = { unavailableReason: error.message };
   }

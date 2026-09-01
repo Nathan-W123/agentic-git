@@ -299,3 +299,130 @@ test("main.mjs imports every sibling function it calls", async () => {
     `main.mjs calls these without importing them: ${missing.join(", ")}`,
   );
 });
+
+interface UsageModule {
+  readVendorUsage: (vendor: string) => Promise<{
+    ok: boolean;
+    raw?: string;
+    exitCode?: number;
+    detail?: string;
+  }>;
+}
+
+/** A directory of fake CLIs, put on `PATH` for the duration of one test. */
+async function withFakeClis(
+  files: Record<string, string>,
+  run: (usage: UsageModule) => Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "kumi-usage-"));
+  const previous = process.env["PATH"];
+  try {
+    for (const [name, body] of Object.entries(files)) {
+      const file = path.join(dir, name);
+      await writeFile(file, body, { mode: 0o755 });
+    }
+    // Deliberately *only* this directory, so a real vendor CLI installed on
+    // the machine running the suite can never be spawned by it.
+    process.env["PATH"] = `${dir}${path.delimiter}${path.dirname(process.execPath)}`;
+    const usage = (await import(
+      pathToFileURL(path.join(electronDir, "usage.mjs")).href
+    )) as UsageModule;
+    await run(usage);
+  } finally {
+    process.env["PATH"] = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A CLI too old for the documented interface must fall through to the older
+ * one, not win the attempt by complaining.
+ *
+ * Codex is asked for its quota twice: `account/rateLimits/read` on the
+ * app-server, which is the interface OpenAI documents, and `--status --json`
+ * for a CLI that predates it. The first cut merged the two output streams, so
+ * `error: unrecognized subcommand 'app-server'` counted as an answer — the
+ * fallback was never reached, and the card then blamed an API-key account for
+ * a CLI that had simply never been asked the question it understands.
+ *
+ * The exit code cannot settle it either: Claude exits non-zero merely for
+ * being signed out, while printing the status it was asked for. Which stream
+ * carried the words is what decides.
+ */
+test("a complaint on stderr is not an answer, so the older reader is reached", async () => {
+  await withFakeClis(
+    {
+      codex: [
+        "#!/usr/bin/env node",
+        "const args = process.argv.slice(2);",
+        "if (args[0] === 'app-server') {",
+        "  process.stderr.write(\"error: unrecognized subcommand 'app-server'\\n\");",
+        "  process.exit(2);",
+        "}",
+        "process.stdout.write(JSON.stringify({ rate_limits: { primary: { used_percent: 55 } } }));",
+      ].join("\n"),
+    },
+    async (usage) => {
+      const reading = await usage.readVendorUsage("codex");
+      assert.equal(reading.ok, true, JSON.stringify(reading));
+      assert.match(String(reading.raw), /used_percent/u);
+      assert.doesNotMatch(String(reading.raw), /unrecognized subcommand/u);
+    },
+  );
+});
+
+/**
+ * And the app-server reader has to stop when it has answered.
+ *
+ * It does not exit on its own — it waits for the next request — so an attempt
+ * that only ends on `close` spends its whole deadline after the answer is
+ * already in hand, and on a machine whose CLI predates the method the
+ * fallback is not reached until that deadline passes. Reading the card is not
+ * worth an eight-second stall, still less two.
+ */
+test("the app-server reader returns as soon as it has the answer", async () => {
+  await withFakeClis(
+    {
+      codex: [
+        "#!/usr/bin/env node",
+        "let seen = '';",
+        "process.stdin.on('data', (chunk) => {",
+        "  seen += chunk;",
+        "  if (!seen.includes('account/rateLimits/read')) return;",
+        "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 1,",
+        "    result: { rateLimits: { primary: { usedPercent: 41, windowDurationMins: 300 } } } }) + '\\n');",
+        // Exactly what the real app-server does: waits for more work.
+        "  setInterval(() => {}, 1000);",
+        "});",
+      ].join("\n"),
+    },
+    async (usage) => {
+      const started = Date.now();
+      const reading = await usage.readVendorUsage("codex");
+      assert.equal(reading.ok, true, JSON.stringify(reading));
+      assert.match(String(reading.raw), /usedPercent/u);
+      assert.ok(
+        Date.now() - started < 5_000,
+        "it must not sit out the deadline after answering",
+      );
+    },
+  );
+});
+
+/**
+ * A CLI that is not here has not reported anything, and saying so is the
+ * whole answer. Reporting an empty reading would file "nothing to show" as
+ * this account's usage until something replaced it.
+ */
+test("an absent CLI reports nothing rather than an empty reading", async () => {
+  await withFakeClis({}, async (usage) => {
+    const reading = await usage.readVendorUsage("codex");
+    assert.equal(reading.ok, false);
+    assert.match(String(reading.detail), /not installed on this machine/u);
+
+    // And a vendor with no usage command at all is a different sentence.
+    const none = await usage.readVendorUsage("gemini");
+    assert.equal(none.ok, false);
+    assert.match(String(none.detail), /publishes no usage command/u);
+  });
+});

@@ -2964,6 +2964,15 @@ export function localAgentsOnly(): boolean {
  * without a credential at all. A second copy would drift, and the one thing
  * this list has to guarantee is that no two agents on a deployment are both
  * Hermes.
+ *
+ * Greek only. It used to carry the Roman counterparts as well — Jupiter beside
+ * Zeus, Minerva beside Athena, Proserpina beside Persephone — which is twenty
+ * pairs where two agents in the same room are named after the same god. That
+ * is not a longer list, it is a shorter one with each entry printed twice
+ * under two spellings, and it produced exactly the confusion it looks like it
+ * would: somebody @mentioned Proserpina and read Persephone's reply as the
+ * wrong agent answering. Names that a person has to keep apart at a glance
+ * cannot be synonyms of each other.
  */
 export const AGENT_CALL_SIGNS = [
   // Olympians and kin
@@ -2976,10 +2985,81 @@ export const AGENT_CALL_SIGNS = [
   "Nyx", "Erebus", "Eos", "Helios", "Selene", "Iris",
   // Winds and lesser gods
   "Boreas", "Zephyrus", "Notus", "Eurus", "Pan", "Morpheus", "Nemesis",
-  "Nike", "Tyche", "Eris", "Hebe", "Janus",
-  // Roman counterparts and originals
-  "Jupiter", "Juno", "Neptune", "Ceres", "Minerva", "Mars", "Venus",
-  "Vulcan", "Mercury", "Vesta", "Bacchus", "Pluto", "Proserpina",
-  "Saturn", "Ops", "Sol", "Luna", "Aurora", "Victoria", "Fortuna",
-  "Bellona", "Faunus", "Flora", "Pomona", "Terminus", "Quirinus",
+  "Nike", "Tyche", "Eris", "Hebe",
+  // Muses, Fates and Graces — the room the Roman counterparts left
+  "Calliope", "Clio", "Erato", "Euterpe", "Melpomene", "Polyhymnia",
+  "Terpsichore", "Thalia", "Urania",
+  "Clotho", "Lachesis", "Atropos",
+  "Aglaia", "Euphrosyne",
+  // Nymphs, heroes and the rest of the pantheon's working population
+  "Echo", "Daphne", "Calypso", "Thetis", "Amphitrite", "Galatea",
+  "Ariadne", "Andromeda", "Cassandra", "Penelope", "Perseus", "Orpheus",
+  "Icarus", "Daedalus", "Theseus", "Jason", "Hector", "Achilles",
+  "Odysseus", "Argus", "Triton", "Nereus", "Proteus", "Charon",
+  "Hypnos", "Thanatos", "Hecate", "Asclepius", "Chiron", "Aeolus",
 ] as const;
+
+/**
+ * The name this agent gets, derived rather than dealt.
+ *
+ * An agent's name has to be *constant*. It is how a person addresses it, so a
+ * name that changes is a name that stops working — and both ends used to pick
+ * one at random and store it, which made the name a property of the storage
+ * rather than of the agent. Every way the storage could be lost was a way the
+ * name could change: a disconnect (which clears the record), a reconnect after
+ * it, a control plane restarted onto a filesystem that did not outlive the
+ * container, a database wiped and rebuilt.
+ *
+ * Deriving it from the agent's own identity removes the whole class. The same
+ * person's Claude agent is the same name on a fresh deployment, after a
+ * disconnect, after a restore from nothing — because nothing was stored for it
+ * to lose. The durable record is still written, and is still what a *rename*
+ * lives in; it simply stopped being what makes the default stable.
+ *
+ * Order is not identity: walking the list would have made every deployment
+ * produce Zeus first, so the name would say who connected first and nothing
+ * else. The hash spreads the starting point instead, and collisions probe
+ * forward from it, deterministically — so two agents that want the same name
+ * still resolve the same way every time anybody asks.
+ *
+ * `taken` is compared case-insensitively, since that is how the callers hold
+ * their sets and how a person reads a name.
+ */
+export function deriveCallSign(
+  userId: string,
+  provider: string,
+  taken: ReadonlySet<string> = new Set(),
+): string | undefined {
+  const claimed = new Set(
+    [...taken].map((name) => name.trim().toLowerCase()),
+  );
+  const start = callSignHash(`${userId}\0${provider}`) % AGENT_CALL_SIGNS.length;
+  for (let step = 0; step < AGENT_CALL_SIGNS.length; step += 1) {
+    const candidate =
+      AGENT_CALL_SIGNS[(start + step) % AGENT_CALL_SIGNS.length];
+    if (candidate !== undefined && !claimed.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * FNV-1a, 32-bit.
+ *
+ * Written out rather than taken from `node:crypto` because this module is
+ * imported by the browser bundle as well, and because the property that
+ * matters is not cryptographic strength but that every process computes the
+ * same number from the same string — including a browser, a gateway and a
+ * worker on three different machines.
+ */
+function callSignHash(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    // The FNV prime, by shifts, so this stays in 32-bit integer arithmetic
+    // instead of losing precision through a float multiply.
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}

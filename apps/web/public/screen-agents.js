@@ -19,6 +19,7 @@ import {
   loadGitHub,
   loadProviders,
   myAgents,
+  PROVIDER_VENDOR,
   providerSignInStatus,
   startGitHubSignIn,
   startProviderSignIn,
@@ -473,24 +474,6 @@ export async function disconnectAgent(providerId, rerender) {
 }
 
 /**
- * The vendor CLI behind each provider account.
- *
- * A provider is the account somebody signs into; a vendor is the program that
- * runs on their machine. They are named differently by their own owners —
- * "anthropic" issues the credential, `claude` does the work — and the desktop
- * installs by the second. Mirrors `PROVIDER_TO_VENDOR` on the server, which is
- * what the roster's own setup hints are keyed by.
- */
-const PROVIDER_VENDOR = {
-  anthropic: "claude",
-  openai: "codex",
-  google: "gemini",
-  cursor: "cursor",
-  copilot: "copilot",
-  kiro: "kiro",
-};
-
-/**
  * The half of connecting that happens on this machine.
  *
  * A vendor sign-in gives Kumi an agent. It does not give the machine anything
@@ -607,7 +590,7 @@ async function finishLocalSetup(providerId, rerender) {
   return "ready";
 }
 
-async function signInAgent(providerId, mode, rerender, intent) {
+async function signInAgent(providerId, mode, rerender) {
   // On a deployment that runs agents locally, the vendor sign-in below buys
   // nothing the agent needs. It stores a credential this server then never
   // reads — the CLI runs under the machine's own login — so somebody signed in
@@ -617,9 +600,10 @@ async function signInAgent(providerId, mode, rerender, intent) {
   // never have helped.
   //
   // So the agent is created outright and setup finishes on the machine. The
-  // credential becomes an optional extra, for the usage figures and for a
-  // deployment that has server-side execution switched on.
-  if (state.localAgentsOnly === true && intent !== "link-account") {
+  // last thing the credential still bought — the usage figures — now comes
+  // from this machine's own CLI, so on a local deployment there is nothing
+  // left for the vendor sign-in to be an extra for, and no route to it.
+  if (state.localAgentsOnly === true) {
     return await connectLocalAgent(providerId, rerender);
   }
   state.providerConnecting?.add(providerId);
@@ -812,66 +796,6 @@ async function signInAgent(providerId, mode, rerender, intent) {
     toast(error.message, "error");
     return false;
   }
-}
-
-/**
- * Attaches a vendor account to an agent that already exists.
- *
- * The credential is no longer what makes an agent — that is the record the
- * connect flow writes — but it is still what the usage figures on the agent
- * card read, and what a deployment with server-side execution switched on
- * needs. So it stays available, as the extra it actually is rather than as
- * the gate somebody has to pass before finding out whether their CLI works.
- */
-export async function linkAgentAccount(providerId, rerender) {
-  const entry = (state.providers ?? []).find((item) => item.id === providerId);
-  const signInFlow = entry?.signInFlow;
-  if (signInFlow === undefined) {
-    toast(
-      `${agentLabelOf(providerId)} has no browser sign-in to link.`,
-      "error",
-    );
-    return;
-  }
-  // Asked before a tab opens, because of what this row looks like to somebody
-  // who wants their agent back.
-  //
-  // A connected agent has no Connect button — it is connected — so the row
-  // reads Rename, Link for usage, Disconnect. Somebody who has just
-  // disconnected an agent and wants it working again presses the only one of
-  // those that sounds like connecting, and lands on the vendor's sign-in page:
-  // exactly the second sign-in this release exists to remove, reached by the
-  // one button on the row that still leads there. It happened to the first
-  // person who tried it.
-  //
-  // So the dialog says what the button cannot fit: that the agent already
-  // works, and what linking actually buys. The name, because the row is about
-  // an agent somebody knows by name rather than about a vendor.
-  const agent = myAgents().find((item) => item.id === providerId);
-  const name = agent?.hasName === true ? agent.name : agentLabelOf(providerId);
-  const label = agentLabelOf(providerId);
-  const proceed = await showModal({
-    title: `Link your ${esc(label)} account?`,
-    subtitle:
-      `This is optional. ${name} already works — it runs on this machine ` +
-      "under the login the CLI there already has.",
-    body: `<p class="modal-hint">Linking signs you in to ${esc(label)} in a new
-      tab and stores that account, which is what lets Kumi show how much of
-      your quota is left. It does not change how ${esc(name)} runs.</p>`,
-    confirm: "Sign in to link",
-    cancel: "Not now",
-  });
-  if (proceed === undefined) {
-    return;
-  }
-  // The browser may refuse the tab now that the original click is over — the
-  // sign-in flow already handles that, opening the address from the dialog it
-  // shows instead. A blocked tab on an optional extra is a far better trade
-  // than sending somebody to a vendor sign-in they never asked for.
-  //
-  // `link-account` rather than the flow's own mode, so `signInAgent` knows not
-  // to take the local shortcut it takes for an ordinary connect.
-  await signInAgent(providerId, signInFlow, rerender, "link-account");
 }
 
 export async function connectAgent(providerId, rerender) {

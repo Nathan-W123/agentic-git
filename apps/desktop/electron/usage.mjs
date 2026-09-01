@@ -18,23 +18,62 @@ import { spawn } from "node:child_process";
 import { detectAgents } from "./agents.mjs";
 
 /**
- * What to run to ask each vendor how much is left.
+ * Codex's app-server handshake, written to stdin in one go.
  *
- * Only vendors whose CLI publishes a usage command are here. Cursor has none,
- * and inventing one would produce a card that reports a failure forever
- * instead of simply not offering the number.
+ * `account/rateLimits/read` is the interface OpenAI documents for this, so it
+ * is asked first and `--status --json` is the fallback for a CLI too old to
+ * answer it. Both are attempted here rather than picked, because this side
+ * does not parse and therefore cannot tell which one answered; the server
+ * runs its parsers in the same order over whatever came back.
+ */
+const CODEX_HANDSHAKE = [
+  {
+    jsonrpc: "2.0",
+    id: 0,
+    method: "initialize",
+    params: { clientInfo: { name: "kumi-desktop", title: "Kumi", version: "0.0.0" } },
+  },
+  { jsonrpc: "2.0", method: "initialized", params: {} },
+  { jsonrpc: "2.0", id: 1, method: "account/rateLimits/read", params: {} },
+]
+  .map((message) => `${JSON.stringify(message)}\n`)
+  .join("");
+
+/**
+ * What to run to ask each vendor how much is left, in the order to try.
  *
- * Codex is absent for a different reason: its figures come from session
- * records under its own home directory rather than from a command, so reading
- * them is a file walk rather than a spawn. Worth doing, and not by pretending
- * it is a command.
+ * Every argv here is one the control plane already runs against the same CLI,
+ * so this is the same question asked from the machine that holds the login
+ * rather than a new one invented for the desktop.
+ *
+ * Cursor is the odd one out: `cursor-agent` publishes no quota at all, and its
+ * status view reports account facts instead. It is still asked, because
+ * "signed in here, but this vendor does not publish a quota" is a more useful
+ * card than silence — and because the answer being account facts is a finding
+ * the server can state rather than a number this side invents.
  */
 const USAGE_COMMANDS = {
-  claude: ["-p", "/usage", "--output-format", "json"],
+  // Claude answers by starting a session, which is why this one is given the
+  // long deadline and the other two are not.
+  claude: [{ args: ["-p", "/usage", "--output-format", "json"], timeoutMs: 60_000 }],
+  codex: [
+    {
+      args: ["app-server", "--stdio"],
+      stdin: CODEX_HANDSHAKE,
+      timeoutMs: 8_000,
+      // The app-server does not exit when it has answered — it waits for the
+      // next request. Without this the first attempt would spend its whole
+      // deadline after the answer was already in hand, and the fallback below
+      // would never be reached inside a reasonable wait.
+      done: (text) => text.includes('"id":1') || text.includes('"id": 1'),
+    },
+    { args: ["--status", "--json"], timeoutMs: 8_000 },
+  ],
+  cursor: [{ args: ["status"], timeoutMs: 15_000 }],
 };
 
-/** How long to wait before deciding the CLI is not going to answer. */
-const USAGE_TIMEOUT_MS = 60_000;
+/** The deadline for an attempt that does not name its own. */
+const USAGE_TIMEOUT_MS = 30_000;
 
 /** The most output worth carrying back; a usage report is a few lines. */
 const MAX_OUTPUT = 64_000;
@@ -48,10 +87,10 @@ const MAX_OUTPUT = 64_000;
  * carried alongside rather than used to throw the answer away.
  */
 export async function readVendorUsage(vendor) {
-  const args = Object.hasOwn(USAGE_COMMANDS, vendor)
+  const attempts = Object.hasOwn(USAGE_COMMANDS, vendor)
     ? USAGE_COMMANDS[vendor]
     : undefined;
-  if (args === undefined) {
+  if (attempts === undefined) {
     return { ok: false, detail: `${String(vendor)} publishes no usage command.` };
   }
   const agents = await detectAgents();
@@ -65,44 +104,103 @@ export async function readVendorUsage(vendor) {
   // The path this machine's own detection found, so the command asked about
   // usage is the same program that does the work.
   const executable = entry.command ?? vendor;
-  return await new Promise((resolve) => {
+  let last;
+  for (const attempt of attempts) {
+    const result = await runOnce(executable, attempt);
+    // The first attempt that actually answered wins — `ok` means this one
+    // printed something on stdout, which is the only stream a usage report
+    // comes back on. A complaint on stderr falls through to the next attempt.
+    if (result.ok) {
+      return result;
+    }
+    last = result;
+  }
+  return last ?? { ok: false, detail: "Nothing to run." };
+}
+
+function runOnce(executable, attempt) {
+  return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(executable, args, {
+      child = spawn(executable, attempt.args, {
         windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error) {
       resolve({ ok: false, detail: describe(error) });
       return;
     }
+    // Kept apart, and this is the distinction that decides whether an attempt
+    // answered at all.
+    //
+    // They used to be merged, and a CLI too old for the documented interface
+    // then "answered" with `error: unrecognized subcommand` — enough to win
+    // the attempt, so the fallback below it was never reached and the card
+    // blamed an API-key account for a CLI that simply predates the method.
+    // The exit code cannot settle it either: Claude exits non-zero merely for
+    // being signed out, while printing the status it was asked for.
     let out = "";
+    let err = "";
     let done = false;
     const finish = (value) => {
       if (!done) {
         done = true;
         clearTimeout(timer);
+        // The app-server does not exit on its own; it is killed here, after
+        // it has already answered.
+        try {
+          child.kill();
+        } catch {
+          // It exited between the state check and the signal.
+        }
         resolve(value);
       }
     };
-    const timer = setTimeout(() => {
-      child.kill();
-      finish({ ok: false, detail: "The CLI did not answer in time." });
-    }, USAGE_TIMEOUT_MS);
+    /** What this attempt amounts to, from what each stream carried. */
+    const settle = (exitCode) =>
+      finish(
+        out.trim() === ""
+          ? {
+              ok: false,
+              detail:
+                err.trim().split("\n")[0]?.slice(0, 400) ??
+                `${executable} ${attempt.args.join(" ")} said nothing (exit ${String(exitCode)}).`,
+            }
+          : { ok: true, raw: out.slice(0, MAX_OUTPUT), exitCode },
+      );
+    const timer = setTimeout(
+      () => settle(124),
+      attempt.timeoutMs ?? USAGE_TIMEOUT_MS,
+    );
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
-    const take = (chunk) => {
+    child.stdout?.on("data", (chunk) => {
       if (out.length < MAX_OUTPUT) {
         out += String(chunk);
       }
-    };
-    child.stdout?.on("data", take);
-    child.stderr?.on("data", take);
-    child.once("error", (error) => finish({ ok: false, detail: describe(error) }));
-    child.once("close", (code) => {
-      // Reported whatever the exit code, for the reason above.
-      finish({ ok: true, raw: out.slice(0, MAX_OUTPUT), exitCode: code ?? 0 });
+      if (attempt.done?.(out) === true) {
+        settle(0);
+      }
     });
+    child.stderr?.on("data", (chunk) => {
+      if (err.length < MAX_OUTPUT) {
+        err += String(chunk);
+      }
+    });
+    child.once("error", (error) => finish({ ok: false, detail: describe(error) }));
+    // Reported whatever the exit code, for the reason above.
+    child.once("close", (code) => settle(code ?? 0));
+    child.stdin?.on("error", () => {
+      // A CLI that closed stdin before this was written has not failed; it
+      // simply did not want it.
+    });
+    // Written before anything is read, because the handshake is what makes
+    // the app-server answer. Closing stdin is what makes a CLI that expects
+    // none stop waiting for one.
+    if (attempt.stdin !== undefined) {
+      child.stdin?.write(attempt.stdin);
+    }
+    child.stdin?.end();
   });
 }
 

@@ -18,6 +18,8 @@ import {
   ProviderChatService,
   parseClaudeStreamJson,
   parseClaudeUsage,
+  parseCursorAccount,
+  parseReportedUsage,
   parseCursorModelList,
   saysSignedIn,
   parseCodexAppServerRateLimits,
@@ -3434,4 +3436,118 @@ test("the last reading survives the machine going away", async () => {
   // One person's figure is never handed to the next person who asks.
   const other = await service.usage({ userId: "u2", provider: "anthropic" });
   assert.notEqual(other.windows[0]?.percentUsed, 19);
+});
+
+/**
+ * The other two vendors, read the same way.
+ *
+ * Claude was the only one a machine could report, which left Codex still
+ * shelling out on the control plane — against the operator's login, on a
+ * deployment where everybody signs in as themselves — and Cursor showing
+ * nothing at all. All three are asked on the machine now, and the parsing
+ * here is the same parsing that already ran when this process did the asking.
+ */
+test("a machine can report Codex quota, through whichever reader answered", () => {
+  // What `account/rateLimits/read` replies with: the documented interface,
+  // tried first because a rename inside the status view must not outrank it.
+  const appServer = parseReportedUsage(
+    "openai",
+    `${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        rateLimits: {
+          primary: { usedPercent: 41, windowDurationMins: 300 },
+          secondary: { usedPercent: 12, windowDurationMins: 10_080 },
+        },
+      },
+    })}\n`,
+  );
+  assert.equal(appServer.windows.length, 2);
+  assert.equal(appServer.windows[0]?.percentUsed, 41);
+
+  // And the fallback, for a CLI too old to have that method.
+  const status = parseReportedUsage(
+    "openai",
+    JSON.stringify({
+      rate_limits: { primary: { used_percent: 55, window_minutes: 300 } },
+    }),
+  );
+  assert.equal(status.windows[0]?.percentUsed, 55);
+});
+
+/**
+ * An account with no subscription quota is not a fault to go looking for.
+ *
+ * A Codex account billed by API key answers the quota question with a
+ * perfectly healthy reply carrying no rate limits, and an empty card sent
+ * three rounds of diagnosis after a break that was never there.
+ */
+test("a Codex reply with no rate limits says why rather than showing nothing", () => {
+  const report = parseReportedUsage("openai", JSON.stringify({ result: {} }));
+  assert.deepEqual(report.windows, []);
+  assert.match(String(report.unavailableReason), /API key/u);
+
+  const silent = parseReportedUsage("openai", "");
+  assert.match(String(silent.unavailableReason), /reported nothing/u);
+
+  // And a CLI that complained instead of replying is quoted rather than
+  // diagnosed. Saying "API key" about this blamed a healthy account's billing
+  // for a CLI too old to have the method that was asked.
+  const complaint = parseReportedUsage(
+    "openai",
+    "error: unrecognized subcommand 'app-server'",
+  );
+  assert.doesNotMatch(String(complaint.unavailableReason), /API key/u);
+  assert.match(String(complaint.unavailableReason), /unrecognized subcommand/u);
+});
+
+/**
+ * Cursor publishes no quota, so the machine reports the one fact its status
+ * view does carry: which account is signed in there. That is what somebody is
+ * actually checking when they open this card, and it is a reading rather than
+ * a number invented to fill the space.
+ */
+test("Cursor reports the signed-in account, and no invented quota", () => {
+  const report = parseReportedUsage(
+    "cursor",
+    ["Cursor Agent CLI 2026.4.1", "Logged in as: dev@example.com", "Plan: pro"].join("\n"),
+  );
+  assert.deepEqual(report.windows, []);
+  assert.match(String(report.unavailableReason), /dev@example\.com/u);
+  assert.match(String(report.unavailableReason), /no usage figure/u);
+
+  // An unrecognised status view is reported as no account, not guessed at.
+  const unknown = parseReportedUsage("cursor", "Cursor Agent CLI 2026.4.1");
+  assert.equal(parseCursorAccount("Cursor Agent CLI 2026.4.1"), undefined);
+  assert.match(String(unknown.unavailableReason), /no quota to show/u);
+});
+
+/**
+ * And a reading beats the per-vendor answer this process would otherwise
+ * give. Cursor is the one that proves it: the reasoning used to return before
+ * the kept reading was even consulted, so a machine could report and the card
+ * would still say Cursor usage is not reported.
+ */
+test("a machine reading is preferred for every vendor, not only the two we can run", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: async () => {
+      throw new Error("nothing runs here");
+    },
+  });
+  await service.reportUsage({
+    userId: "u1",
+    provider: "cursor",
+    raw: "Logged in as: dev@example.com",
+  });
+
+  const shown = await service.usage({ userId: "u1", provider: "cursor" });
+  assert.match(String(shown.unavailableReason), /dev@example\.com/u);
+  assert.ok(shown.asOf !== undefined);
+
+  // Nobody has reported for this one, so it still says the plain thing.
+  const unreported = await service.usage({ userId: "u2", provider: "cursor" });
+  assert.equal(unreported.unavailableReason, "Cursor usage not reported.");
 });

@@ -16,7 +16,11 @@ import {
   type CanonicalRepository,
   type ProcessOutput,
 } from "@coord/repository-service";
-import { AGENT_CALL_SIGNS, type CanonicalVersion } from "@coord/shared-types";
+import {
+  AGENT_CALL_SIGNS,
+  deriveCallSign,
+  type CanonicalVersion,
+} from "@coord/shared-types";
 import {
   GitWorktreeWorkspaceManager,
   supportedCredentialKinds,
@@ -1015,6 +1019,100 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
           ? "This account bills per API key, which has no subscription limit to report a percentage of."
           : "The claude CLI reported no usage percentage. That is expected unless the account is on a subscription with limits.",
       };
+}
+
+/**
+ * Turns what a machine reported into a usage card.
+ *
+ * The desktop runs the vendor's own usage command and sends back exactly what
+ * it printed, so this is the same parsing the control plane already does when
+ * it runs those commands itself — the same functions, in the same order —
+ * only fed from the machine that actually holds the login. That is what makes
+ * a figure possible without a second sign-in: nothing has to be stored here
+ * for the number to be about the right account.
+ *
+ * Exported for tests.
+ */
+export function parseReportedUsage(
+  provider: ProviderId,
+  raw: string,
+): ProviderUsageReport {
+  if (provider === "anthropic") {
+    return parseClaudeUsage(raw);
+  }
+  if (provider === "openai") {
+    // The order the machine tried them in, so whichever one answered is the
+    // one read. A reading that parses at all is the answer; the reasons below
+    // are for a reading that parses as nothing.
+    const parsed =
+      parseCodexAppServerRateLimits(raw) ??
+      parseCodexStatusRateLimits(raw) ??
+      parseCodexRateLimits(raw);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+    // A reply is the only thing that supports the API-key reading, so that is
+    // the only thing it is said about. Said of anything that failed to parse,
+    // it blamed a healthy account's billing for a CLI that had answered with
+    // a complaint — which is the wrong diagnosis handed out with confidence.
+    const replied = /"(?:result|rate_?[lL]imits)"/u.test(raw);
+    return {
+      source: PROVIDER_NAMES.openai,
+      windows: [],
+      unavailableReason: replied
+        ? "The Codex CLI on this machine answered without any rate limits, " +
+          "which is what an account billed by API key returns — that usage " +
+          "is reported in the OpenAI dashboard rather than here."
+        : raw.trim() === ""
+          ? "The Codex CLI on this machine reported nothing when asked for " +
+            "its quota."
+          : // Its own words, because they name the problem better than any
+            // guess made from here can.
+            `The Codex CLI on this machine did not report a quota. It said: ${
+              raw.trim().split("\n")[0]?.slice(0, 200) ?? ""
+            }`,
+    };
+  }
+  if (provider === "cursor") {
+    // Cursor publishes no quota at all: its status view reports account
+    // facts. Rather than a card that reads as a failure forever, the account
+    // it is signed in as is worth saying, because that is the fact somebody
+    // is actually checking when they open this.
+    const account = parseCursorAccount(raw);
+    return {
+      source: PROVIDER_NAMES.cursor,
+      windows: [],
+      unavailableReason:
+        account === undefined
+          ? "Cursor publishes no usage figure, so there is no quota to show."
+          : `Signed in as ${account} on this machine. Cursor publishes no ` +
+            "usage figure, so there is no quota to show.",
+    };
+  }
+  return {
+    source: PROVIDER_NAMES[provider],
+    windows: [],
+    unavailableReason: `No usage reading is understood for ${PROVIDER_NAMES[provider]}.`,
+  };
+}
+
+/**
+ * Pulls the signed-in account out of `cursor-agent status`.
+ *
+ * Deliberately only an email or a `Logged in as` line: the rest of that view
+ * is version and path detail that says nothing about whether the login works.
+ * Nothing is inferred when neither appears — an unrecognised status view is
+ * reported as no account rather than as a guess at one.
+ */
+export function parseCursorAccount(raw: string): string | undefined {
+  const labelled = /^\s*(?:logged in as|signed in as|account|email)\s*[:\-]?\s*(\S+@\S+\.\S+)/imu.exec(
+    raw,
+  );
+  if (labelled?.[1] !== undefined) {
+    return labelled[1];
+  }
+  const email = /[\w.+-]+@[\w-]+\.[\w.-]+/u.exec(raw);
+  return email?.[0];
 }
 
 /** Real `--effort` values the Claude CLI accepts. */
@@ -2364,10 +2462,10 @@ export class ProviderChatService {
         }
       }
     }
-    const free = AGENT_CALL_SIGNS.filter(
-      (sign) => !taken.has(sign.toLowerCase()),
-    );
-    const sign = free[Math.floor(Math.random() * free.length)];
+    // Derived from the agent's own identity rather than drawn, so the same
+    // account gets the same name on a deployment that has forgotten every
+    // name it ever handed out. See `deriveCallSign`.
+    const sign = deriveCallSign(userId, provider, taken);
     if (sign === undefined) {
       return undefined;
     }
@@ -2587,14 +2685,7 @@ export class ProviderChatService {
     provider: ProviderId;
     raw: string;
   }): Promise<ProviderUsageReport> {
-    const report =
-      input.provider === "anthropic"
-        ? parseClaudeUsage(input.raw)
-        : {
-            windows: [],
-            unavailableReason:
-              `No usage reading is understood for ${PROVIDER_NAMES[input.provider]}.`,
-          };
+    const report = parseReportedUsage(input.provider, input.raw);
     this.reportedUsage.set(`${input.userId}:${input.provider}`, {
       at: new Date().toISOString(),
       report,
@@ -2637,6 +2728,25 @@ export class ProviderChatService {
       void withheld;
       return report;
     }
+    // What the machine itself last said, which beats anything this process can
+    // work out. Asking here means running the vendor CLI on the control plane,
+    // and without a credential of the caller's that lands on the container's
+    // own login — the operator's account, reporting the operator's quota, as
+    // an answer to a question about somebody else's. A reading from the
+    // machine that holds the login is both cheaper and the only one that is
+    // actually about the right account.
+    //
+    // Consulted before the per-vendor answers below, and for every vendor
+    // rather than the two this process can run: a machine that reported
+    // something has answered, and the reasons below exist for the case where
+    // nobody has.
+    const reported =
+      input.userId === undefined
+        ? undefined
+        : this.reportedUsage.get(`${input.userId}:${input.provider}`);
+    if (reported !== undefined) {
+      return { ...reported.report, asOf: reported.at };
+    }
     if (input.provider === "cursor") {
       // Cursor's CLI publishes no subscription figure: asking it produced a
       // card of account facts rather than a quota, so the honest answer is
@@ -2654,20 +2764,6 @@ export class ProviderChatService {
         unavailableReason:
           "No usage figures are available for this provider.",
       };
-    }
-    // What the machine itself last said, which beats anything this process can
-    // work out. Asking here means running the vendor CLI on the control plane,
-    // and without a credential of the caller's that lands on the container's
-    // own login — the operator's account, reporting the operator's quota, as
-    // an answer to a question about somebody else's. A reading from the
-    // machine that holds the login is both cheaper and the only one that is
-    // actually about the right account.
-    const reported =
-      input.userId === undefined
-        ? undefined
-        : this.reportedUsage.get(`${input.userId}:${input.provider}`);
-    if (reported !== undefined) {
-      return { ...reported.report, asOf: reported.at };
     }
     // Caller and provider both, so one person's figures are never handed to
     // the next person who asks. "host" stands for a caller with no credential
@@ -5008,6 +5104,30 @@ export class ProviderChatService {
         // vanishes, pointed the other way.
         await this.forgetCallSign(input.userId, input.provider);
       } else {
+        // Nobody else's name.
+        //
+        // A mention resolves by name and dispatches to *everyone* it matches,
+        // so two agents sharing one makes a single @mention start two runs on
+        // two accounts, and the second reply arrives from an agent the sender
+        // never addressed. Deriving the default avoided that among defaults;
+        // renaming went straight past it, because a typed name never consults
+        // the taken set at all.
+        //
+        // Compared case-insensitively, because that is how a mention matches
+        // and how a person reads a name.
+        const clash = (await this.storedCallSigns()).find(
+          (entry) =>
+            entry.callSign.trim().toLowerCase() === trimmed.toLowerCase() &&
+            !(entry.userId === input.userId && entry.provider === input.provider),
+        );
+        if (clash !== undefined) {
+          throw new ProviderChatError(
+            409,
+            "call_sign_taken",
+            `Another agent here is already called ${clash.callSign}. ` +
+              "Two agents with one name both answer to it — pick another.",
+          );
+        }
         settings.callSign = trimmed;
         await this.rememberCallSign(input.userId, input.provider, trimmed);
       }

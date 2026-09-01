@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AGENT_CALL_SIGNS,
+  deriveCallSign,
   rankTouchedFiles,
   arbitrationFiles,
   arbitrationSymbols,
@@ -916,4 +918,91 @@ test("bounded output keeps the end, which is where a failure says why", () => {
   assert.match(bounded, /earlier characters dropped/u);
   // Short output is left exactly alone.
   assert.equal(boundCommandOutput("fine"), "fine");
+});
+
+/**
+ * An agent's name is how a person addresses it, so a name that changes is a
+ * name that stops working. Both ends used to draw one at random and store it,
+ * which made the name a property of the *storage* rather than of the agent —
+ * and every way the storage could be lost was a way the name could change: a
+ * disconnect (which clears the record), the reconnect after it, a control
+ * plane restarted onto a filesystem that did not outlive the container.
+ */
+test("an agent's name is derived from its identity, so it cannot drift", () => {
+  const first = deriveCallSign("user_nathan", "anthropic");
+  assert.notEqual(first, undefined);
+  // The property that matters, stated as the loop it replaces: asking again,
+  // in another process, after the record is gone, gives the same answer.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    assert.equal(deriveCallSign("user_nathan", "anthropic"), first);
+  }
+  // Different agent, different name — the vendor is part of the identity, so
+  // one person's two agents are two people in the room.
+  assert.notEqual(deriveCallSign("user_nathan", "openai"), first);
+  assert.notEqual(deriveCallSign("user_someone_else", "anthropic"), first);
+});
+
+test("a name already taken is resolved the same way every time", () => {
+  const wanted = deriveCallSign("user_nathan", "anthropic") as string;
+  const taken = new Set([wanted]);
+  const second = deriveCallSign("user_nathan", "anthropic", taken);
+  assert.notEqual(second, wanted);
+  assert.equal(deriveCallSign("user_nathan", "anthropic", taken), second);
+  // Case is not identity: a set holding "athena" still claims "Athena".
+  assert.notEqual(
+    deriveCallSign("user_nathan", "anthropic", new Set([wanted.toLowerCase()])),
+    wanted,
+  );
+  // An exhausted pantheon is undefined rather than a collision, which is the
+  // caller's cue to fall back to the vendor label.
+  assert.equal(
+    deriveCallSign("u", "p", new Set(AGENT_CALL_SIGNS)),
+    undefined,
+  );
+});
+
+/**
+ * Order must not be identity. Walking the list made every deployment produce
+ * Zeus, then Hera, then Poseidon — so the name said which account connected
+ * first and nothing else.
+ */
+test("names spread across the whole list rather than clustering at its head", () => {
+  const seen = new Set<string>();
+  for (let index = 0; index < 3_000; index += 1) {
+    const name = deriveCallSign(`user_${String(index)}`, "anthropic");
+    if (name !== undefined) {
+      seen.add(name);
+    }
+  }
+  assert.equal(seen.size, AGENT_CALL_SIGNS.length);
+});
+
+/**
+ * Two agents in one room must not be named after the same god.
+ *
+ * The list carried the Roman counterparts beside the Greek — Jupiter beside
+ * Zeus, Proserpina beside Persephone — which is twenty pairs of synonyms, and
+ * it produced exactly the confusion it looks like it would: somebody
+ * @mentioned Proserpina and read Persephone's reply as the wrong agent
+ * answering.
+ */
+test("no two call signs are the same deity under two spellings", () => {
+  const synonyms = [
+    ["Zeus", "Jupiter"], ["Hera", "Juno"], ["Poseidon", "Neptune"],
+    ["Demeter", "Ceres"], ["Athena", "Minerva"], ["Ares", "Mars"],
+    ["Aphrodite", "Venus"], ["Hephaestus", "Vulcan"], ["Hermes", "Mercury"],
+    ["Hestia", "Vesta"], ["Dionysus", "Bacchus"], ["Hades", "Pluto"],
+    ["Persephone", "Proserpina"], ["Cronus", "Saturn"], ["Rhea", "Ops"],
+    ["Helios", "Sol"], ["Selene", "Luna"], ["Eos", "Aurora"],
+    ["Nike", "Victoria"], ["Tyche", "Fortuna"], ["Artemis", "Diana"],
+  ];
+  const names = new Set<string>(AGENT_CALL_SIGNS);
+  const both = synonyms.filter(([greek, roman]) =>
+    names.has(greek as string) && names.has(roman as string),
+  );
+  assert.deepEqual(both, [], "these pairs name one god twice");
+
+  // And no plain duplicates either, in any casing.
+  const lower = AGENT_CALL_SIGNS.map((name) => name.toLowerCase());
+  assert.equal(new Set(lower).size, lower.length);
 });
