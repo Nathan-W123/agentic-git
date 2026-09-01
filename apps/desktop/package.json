@@ -1,6 +1,6 @@
 {
   "name": "@coord/desktop",
-  "version": "0.5.0",
+  "version": "0.5.3",
   "private": true,
   "description": "Kumi as a desktop app: a window onto your deployment, signed in through your browser.",
   "author": "Kumi",
