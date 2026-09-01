@@ -1091,6 +1091,38 @@ async function runProjectLoads(loads, project, organization) {
 }
 
 /**
+ * Says out loud when a refresh moved somebody.
+ *
+ * Three lists are refetched on every poll — organizations, projects,
+ * repositories — and each has a rule that reads "if what you were looking at
+ * is not in this list, go to the first thing that is". The rules are right for
+ * a first load and for a workspace somebody has genuinely lost access to. They
+ * are also indistinguishable, from inside, from a list that came back short
+ * for a reason that has nothing to do with the reader: a project that resolved
+ * a moment late, a membership read that raced, a response that arrived
+ * partial. When that happens the screen switches workspace under somebody
+ * mid-sentence, and from outside it looks like the page reloaded and landed
+ * somewhere else.
+ *
+ * This does not stop it. It names it, because the alternative is guessing:
+ * "the workspace list came back without the one you were in" is a fact one
+ * console line can establish, and no amount of reading the code can.
+ *
+ * Deliberately `console.warn` and not a toast. It is a diagnostic for the two
+ * people who can act on it, not an interruption for everyone else.
+ */
+function relocated(what, from, to) {
+  if (!from) {
+    return;
+  }
+  console.warn(
+    `[kumi] the ${what} list came back without ${from}; ` +
+      `moving to ${to ?? "nothing"}. If you were reading something, this is ` +
+      `what moved you.`,
+  );
+}
+
+/**
  * Loads the context a screen can be drawn from.
  *
  * `defer` splits the project fan-out in two: with it, only the loads a first
@@ -1128,6 +1160,7 @@ export async function loadContext({ defer = false } = {}) {
 
   state.organizations = organizations.organizations ?? [];
   if (!state.organizations.some((org) => org.id === state.organizationId)) {
+    relocated("organization", state.organizationId, state.organizations[0]?.id);
     state.organizationId = state.organizations[0]?.id ?? "";
   }
   persist("ag.org", state.organizationId);
@@ -1146,6 +1179,7 @@ export async function loadContext({ defer = false } = {}) {
   }
 
   if (!state.projects.some((project) => project.id === state.projectId)) {
+    relocated("project", state.projectId, state.projects[0]?.id);
     state.projectId = state.projects[0]?.id ?? "";
   }
   persist("ag.project", state.projectId);
@@ -1176,6 +1210,7 @@ export async function loadContext({ defer = false } = {}) {
     state.repositoryId &&
     !state.repositories.some((repo) => repo.id === state.repositoryId)
   ) {
+    relocated("workspace", state.repositoryId, state.repositories[0]?.id);
     state.repositoryId = "";
   }
   state.loaded = true;

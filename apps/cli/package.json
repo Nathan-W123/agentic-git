@@ -22,6 +22,10 @@
       "types": "./dist/worker-operations.d.ts",
       "default": "./dist/worker-operations.js"
     },
+    "./remote-holders": {
+      "types": "./dist/remote-holders.d.ts",
+      "default": "./dist/remote-holders.js"
+    },
     "./recovery": {
       "types": "./dist/recovery.d.ts",
       "default": "./dist/recovery.js"

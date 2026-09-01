@@ -5,6 +5,7 @@ import {
   type NamedRange,
 } from "./hunks.js";
 import {
+  claimCoversPath,
   createId,
   deferredFilePaths,
   planAdmissionPartial,
@@ -135,7 +136,18 @@ export function splitChangeSet(
       deferredPatches.push(patch);
       continue;
     }
-    if (!granted.has(patch.path)) {
+    // A coordinator-issued claim approves paths no declaration names — a
+    // blanket claim approves the repository, a frozen one the directories its
+    // holder was already working in — and both were decided against every
+    // other holder before they were issued. `assertChangeSetWithinPlan` has
+    // always read them that way; this did not, so a claimed task's own writes
+    // were bucketed as escapes and its result refused.
+    //
+    // It went unnoticed while claims were granted only in-process, where the
+    // result never reaches this split. The moment a remote worker could hold
+    // one, every claimed task failed at integration for writing the files it
+    // had been given.
+    if (!granted.has(patch.path) && !claimCoversPath(plan, patch.path)) {
       escaped.push(patch.path);
       continue;
     }

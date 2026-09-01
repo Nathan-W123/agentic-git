@@ -1,7 +1,13 @@
 # Blanket claim over the worker protocol
 
-A design for giving a solo agent back its repository claim after execution moved
-onto people's own machines.
+How a solo agent got its repository claim back after execution moved onto
+people's own machines.
+
+**Shipped.** All four phases are implemented; what follows is the design as
+built, and the "Phases" section near the end records what each one turned out
+to involve. Two things differ from the plan, both noted in place: the
+one-worker condition came off in the same change rather than a later one, and
+`observe` needed a freshness rule the in-process version never did.
 
 ## What is actually missing
 
@@ -160,6 +166,39 @@ stays blanket, which is recoverable, and the force-admit bound in `admit` is wha
 stops anybody waiting forever.
 
 **Phase 4 — remove the tightened condition** from Phase 1, once narrowing works.
+
+---
+
+## What building it changed
+
+**`observe` needed a freshness rule.** In-process the worktree is read
+synchronously at the moment of the freeze, so the observation is exact by
+construction. A reported one is not: a freeze hands the arrival everything the
+holder is *not* standing on, so a reading older than the holder's last write is
+not a weaker observation, it is a wrong one. Two things close that. The
+declaration answer carries a reading taken at the moment the agent was paused —
+exact, like the local one. And a reading with no answer behind it is only used
+while it is fresh: past twenty-five seconds it counts as no observation at all,
+the freeze raises, and the arrival retries. To keep that window small a holder
+is told to beat every ten seconds while it holds a claim, rather than every
+sixty.
+
+**A bug in `splitChangeSet`, found by the first claimed run.** Every patch was
+bucketed against `expectedFiles` alone, so a claimed task's own writes came back
+as scope escapes and its result was refused at integration.
+`assertChangeSetWithinPlan` had always read a claim as approving what it covers;
+the split had not. It went unnoticed because an in-process result never reaches
+that split.
+
+**The worker has to report the plan it ended with, not the one it started
+with.** A claim narrowed mid-run leaves the frozen plan as the contract on the
+lease, and a run that reported its original blanket claim would be claiming
+resources the admitted plan no longer covers.
+
+**The declaration prompt is shared rather than restated.** Two askers with two
+promptings would get two different kinds of answer to a question whose whole
+value is that it is answered the same way, so `BLANKET_DECLARATION_REASON` is
+exported and both use it.
 
 ## Risks
 

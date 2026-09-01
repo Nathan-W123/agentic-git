@@ -30,6 +30,10 @@ import {
   withModelOverride,
 } from "@coord/cli/commands";
 import type { AgentConfig, CoordinatorProject } from "@coord/cli/project";
+// The exact words an in-process holder is asked with. Shared rather than
+// restated: two askers with two promptings would get two different kinds of
+// answer to a question whose whole value is that it is answered the same way.
+import { BLANKET_DECLARATION_REASON } from "@coord/coordinator";
 import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import { GitClient } from "@coord/repository-service";
 import {
@@ -51,7 +55,13 @@ import {
   type WorkspaceSandbox,
 } from "@coord/workspace-manager";
 
-import { LeaseLostError, WorkerClient, isTransportFailure } from "./client.js";
+import {
+  LeaseLostError,
+  WorkerClient,
+  isTransportFailure,
+  type HeartbeatReply,
+  type WorkingChange,
+} from "./client.js";
 import { signalHost } from "./host-signal.js";
 import type { WorkNudge } from "./nudge.js";
 import {
@@ -402,6 +412,36 @@ export class Worker {
    */
   private laps: Laps | undefined;
 
+  /**
+   * The repository claim this machine is currently holding, if it is.
+   *
+   * Kept because both halves of a claim's life happen outside the call that
+   * granted it: the heartbeat reports what has been written under it, and the
+   * heartbeat's reply is where it learns the claim has been narrowed. Cleared
+   * the moment it stops being blanket, which is what stops a narrowed holder
+   * going on reporting as though it still had the repository.
+   */
+  /**
+   * The plan the control plane narrowed this run's claim to, if it did.
+   *
+   * Reported instead of the claim at the end. The result is checked against
+   * the contract on the lease, and after a narrowing that contract is the
+   * frozen plan — a run that reported the blanket claim it started with would
+   * be claiming resources the admitted plan no longer covers, and refused for
+   * it. What the worker reports has to be what the control plane last decided.
+   */
+  private adoptedPlan: AgentPlan | undefined;
+
+  private activeClaim:
+    | {
+        adapter: AgentAdapter;
+        sessionId: string;
+        plan: AgentPlan;
+        workspace: TaskWorkspace;
+        workspaces: WorkspaceManager;
+      }
+    | undefined;
+
   public async runOnce(): Promise<IterationResult> {
     if (this.stopping) {
       return { worked: false };
@@ -485,8 +525,18 @@ export class Worker {
       if (heartbeat !== undefined || leaseLost) {
         return;
       }
-      heartbeat = this.options.client
-        .heartbeat(assignment.lease.id, this.spentSoFar())
+      heartbeat = (async () => {
+        // Only while a claim is held. A run that planned its own scope has
+        // nothing to report and nothing that could be narrowed, so its
+        // heartbeat stays the call it always was.
+        const changes = await this.claimedWorkingChanges();
+        const reply = await this.options.client.heartbeat(
+          assignment.lease.id,
+          this.spentSoFar(),
+          changes,
+        );
+        await this.answerClaimTraffic(assignment, reply);
+      })()
         .catch(async (error) => {
           if (error instanceof LeaseLostError) {
             leaseLost = true;
@@ -573,7 +623,11 @@ export class Worker {
         assignment.lease.id,
         {
           status: "completed",
-          plan: result.plan,
+          // Whatever the control plane last decided this run holds, which is
+          // not always what it started with: a claim narrowed mid-run leaves
+          // the frozen plan as the contract, and reporting the wider one is
+          // reporting resources nobody granted.
+          plan: this.adoptedPlan ?? result.plan,
           changeSet: result.changeSet,
         },
         this.spentSoFar(),
@@ -630,6 +684,8 @@ export class Worker {
       await heartbeat?.catch(() => undefined);
       await this.cancelActiveSession();
       this.activeLease = undefined;
+      this.activeClaim = undefined;
+      this.adoptedPlan = undefined;
       this.activeSession = undefined;
       this.activeCancellation = undefined;
       this.admissionWait = undefined;
@@ -1007,6 +1063,146 @@ export class Worker {
     });
   }
 
+  /**
+   * What this holder has written, for the heartbeat to carry up.
+   *
+   * Answers nothing at all unless a repository claim is actually held, which
+   * is what keeps an ordinary run's heartbeat the call it has always been. A
+   * workspace manager that cannot report changes answers nothing too, and a
+   * holder that reports nothing is one an arrival cannot freeze — so it waits
+   * a retry instead, which is exactly what happens today.
+   */
+  private async claimedWorkingChanges(): Promise<
+    readonly WorkingChange[] | undefined
+  > {
+    const held = this.activeClaim;
+    if (held === undefined) {
+      return undefined;
+    }
+    const list = held.workspaces.listWorkingChanges?.bind(held.workspaces);
+    if (list === undefined) {
+      return undefined;
+    }
+    try {
+      return (await list(held.workspace)).map((change) => ({
+        path: change.path,
+        status:
+          change.status === "added" || change.status === "deleted"
+            ? change.status
+            : "modified",
+      }));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Acts on the two things a heartbeat can bring back about a claim.
+   *
+   * **A narrowed plan.** Somebody arrived and the claim became an ordinary
+   * one. The holder is told, because a holder that is not told goes on
+   * believing it has the repository and goes on telling its agent so — the
+   * same fault the in-process poll exists to prevent, at a distance. Adopting
+   * is the same call that accepted the claim in the first place.
+   *
+   * **An ask.** Somebody is waiting to know what the rest of this work needs,
+   * and the answer is what turns their retry into a run. The agent is paused,
+   * asked, and resumed by the adapter's own replan; the answer is posted on
+   * its own route because it arrives on a model's schedule rather than a
+   * heartbeat's.
+   *
+   * Nothing here may fail the run. A claim that cannot be adopted, an agent
+   * that will not answer, a post that does not land — every one of them leaves
+   * the claim as it was, which is the recoverable state the freeze is designed
+   * around.
+   */
+  private async answerClaimTraffic(
+    assignment: WorkAssignment,
+    reply: HeartbeatReply,
+  ): Promise<void> {
+    const held = this.activeClaim;
+    if (held === undefined) {
+      return;
+    }
+    if (reply.narrowedPlan !== undefined) {
+      this.activeClaim = undefined;
+      this.adoptedPlan = reply.narrowedPlan;
+      await held.adapter
+        .acceptBlanketClaim?.(held.sessionId, reply.narrowedPlan)
+        .catch(() => undefined);
+      await this.options.client
+        .progress(
+          assignment.lease.id,
+          "Another agent arrived, so this run narrowed its claim to the files it is working in.",
+        )
+        .catch(() => undefined);
+      return;
+    }
+    const askId = reply.declareScope?.askId;
+    const claim = held.plan;
+    if (
+      askId === undefined ||
+      held.adapter.requestReplan === undefined ||
+      held.adapter.pause === undefined ||
+      held.adapter.resume === undefined
+    ) {
+      return;
+    }
+    // Paused, asked, resumed — the same three steps the in-process holder
+    // takes, for the same reason: what comes back has to be a statement about
+    // the rest of this task's work, and an agent mid-tool-call cannot make
+    // one. A pause that does not land means no ask, and the claim stays
+    // blanket, which is recoverable.
+    const paused = await held.adapter
+      .pause?.(held.sessionId)
+      .then(() => true)
+      .catch(() => false);
+    if (paused !== true) {
+      await this.options.client.postDeclaration(
+        assignment.lease.id,
+        askId,
+        undefined,
+        (await this.claimedWorkingChanges()) ?? [],
+      );
+      return;
+    }
+    const declaration = await held.adapter
+      .requestReplan(held.sessionId, {
+        taskId: assignment.task.id,
+        previousPlan: claim,
+        canonicalChange: {
+          previousVersion: assignment.canonicalVersion,
+          canonicalVersion: assignment.canonicalVersion,
+          changedFiles: [],
+          changedSymbols: [],
+          changedApis: [],
+          changedSchemas: [],
+          changedConfigKeys: [],
+          changedTests: [],
+          changedServices: [],
+          reason: BLANKET_DECLARATION_REASON,
+        },
+        constraints: [BLANKET_DECLARATION_REASON],
+      })
+      .then((plan) =>
+        plan.expectedFiles.length > 0 && plan.expectedSymbols.length > 0
+          ? { files: [...plan.expectedFiles], symbols: [...plan.expectedSymbols] }
+          : undefined,
+      )
+      .catch(() => undefined);
+    // Resumed whatever the answer was. A holder left paused because nobody
+    // else needed it is a task that never finishes.
+    await held.adapter.resume?.(held.sessionId).catch(() => undefined);
+    // The reading is taken *after* the pause, so it is the exact one — the
+    // only observation of a remote holder that is not up to a heartbeat old.
+    await this.options.client.postDeclaration(
+      assignment.lease.id,
+      askId,
+      declaration,
+      (await this.claimedWorkingChanges()) ?? [],
+    );
+  }
+
   /** Materialises the workspace and gets the agent's plan — no editing yet. */
   private async plan(
     assignment: WorkAssignment,
@@ -1096,7 +1292,26 @@ export class Worker {
     // that says "now do the same for the other file" is unanswerable without
     // the messages before it. Handoff seeding is the coordinator's, and the
     // worker does not run one; this is the part the assignment carries.
-    const context = assignment.task.context?.trim() ?? "";
+    // Asked before the session opens, because half of what it answers belongs
+    // in the prompt that opens it.
+    //
+    // Planning is not one inference. It is an agent reading its way into a
+    // repository a tool call at a time, and most of that reading is a search
+    // for something the control plane has already computed: which files
+    // declare the names the objective uses, and where this repository has
+    // been working lately. The in-process planner has been handed both for as
+    // long as they have existed. A worker was handed neither and started every
+    // plan from nothing — the same shape of gap as the missing claim, one
+    // layer down.
+    const prepared = await this.options.client.claimRepository(
+      assignment.lease.id,
+    );
+    const context = [
+      assignment.task.context?.trim() ?? "",
+      prepared.planningContext ?? "",
+    ]
+      .filter((part) => part !== "")
+      .join("\n\n");
     const session = await adapter.startTask({
       task: {
         id: assignment.task.id,
@@ -1152,6 +1367,50 @@ export class Worker {
     const leaseBase = assignment.canonicalVersion.revision;
     const remembered = this.plans.get(taskId);
     let plan: AgentPlan;
+    // The whole repository, asked for before it is described.
+    //
+    // A task alone in its repository is handed all of it and never asked to
+    // plan: the plan an agent would write here exists so a second task can
+    // arbitrate against it, and where there is no second task the round trip
+    // buys nothing. It is the single largest fixed cost before the first edit
+    // — an agent round trip, minutes rather than seconds.
+    //
+    // The in-process coordinator has done this since blanket claims existed.
+    // A worker never could: its vocabulary had no claim step, so moving
+    // execution onto people's own machines quietly put every desktop task
+    // back through planning. This is that step, and the answer is usually no
+    // — which costs one cheap call and changes nothing.
+    //
+    // Asked only where the adapter can be *told* its scope. An agent that can
+    // only be asked for a plan has nothing to accept, and granting it a claim
+    // it cannot hear about would hold the repository for nobody.
+    const acceptClaim = adapter.acceptBlanketClaim?.bind(adapter);
+    const claimed = prepared.plan;
+    if (claimed !== undefined && acceptClaim !== undefined) {
+      await acceptClaim(session.id, claimed);
+      this.laps?.mark("claim");
+      // Published to the heartbeat, which is the only thing that can report
+      // this holder's writes or hear that its claim has been taken back.
+      this.activeClaim = {
+        adapter,
+        sessionId: session.id,
+        plan: claimed,
+        workspace,
+        workspaces,
+      };
+      // Not remembered in `this.plans`. That cache exists so a task deferred
+      // at admission can amend the plan it already paid for rather than buy a
+      // second one, and a claim was never bought — a task that comes back
+      // here simply asks for the claim again, and is refused if the
+      // repository is no longer free.
+      return {
+        adapter,
+        sessionId: session.id,
+        plan: claimed,
+        workspaceId: workspace.id,
+        workspacePath,
+      };
+    }
     if (remembered !== undefined && remembered.baseRevision === leaseBase) {
       // Same task, same tree: the plan is still exactly what the model would
       // write, so nothing needs asking.
