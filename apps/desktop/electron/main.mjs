@@ -41,6 +41,16 @@ import {
   resolveServer,
   verifyServer,
 } from "../dist/server-address.js";
+// Imported, which it was not. `detectAgents` was called by the handler the
+// dashboard asks "what is installed here" and by the menu that reports it,
+// and was never brought into this module — so both threw ReferenceError on
+// every call, on every launch, since the day the handler was written.
+//
+// Nothing said so. The renderer's `.catch(() => undefined)` turned the throw
+// into "no answer", and the setup that answer gates — the CLI check, the
+// install offer, the sign-in — was skipped in silence. Agents connected,
+// looked connected, and could run nothing.
+import { detectAgents } from "./agents.mjs";
 import { setStayAwake, startWorker, stopWorker } from "./worker.mjs";
 import { readVendorUsage } from "./usage.mjs";
 import {
