@@ -2011,6 +2011,39 @@ test("linking a vendor account asks before it opens a sign-in", async () => {
   assert.match(body, /agent\?\.hasName === true \? agent\.name/u);
 });
 
+/**
+ * The machine half of an agent has to be reachable after connecting, not only
+ * during it.
+ *
+ * `finishLocalSetup` — the install, and the sign-in — ran only as the tail of
+ * connecting, and a connected row has no Connect button, because it is
+ * connected. So an agent whose CLI was never installed, or whose CLI has since
+ * signed out, had no route to either: the row offered a rename, a vendor web
+ * sign-in and a delete, none of which touch the machine. Somebody ended up
+ * with three connected agents, no CLI behind any of them, and nothing on any
+ * screen able to say so.
+ */
+test("a connected agent can have its CLI checked without disconnecting", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const start = app.indexOf("function agentsCard()");
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+
+  // On the connected row, beside the other two — the row that has no Connect.
+  assert.match(body, /data-act="agent-check-cli"/u);
+  const link = body.indexOf('data-act="agent-link-account"');
+  assert.ok(link !== -1 && body.indexOf('data-act="agent-check-cli"') > link);
+  assert.match(app, /void checkLocalCli\(value, render\)/u);
+
+  // The same setup connecting runs, not a second copy of it.
+  assert.match(agents, /export async function checkLocalCli/u);
+  assert.match(agents, /await finishLocalSetup\(providerId, rerender\)/u);
+  // And it says so in a browser rather than doing nothing, because a web page
+  // cannot see the machine and silence is what caused this in the first place.
+  assert.match(agents, /window\.KUMI_INSTALL === undefined/u);
+  assert.match(agents, /Open the Kumi app on the machine/u);
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may

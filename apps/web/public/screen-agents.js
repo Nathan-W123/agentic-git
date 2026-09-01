@@ -469,6 +469,32 @@ const PROVIDER_VENDOR = {
  * only thing that can see the machine; a browser has no business being asked
  * and is left exactly as it was.
  */
+/**
+ * Sorting out the machine, for an agent that already exists.
+ *
+ * `finishLocalSetup` only ever ran as the tail of connecting, so the install
+ * and the sign-in were reachable from exactly one button — and that button is
+ * absent from a connected row, because the row is connected. An agent whose
+ * CLI was never installed, or whose CLI has since signed out, therefore had no
+ * route to either: the row offered a rename, a vendor web sign-in and a
+ * delete, and none of those touch the machine.
+ *
+ * That is how somebody ended up with three connected agents, no CLI behind any
+ * of them, and nothing on any screen able to say so. Same dialog, same
+ * installer, asked for when it is wanted rather than only on the way past.
+ */
+export async function checkLocalCli(providerId, rerender) {
+  if (window.KUMI_INSTALL === undefined) {
+    toast(
+      "Open the Kumi app on the machine that runs this agent — a browser " +
+        "cannot see what is installed there.",
+      "error",
+    );
+    return;
+  }
+  await finishLocalSetup(providerId, rerender);
+}
+
 async function finishLocalSetup(providerId, rerender) {
   const bridge = window.KUMI_INSTALL;
   if (bridge === undefined) {
