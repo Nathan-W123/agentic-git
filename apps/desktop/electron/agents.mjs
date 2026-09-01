@@ -11,6 +11,8 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 
+import { wellKnownBinDirectories } from "./installers.mjs";
+
 /**
  * Vendor CLIs a worker can drive, and what they are called on each platform.
  *
@@ -71,7 +73,21 @@ export async function exists(candidate) {
  * worse than never being offered it.
  */
 export async function detectAgents() {
-  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  // PATH, and then the handful of places these things are actually installed.
+  //
+  // A process's environment is fixed when it starts. Installing a CLI from
+  // inside Kumi puts it in npm's global bin — `%APPDATA%\npm` on Windows —
+  // which the running app's PATH does not mention and will not mention until
+  // it is restarted. So the app installed something, scanned for it, did not
+  // find it, and went on reporting that the machine had no agent: the one
+  // moment in the whole product where it had just done the thing itself.
+  //
+  // Appended rather than prepended. A directory somebody put on their own PATH
+  // is a choice, and it keeps winning.
+  const dirs = [
+    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean),
+    ...wellKnownBinDirectories(),
+  ];
   const agents = {};
   for (const agent of KNOWN_AGENTS) {
     const found = await findOnPath(dirs, agent.commands);

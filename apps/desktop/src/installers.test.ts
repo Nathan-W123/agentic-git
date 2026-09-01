@@ -20,6 +20,10 @@ interface Plan {
 
 interface InstallersModule {
   installPlan: (vendor: unknown) => Plan | undefined;
+  nodeInstallPlan: (
+    platform?: string,
+  ) => { command: string; args: string[] } | undefined;
+  wellKnownBinDirectories: (platform?: string) => string[];
   installArgv: (
     vendor: unknown,
     platform: string,
@@ -208,4 +212,57 @@ test("the argv installs the package the plan says it installs", async () => {
       );
     }
   }
+});
+
+/**
+ * "npm is not installed on this machine" was a true sentence and a dead end.
+ *
+ * Two of the three vendor CLIs are npm packages, so a machine without Node
+ * cannot install them — and what the app did about that was hand somebody who
+ * came here to connect an agent a second piece of homework, on a different
+ * website, with no way back into the flow they were in. It knows the command.
+ * It offers to run it.
+ */
+test("Node itself is something the app can install, on the platforms where that is honest", async () => {
+  const { nodeInstallPlan } = await load();
+
+  // Windows through winget — Microsoft's own package manager, shipped with the
+  // OS, installing the Node Foundation's own published package. Not a URL this
+  // app invented and not a binary it chose.
+  const windows = nodeInstallPlan("win32");
+  assert.match(String(windows?.command), /System32.cmd\.exe$/u);
+  assert.ok(windows?.args.includes("winget"));
+  assert.ok(windows?.args.includes("OpenJS.NodeJS.LTS"));
+  // Non-interactive, or it waits for a keystroke behind a window with no
+  // terminal in it.
+  for (const flag of ["--accept-package-agreements", "--accept-source-agreements"]) {
+    assert.ok(windows?.args.includes(flag), `winget needs ${flag}`);
+  }
+
+  assert.equal(nodeInstallPlan("darwin")?.command, "brew");
+
+  // And Linux is deliberately absent rather than guessed at: the honest answer
+  // spans a dozen package managers. The caller says so plainly instead.
+  assert.equal(nodeInstallPlan("linux"), undefined);
+});
+
+/**
+ * A process's environment is fixed when it starts.
+ *
+ * Installing Node writes its directory into the registry's PATH on Windows;
+ * installing a CLI puts it in npm's global bin. Neither reaches a Kumi that
+ * was already running — so the app installed something, scanned for it, did
+ * not find it, and reported that the machine had no agent. At the one moment
+ * in the product where it had just done the thing itself.
+ */
+test("the standard places Node and npm's globals live are searched too", async () => {
+  const { wellKnownBinDirectories } = await load();
+
+  const windows = wellKnownBinDirectories("win32").join("|");
+  assert.match(windows, /nodejs/u, "Node's own directory");
+  assert.match(windows, /npm/u, "and where npm puts what it installs globally");
+
+  const unix = wellKnownBinDirectories("darwin").join("|");
+  assert.match(unix, /homebrew/u);
+  assert.match(unix, /usr.local.bin/u);
 });

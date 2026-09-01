@@ -58,8 +58,10 @@ import {
   INSTALLABLE_VENDORS,
   VENDOR_LABELS,
   installPlan,
+  nodeInstallPlan,
   openSignIn,
   runInstall,
+  runNodeInstall,
 } from "./installers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -428,6 +430,116 @@ let offeredInstall = false;
  * immediately: `runInstall`'s own handler stops and restarts the worker, so
  * the scan runs again and the machine starts advertising what it just got.
  */
+/**
+ * The dependency under the dependency, offered rather than assigned.
+ *
+ * Two of the three vendor CLIs are npm packages, so a machine without Node
+ * cannot install them — and what the app used to do about that was print a
+ * sentence: "npm is not installed on this machine. Install Node.js first,
+ * then try again." True, and a dead end. Somebody who came here to connect an
+ * agent was handed a second piece of homework on a different website, in the
+ * middle of setting up something else, with no way back into the flow they
+ * were in except to remember it later.
+ *
+ * The app knows the command. So it offers to run it, in the window already
+ * open, and then does the thing that was interrupted — which is the part that
+ * makes this a fix rather than a shortcut. A retry the person has to start
+ * themselves is the same dead end with an extra step in it.
+ *
+ * Returns whatever the vendor install then said, or the original failure if
+ * Node was declined or could not be installed.
+ */
+async function installNodeThenRetry(surface, vendor, label, failure) {
+  const plan = nodeInstallPlan();
+  if (plan === undefined) {
+    return failure;
+  }
+  const agreed = await surface.ask({
+    heading: "Node.js is needed first",
+    body:
+      `${failure.detail ?? ""}\n\nKumi can install it now, and then carry on ` +
+      `installing ${label}.`,
+    buttons: [`Install Node.js and ${label}`, "Not now"],
+  });
+  if (!agreed) {
+    return failure;
+  }
+  surface.progress({ heading: "Installing Node.js…", body: plan.command });
+  const node = await runNodeInstall((chunk) => surface.log(chunk));
+  if (!node.ok) {
+    return {
+      ok: false,
+      detail:
+        `${node.detail ?? "Node.js could not be installed."}\n\n` +
+        "Install Node.js from nodejs.org and press the install again — Kumi " +
+        "picks up a new Node without being restarted.",
+    };
+  }
+  // Straight on, without asking a second time: they already said yes to both
+  // in one button. `runInstall` looks for npm in the standard places as well
+  // as on PATH, which is what lets this work in the session that installed it
+  // — nothing a Windows installer writes to the registry reaches a process
+  // that is already running.
+  surface.progress({
+    heading: `Installing ${label}…`,
+    body: installPlan(vendor)?.command ?? "",
+  });
+  return await runInstall(vendor, (chunk) => surface.log(chunk));
+}
+
+/**
+ * The dialog conversation, as a surface {@link installNodeThenRetry} can drive.
+ *
+ * One window throughout: the offer that failed becomes the question about
+ * Node, becomes two installs, becomes the answer. A second modal for the
+ * prerequisite would be a second thing to dismiss on the way to the thing
+ * somebody actually asked for.
+ */
+function dialogSurface(conversation) {
+  return {
+    async ask(spec) {
+      conversation.update({ kind: "question", title: "Kumi", ...spec, cancelId: 1, log: "" });
+      return (await conversation.chosen) === 0;
+    },
+    progress(spec) {
+      conversation.update({ kind: "progress", ...spec, buttons: [], log: "" });
+    },
+    log: (chunk) => conversation.log(chunk),
+  };
+}
+
+/**
+ * The dashboard's install, as the same surface.
+ *
+ * The page draws its own progress and its own log, so the only thing this
+ * needs a window for is the question — installing Node is a change to the
+ * machine, and a click on "Install Codex" is not consent to it. The headings
+ * go into the page's output instead, where its log already is.
+ */
+function pageSurface(sender) {
+  const say = (text) => {
+    if (!sender.isDestroyed()) {
+      sender.send("kumi:install-output", text);
+    }
+  };
+  return {
+    async ask(spec) {
+      return (
+        (await askDialog({
+          kind: "question",
+          title: "Kumi",
+          cancelId: 1,
+          ...spec,
+        })) === 0
+      );
+    },
+    progress(spec) {
+      say(`\n${spec.heading}\n${spec.body ?? ""}\n`);
+    },
+    log: say,
+  };
+}
+
 async function offerToInstallACli() {
   if (offeredInstall || session === undefined || here === undefined) {
     return;
@@ -471,7 +583,10 @@ async function offerToInstallACli() {
   // commands rather than a second copy that drifts — but relayed now, into the
   // window that asked. These commands fail for ordinary, legible reasons, and
   // the vendor's own words are what say which.
-  const result = await runInstall(vendor, (chunk) => conversation.log(chunk));
+  let result = await runInstall(vendor, (chunk) => conversation.log(chunk));
+  if (result.reason === "no-node") {
+    result = await installNodeThenRetry(dialogSurface(conversation), vendor, label, result);
+  }
   if (!result.ok) {
     conversation.update({
       kind: "error",
@@ -646,14 +761,21 @@ async function start() {
 ipcMain.handle("kumi:install-plan", (_event, vendor) => installPlan(vendor));
 
 ipcMain.handle("kumi:install-run", async (event, vendor) => {
-  const result = await runInstall(vendor, (line) => {
-    // Relayed to the window that asked, as it arrives. These commands fail for
-    // ordinary legible reasons and the vendor's own words say which; a spinner
-    // that ends in "failed" would put the reader back where they began.
-    if (!event.sender.isDestroyed()) {
-      event.sender.send("kumi:install-output", line);
-    }
-  });
+  // Relayed to the window that asked, as it arrives. These commands fail for
+  // ordinary legible reasons and the vendor's own words say which; a spinner
+  // that ends in "failed" would put the reader back where they began.
+  const surface = pageSurface(event.sender);
+  let result = await runInstall(vendor, surface.log);
+  if (result.reason === "no-node") {
+    // The same offer the app makes when it discovers the gap itself, so the
+    // two ways into an install do not disagree about what happens next.
+    result = await installNodeThenRetry(
+      surface,
+      vendor,
+      VENDOR_LABELS[vendor] ?? String(vendor),
+      result,
+    );
+  }
   if (result.ok && here !== undefined && session !== undefined) {
     // The scan deciding which agents this machine advertises runs at worker
     // start, so a CLI installed afterwards stays invisible until the worker
