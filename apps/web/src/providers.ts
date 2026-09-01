@@ -5113,13 +5113,31 @@ export class ProviderChatService {
     visibility?: "personal" | "org";
   }): Promise<ProviderStatus[]> {
     const file = await this.readConnections();
-    const connection = file[input.userId]?.[input.provider];
+    let connection = file[input.userId]?.[input.provider];
     if (connection === undefined) {
-      throw new ProviderChatError(
-        409,
-        "not_connected",
-        `Connect ${PROVIDER_NAMES[input.provider]} before changing its settings`,
+      // An agent exists without a credential, and its settings are still its
+      // settings. This asked the old question — is a secret stored — and so
+      // refused every change to an agent created by the local flow: its model,
+      // its reasoning level, its name, and the visibility deciding whether
+      // teammates may task it.
+      //
+      // The connections file holds *settings*; the credential store holds
+      // credentials. They were always separate, so a settings row with no
+      // credential behind it is an ordinary row.
+      const exists = (await this.storedCallSigns()).some(
+        (entry) =>
+          entry.userId === input.userId && entry.provider === input.provider,
       );
+      if (!exists) {
+        throw new ProviderChatError(
+          409,
+          "not_connected",
+          `Connect ${PROVIDER_NAMES[input.provider]} before changing its settings`,
+        );
+      }
+      const byProvider = (file[input.userId] ??= {});
+      connection = { kind: "account", createdAt: new Date().toISOString() };
+      byProvider[input.provider] = connection;
     }
     const options = await this.options({ provider: input.provider });
     // Partial updates merge: changing the effort alone must not drop the
@@ -5254,11 +5272,23 @@ export class ProviderChatService {
       try {
         await store.setVisibility(input.userId, vendor, input.visibility);
       } catch (error) {
-        throw new ProviderChatError(
-          409,
-          "not_connected",
-          error instanceof Error ? error.message : String(error),
+        // No credential to carry it, which is the ordinary state of an agent
+        // that runs on somebody's own machine. The agent record is where its
+        // visibility lives then, and the settings route writes it there —
+        // and `describeProviders` reads it back, which is the half this
+        // lacked the first time: the setting saved and every read still
+        // said personal.
+        const owned = (await this.storedCallSigns()).some(
+          (entry) =>
+            entry.userId === input.userId && entry.provider === input.provider,
         );
+        if (!owned) {
+          throw new ProviderChatError(
+            409,
+            "not_connected",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
     }
     return await this.list({ userId: input.userId, systemAdmin: true });

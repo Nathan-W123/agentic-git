@@ -12295,15 +12295,6 @@ export class ApiGateway {
 
       if (path === `${API_PREFIX}/chat/providers` && method === "GET") {
         const listed = await performChat(() => chatOperations.list(identity));
-        // Whether an agent for this vendor exists at all, which is no longer
-        // the same question as whether a credential is stored. The settings
-        // screen needs both: one decides "Connect" from "Link for usage", and
-        // the credential alone can no longer answer it.
-        const owned = new Set(
-          (await this.options.store.listAgentCallSigns().catch((): [] => []))
-            .filter((sign) => sign.userId === principal.user.id)
-            .map((sign) => sign.provider),
-        );
         this.sendJson(response, 200, {
           // Deployment-wide, and sent here because this is the response the
           // Settings screen loads. It also arrives on a channel's roster, but
@@ -12311,20 +12302,7 @@ export class ApiGateway {
           // it was, the screen fell back to "false" and drew the connect
           // button for agents that already existed.
           localAgentsOnly: localAgentsOnly(),
-          providers: (Array.isArray(listed) ? listed : []).map((entry) => {
-            // `ownCredential`, not `mine`: `mine` is the browser's word for
-            // this, computed in `myAgents`, and testing for it here was
-            // testing a field the provider list has never carried. Harmless
-            // only because the call-sign lookup answers the same question for
-            // every connection made since agents got names.
-            const provider = entry as { id?: unknown; ownCredential?: unknown };
-            return {
-              ...provider,
-              exists:
-                provider.ownCredential !== undefined ||
-                (typeof provider.id === "string" && owned.has(provider.id)),
-            };
-          }),
+          providers: await this.describeProviders(principal.user.id, listed),
         });
         return;
       }
@@ -12701,6 +12679,35 @@ export class ApiGateway {
               ...(visibility === undefined ? {} : { visibility }),
             }),
           );
+          // Visibility belongs to the agent record when no credential holds it.
+          //
+          // The credential store is where it lives for an agent that has a
+          // credential, because there it decides whose secret a teammate's
+          // prompt may spend. An agent running on its owner's machine has no
+          // credential here at all, and the durable record carries the column
+          // for exactly this case — see `AgentCallSign.visibility`, which says
+          // so. Written after the service call so a refusal there leaves this
+          // untouched.
+          if (visibility === "personal" || visibility === "org") {
+            const existing = (
+              await this.options.store.listAgentCallSigns().catch((): [] => [])
+            ).find(
+              (sign) =>
+                sign.userId === identity.userId && sign.provider === provider,
+            );
+            if (existing !== undefined) {
+              await this.options.store
+                .setAgentCallSign(
+                  identity.userId,
+                  provider,
+                  // The name is unchanged; this write is about the column
+                  // beside it, and the store's upsert takes both together.
+                  callSign ?? existing.callSign,
+                  visibility,
+                )
+                .catch(() => undefined);
+            }
+          }
           // A rename is account-wide, so nothing per-repository may go on
           // shadowing it: an override naming this agent in one channel wins
           // over the call sign there (`resolveChannelAgentPresentation`), and
@@ -12720,7 +12727,14 @@ export class ApiGateway {
               },
             });
           }
-          this.sendJson(response, 200, { providers });
+          this.sendJson(response, 200, {
+            // Through the same decorator the GET uses. Returning the service's
+            // list raw is what emptied the Agents tab on every settings write:
+            // the browser replaces its provider list with this response, and
+            // without `exists` every agent that has no credential reads as one
+            // that does not exist.
+            providers: await this.describeProviders(identity.userId, providers),
+          });
           return;
         }
         throw new HttpError(405, "method_not_allowed", "Unsupported method");
@@ -14258,6 +14272,62 @@ export class ApiGateway {
     return (connections[candidate.userId] ?? []).some(
       (connection) => connection.provider === candidate.provider,
     );
+  }
+
+  /**
+   * The provider list as the browser needs it, wherever it is sent from.
+   *
+   * Two facts the service cannot supply, both of which stopped being optional
+   * when an agent became a record rather than a credential:
+   *
+   *  - `exists`. Whether there is an agent for this vendor at all, which is no
+   *    longer the same question as whether a credential is stored. The
+   *    Settings screen decides "Connect" from "Disconnect" on it.
+   *  - `visibility`. `list()` reports it off the credential summary, so an
+   *    agent with no credential reads as `personal` no matter what anybody
+   *    sets. The durable agent record carries the column; this is where it is
+   *    read back.
+   *
+   * One method because it was two. The GET route decorated its answer and the
+   * settings route returned the service's list raw, so *any* settings write —
+   * a rename, a model, an effort — replaced the browser's provider list with
+   * one whose `exists` was missing, and every locally-run agent vanished from
+   * the Agents tab until the next reload. It looked like the setting had
+   * deleted them.
+   */
+  private async describeProviders(
+    userId: string,
+    listed: unknown,
+  ): Promise<unknown[]> {
+    const records = await this.options.store
+      .listAgentCallSigns()
+      .catch((): [] => []);
+    const owned = new Map(
+      records
+        .filter((sign) => sign.userId === userId)
+        .map((sign) => [sign.provider, sign]),
+    );
+    return (Array.isArray(listed) ? listed : []).map((entry) => {
+      // `ownCredential`, not `mine`: `mine` is the browser's word for this,
+      // computed in `myAgents`, and testing for it here was testing a field
+      // the provider list has never carried.
+      const provider = entry as {
+        id?: unknown;
+        ownCredential?: { visibility?: unknown } | undefined;
+      };
+      const record =
+        typeof provider.id === "string" ? owned.get(provider.id) : undefined;
+      return {
+        ...provider,
+        exists: provider.ownCredential !== undefined || record !== undefined,
+        // The credential's own visibility still wins where there is one: it is
+        // the thing that decides whose secret a teammate's prompt may spend,
+        // and the record is only the answer when no credential holds it.
+        ...(provider.ownCredential !== undefined || record === undefined
+          ? {}
+          : { recordVisibility: record.visibility ?? "personal" }),
+      };
+    });
   }
 
   /**
