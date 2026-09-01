@@ -168,3 +168,45 @@ test("a real executable is pinned ahead of the extensionless npm script", async 
     }
   });
 });
+
+/**
+ * A machine with no CLI must not be a dead end.
+ *
+ * The worker refuses to start without one, and correctly — a worker
+ * advertising adapters it cannot drive takes work it will then fail. But
+ * refusing was the whole of it: the reason went into the application menu, the
+ * dashboard said nothing, and an agent connected from such a machine accepted
+ * every task and did none of them. Somebody installed the app, connected three
+ * agents, and had no way to discover that nothing on the machine could run
+ * them.
+ *
+ * Read as text rather than executed, because both files reach for Electron.
+ * The contract is small and worth pinning anyway: the worker names this stop,
+ * and the main process acts on that name.
+ */
+test("no CLI on the machine is a named stop the app offers to fix", async () => {
+  const worker = await readFile(path.join(electronDir, "worker.mjs"), "utf8");
+  const main = await readFile(path.join(electronDir, "main.mjs"), "utf8");
+
+  // Named, so it can be told apart from a crash, a bad token, or a server that
+  // did not answer — none of which installing anything would fix.
+  assert.match(worker, /reason: "no-cli"/u);
+  assert.match(worker, /No agent CLI found on this machine/u);
+
+  // And acted on, rather than only written into the menu.
+  assert.match(main, /event\.reason === "no-cli"/u);
+  assert.match(main, /offerToInstallACli/u);
+  // Offered from the same table the dashboard installs from, so there is one
+  // set of commands rather than a second copy that drifts out of step.
+  assert.match(main, /INSTALLABLE_VENDORS/u);
+  assert.match(main, /await runInstall\(vendor/u);
+  // Once per run: the worker restarts, and every restart on a bare machine
+  // would otherwise ask again.
+  assert.match(main, /if \(offeredInstall/u);
+  // Installing is not the end of it — the vendor's own sign-in still has to
+  // happen, and the machine has to start advertising what it just got.
+  assert.match(main, /startWorker\(here, session, noteWorkerState\)/u);
+  assert.match(main, /openSignIn\(vendor\)/u);
+  // A failed install is said out loud rather than swallowed.
+  assert.match(main, /Could not install \$\{VENDOR_LABELS/u);
+});

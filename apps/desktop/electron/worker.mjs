@@ -165,8 +165,15 @@ export async function startWorker(here, session, onEvent) {
 
   const agents = await detectAgents();
   if (Object.keys(agents).length === 0) {
+    // Named, not just described. This is the one stop the app can do something
+    // about — every other one is a crash, a bad token or a server that did not
+    // answer — and until it carried a reason the only trace of it was a line
+    // of text in a menu nobody opens. Somebody would install the app, connect
+    // an agent, watch it accept work and never do any, and have no way at all
+    // to find out that nothing on the machine could run it.
     onEvent?.({
       state: "stopped",
+      reason: "no-cli",
       detail:
         "No agent CLI found on this machine. Install and sign in to Claude Code or Codex, then try again.",
     });

@@ -98,6 +98,26 @@ const INSTALLERS = {
 };
 
 /**
+ * The vendors this app can install, in the order worth offering them.
+ *
+ * Derived from the table rather than written twice: a vendor without a
+ * verified command must not be offered, and the surest way to keep that true
+ * is to have one list. Claude first because its installer is the plainest
+ * `npm install` of the three, so it is the likeliest to succeed on a machine
+ * nobody has set up yet.
+ */
+export const INSTALLABLE_VENDORS = ["claude", "codex", "cursor"].filter(
+  (vendor) => Object.hasOwn(INSTALLERS, vendor),
+);
+
+/** What each vendor is called when a person is asked about it. */
+export const VENDOR_LABELS = {
+  claude: "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+};
+
+/**
  * The entry for a vendor name, and only ever a real entry.
  *
  * `INSTALLERS[name]` is not enough: `"__proto__"` resolves through the
