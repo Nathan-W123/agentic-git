@@ -118,6 +118,26 @@ export interface WorkerClientOptions {
   connectionBackoffMs?: number;
 }
 
+/** One dirty path in a holder's workspace, as the control plane reads it. */
+export interface WorkingChange {
+  path: string;
+  status: "added" | "modified" | "deleted";
+}
+
+/**
+ * What the control plane says back on a beat.
+ *
+ * Everything here is optional and everything is about a repository claim: a
+ * plan the claim was narrowed to while this worker was working, an ask to say
+ * what the rest of the work needs, and a cadence to beat at while holding one.
+ * A worker holding no claim gets none of it and behaves exactly as before.
+ */
+export interface HeartbeatReply {
+  narrowedPlan?: AgentPlan;
+  declareScope?: { askId: string };
+  heartbeatIntervalMs?: number;
+}
+
 export class WorkerClient {
   private readonly base: string;
   private readonly fetchImpl: typeof globalThis.fetch;
@@ -378,12 +398,37 @@ export class WorkerClient {
   public async heartbeat(
     leaseId: string,
     tokenUsage: readonly AgentTokenUsage[] = [],
-  ): Promise<void> {
+    /**
+     * What this holder has written so far, while it holds a repository claim.
+     *
+     * Sent on the beat rather than on request because the only observation of
+     * a remote holder an arrival can act on is a recent one, and a request it
+     * has to make first is a request that arrives after the decision. Omitted
+     * entirely when no claim is held, so an ordinary run's heartbeat is the
+     * same call it always was.
+     */
+    workingChanges?: readonly WorkingChange[],
+  ): Promise<HeartbeatReply> {
     try {
-      await this.request(`/api/v1/workers/leases/${leaseId}/heartbeat`, {
-        method: "POST",
-        ...(tokenUsage.length === 0 ? {} : { body: { tokenUsage } }),
-      });
+      const { json } = await this.request(
+        `/api/v1/workers/leases/${leaseId}/heartbeat`,
+        {
+          method: "POST",
+          ...(tokenUsage.length === 0 &&
+          (workingChanges === undefined || workingChanges.length === 0)
+            ? {}
+            : {
+                body: {
+                  ...(tokenUsage.length === 0 ? {} : { tokenUsage }),
+                  ...(workingChanges === undefined
+                    ? {}
+                    : { workingChanges }),
+                },
+              }),
+        },
+      );
+      const reply = (json ?? {}) as HeartbeatReply;
+      return reply;
     } catch (error) {
       if (
         error instanceof ControlPlaneError &&
@@ -425,6 +470,38 @@ export class WorkerClient {
    * The answer is the coordinator's, not an acknowledgement: only an approved
    * status licenses the worker to spend agent execution time.
    */
+  /**
+   * The answer to an ask the heartbeat carried down.
+   *
+   * Posted on its own rather than folded into the next beat because the two
+   * have opposite deadlines: a heartbeat must return promptly to keep the
+   * lease alive, and this arrives whenever a paused agent has finished
+   * thinking. Somebody is waiting on it, so the sooner it lands the sooner
+   * they run — and a failure is not the worker's problem to solve, because an
+   * unanswered ask leaves the claim blanket, which is the recoverable state.
+   */
+  public async postDeclaration(
+    leaseId: string,
+    askId: string,
+    declaration: unknown,
+    workingChanges: readonly WorkingChange[],
+  ): Promise<void> {
+    try {
+      await this.request(`/api/v1/workers/leases/${leaseId}/declaration`, {
+        method: "POST",
+        body: {
+          askId,
+          workingChanges,
+          ...(declaration === undefined ? {} : { declaration }),
+        },
+      });
+    } catch {
+      // Swallowed for the same reason `progress` is: this is a courtesy to a
+      // decision happening somewhere else, and a run must not fail because it
+      // could not be delivered.
+    }
+  }
+
   /**
    * Asks for the whole repository before paying to plan it.
    *

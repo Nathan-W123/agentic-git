@@ -73,6 +73,7 @@ import {
   describeError,
   DO_NOT_CODE_DIRECTIVE,
   FORCE_QUESTION_MARKER,
+  isBlanketClaim,
   KEEP_IT_SIMPLE_DIRECTIVE,
   localAgentsOnly,
   projectBudgets,
@@ -84,6 +85,13 @@ import {
   type FilePatchStatus,
   type SequencedAuditEvent,
 } from "@coord/shared-types";
+import {
+  CLAIM_HEARTBEAT_INTERVAL_MS,
+  askToDeliver,
+  parseWorkingChanges,
+  rememberWorkingChanges,
+  settleDeclaration,
+} from "@coord/cli/remote-holders";
 
 import {
   AuthService,
@@ -7105,7 +7113,7 @@ export class ApiGateway {
     const leaseMatch = matchPath(
       path,
       new RegExp(
-        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|claim|plan|scope|result|release|progress)$`,
+        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|claim|declaration|plan|scope|result|release|progress)$`,
         "u",
       ),
     );
@@ -7182,8 +7190,9 @@ export class ApiGateway {
         // here rather than only at the end is what makes a token budget a cap
         // instead of a post-mortem: an overspending task is stopped while it
         // is still spending.
+        const beat = await this.readHeartbeatBody(request);
         const reported = await this.recordLeaseTokenUsage(
-          request,
+          beat,
           lease,
           now.toISOString(),
         );
@@ -7266,7 +7275,10 @@ export class ApiGateway {
           );
         }
         await this.options.store.touchWorker(lease.workerId, now.toISOString());
-        this.sendJson(response, 200, extended);
+        this.sendJson(response, 200, {
+          ...extended,
+          ...(await this.claimTraffic(lease, beat)),
+        });
         return;
       }
 
@@ -7337,6 +7349,39 @@ export class ApiGateway {
           return;
         }
         this.sendJson(response, 200, { plan });
+        return;
+      }
+
+      if (action === "declaration" && method === "POST") {
+        // The answer to an ask the heartbeat carried down.
+        //
+        // Its own route rather than a field on the next heartbeat, because the
+        // two have opposite deadlines: a heartbeat must return promptly to
+        // keep a lease alive, and this arrives whenever a paused agent has
+        // finished thinking. Somebody is waiting on it — the arrival that
+        // asked — so the sooner it is posted the sooner they run.
+        //
+        // The working changes travel with it because this is the one
+        // observation of a remote holder that is *exact*: taken at the moment
+        // the agent was paused, rather than up to a heartbeat old.
+        const body = objectBody(await this.readJson(request));
+        const askId =
+          stringField(body["askId"], "askId", { max: 200, optional: true }) ?? "";
+        const declared = body["declaration"];
+        const changes = parseWorkingChanges(body["workingChanges"]);
+        const settled = settleDeclaration(
+          lease.taskId,
+          askId,
+          typeof declared === "object" && declared !== null
+            ? (declared as never)
+            : undefined,
+          changes,
+        );
+        // Never an error. An ask that has been abandoned — the arrival gave up
+        // and retried — is answered by a holder that could not have known, and
+        // the honest reply is that nobody is listening any more rather than a
+        // failure the worker would log.
+        this.sendJson(response, 202, { settled });
         return;
       }
 
@@ -23548,26 +23593,86 @@ export class ApiGateway {
    * failing a running task over a miscounted bill, and a gap in the data is
    * the honest record of an agent that could not say what it spent.
    */
-  private async recordLeaseTokenUsage(
+  /**
+   * The heartbeat's body, read once.
+   *
+   * A request body is a stream and can only be consumed once, and this one now
+   * carries two unrelated things — the agent's running token total and, while a
+   * repository claim is held, what the holder has written. Reading it here and
+   * handing the parsed object to both readers is what stops the second one
+   * finding an empty stream.
+   */
+  private async readHeartbeatBody(
     request: IncomingMessage,
-    lease: WorkLease,
-    at: string,
-  ): Promise<number> {
+  ): Promise<Record<string, unknown>> {
     const declared = Number.parseInt(
       request.headers["content-length"] ?? "0",
       10,
     );
-    if (Number.isFinite(declared) && declared > 0) {
-      const body = await this.readJson(request).catch(() => undefined);
-      const entries = (body as { tokenUsage?: unknown } | undefined)
-        ?.tokenUsage;
-      if (Array.isArray(entries)) {
-        await this.recordReportedTokenUsage(lease, entries, at);
-      }
+    if (!Number.isFinite(declared) || declared <= 0) {
+      return {};
+    }
+    const body = await this.readJson(request).catch(() => undefined);
+    return typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  }
+
+  private async recordLeaseTokenUsage(
+    body: Record<string, unknown>,
+    lease: WorkLease,
+    at: string,
+  ): Promise<number> {
+    const entries = body["tokenUsage"];
+    if (Array.isArray(entries)) {
+      await this.recordReportedTokenUsage(lease, entries, at);
     }
     return (
       await this.options.store.listTokenUsage({ leaseId: lease.id })
     ).reduce((sum, entry) => sum + entry.totalTokens, 0);
+  }
+
+  /**
+   * The two directions of a repository claim, folded onto the heartbeat.
+   *
+   * Up: what this holder has written, which is the only observation of a
+   * remote holder an arrival can freeze on. Down: a claim that has been
+   * narrowed underneath it, and the ask that turns "the arrival waits" into
+   * "the arrival runs now".
+   *
+   * Nothing new stays connected for either. The heartbeat already runs against
+   * a live lease and already carries token usage up and lease-loss down; both
+   * halves of this fit on it, and a worker holding no claim pays nothing but a
+   * lookup.
+   */
+  private async claimTraffic(
+    lease: WorkLease,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const held = lease.plan?.plan;
+    if (held === undefined) {
+      return {};
+    }
+    const reported = parseWorkingChanges(body["workingChanges"]);
+    if (reported !== undefined) {
+      rememberWorkingChanges(lease.taskId, reported);
+    }
+    if (!isBlanketClaim(held)) {
+      // The claim became an ordinary plan while this holder was working, and
+      // the holder does not know. Told here, because a holder that is not told
+      // goes on believing it has the repository and goes on telling its agent
+      // so — the same bug the in-process poll exists to prevent, at a distance.
+      return { narrowedPlan: held };
+    }
+    const askId = askToDeliver(lease.taskId);
+    return {
+      // Beaten faster while a claim is held, so an arrival's window onto this
+      // holder is ten seconds wide rather than sixty. Nothing else in the
+      // system is paced by it, and an idle claim costs six cheap calls a
+      // minute against a lease that is already open.
+      heartbeatIntervalMs: CLAIM_HEARTBEAT_INTERVAL_MS,
+      ...(askId === undefined ? {} : { declareScope: { askId } }),
+    };
   }
 
   /** Writes one batch of reported phase totals against a lease. */

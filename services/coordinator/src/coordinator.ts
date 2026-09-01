@@ -1207,7 +1207,7 @@ const DEFAULT_BLANKET_PAUSE_TIMEOUT_MS = 10_000;
  * The holder is mid-execution, so the danger is that it reads this as "plan
  * again" and rewrites an objective that is already settled.
  */
-const BLANKET_DECLARATION_REASON = [
+export const BLANKET_DECLARATION_REASON = [
   "Another task has started in this repository. You were handed the whole of",
   "it without being asked to describe yourself; that ends now, and what you",
   "name here is what you keep.",

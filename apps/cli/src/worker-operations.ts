@@ -32,6 +32,8 @@ import {
   type ChangeSetSplit,
 } from "@coord/coordinator";
 import { IntegrationService } from "@coord/integration-service";
+
+import { registerRemoteHolder, releaseRemoteHolder } from "./remote-holders.js";
 import type {
   CoordinationStore,
   SubmittedTask,
@@ -716,6 +718,7 @@ async function rejectWorkerResult(
   lease: WorkLease,
   reason: string,
 ): Promise<WorkResultAcceptance> {
+  letGoOfClaim(lease.taskId);
   const now = new Date().toISOString();
   const settled = await store.finishWorkLease(
     lease.id,
@@ -1241,11 +1244,13 @@ interface WorkClaimServices {
  *   narrowed the moment somebody arrives. A claim that can never be given
  *   back early is not worth the planning round it saves.
  *
- * And one that is only here: the repository must have exactly one live
- * worker. A claim that cannot be narrowed is worse than no claim — a solo
- * claim held by an unreachable laptop blocks everybody else until the task
- * ends — and until narrowing works across the wire, "there is nobody to
- * block" is the honest version of that safety property.
+ * There is no longer a condition about how many workers are live. There was
+ * one while a remote claim could not be given back: a claim that cannot be
+ * narrowed is worse than no claim, so "there is nobody to block" stood in for
+ * the safety property until the property itself existed. It exists now — the
+ * heartbeat carries what a holder has written, the ask reaches it wherever it
+ * is running, and an arrival that cannot get an answer waits rather than
+ * freezing on a guess. A second machine is no longer a reason to withhold.
  */
 export async function claimWorkRepository(
   store: CoordinationStore,
@@ -1281,9 +1286,6 @@ export async function claimWorkRepository(
     })
   ).filter((candidate) => candidate.id !== lease.id);
   if (others.length > 0) {
-    return undefined;
-  }
-  if (!(await soleWorkerInRepository(store, lease))) {
     return undefined;
   }
   const storedRepository = await store.getRepository(lease.repositoryId);
@@ -1355,6 +1357,20 @@ export async function claimWorkRepository(
   if (saved.outcome !== "saved") {
     return undefined;
   }
+  // Published the moment the claim is, so an arrival can reach the holder
+  // through exactly the registry a local one is reached through. Without this
+  // a remote claim is one nobody can take back, which is the thing the
+  // one-worker condition above exists to make impossible.
+  registerRemoteHolder({
+    task: {
+      id: task.id,
+      objective: task.objective,
+      agentId: task.agentId,
+      validationCommands: task.validationCommands,
+    },
+    repositoryId: lease.repositoryId,
+    leaseId: lease.id,
+  });
   await store.appendAudit(undefined, {
     type: "blanket_claim_granted",
     taskId: task.id,
@@ -1368,33 +1384,6 @@ export async function claimWorkRepository(
     },
   });
   return plan;
-}
-
-/**
- * Whether this lease's worker is the only one that could be in this
- * repository — the Phase 1 safety condition, and a temporary one.
- *
- * "Live" is the same window the dispatcher uses: a worker seen within three
- * heartbeats. Two workers both idle is still two workers, because either can
- * lease the moment this claim is granted.
- */
-async function soleWorkerInRepository(
-  store: CoordinationStore,
-  lease: WorkLease,
-): Promise<boolean> {
-  const worker = await store.getWorker(lease.workerId);
-  if (worker === undefined) {
-    return false;
-  }
-  const cutoff = Date.now() - OWNER_RESERVATION_MS;
-  const live = (
-    await store.listWorkers(
-      worker.organizationId === undefined
-        ? {}
-        : { organizationId: worker.organizationId },
-    )
-  ).filter((candidate) => Date.parse(candidate.lastSeenAt) >= cutoff);
-  return live.length <= 1;
 }
 
 /** Resolves with the fallback rather than keeping a caller waiting. */
@@ -2670,6 +2659,19 @@ function planScopeEscapes(
  * harmless. Exact-base integration and stale requeueing provide the remote
  * equivalent of dynamic replanning when canonical advances.
  */
+/**
+ * Lets go of a remote holder the moment its lease stops being one.
+ *
+ * Called on every way a lease ends rather than only the happy one: a holder
+ * left published is a holder an arrival can pause, and pausing a task that
+ * finished five minutes ago is a network round trip to nobody. Harmless for a
+ * task that never held a claim, which is what lets every settle path call it
+ * without first asking.
+ */
+function letGoOfClaim(taskId: string): void {
+  releaseRemoteHolder(taskId);
+}
+
 export async function acceptWorkResult(
   store: CoordinationStore,
   input: WorkResultInput,
@@ -2777,6 +2779,7 @@ export async function acceptWorkResult(
         "The agent answered with nothing",
       );
     }
+    letGoOfClaim(task.id);
     const settled = await store.finishWorkLease(
       input.leaseId,
       "completed",
@@ -2806,6 +2809,7 @@ export async function acceptWorkResult(
   }
 
   if (input.status === "failed") {
+    letGoOfClaim(task.id);
     const settled = await store.finishWorkLease(
       input.leaseId,
       "failed",
@@ -3242,6 +3246,7 @@ export async function acceptWorkResult(
         );
       }
     }
+    letGoOfClaim(task.id);
     const settled = await store.finishWorkLease(
       input.leaseId,
       "completed",
