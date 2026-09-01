@@ -12701,37 +12701,6 @@ export class ApiGateway {
               ...(visibility === undefined ? {} : { visibility }),
             }),
           );
-          // Visibility belongs to the agent record when no credential holds it.
-          //
-          // The credential store is where visibility lives for an agent that
-          // has a credential, because there it decides whose secret a
-          // teammate's prompt may spend. An agent that runs on its owner's
-          // machine has no credential here at all, and the durable record of
-          // it — the one the roster reads — carries a `visibility` column for
-          // exactly this. Without this write, "only me" was permanent for
-          // every locally-run agent: the service wrote to a credential that
-          // was not there, and the change came back reporting success while
-          // changing nothing.
-          if (visibility === "personal" || visibility === "org") {
-            const existing = (
-              await this.options.store.listAgentCallSigns().catch((): [] => [])
-            ).find(
-              (sign) =>
-                sign.userId === identity.userId && sign.provider === provider,
-            );
-            if (existing !== undefined) {
-              await this.options.store
-                .setAgentCallSign(
-                  identity.userId,
-                  provider,
-                  // The name is unchanged; this write is about the column
-                  // beside it, and the store's upsert takes both together.
-                  callSign ?? existing.callSign,
-                  visibility,
-                )
-                .catch(() => undefined);
-            }
-          }
           // A rename is account-wide, so nothing per-repository may go on
           // shadowing it: an override naming this agent in one channel wins
           // over the call sign there (`resolveChannelAgentPresentation`), and
