@@ -73,7 +73,6 @@ import {
   describeError,
   DO_NOT_CODE_DIRECTIVE,
   FORCE_QUESTION_MARKER,
-  isBlanketClaim,
   KEEP_IT_SIMPLE_DIRECTIVE,
   localAgentsOnly,
   projectBudgets,
@@ -85,14 +84,6 @@ import {
   type FilePatchStatus,
   type SequencedAuditEvent,
 } from "@coord/shared-types";
-import {
-  CLAIM_HEARTBEAT_INTERVAL_MS,
-  askToDeliver,
-  parseWorkingChanges,
-  rememberWorkingChanges,
-  settleDeclaration,
-} from "@coord/cli/remote-holders";
-
 import {
   AuthService,
   AuthenticationError,
@@ -3934,6 +3925,26 @@ export interface ApiOperations {
     protocolVersion: number;
   }): Promise<{ plan?: unknown; planningContext?: string }>;
   /**
+   * The two directions of a repository claim, folded onto the heartbeat.
+   *
+   * Up goes what the holder has written; down comes a claim that was narrowed
+   * underneath it and the ask that turns an arrival's retry into a run. The
+   * gateway carries the traffic and decides none of it — everything this
+   * answers is about leases and holders, which live on the other side of this
+   * interface with every other decision of that kind.
+   */
+  claimHeartbeat?(input: {
+    leaseId: string;
+    workingChanges?: unknown;
+  }): Promise<Record<string, unknown>>;
+  /** A holder's answer to the ask, posted on its own route. */
+  settleClaimDeclaration?(input: {
+    leaseId: string;
+    askId: string;
+    declaration?: unknown;
+    workingChanges?: unknown;
+  }): Promise<boolean>;
+  /**
    * Arbitrates a worker's plan before it executes. A deployment that omits
    * this cannot run plan-first workers, and the endpoint says so.
    */
@@ -7375,16 +7386,16 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         const askId =
           stringField(body["askId"], "askId", { max: 200, optional: true }) ?? "";
-        const declared = body["declaration"];
-        const changes = parseWorkingChanges(body["workingChanges"]);
-        const settled = settleDeclaration(
-          lease.taskId,
-          askId,
-          typeof declared === "object" && declared !== null
-            ? (declared as never)
-            : undefined,
-          changes,
-        );
+        const settle = this.options.operations.settleClaimDeclaration;
+        const settled =
+          settle === undefined
+            ? false
+            : await settle({
+                leaseId,
+                askId,
+                declaration: body["declaration"],
+                workingChanges: body["workingChanges"],
+              });
         // Never an error. An ask that has been abandoned — the arrival gave up
         // and retried — is answered by a holder that could not have known, and
         // the honest reply is that nobody is listening any more rather than a
@@ -23641,46 +23652,32 @@ export class ApiGateway {
   }
 
   /**
-   * The two directions of a repository claim, folded onto the heartbeat.
+   * The two directions of a repository claim, carried on the heartbeat.
    *
-   * Up: what this holder has written, which is the only observation of a
-   * remote holder an arrival can freeze on. Down: a claim that has been
-   * narrowed underneath it, and the ask that turns "the arrival waits" into
-   * "the arrival runs now".
+   * A holder reports what it has written; the reply may carry a claim that was
+   * narrowed underneath it, the ask that turns an arrival's retry into a run,
+   * and the faster cadence a claim is held at. Every one of those is a
+   * question about leases and holders, so none of them is decided here — this
+   * hands the report across and puts the answer on the wire.
    *
-   * Nothing new stays connected for either. The heartbeat already runs against
-   * a live lease and already carries token usage up and lease-loss down; both
-   * halves of this fit on it, and a worker holding no claim pays nothing but a
-   * lookup.
+   * Nothing new stays connected either way. The heartbeat already runs against
+   * a live lease and already carries usage up and lease-loss down, and a
+   * worker holding no claim pays one lookup.
    */
   private async claimTraffic(
     lease: WorkLease,
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const held = lease.plan?.plan;
-    if (held === undefined) {
+    const traffic = this.options.operations.claimHeartbeat;
+    if (traffic === undefined || lease.plan === undefined) {
       return {};
     }
-    const reported = parseWorkingChanges(body["workingChanges"]);
-    if (reported !== undefined) {
-      rememberWorkingChanges(lease.taskId, reported);
-    }
-    if (!isBlanketClaim(held)) {
-      // The claim became an ordinary plan while this holder was working, and
-      // the holder does not know. Told here, because a holder that is not told
-      // goes on believing it has the repository and goes on telling its agent
-      // so — the same bug the in-process poll exists to prevent, at a distance.
-      return { narrowedPlan: held };
-    }
-    const askId = askToDeliver(lease.taskId);
-    return {
-      // Beaten faster while a claim is held, so an arrival's window onto this
-      // holder is ten seconds wide rather than sixty. Nothing else in the
-      // system is paced by it, and an idle claim costs six cheap calls a
-      // minute against a lease that is already open.
-      heartbeatIntervalMs: CLAIM_HEARTBEAT_INTERVAL_MS,
-      ...(askId === undefined ? {} : { declareScope: { askId } }),
-    };
+    return await traffic({
+      leaseId: lease.id,
+      ...(body["workingChanges"] === undefined
+        ? {}
+        : { workingChanges: body["workingChanges"] }),
+    });
   }
 
   /** Writes one batch of reported phase totals against a lease. */

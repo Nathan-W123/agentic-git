@@ -35,7 +35,15 @@ import {
 } from "@coord/coordinator";
 import { IntegrationService } from "@coord/integration-service";
 
-import { registerRemoteHolder, releaseRemoteHolder } from "./remote-holders.js";
+import {
+  CLAIM_HEARTBEAT_INTERVAL_MS,
+  askToDeliver,
+  parseWorkingChanges,
+  registerRemoteHolder,
+  releaseRemoteHolder,
+  rememberWorkingChanges,
+  settleDeclaration,
+} from "./remote-holders.js";
 import type {
   CoordinationStore,
   SubmittedTask,
@@ -53,6 +61,7 @@ import {
   assertChangeSet,
   createId,
   deferredFilePaths,
+  isBlanketClaim,
   mergePlanScope,
   normalizeRepositoryPath,
   planAdmissionApproved,
@@ -3688,6 +3697,57 @@ export function workerOperations(
     }) => await leaseWork(store, input, repositories, project),
     leaseBundle: async (leaseId: string, have?: string) =>
       await leaseBundle(store, leaseId, repositories, have),
+    claimHeartbeat: async (input: {
+      leaseId: string;
+      workingChanges?: unknown;
+    }): Promise<Record<string, unknown>> => {
+      const lease = await store.getWorkLease(input.leaseId);
+      const held = lease?.plan?.plan;
+      if (lease === undefined || held === undefined) {
+        return {};
+      }
+      const reported = parseWorkingChanges(input.workingChanges);
+      if (reported !== undefined) {
+        rememberWorkingChanges(lease.taskId, reported);
+      }
+      if (!isBlanketClaim(held)) {
+        // The claim became an ordinary plan while this holder was working, and
+        // the holder does not know. Told here, because a holder that is not
+        // told goes on believing it has the repository and goes on telling its
+        // agent so — the same fault the in-process poll exists to prevent, at
+        // a distance.
+        return { narrowedPlan: held };
+      }
+      const askId = askToDeliver(lease.taskId);
+      return {
+        // Beaten faster while a claim is held, so an arrival's window onto
+        // this holder is ten seconds wide rather than sixty. Nothing else is
+        // paced by it, and an idle claim costs six cheap calls a minute
+        // against a lease that is already open.
+        heartbeatIntervalMs: CLAIM_HEARTBEAT_INTERVAL_MS,
+        ...(askId === undefined ? {} : { declareScope: { askId } }),
+      };
+    },
+    settleClaimDeclaration: async (input: {
+      leaseId: string;
+      askId: string;
+      declaration?: unknown;
+      workingChanges?: unknown;
+    }): Promise<boolean> => {
+      const lease = await store.getWorkLease(input.leaseId);
+      if (lease === undefined) {
+        return false;
+      }
+      const declared = input.declaration;
+      return settleDeclaration(
+        lease.taskId,
+        input.askId,
+        typeof declared === "object" && declared !== null
+          ? (declared as { files: readonly string[]; symbols: readonly string[] })
+          : undefined,
+        parseWorkingChanges(input.workingChanges),
+      );
+    },
     claimWorkRepository: async (input: {
       leaseId: string;
       actorId: string;
