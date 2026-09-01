@@ -144,6 +144,17 @@ export interface ProviderUsageWindow {
   windowDurationMins?: number;
 }
 
+/** See {@link ProviderUsageReport.spend}. */
+export interface ProviderSpend {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  /** How many tasks these tokens came from, so a big number has a scale. */
+  tasks: number;
+  /** The start of the window measured, so "since" is not left to a guess. */
+  since: string;
+}
+
 export interface ProviderUsageReport {
   /**
    * Where these numbers came from, shown to the user verbatim-ish. Absent
@@ -161,6 +172,22 @@ export interface ProviderUsageReport {
    * reporting today's quota.
    */
   asOf?: string;
+  /**
+   * What this agent has actually spent through Kumi.
+   *
+   * Kumi's own accounting, not the vendor's, and the two answer different
+   * questions. A vendor quota says how much of a ceiling is left and only the
+   * vendor knows the ceiling; this says what the work done here cost, and is
+   * available for every vendor because it is measured rather than asked for —
+   * the worker reports a running total on each heartbeat and it is stored per
+   * task.
+   *
+   * It is the answer for Claude in particular, whose CLI publishes no quota
+   * figure outside its own interactive view at all: there is no percentage to
+   * be had, and an empty card that says so forever is worse than a real
+   * number about real work.
+   */
+  spend?: ProviderSpend;
   /** The subscription tier the account is on ("plus", "pro", ...). */
   planType?: string;
   /**
@@ -2313,14 +2340,29 @@ function isSignInUrl(value: string, hosts: string[] | undefined): boolean {
  * reported a signed-out account as signed in.
  */
 export function saysSignedIn(output: string): boolean {
-  if (
-    /\b(?:not logged in|not signed in|no active session|please (?:log|sign) in)\b/iu.test(
-      output,
-    )
-  ) {
+  if (saysSignedOut(output)) {
     return false;
   }
   return /\b(?:logged in|signed in)\b/iu.test(output);
+}
+
+/**
+ * The CLI saying, in so many words, that nobody is signed in.
+ *
+ * The half of the question that can be answered from text alone. Its opposite
+ * cannot: a CLI that *is* signed in may say "Logged in using ChatGPT", or
+ * "Authenticated", or print an account line and no verb at all, and demanding
+ * one of two English phrases before believing it told a signed-in user they
+ * were signed out — with the connect flow's only remedy being to sign in
+ * again, which they had already done.
+ *
+ * So this is used as a veto over the exit code rather than as the whole test.
+ * A refusal is stated; a success is merely exit zero.
+ */
+export function saysSignedOut(output: string): boolean {
+  return /\b(?:not logged in|not signed in|no active session|please (?:log|sign) in)\b/iu.test(
+    output,
+  );
 }
 
 export function resolveCodexCommand(homeDirectory = os.homedir()): string {
@@ -3080,7 +3122,12 @@ export class ProviderChatService {
     }
     try {
       const login = await ask(["login", "status"]);
-      if (!saysSignedIn(`${login.stdout}\n${login.stderr}`)) {
+      // The same rule as `detectCodex`, so the quota card and the connection
+      // row cannot disagree about whether this account is signed in.
+      if (
+        login.exitCode !== 0 ||
+        saysSignedOut(`${login.stdout}\n${login.stderr}`)
+      ) {
         return (
           "The Codex CLI is installed but this account is not signed in to " +
           "it, so it has no quota to report. Signing in again from the " +
@@ -3322,7 +3369,12 @@ export class ProviderChatService {
       maxOutputBytes: 65_536,
     });
     const output = `${login.stdout}\n${login.stderr}`;
-    const loggedIn = login.exitCode === 0 && saysSignedIn(output);
+    // Exit code first, words only to veto. `codex login status` answers zero
+    // when it has an account and non-zero when it does not; what it *says*
+    // while doing so has changed between releases, and requiring one of two
+    // phrasings is what told somebody with a live ChatGPT session that they
+    // were not signed in.
+    const loggedIn = login.exitCode === 0 && !saysSignedOut(output);
     return {
       detected: true,
       loggedIn,

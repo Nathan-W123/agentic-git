@@ -2013,6 +2013,36 @@ test("a connected local row offers no second vendor sign-in", async () => {
 });
 
 /**
+ * A card with no vendor quota still has something true to show.
+ *
+ * Two of the three vendors publish no usage figure at all — Claude's exists
+ * only inside its own interactive view, Cursor's does not exist — so their
+ * cards were permanently empty above a sentence that read like a fault. Kumi
+ * measures the real thing on the way past: the worker reports a running token
+ * total on every heartbeat, stored per task.
+ */
+test("the usage card falls back to what Kumi itself measured", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function spendBlock");
+  assert.notEqual(start, -1);
+  const body = chats.slice(start, chats.indexOf("\nfunction usageBlock", start));
+
+  // Nothing is drawn when nothing was spent — an empty card beats a zero.
+  assert.match(body, /!\(Number\(spend\.totalTokens\) > 0\)/u);
+  // And it is never a bar: a bar is a fraction of a ceiling nobody here knows.
+  assert.doesNotMatch(body, /rr-usage-bar/u);
+  assert.match(body, /tokens/u);
+
+  // The quota path still wins where a quota exists, and the two coexist.
+  const usage = chats.slice(chats.indexOf("function usageBlock"));
+  assert.match(
+    usage,
+    /if \(report\.unavailableReason !== undefined \|\| windows\.length === 0\) \{\s*\n\s*return spendBlock\(report\);/u,
+  );
+  assert.match(usage, /\$\{spendBlock\(report\)\}<span class="pcard-section pcard-usage-section">/u);
+});
+
+/**
  * A running agent is not queued work.
  *
  * The panel bucketed every `claimed` task as queued, so an agent visibly
