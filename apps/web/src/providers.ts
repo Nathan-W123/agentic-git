@@ -16,7 +16,11 @@ import {
   type CanonicalRepository,
   type ProcessOutput,
 } from "@coord/repository-service";
-import { AGENT_CALL_SIGNS, type CanonicalVersion } from "@coord/shared-types";
+import {
+  AGENT_CALL_SIGNS,
+  deriveCallSign,
+  type CanonicalVersion,
+} from "@coord/shared-types";
 import {
   GitWorktreeWorkspaceManager,
   supportedCredentialKinds,
@@ -2458,10 +2462,10 @@ export class ProviderChatService {
         }
       }
     }
-    const free = AGENT_CALL_SIGNS.filter(
-      (sign) => !taken.has(sign.toLowerCase()),
-    );
-    const sign = free[Math.floor(Math.random() * free.length)];
+    // Derived from the agent's own identity rather than drawn, so the same
+    // account gets the same name on a deployment that has forgotten every
+    // name it ever handed out. See `deriveCallSign`.
+    const sign = deriveCallSign(userId, provider, taken);
     if (sign === undefined) {
       return undefined;
     }

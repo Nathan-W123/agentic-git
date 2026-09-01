@@ -65,11 +65,11 @@ import {
   type AuditFinding,
 } from "./auditor.js";
 import {
-  AGENT_CALL_SIGNS,
   AGENT_ACCOUNT_PREFIX,
   ANSWER_NOT_STATUS_DIRECTIVE,
   assertProjectPolicy,
   createId,
+  deriveCallSign,
   describeError,
   DO_NOT_CODE_DIRECTIVE,
   FORCE_QUESTION_MARKER,
@@ -12380,27 +12380,27 @@ export class ApiGateway {
           // A name is only ever assigned once. Re-running this must not rename
           // an agent people have learned, which is the same rule
           // `assignCallSign` follows on the credential path.
-          // A name is dealt, not derived. `defaultChannelAgentName` returns
+          // A name is derived, not dealt. `defaultChannelAgentName` returns
           // "Claude (Nathan)" when there is no call sign — a *label*, and
           // storing it here would freeze the placeholder as the agent's
           // permanent name, which is the exact complaint the durable table
-          // was added to fix. So a free sign is drawn, and the label is only
-          // the fallback for a deployment that has exhausted the pantheon.
+          // was added to fix. So a sign is derived from the agent's own
+          // identity, and the label is only the fallback for a deployment
+          // that has exhausted the pantheon.
           const taken = new Set(
             (await this.options.store.listAgentCallSigns().catch((): [] => []))
               .map((sign) => sign.callSign),
           );
-          const free = AGENT_CALL_SIGNS.filter((sign) => !taken.has(sign));
           const callSign =
             existing?.callSign ??
             stringField(agentBody["callSign"], "callSign", {
               max: 40,
               optional: true,
             }) ??
-            // Uniformly, not in order: walking the list made every deployment
-            // produce Zeus, then Hera, then Poseidon, so the name said which
-            // account connected first and nothing else.
-            free[Math.floor(Math.random() * free.length)] ??
+            // The same name every time this account asks, which is what makes
+            // disconnecting and reconnecting give an agent back rather than
+            // give back a stranger. See `deriveCallSign`.
+            deriveCallSign(identity.userId, provider, taken) ??
             defaultChannelAgentName({
               provider,
               userName: owner.displayName,
