@@ -3359,6 +3359,22 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const REPOSITORY_PICTURE_MAX_CHARS = 256 * 1024;
 /** How long a worker holds a task before it must heartbeat again. */
 const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
+/**
+ * How far back the usage card's own spend figure reaches.
+ *
+ * Thirty days, which is the retention the audit sweep keeps anyway, so this
+ * never claims a total whose evidence has already been pruned.
+ */
+const SPEND_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** What one agent has spent through Kumi. See {@link ApiGateway.agentSpend}. */
+interface AgentSpend {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  tasks: number;
+  since: string;
+}
 /** A week: long enough to be useful, short enough to be a poor thing to leak. */
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -12590,9 +12606,22 @@ export class ApiGateway {
               usage = codexUsageReport(snapshot);
             }
           }
-          this.sendJson(response, 200, {
-            usage,
-          });
+          // Kumi's own accounting, added to whatever the vendor said. It is
+          // the only figure available for a vendor that publishes no quota,
+          // and it is worth having beside one that does: a percentage says
+          // how much ceiling is left, this says what the work cost.
+          const spend = await this.agentSpend(
+            owner === undefined || owner === "" ? identity.userId : owner,
+            provider,
+          );
+          const merged =
+            spend !== undefined &&
+            typeof usage === "object" &&
+            usage !== null &&
+            !Array.isArray(usage)
+              ? { ...(usage as Record<string, unknown>), spend }
+              : usage;
+          this.sendJson(response, 200, { usage: merged });
           return;
         }
         if (action === "usage" && method === "POST") {
@@ -14228,6 +14257,89 @@ export class ApiGateway {
     return (connections[candidate.userId] ?? []).some(
       (connection) => connection.provider === candidate.provider,
     );
+  }
+
+  /**
+   * What one agent has actually spent through Kumi, measured rather than asked.
+   *
+   * The vendors answer a different question and two of the three will not
+   * answer it at all: Claude publishes no quota outside its own interactive
+   * view, and Cursor publishes none anywhere. So the usage card had nothing to
+   * show for them, permanently, and said so in a sentence that read like a
+   * fault.
+   *
+   * This is the figure Kumi already has. A worker reports a running token
+   * total on every heartbeat and it is stored per task, so the work done here
+   * is measured on the way past. It cannot say what fraction of a limit is
+   * gone — only the vendor knows the limit — but it can say what was spent,
+   * for every vendor, without asking any CLI anything.
+   *
+   * Attribution runs through the task rather than the usage row: a row names
+   * the *configured agent* that ran (a key from the operator's config), and
+   * the question here is about a person's agent. `submittedBy` is what pins a
+   * task to its owner everywhere else in this file, so it is what pins the
+   * spend too.
+   *
+   * Bounded by time and failing to `undefined`: this rides on a request
+   * somebody is waiting for, and a figure nobody can produce is a card
+   * without a number rather than a card with an error.
+   */
+  private async agentSpend(
+    ownerId: string,
+    provider: string,
+  ): Promise<AgentSpend | undefined> {
+    const vendor = PROVIDER_TO_VENDOR[provider];
+    if (vendor === undefined) {
+      return undefined;
+    }
+    const since = new Date(Date.now() - SPEND_WINDOW_MS).toISOString();
+    try {
+      // Not scoped to a project: this route is about an account's agent and
+      // carries no project, and an agent's spend is its spend wherever the
+      // work was done. The time window is what bounds the read.
+      const [usage, tasks] = await Promise.all([
+        this.options.store.listTokenUsage({ recordedAfter: since }),
+        this.options.store.listSubmittedTasks({ kind: "any" }),
+      ]);
+      const mine = new Set(
+        tasks
+          .filter(
+            (task) =>
+              task.submittedBy === ownerId &&
+              task.agentId.toLowerCase().includes(vendor),
+          )
+          .map((task) => task.id),
+      );
+      if (mine.size === 0) {
+        return undefined;
+      }
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let totalTokens = 0;
+      const counted = new Set<string>();
+      for (const row of usage) {
+        if (!mine.has(row.taskId)) {
+          continue;
+        }
+        inputTokens += row.inputTokens;
+        outputTokens += row.outputTokens;
+        totalTokens += row.totalTokens;
+        counted.add(row.taskId);
+      }
+      if (counted.size === 0) {
+        return undefined;
+      }
+      return {
+        inputTokens,
+        outputTokens,
+        totalTokens,
+        tasks: counted.size,
+        since,
+      };
+    } catch {
+      // A card without a number, never a card with an error.
+      return undefined;
+    }
   }
 
   /**

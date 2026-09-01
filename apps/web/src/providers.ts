@@ -144,6 +144,17 @@ export interface ProviderUsageWindow {
   windowDurationMins?: number;
 }
 
+/** See {@link ProviderUsageReport.spend}. */
+export interface ProviderSpend {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  /** How many tasks these tokens came from, so a big number has a scale. */
+  tasks: number;
+  /** The start of the window measured, so "since" is not left to a guess. */
+  since: string;
+}
+
 export interface ProviderUsageReport {
   /**
    * Where these numbers came from, shown to the user verbatim-ish. Absent
@@ -161,6 +172,22 @@ export interface ProviderUsageReport {
    * reporting today's quota.
    */
   asOf?: string;
+  /**
+   * What this agent has actually spent through Kumi.
+   *
+   * Kumi's own accounting, not the vendor's, and the two answer different
+   * questions. A vendor quota says how much of a ceiling is left and only the
+   * vendor knows the ceiling; this says what the work done here cost, and is
+   * available for every vendor because it is measured rather than asked for —
+   * the worker reports a running total on each heartbeat and it is stored per
+   * task.
+   *
+   * It is the answer for Claude in particular, whose CLI publishes no quota
+   * figure outside its own interactive view at all: there is no percentage to
+   * be had, and an empty card that says so forever is worse than a real
+   * number about real work.
+   */
+  spend?: ProviderSpend;
   /** The subscription tier the account is on ("plus", "pro", ...). */
   planType?: string;
   /**

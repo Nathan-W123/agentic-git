@@ -441,18 +441,69 @@ function usageStateKey(agent) {
  * otherwise stay out of the way. That keeps an unsupported provider or a
  * transient CLI error from turning an identity card into a diagnostics pane.
  */
+/**
+ * Tokens, written the way a person reads them.
+ *
+ * Thousands and millions, one decimal, because the exact figure is noise at
+ * this size — nobody is reconciling a bill from a hover card, they are asking
+ * whether this agent has been busy.
+ */
+function tokenCount(value) {
+  const tokens = Number(value) || 0;
+  if (tokens >= 1_000_000) {
+    return `${(tokens / 1_000_000).toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) {
+    return `${(tokens / 1_000).toFixed(1)}k`;
+  }
+  return String(Math.round(tokens));
+}
+
+/**
+ * What this agent has spent through Kumi, when there is no quota to show.
+ *
+ * Two vendors publish no usage figure at all — Claude's exists only inside its
+ * own interactive view, Cursor's does not exist — so their cards were
+ * permanently empty above a sentence that read like a fault. This is the
+ * number Kumi measured on the way past: the worker reports a running token
+ * total on every heartbeat and it is stored per task.
+ *
+ * Deliberately not drawn as a bar. A bar is a fraction of something, and
+ * nothing here knows the ceiling; drawing one would invent the very figure the
+ * vendor would not give us.
+ */
+function spendBlock(report) {
+  const spend = report?.spend;
+  if (spend === undefined || !(Number(spend.totalTokens) > 0)) {
+    return "";
+  }
+  const tasks = Number(spend.tasks) || 0;
+  return `<span class="pcard-section pcard-usage-section">
+    <span class="pcard-section-label">Spent through Kumi</span>
+    <span class="rr-usage-spend">
+      <strong>${esc(tokenCount(spend.totalTokens))}</strong> tokens
+      across ${esc(String(tasks))} ${tasks === 1 ? "task" : "tasks"}
+      <span class="rr-usage-reset">${esc(
+        `${tokenCount(spend.inputTokens)} in · ${tokenCount(spend.outputTokens)} out · last 30 days`,
+      )}</span>
+    </span>
+  </span>`;
+}
+
 function usageBlock(agent) {
   const report = state.providerUsage[usageStateKey(agent)];
   const windows = report?.windows ?? [];
-  if (
-    report === undefined ||
-    report.loading === true ||
-    report.unavailableReason !== undefined ||
-    windows.length === 0
-  ) {
+  if (report === undefined || report.loading === true) {
     return "";
   }
-  return `<span class="pcard-section pcard-usage-section">
+  // A vendor quota when there is one, and Kumi's own measure when there is
+  // not. The second is not a lesser version of the first — it answers "what
+  // has this cost" where the first answers "how much is left" — so where both
+  // exist, both are shown.
+  if (report.unavailableReason !== undefined || windows.length === 0) {
+    return spendBlock(report);
+  }
+  return `${spendBlock(report)}<span class="pcard-section pcard-usage-section">
     <span class="pcard-section-label">Usage</span>
     <span class="pcard-usage">${windows
       .map((window) => {
