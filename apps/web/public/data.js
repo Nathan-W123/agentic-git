@@ -3151,7 +3151,16 @@ export function myAgents() {
       // access to a repository this agent works in can). Chosen at connect
       // time; absent on a provider this account has never connected reads as
       // "personal", the same default the store itself falls back to.
-      visibility: provider.ownCredential?.visibility ?? "personal",
+      // The credential's own visibility where there is one — it is what
+      // decides whose secret a teammate's prompt may spend. Where there is
+      // none, the agent record's, which the server reads back as
+      // `recordVisibility`. Reading only the credential meant an agent that
+      // runs on its owner's machine was "only me" permanently: the setting
+      // saved, reported success, and came back personal on every read.
+      visibility:
+        provider.ownCredential?.visibility ??
+        provider.recordVisibility ??
+        "personal",
     };
   });
 }

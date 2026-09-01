@@ -2659,16 +2659,6 @@ export class ProviderChatService {
     return changed;
   }
 
-  /** Whether this account has an agent of this vendor at all, credential or not. */
-  private async agentRecordExists(
-    userId: string,
-    provider: ProviderId,
-  ): Promise<boolean> {
-    return (await this.storedCallSigns()).some(
-      (entry) => entry.userId === userId && entry.provider === provider,
-    );
-  }
-
   /** Every name this deployment has handed out, or none if it cannot ask. */
   private async storedCallSigns(): Promise<
     ReadonlyArray<{ userId: string; provider: string; callSign: string }>
@@ -5126,18 +5116,14 @@ export class ProviderChatService {
     let connection = file[input.userId]?.[input.provider];
     if (connection === undefined) {
       // An agent exists without a credential, and its settings are still its
-      // settings.
-      //
-      // This asked the old question — is a secret stored — and refused every
-      // change to an agent created by the local flow: its model, its
-      // reasoning level, its name, and the visibility that decides whether
-      // teammates may task it. Somebody watching that agent do work was told
-      // to connect the account it was plainly already using.
+      // settings. This asked the old question — is a secret stored — and so
+      // refused every change to an agent created by the local flow: its model,
+      // its reasoning level, its name, and the visibility deciding whether
+      // teammates may task it.
       //
       // The connections file holds *settings*; the credential store holds
-      // credentials. They were always separate, so a settings record with no
-      // credential behind it is a perfectly ordinary row, and writing one is
-      // what lets an agent that exists be configured.
+      // credentials. They were always separate, so a settings row with no
+      // credential behind it is an ordinary row.
       const exists = (await this.storedCallSigns()).some(
         (entry) =>
           entry.userId === input.userId && entry.provider === input.provider,
@@ -5288,10 +5274,15 @@ export class ProviderChatService {
       } catch (error) {
         // No credential to carry it, which is the ordinary state of an agent
         // that runs on somebody's own machine. The agent record is where its
-        // visibility lives then, and the caller writes it there — see the
-        // settings route. Refusing here made "only me" a permanent setting
-        // for every local agent.
-        if (!(await this.agentRecordExists(input.userId, input.provider))) {
+        // visibility lives then, and the settings route writes it there —
+        // and `describeProviders` reads it back, which is the half this
+        // lacked the first time: the setting saved and every read still
+        // said personal.
+        const owned = (await this.storedCallSigns()).some(
+          (entry) =>
+            entry.userId === input.userId && entry.provider === input.provider,
+        );
+        if (!owned) {
           throw new ProviderChatError(
             409,
             "not_connected",

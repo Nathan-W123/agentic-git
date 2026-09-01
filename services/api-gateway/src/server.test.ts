@@ -598,6 +598,34 @@ async function startRuntime(
         : { usage: { thinkingTokens: chatAnswer.thinkingTokens } }),
     };
   };
+  /**
+   * The provider list, shared by `list` and `setSettings`.
+   *
+   * Both return it in the real service, and a settings response is what the
+   * browser replaces its whole provider list with — so a fixture where only
+   * one of them answers faithfully cannot show whether a write empties the
+   * Agents tab, which is exactly the bug this shape exists to catch.
+   */
+  const listProviderStatuses = (userId: string): unknown[] => {
+    const connections = chatConnections.get(userId) ?? [];
+    return ["anthropic", "openai", "cursor"].map((id) => {
+      const connection = connections.find((entry) => entry.provider === id);
+      return {
+        id,
+        name: id,
+        connected: connection !== undefined,
+        ...(connection === undefined
+          ? {}
+          : {
+              ownCredential: {
+                kind: "oauth_token",
+                visibility: connection.visibility ?? "personal",
+              },
+            }),
+      };
+    });
+  };
+
   const operations: ApiOperations = {
     chatProviders: {
       // Faithful in the one respect the gateway acts on: the route decides,
@@ -605,23 +633,7 @@ async function startRuntime(
       // `ownCredential` to do it. A stub that answered `[]` meant that
       // decision was made over an empty list and never exercised.
       async list(input) {
-        const connections = chatConnections.get(input.userId) ?? [];
-        return ["anthropic", "openai", "cursor"].map((id) => {
-          const connection = connections.find((entry) => entry.provider === id);
-          return {
-            id,
-            name: id,
-            connected: connection !== undefined,
-            ...(connection === undefined
-              ? {}
-              : {
-                  ownCredential: {
-                    kind: "oauth_token",
-                    visibility: connection.visibility ?? "personal",
-                  },
-                }),
-          };
-        });
+        return listProviderStatuses(input.userId);
       },
       async signIn() {
         return {};
@@ -661,10 +673,26 @@ async function startRuntime(
           (entry) => entry.provider === input.provider,
         );
         if (connection === undefined) {
-          throw Object.assign(
-            new Error(`Connect ${input.provider} before changing its settings`),
-            { status: 409, code: "not_connected" },
+          // An agent that exists as a durable record and has no credential is
+          // configurable, which is the ordinary shape since local execution.
+          // The fixture has to behave like the real service here or it tests
+          // a rule the service no longer has.
+          //
+          // And it must *not* invent a connection to represent that: this map
+          // stands for credentials, so pushing one makes a credential-less
+          // agent look credential-backed, and the visibility the gateway wrote
+          // to its record is then correctly ignored on the way back out. The
+          // real service writes a settings row, which is a different thing.
+          const record = (await store.listAgentCallSigns()).find(
+            (sign) =>
+              sign.userId === input.userId && sign.provider === input.provider,
           );
+          if (record === undefined) {
+            throw Object.assign(
+              new Error(`Connect ${input.provider} before changing its settings`),
+              { status: 409, code: "not_connected" },
+            );
+          }
         }
         if (input.callSign !== undefined) {
           const trimmed = input.callSign.trim();
@@ -675,14 +703,21 @@ async function startRuntime(
             );
           }
           if (trimmed === "") {
-            delete connection.callSign;
+            if (connection !== undefined) {
+              delete connection.callSign;
+            }
             await store.clearAgentCallSign(input.userId, input.provider);
           } else {
-            connection.callSign = trimmed;
+            if (connection !== undefined) {
+              connection.callSign = trimmed;
+            }
             await store.setAgentCallSign(input.userId, input.provider, trimmed);
           }
         }
-        return {};
+        // The provider list, as the real service returns — this response is
+        // what the browser replaces its whole list with, so a fixture that
+        // answers `{}` cannot show that the tab survives a write.
+        return listProviderStatuses(input.userId);
       },
       async complete(input: any) {
         return await performChat(input);
@@ -6226,6 +6261,69 @@ test("a message the local model is unsure about is left alone", async (t) => {
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(runtime.submittedTasks.length, 0, "the middle must not act");
   assert.deepEqual(runtime.chatPrompts.slice(before), []);
+});
+
+/**
+ * A settings write must not empty the Agents tab.
+ *
+ * The browser replaces its whole provider list with whatever a settings write
+ * answers. The GET route decorated its answer with `exists` — whether an agent
+ * for this vendor exists at all, which stopped being the same question as
+ * whether a credential is stored — and the settings route returned the
+ * service's list raw. So any write, a rename or a model or a visibility
+ * change, replaced the list with one whose `exists` was missing, and every
+ * agent that runs on its owner's machine vanished from the tab until the next
+ * reload. It read as though the setting had deleted them.
+ */
+test("changing a setting leaves every agent still on the tab", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const base = `/api/v1/chat/providers`;
+
+  // An agent that exists as a record and has no credential — the ordinary
+  // shape since local execution.
+  assert.equal(
+    (await owner.request(`${base}/anthropic/agent`, { method: "POST", body: {} }))
+      .status,
+    200,
+  );
+  const before = await owner.request(base);
+  const listedBefore = (before.data.providers ?? []).filter(
+    (entry: { exists?: boolean }) => entry.exists === true,
+  );
+  assert.equal(listedBefore.length, 1, JSON.stringify(before.data.providers));
+
+  // The write the tab performs, and the list it replaces its state with.
+  const written = await owner.request(`${base}/anthropic/settings`, {
+    method: "POST",
+    body: { visibility: "org" },
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.data));
+  const listedAfter = (written.data.providers ?? []).filter(
+    (entry: { exists?: boolean }) => entry.exists === true,
+  );
+  assert.equal(
+    listedAfter.length,
+    1,
+    "the settings response must carry the same agents the tab was drawn from",
+  );
+
+  // And the setting is readable afterwards, which is the other half: it lives
+  // on the agent record when no credential can hold it, and something has to
+  // read it back.
+  const reloaded = await owner.request(base);
+  const anthropic = (reloaded.data.providers ?? []).find(
+    (entry: { id?: string }) => entry.id === "anthropic",
+  );
+  assert.equal(anthropic?.exists, true);
+  assert.equal(
+    anthropic?.recordVisibility,
+    "org",
+    "visibility set on a credential-less agent must survive a reload",
+  );
+  assert.equal(bootstrapped.user.id.length > 0, true);
 });
 
 function withLocalAgentsOnly(t: { after: (fn: () => void) => void }): void {
