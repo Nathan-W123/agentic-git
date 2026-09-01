@@ -24408,6 +24408,28 @@ export class ApiGateway {
                 code: "internal_error",
                 message: "The request could not be completed",
               };
+    // An unexpected failure is the one kind nobody can look up.
+    //
+    // `HttpError` and `AuthenticationError` are deliberate: they carry their
+    // own words to the caller, and logging them would bury the log in ordinary
+    // 404s and 401s. Everything else reaching here is a bug — an exception no
+    // route expected — and it was answered with an opaque sentence, a request
+    // id, and no record anywhere of what actually threw. The id matched
+    // nothing. An agent reporting "I could not finish this: The request could
+    // not be completed" was therefore the end of the investigation rather than
+    // the start of one.
+    //
+    // Written with the id the caller was given, so the sentence on somebody's
+    // screen and the stack in the log are one grep apart.
+    if (normalized.code === "internal_error") {
+      process.stderr.write(
+        `[gateway] ${requestId} unhandled: ${
+          error instanceof Error
+            ? `${error.stack ?? error.message}`
+            : String(error)
+        }\n`,
+      );
+    }
     this.sendJson(response, normalized.status, {
       error: {
         code: normalized.code,
