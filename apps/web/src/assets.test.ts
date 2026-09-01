@@ -2042,6 +2042,13 @@ test("a connected agent can have its CLI checked without disconnecting", async (
   // cannot see the machine and silence is what caused this in the first place.
   assert.match(agents, /window\.KUMI_INSTALL === undefined/u);
   assert.match(agents, /Open the Kumi app on the machine/u);
+  // A browser and an out-of-date app are different problems with different
+  // remedies, and only one of them is fixed by opening the app. `KUMI_SERVER`
+  // predates the install bridge by a long way, so its presence is what tells
+  // them apart — without it, somebody already inside the app is told to go and
+  // open the app.
+  assert.match(agents, /window\.KUMI_SERVER === undefined/u);
+  assert.match(agents, /too old to install or check a CLI/u);
 });
 
 test("a conversation is scoped to one user's own provider connection", async () => {

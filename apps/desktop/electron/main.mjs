@@ -42,6 +42,7 @@ import {
   verifyServer,
 } from "../dist/server-address.js";
 import { setStayAwake, startWorker, stopWorker } from "./worker.mjs";
+import { readVendorUsage } from "./usage.mjs";
 import {
   INSTALLABLE_VENDORS,
   VENDOR_LABELS,
@@ -614,6 +615,17 @@ ipcMain.handle("kumi:install-run", async (event, vendor) => {
 });
 
 ipcMain.handle("kumi:install-sign-in", (_event, vendor) => openSignIn(vendor));
+
+// What the vendor says is left, read here rather than on the control plane.
+//
+// The server's copy of this needed a stored vendor credential, and that
+// credential was the whole reason connecting an agent asked for a second
+// sign-in — nothing else wanted it, since the agent runs here under the login
+// this machine already holds. Raw output goes back; the server parses it, and
+// keeps the last reading so the figure survives this machine being asleep.
+ipcMain.handle("kumi:agent-usage", async (_event, vendor) =>
+  await readVendorUsage(vendor),
+);
 
 // What this machine actually has, asked for by the connect screen.
 //

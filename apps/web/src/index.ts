@@ -437,6 +437,11 @@ async function serve(
         });
       },
       connectionsFor: (userIds) => providerChat.listConnectionsFor(userIds),
+      reportUsage: async (input) =>
+        await providerChat.reportUsage({
+          ...input,
+          provider: input.provider as ProviderId,
+        }),
       noteAuthFailure: (input) =>
         providerChat.noteAuthFailure({
           ...input,

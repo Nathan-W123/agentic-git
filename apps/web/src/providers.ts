@@ -150,6 +150,13 @@ export interface ProviderUsageReport {
   windows: ProviderUsageWindow[];
   /** Set when the CLI publishes no consumption figure at all. */
   unavailableReason?: string;
+  /**
+   * When this reading was taken, for a figure that came from a machine rather
+   * than from asking just now. Absent means it is live. Present means the card
+   * should say so, because a machine that has been asleep for a day is not
+   * reporting today's quota.
+   */
+  asOf?: string;
   /** The subscription tier the account is on ("plus", "pro", ...). */
   planType?: string;
   /**
@@ -2218,6 +2225,24 @@ export class ProviderChatService {
    * so a key of provider alone would hand one person's consumption figures
    * to the next person who hovered.
    */
+  /**
+   * The last usage figure each machine reported for itself.
+   *
+   * Kept because the machine is not always on, and an agent asleep is exactly
+   * when somebody looks at the card wondering where their quota went. A stale
+   * number with a time on it is far more use than an empty card, so this is
+   * never expired — it is replaced when a fresher reading arrives and
+   * otherwise stands, labelled with when it was taken.
+   *
+   * In memory, so a deployment restart forgets it and the next reading fills
+   * it in again. Worth saying plainly rather than implying durability this
+   * does not have.
+   */
+  private readonly reportedUsage = new Map<
+    string,
+    { at: string; report: ProviderUsageReport }
+  >();
+
   private readonly usageCache = new Map<
     string,
     { at: number; report: ProviderUsageReport }
@@ -2542,6 +2567,41 @@ export class ProviderChatService {
    * is the only place a consumed figure is published, so its lines are
    * parsed rather than any number being derived here.
    */
+  /**
+   * Takes a usage reading from the machine an agent actually runs on.
+   *
+   * The figure used to be read on the control plane, which needed a vendor
+   * credential stored there — and that credential was the entire reason
+   * connecting an agent asked for a second sign-in. Nothing else wanted it:
+   * the agent runs on somebody's own machine under the login its CLI already
+   * holds, so that is where the question has an answer.
+   *
+   * The raw text is parsed here rather than on the machine, because the
+   * parsers already live here and vendors change their output without
+   * warning; one copy is enough to keep in step. A reading that parses to
+   * nothing is still kept, because "the CLI said it has nothing to report" is
+   * a different card from "nobody has looked".
+   */
+  public async reportUsage(input: {
+    userId: string;
+    provider: ProviderId;
+    raw: string;
+  }): Promise<ProviderUsageReport> {
+    const report =
+      input.provider === "anthropic"
+        ? parseClaudeUsage(input.raw)
+        : {
+            windows: [],
+            unavailableReason:
+              `No usage reading is understood for ${PROVIDER_NAMES[input.provider]}.`,
+          };
+    this.reportedUsage.set(`${input.userId}:${input.provider}`, {
+      at: new Date().toISOString(),
+      report,
+    });
+    return report;
+  }
+
   public async usage(input: {
     provider: ProviderId;
     /**
@@ -2594,6 +2654,20 @@ export class ProviderChatService {
         unavailableReason:
           "No usage figures are available for this provider.",
       };
+    }
+    // What the machine itself last said, which beats anything this process can
+    // work out. Asking here means running the vendor CLI on the control plane,
+    // and without a credential of the caller's that lands on the container's
+    // own login — the operator's account, reporting the operator's quota, as
+    // an answer to a question about somebody else's. A reading from the
+    // machine that holds the login is both cheaper and the only one that is
+    // actually about the right account.
+    const reported =
+      input.userId === undefined
+        ? undefined
+        : this.reportedUsage.get(`${input.userId}:${input.provider}`);
+    if (reported !== undefined) {
+      return { ...reported.report, asOf: reported.at };
     }
     // Caller and provider both, so one person's figures are never handed to
     // the next person who asks. "host" stands for a caller with no credential
