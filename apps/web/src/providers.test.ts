@@ -2951,8 +2951,12 @@ test("a session summary is reported as the CLI not publishing a figure, not as a
     }),
   );
   assert.deepEqual(report.windows, []);
-  assert.match(String(report.unavailableReason), /does not publish a usage figure/u);
-  assert.match(String(report.unavailableReason), /Nothing is wrong with the account/u);
+  assert.match(String(report.unavailableReason), /no subscription window to report/u);
+  assert.match(String(report.unavailableReason), /machine that holds your CLI login/u);
+  // Never the claim that the CLI cannot publish it: a subscription account
+  // reports percentages perfectly well, and saying otherwise sent the reader
+  // looking for a missing feature instead of a misdirected question.
+  assert.doesNotMatch(String(report.unavailableReason), /does not publish/u);
   assert.doesNotMatch(String(report.unavailableReason), /unless the account is on a subscription/u);
 
   // An API-key account is still named as such, because that reading is
