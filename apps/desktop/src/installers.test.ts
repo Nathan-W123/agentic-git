@@ -33,6 +33,10 @@ interface InstallersModule {
     vendor: unknown,
     platform: string,
   ) => { command: string; args: string[] } | undefined;
+  treeKill: (
+    pid: number,
+    platform?: string,
+  ) => { command: string; args: string[] } | undefined;
   openSignIn: (vendor: unknown) => boolean;
 }
 
@@ -307,4 +311,37 @@ test("a detected batch shim is run through an interpreter, everything else untou
 
   // `.bat` is the same rule; case does not save it.
   assert.match(runnable("x\\agent.BAT", [], "win32").command, /cmd\.exe$/u);
+});
+
+/**
+ * And the tool that ends the tree is named the same way the interpreter is.
+ *
+ * A bare `taskkill` is resolved through `PATH`, which is the one thing that is
+ * not dependable here: the fake-CLI harness narrows `PATH` on purpose, and a
+ * worker's environment is sanitised on purpose. Asked for by name under either,
+ * `spawnSync` reports ENOENT into a result nothing read, and the process tree
+ * that call exists to kill went on running — holding the stdout pipe that the
+ * reader was still waiting to see close. That is a hang, not a leak, and it
+ * cost twenty-five minutes of a Windows release job twice before it was found.
+ */
+test("the process-tree kill is found by path, not by PATH", async () => {
+  const { treeKill } = await load();
+
+  const windows = treeKill(4321, "win32");
+  assert.ok(windows !== undefined, "Windows needs the tree, not the process");
+  assert.match(windows.command, /System32.taskkill\.exe$/u);
+  // `path.win32`, because this assertion is about a Windows path and the
+  // suite that makes it usually runs on Linux, where `path.isAbsolute` reads
+  // `C:\...` as a relative name and passes the test for the wrong reason.
+  assert.ok(
+    path.win32.isAbsolute(windows.command),
+    "resolved here, so a narrowed PATH cannot lose it",
+  );
+  assert.deepEqual(windows.args, ["/pid", "4321", "/T", "/F"]);
+
+  // Everywhere else a signal reaches the program itself, so there is no tree
+  // to walk and nothing to spawn to walk it.
+  for (const platform of ["darwin", "linux"] as const) {
+    assert.equal(treeKill(4321, platform), undefined);
+  }
 });

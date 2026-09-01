@@ -85,6 +85,15 @@ jobs:
 
       # Tested here as well as on every commit, because this is the last point
       # at which a broken sign-in flow is still cheaper to find than to ship.
+      #
+      # The suite runs under `--test-force-exit` (see the package's own `test`
+      # script). `node --test` has no deadline of its own: a test file that
+      # leaves a handle open never exits, the runner waits on it forever, and
+      # this step — four seconds on every other platform — sat for twenty-five
+      # minutes on the Windows runner twice before anyone read the log. The
+      # leak that caused it is fixed at its source and pinned by a test; this
+      # is the seatbelt, so the next one costs a red cross rather than a
+      # release.
       - name: Build and test the app
         run: npx turbo run build test --filter=@coord/desktop
 

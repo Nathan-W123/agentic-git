@@ -60,6 +60,37 @@ export function runnable(command, args, platform = process.platform) {
   };
 }
 
+/**
+ * The argv that ends a process *and everything it started*, or nothing where a
+ * signal already does.
+ *
+ * Beside {@link runnable} because it is the other half of the same rule. Once
+ * a `.cmd` has to be run through `cmd.exe`, the process this side holds is the
+ * interpreter, and signalling it leaves the vendor CLI behind it running —
+ * still holding the stdout pipe it inherited, so the read never ends and
+ * whoever is waiting on it waits forever.
+ *
+ * `taskkill.exe` is named by its full path for the same reason `cmd.exe` is,
+ * and this time the reason is not hypothetical: asked for by bare name, it is
+ * resolved through `PATH`, and anything that has narrowed `PATH` — a test
+ * harness pinning which CLIs exist, a sanitised environment — makes the one
+ * thing that ends a Windows process tree unfindable. `spawnSync` then reports
+ * ENOENT into a result nobody read, and the tree survived the call that exists
+ * to kill it.
+ *
+ * Everywhere else a signal reaches the program directly, because there is no
+ * interpreter standing in front of it.
+ */
+export function treeKill(pid, platform = process.platform) {
+  if (platform !== "win32") {
+    return undefined;
+  }
+  return {
+    command: windowsSystem32("taskkill.exe"),
+    args: ["/pid", String(pid), "/T", "/F"],
+  };
+}
+
 /** Where the interpreter for a shell one-liner lives on this machine. */
 function powershell() {
   return windowsSystem32("WindowsPowerShell", "v1.0", "powershell.exe");

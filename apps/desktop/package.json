@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/*.test.js",
+    "test": "node --test --test-force-exit dist/*.test.js",
     "desktop": "electron electron/main.mjs",
     "package": "electron-builder --config electron-builder.yml"
   }

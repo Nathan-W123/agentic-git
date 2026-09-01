@@ -16,7 +16,7 @@
 import { spawn, spawnSync } from "node:child_process";
 
 import { detectAgents, findAgentCommand } from "./agents.mjs";
-import { runnable } from "./installers.mjs";
+import { runnable, treeKill } from "./installers.mjs";
 
 /**
  * Codex's app-server handshake, written to stdin in one go.
@@ -247,19 +247,27 @@ function runOnce(executable, attempt) {
  * waiting on it waits forever: a `codex app-server` asked for a usage figure
  * would be left running on somebody's machine after every reading, and the
  * suite that exercises it hangs rather than fails, which is how this arrived —
- * as twenty-two minutes of a Windows job sitting on a four-second step.
+ * as twenty-five minutes of a Windows job sitting on a four-second step.
  *
- * `taskkill /T` ends the tree. Everywhere else a signal reaches the program
- * directly, because there is no interpreter in front of it.
+ * {@link treeKill} names the tool by its full path, because the first cut
+ * asked for `taskkill` by name and a narrowed `PATH` is exactly the condition
+ * this runs under. Its result is read for the same reason: a kill that could
+ * not run has to fall through to the signal, which reaches less than the tree
+ * does but is better than the tree surviving unremarked.
  */
 function stop(child) {
   try {
-    if (process.platform === "win32" && child.pid !== undefined) {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+    const tree = child.pid === undefined ? undefined : treeKill(child.pid);
+    if (tree !== undefined) {
+      const ended = spawnSync(tree.command, tree.args, {
         windowsHide: true,
         stdio: "ignore",
       });
-      return;
+      // A non-zero status is usually 128 — the tree was already gone — and
+      // signalling a dead child below is a no-op, so both roads are safe.
+      if (ended.error === undefined && ended.status === 0) {
+        return;
+      }
     }
     child.kill();
   } catch {
