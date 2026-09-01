@@ -410,6 +410,50 @@ test("the app-server reader returns as soon as it has the answer", async () => {
 });
 
 /**
+ * Claude is asked in the format that publishes the windows, and let go the
+ * moment it has.
+ *
+ * `claude -p "/usage"` sends the slash command as a prompt — the interactive
+ * usage view is never opened — so the reply is a session summary with no
+ * percentage in it, which is why the card had been empty since agents moved
+ * off the control plane. `--output-format stream-json` is what carries the
+ * numbers: a `rate_limit_event` whose `unifiedWindows` holds the five-hour
+ * and seven-day figures. Killing the run there is not just tidiness — it ends
+ * the turn the question started, so asking costs less than it did before.
+ */
+test("the claude reader asks in stream-json and stops at the rate limit event", async () => {
+  await withFakeClis(
+    {
+      claude: [
+        "#!/usr/bin/env node",
+        "const args = process.argv.slice(2);",
+        "if (!args.includes('stream-json')) {",
+        "  process.stdout.write(JSON.stringify({ result: 'Total cost: $0.01' }));",
+        "  return;",
+        "}",
+        "process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init' }) + '\\n');",
+        "process.stdout.write(JSON.stringify({ type: 'rate_limit_event',",
+        "  rate_limit_info: { unifiedWindows: { five_hour: { utilization: 36 },",
+        "    seven_day: { utilization: 71 } } } }) + '\\n');",
+        // The real CLI carries on with the turn it started; this must not.
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+    },
+    async (usage) => {
+      const started = Date.now();
+      const reading = await usage.readVendorUsage("claude");
+      assert.equal(reading.ok, true, JSON.stringify(reading));
+      assert.match(String(reading.raw), /rate_limit_event/u);
+      assert.match(String(reading.raw), /seven_day/u);
+      assert.ok(
+        Date.now() - started < 10_000,
+        "it must not sit out the deadline once the windows have arrived",
+      );
+    },
+  );
+});
+
+/**
  * A CLI that is not here has not reported anything, and saying so is the
  * whole answer. Reporting an empty reading would file "nothing to show" as
  * this account's usage until something replaced it.
