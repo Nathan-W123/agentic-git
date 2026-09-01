@@ -33,6 +33,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { detectAgents, ensureProject, exists } from "./agents.mjs";
+import { treeKill } from "./installers.mjs";
 
 /**
  * Backoff between restarts, and the point at which restarting is pointless.
@@ -375,19 +376,19 @@ export function stopWorker() {
  * the process group, which `kill` already reaches. Best effort throughout —
  * this runs while the app is quitting, and a failure to clean up must not be
  * able to stop it.
+ *
+ * The argv comes from {@link treeKill} rather than being written out here.
+ * This file had the full path to `taskkill.exe` from the start and the usage
+ * reader did not, and a bare name there cost two Windows release jobs — so
+ * there is now one rule and one place to be right about it.
  */
 function terminateTree(pid) {
-  if (pid === undefined || process.platform !== "win32") {
+  const tree = pid === undefined ? undefined : treeKill(pid);
+  if (tree === undefined) {
     return;
   }
-  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
   try {
-    spawnSync(path.join(systemRoot, "System32", "taskkill.exe"), [
-      "/pid",
-      String(pid),
-      "/t",
-      "/f",
-    ], { windowsHide: true, stdio: "ignore" });
+    spawnSync(tree.command, tree.args, { windowsHide: true, stdio: "ignore" });
   } catch {
     // Nothing left to try, and nothing worth failing a quit over.
   }

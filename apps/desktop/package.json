@@ -1,6 +1,6 @@
 {
   "name": "@coord/desktop",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "private": true,
   "description": "Kumi as a desktop app: a window onto your deployment, signed in through your browser.",
   "author": "Kumi",
@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/*.test.js",
+    "test": "node --test --test-force-exit dist/*.test.js",
     "desktop": "electron electron/main.mjs",
     "package": "electron-builder --config electron-builder.yml"
   }
