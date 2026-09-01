@@ -3498,9 +3498,9 @@ async function deleteRepositoryAction(repositoryId) {
   const label = repositoryLabel(repositoryId);
   const phrase = `yesiwanttodelete${label.replace(/\s+/gu, "")}`;
   const values = await showModal({
-    title: "Delete this repository?",
-    subtitle: `This permanently deletes ${label}, its chat history, and its repository-scoped grants. This cannot be undone.`,
-    confirm: "Delete repository",
+    title: "Delete this workspace?",
+    subtitle: `This permanently deletes ${label}, its chat history, and its workspace-scoped grants. This cannot be undone.`,
+    confirm: "Delete workspace",
     body: `<label class="field">
         <span>Type <code>${esc(phrase)}</code> to confirm</span>
         <input class="input" name="confirmation" autocomplete="off"
@@ -3512,7 +3512,7 @@ async function deleteRepositoryAction(repositoryId) {
     return;
   }
   if (String(values.confirmation ?? "").trim().toLowerCase() !== phrase.toLowerCase()) {
-    toast(`Type ${phrase} exactly to delete this repository`, "error");
+    toast(`Type ${phrase} exactly to delete this workspace`, "error");
     return;
   }
   try {
@@ -8026,7 +8026,7 @@ function repositoryMenuItems(repositoryId) {
     {
       act: "channel-delete-repo",
       value: repositoryId,
-      label: "Delete repository",
+      label: "Delete workspace",
       iconName: "trash",
       danger: true,
     },

@@ -139,12 +139,12 @@ test("the channel menu offers owner-gated repository deletion", async () => {
   );
   assert.match(shared, /if \(!canDeleteRepository\(repositoryId\)\) \{\s*return \[\];/u);
   assert.match(shared, /act: "channel-delete-repo"/u);
-  assert.match(shared, /label: "Delete repository"/u);
+  assert.match(shared, /label: "Delete workspace"/u);
   assert.match(shared, /danger: true/u);
   assert.doesNotMatch(shared, /separator: true/u);
 
   // Danger changes the row's colour, but does not silently insert a divider
-  // between Sync from GitHub and Delete repository.
+  // between Sync from GitHub and Delete workspace.
   const menu = slice(
     ui,
     "export function showMenu(anchor, items",
@@ -231,12 +231,16 @@ test("deleting a repository requires typing the confirmation phrase", async () =
   // the wrong repository.
   assert.match(action, /const label = repositoryLabel\(repositoryId\);/u);
   assert.match(action, /const phrase = `yesiwanttodelete\$\{label\.replace\(/u);
+  assert.match(action, /title: "Delete this workspace\?"/u);
+  assert.match(action, /workspace-scoped grants/u);
+  assert.match(action, /confirm: "Delete workspace"/u);
   assert.match(action, /name="confirmation"/u);
   // Mismatched input says so and stops — the request is never sent.
   assert.match(
     action,
     /values\.confirmation[\s\S]*!==[\s\S]*phrase\.toLowerCase\(\)[\s\S]*?return;/u,
   );
+  assert.match(action, /exactly to delete this workspace/u);
   const sent = action.indexOf("await deleteRepository(repositoryId)");
   const checked = action.indexOf("values.confirmation");
   assert.notEqual(sent, -1);
