@@ -205,6 +205,7 @@ import {
 import {
   TERMINAL_TASK_STATUS,
   cancelTask,
+  checkLocalCli,
   connectAgent,
   disconnectAgent,
   linkAgentAccount,
@@ -2356,6 +2357,11 @@ function agentsCard() {
                           data-value="${esc(agent.id)}"
                           title="Link your ${esc(agent.label ?? agent.id)} account so Kumi can show your remaining usage"
                           >Link for usage</button>
+                          <button type="button" class="btn btn-sm"
+                          data-act="agent-check-cli"
+                          data-value="${esc(agent.id)}"
+                          title="Check that this agent's CLI is installed and signed in on this machine"
+                          >Check the CLI</button>
                           <button type="button" class="btn btn-sm"
                           data-act="agent-disconnect"
                           data-value="${esc(agent.id)}">Disconnect</button>`
@@ -10298,6 +10304,12 @@ document.addEventListener("click", (event) => {
     /* Agent connections */
     case "agent-connect":
       void connectAgent(value, render);
+      return;
+    case "agent-check-cli":
+      // The machine half of an agent, on demand. Connecting used to be the
+      // only thing that ran it, which left an agent whose CLI was missing or
+      // signed out with no way to reach the installer at all.
+      void checkLocalCli(value, render);
       return;
     case "agent-link-account":
       // The vendor sign-in on its own terms: the agent already exists, and
