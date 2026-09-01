@@ -72,6 +72,117 @@ function npmInstall(packageName, platform) {
 }
 
 /**
+ * Where a fresh Node lands, and where npm puts what it installs globally.
+ *
+ * Needed twice, for the same reason both times: a program's environment is
+ * fixed when it starts. Installing Node writes its directory into the
+ * *registry's* PATH on Windows, and into a shell profile everywhere else —
+ * neither of which reaches a Kumi that was already running. So a person who
+ * installs Node and comes back to the app is told, correctly and uselessly,
+ * that npm is still not there; and a person who installs a CLI is told the
+ * machine still has no CLI. Both were "restart Kumi", which is a fine
+ * instruction and a terrible first five minutes.
+ *
+ * These are the standard locations, added to what PATH already says rather
+ * than replacing it. A directory that does not exist costs a failed lookup.
+ */
+export function wellKnownBinDirectories(platform = process.platform) {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  if (platform === "win32") {
+    const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
+    const localAppData =
+      process.env.LOCALAPPDATA ?? (home === "" ? "" : path.join(home, "AppData", "Local"));
+    const appData =
+      process.env.APPDATA ?? (home === "" ? "" : path.join(home, "AppData", "Roaming"));
+    return [
+      path.join(programFiles, "nodejs"),
+      ...(localAppData === "" ? [] : [path.join(localAppData, "Programs", "nodejs")]),
+      // Where npm's own `-g` bin goes on Windows, which is where the vendor
+      // CLIs land — so this is the one that decides whether an install this
+      // app just ran is visible to it.
+      ...(appData === "" ? [] : [path.join(appData, "npm")]),
+    ];
+  }
+  return [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    ...(home === "" ? [] : [path.join(home, ".npm-global", "bin"), path.join(home, ".local", "bin")]),
+  ];
+}
+
+/** This process's PATH with those directories appended. */
+export function pathWithWellKnown(platform = process.platform) {
+  const current = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const extra = wellKnownBinDirectories(platform).filter(
+    (dir) => !current.includes(dir),
+  );
+  return [...current, ...extra].join(path.delimiter);
+}
+
+/**
+ * How to install Node itself, which is the dependency under two of the three.
+ *
+ * Offered rather than merely reported. "npm is not installed on this machine,
+ * install Node.js first" is a true sentence and a dead end: it hands somebody
+ * who came here to connect an agent a second piece of homework, on a different
+ * website, in the middle of setting up something else. The app knows what to
+ * run, so it offers to run it.
+ *
+ * Windows goes through `winget`, which ships with Windows 11 and with any
+ * Windows 10 carrying App Installer. It is Microsoft's own package manager and
+ * `OpenJS.NodeJS.LTS` is the Node Foundation's own published package, so this
+ * is neither a URL this app invented nor a binary it chose. A machine without
+ * winget says so in its own words and the offer becomes the sentence it was
+ * before.
+ *
+ * macOS goes through Homebrew when Homebrew is there, and does not pretend
+ * otherwise when it is not: the alternative is a `.pkg` that needs an
+ * administrator, and asking for a password on somebody's behalf is further
+ * than an app should reach. Linux is deliberately absent — the honest answer
+ * spans a dozen package managers, and the desktop app's platform is Windows.
+ */
+const NODE_INSTALLERS = {
+  win32: {
+    display: "winget install OpenJS.NodeJS.LTS",
+    argv: () => ({
+      command: windowsSystem32("cmd.exe"),
+      args: [
+        "/d",
+        "/c",
+        "winget",
+        "install",
+        "--id",
+        "OpenJS.NodeJS.LTS",
+        "--exact",
+        // The community source, explicitly: the Store carries packages by the
+        // same name and this is the one the Node Foundation publishes.
+        "--source",
+        "winget",
+        // Without these it waits for a keystroke nobody can see, behind a
+        // window with no terminal in it.
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+      ],
+    }),
+  },
+  darwin: {
+    display: "brew install node",
+    argv: () => ({ command: "brew", args: ["install", "node"] }),
+  },
+};
+
+/** What installing Node would run here, or nothing if this app cannot. */
+export function nodeInstallPlan(platform = process.platform) {
+  const installer = Object.hasOwn(NODE_INSTALLERS, platform)
+    ? NODE_INSTALLERS[platform]
+    : undefined;
+  return installer === undefined
+    ? undefined
+    : { command: installer.display, ...installer.argv() };
+}
+
+/**
  * What each vendor publishes as its install command, and what to run to sign
  * in afterwards.
  *
@@ -203,18 +314,53 @@ export async function runInstall(vendor, onOutput) {
       detail: `No install is published here for ${String(vendor)}.`,
     };
   }
-  const { command, args } = installer.argv(process.platform);
   // Whether this vendor's install needs Node on the machine, which decides
   // what "it did not start" means. Read off the published command rather than
   // off the argv, because the argv is now an interpreter on Windows and the
   // interpreter is always there.
-  const needsNpm = installer.display.startsWith("npm ");
+  return await run(installer.argv(process.platform), onOutput, {
+    needsNpm: installer.display.startsWith("npm "),
+  });
+}
+
+/**
+ * Installs Node itself, so "npm is not installed" stops being the end of it.
+ *
+ * Separate from {@link runInstall} rather than another row in the vendor
+ * table, because it is not a vendor: nobody signs into it, nothing runs
+ * agents with it, and it is offered only in answer to a specific failure of
+ * something else.
+ */
+export async function runNodeInstall(onOutput) {
+  const plan = nodeInstallPlan();
+  if (plan === undefined) {
+    return {
+      ok: false,
+      detail:
+        `Kumi cannot install Node.js on ${process.platform} for you. ` +
+        "Install it from nodejs.org and try again — no restart needed.",
+    };
+  }
+  return await run(plan, onOutput, { needsNpm: false });
+}
+
+/**
+ * Runs one install, relaying what it says and keeping the last of it.
+ *
+ * The PATH it runs under is this process's plus the standard places Node and
+ * npm's global bin live. That is what lets an install work in the session
+ * that installed Node a minute earlier: this app's environment was fixed when
+ * it launched, and nothing a Windows installer writes to the registry reaches
+ * a process that is already running.
+ */
+async function run({ command, args }, onOutput, { needsNpm }) {
   return await new Promise((resolve) => {
     let child;
     try {
       child = spawn(command, args, {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, PATH: pathWithWellKnown() },
       });
     } catch (error) {
       resolve({ ok: false, detail: describe(error) });
@@ -233,26 +379,29 @@ export async function runInstall(vendor, onOutput) {
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", heard);
     child.stderr?.on("data", heard);
+    // Named rather than described, so the caller can offer the remedy instead
+    // of printing the diagnosis. `reason` is the whole of what main.mjs reads;
+    // `detail` is for the person.
+    const failed = (text, fallback) => {
+      const noNode = missingNode(needsNpm, text);
+      return noNode === undefined
+        ? { ok: false, detail: lastLines(text) ?? fallback }
+        : { ok: false, reason: "no-node", detail: noNode };
+    };
     child.once("error", (error) => {
       const said = describe(error);
-      resolve({ ok: false, detail: missingNode(needsNpm, said) ?? said });
+      resolve(failed(said, said));
     });
     child.once("close", (code) => {
-      if (code === 0) {
-        resolve({ ok: true });
-        return;
-      }
-      // Through an interpreter, a missing npm is not an `error` event at all:
-      // the interpreter starts perfectly well and then reports that it could
-      // not find the command. So the same sentence has to be reachable from
-      // the output as well as from the errno.
-      resolve({
-        ok: false,
-        detail:
-          missingNode(needsNpm, tail) ??
-          lastLines(tail) ??
-          `The installer exited with code ${String(code)}.`,
-      });
+      resolve(
+        code === 0
+          ? { ok: true }
+          : // Through an interpreter, a missing npm is not an `error` event at
+            // all: the interpreter starts perfectly well and then reports that
+            // it could not find the command. So the same reading has to be
+            // reachable from the output as well as from the errno.
+            failed(tail, `The installer exited with code ${String(code)}.`),
+      );
     });
   });
 }
@@ -275,8 +424,8 @@ function missingNode(needsNpm, text) {
     /ENOENT|is not recognized as an internal or external command|command not found/iu.test(
       text,
     )
-    ? "npm is not installed on this machine. Install Node.js from " +
-      "nodejs.org first, then try again."
+    ? "npm is not installed on this machine — the vendor CLIs are npm " +
+      "packages, so Node.js has to be here first."
     : undefined;
 }
 

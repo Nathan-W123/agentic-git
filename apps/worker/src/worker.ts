@@ -200,6 +200,45 @@ export interface IterationResult {
 }
 
 const DEFAULT_POLL_MS = 5_000;
+
+/**
+ * Where a task's minutes went, said once when it ends.
+ *
+ * Running agents on a laptop instead of in the datacentre changes what is
+ * expensive, and nothing here reported which part. "It feels slower than it
+ * was on the server" is a real observation with no way to act on it: a
+ * checkout that takes ninety seconds because an antivirus is reading every
+ * file it writes, a first bundle arriving over a home connection, and a model
+ * simply taking its time are three completely different problems that look
+ * identical from outside.
+ *
+ * Deliberately one line rather than a metrics system. It is printed to the
+ * worker's own output, which the desktop app now keeps, so the answer to "why
+ * was that slow" is a thing somebody can read rather than a thing somebody has
+ * to reproduce.
+ */
+class Laps {
+  private readonly marks: [string, number][] = [];
+  private last = Date.now();
+  private readonly startedAt = Date.now();
+
+  /** Closes the stretch since the previous mark and names it. */
+  public mark(name: string): void {
+    const now = Date.now();
+    this.marks.push([name, now - this.last]);
+    this.last = now;
+  }
+
+  /** Everything measured, longest phase named first among equals. */
+  public summary(): string {
+    const parts = this.marks
+      .filter(([, ms]) => ms >= 50)
+      .map(([name, ms]) => `${name} ${(ms / 1000).toFixed(1)}s`);
+    return `${parts.join(" · ")} · total ${(
+      (Date.now() - this.startedAt) / 1000
+    ).toFixed(1)}s`;
+  }
+}
 const DEFAULT_PLAN_WAIT_BUDGET_MS = 60_000;
 /**
  * How long any one git command may take before the task is failed.
@@ -356,6 +395,13 @@ export class Worker {
    * Separated from {@link run} so the whole cycle can be driven directly by a
    * test without an infinite loop.
    */
+  /**
+   * The stretch timings for the task in hand, so the phases inside `plan` can
+   * be named by the code that runs them rather than measured from outside.
+   * Undefined between tasks.
+   */
+  private laps: Laps | undefined;
+
   public async runOnce(): Promise<IterationResult> {
     if (this.stopping) {
       return { worked: false };
@@ -485,11 +531,15 @@ export class Worker {
         };
       }
 
+      const laps = new Laps();
+      this.laps = laps;
       const planned = await this.plan(assignment, scratch);
+      laps.mark("plan");
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
       const admission = await this.awaitAdmission(assignment, planned.plan);
+      laps.mark("admission");
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
@@ -515,6 +565,7 @@ export class Worker {
       }
 
       const result = await this.execute(assignment, planned, admission);
+      laps.mark("execute");
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
@@ -527,6 +578,11 @@ export class Worker {
         },
         this.spentSoFar(),
       );
+      laps.mark("report");
+      // One line, on the worker's own output, which the desktop app keeps.
+      // Everything above this is where the time actually went; without it
+      // "slower than the server was" is an observation with nowhere to go.
+      console.log(`[worker] task ${assignment.task.id} — ${laps.summary()}`);
       const withheld = (admission.deferredResources ?? []).map(
         (resource) => `${resource.resourceType}:${resource.resourceId}`,
       );
@@ -868,6 +924,11 @@ export class Worker {
       assignment,
       scratch,
     );
+    // The two halves are timed apart because they fail for opposite reasons: a
+    // slow fetch is the network or a cache that keeps being rebuilt, and a slow
+    // checkout is the disk — which on Windows usually means a virus scanner
+    // reading every file git writes.
+    this.laps?.mark("fetch");
 
     const workspacePath = path.join(scratch, "workspace");
     // `clone --branch` cannot name a ref outside `refs/heads/`, and the lease
@@ -895,6 +956,7 @@ export class Worker {
       ["-C", workspacePath, "checkout", "--detach", "FETCH_HEAD"],
       { timeoutMs: GIT_COMMAND_TIMEOUT_MS },
     );
+    this.laps?.mark("checkout");
 
     const workspace: TaskWorkspace = {
       id: assignment.lease.id,
