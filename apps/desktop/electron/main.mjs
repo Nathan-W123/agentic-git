@@ -42,7 +42,13 @@ import {
   verifyServer,
 } from "../dist/server-address.js";
 import { setStayAwake, startWorker, stopWorker } from "./worker.mjs";
-import { installPlan, openSignIn, runInstall } from "./installers.mjs";
+import {
+  INSTALLABLE_VENDORS,
+  VENDOR_LABELS,
+  installPlan,
+  openSignIn,
+  runInstall,
+} from "./installers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -377,6 +383,85 @@ function noteWorkerState(event) {
         ? "Reconnecting…"
         : `Not running — ${event.detail}`;
   Menu.setApplicationMenu(buildMenu());
+  if (event.reason === "no-cli") {
+    void offerToInstallACli();
+  }
+}
+
+/**
+ * Whether this run has already offered to install a CLI.
+ *
+ * The worker restarts, and every restart on a machine with nothing installed
+ * would ask again. Once per run is the right number: somebody who said no is
+ * saying no to this session, not to the idea forever, and the offer is still
+ * on the Agents screen whenever they want it.
+ */
+let offeredInstall = false;
+
+/**
+ * The dead end this app used to have, and the way out of it.
+ *
+ * Nothing here can run an agent until one of three vendors' CLIs is on the
+ * machine, and the worker refuses to start without one — correctly, because a
+ * worker advertising adapters it cannot drive takes work it will fail. But
+ * refusing was the whole of it. The reason went into a menu, the dashboard
+ * said nothing, and an agent connected from a machine in that state accepted
+ * every task and did none of them.
+ *
+ * There was never a reason a person needed a CLI *first*. This app knows how
+ * to install all three, has known since the install table was written, and
+ * only ever offered it from a screen somebody had to go and find. So it asks
+ * here, at the moment it discovers the gap, and installing takes effect
+ * immediately: `runInstall`'s own handler stops and restarts the worker, so
+ * the scan runs again and the machine starts advertising what it just got.
+ */
+async function offerToInstallACli() {
+  if (offeredInstall || session === undefined || here === undefined) {
+    return;
+  }
+  offeredInstall = true;
+  const labels = INSTALLABLE_VENDORS.map(
+    (vendor) => VENDOR_LABELS[vendor] ?? vendor,
+  );
+  const choice = await dialog.showMessageBox({
+    type: "question",
+    title: "Kumi needs an agent on this machine",
+    message: "No agent CLI is installed here yet",
+    detail:
+      "Kumi runs agents on your own machine, under your own vendor login, so " +
+      "one of these has to be installed before an agent can do any work. " +
+      "Kumi can install it for you now — you will still sign in to the " +
+      "vendor yourself afterwards.",
+    buttons: [...labels, "Not now"],
+    defaultId: 0,
+    cancelId: labels.length,
+    noLink: true,
+  });
+  const vendor = INSTALLABLE_VENDORS[choice.response];
+  if (vendor === undefined) {
+    return;
+  }
+  // The same path the dashboard uses, so there is one installer and one set of
+  // commands rather than a second copy that drifts. Output is not relayed
+  // anywhere here — there is no window asking — so a failure is reported as
+  // its own message rather than as silence.
+  const result = await runInstall(vendor, () => undefined);
+  if (!result.ok) {
+    dialog.showErrorBox(
+      `Could not install ${VENDOR_LABELS[vendor] ?? vendor}`,
+      `${result.detail ?? "The installer did not finish."}\n\n` +
+        "You can install it yourself and restart Kumi, or try again from " +
+        "Settings → Agents in the dashboard.",
+    );
+    return;
+  }
+  // Installed, and the worker is already restarting behind this. The sign-in
+  // is the one step nobody can do for somebody else: every vendor's login is
+  // an interactive flow it owns, and the most this can do is put them in
+  // front of it with nothing left to type.
+  stopWorker();
+  void startWorker(here, session, noteWorkerState);
+  openSignIn(vendor);
 }
 
 async function openDashboard() {

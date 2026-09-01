@@ -104,3 +104,42 @@ test("the command shown is the vendor's own published one", async () => {
   // `cursor-agent`, which is a different npm package by a different author.
   assert.equal(installPlan("cursor")?.signIn, "agent");
 });
+
+/**
+ * The offer has to be built from the table, not from a second list.
+ *
+ * A vendor named here but absent from the table would be offered and then
+ * fail to install; one in the table but missing here could never be offered at
+ * all. Both are silent, and the second is how the app came to have an install
+ * flow that a person could only reach from a screen they had to go and find.
+ */
+test("every offerable vendor is one this app can actually install", async () => {
+  const module = (await import(
+    pathToFileURL(path.join(electronDir, "installers.mjs")).href
+  )) as unknown as {
+    INSTALLABLE_VENDORS: readonly string[];
+    VENDOR_LABELS: Record<string, string>;
+    installPlan: (vendor: unknown) => Plan | undefined;
+  };
+
+  assert.ok(module.INSTALLABLE_VENDORS.length > 0, "something must be offerable");
+  for (const vendor of module.INSTALLABLE_VENDORS) {
+    const plan = module.installPlan(vendor);
+    assert.ok(plan !== undefined, `${vendor} is offered but has no installer`);
+    assert.equal(plan.vendor, vendor);
+    // Named for a person, because these go on buttons in a dialog.
+    assert.ok(
+      (module.VENDOR_LABELS[vendor] ?? "").length > 0,
+      `${vendor} is offered with no human label`,
+    );
+  }
+  // Only the three verified vendors. npm carries a package called
+  // `cursor-agent` that is somebody else's project entirely, and a wrong
+  // command here would have somebody install it, watch Kumi fail, and
+  // conclude Kumi was broken.
+  assert.deepEqual([...module.INSTALLABLE_VENDORS].sort(), [
+    "claude",
+    "codex",
+    "cursor",
+  ]);
+});
