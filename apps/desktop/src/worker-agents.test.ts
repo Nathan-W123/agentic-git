@@ -326,7 +326,17 @@ interface UsageModule {
   }>;
 }
 
-/** A directory of fake CLIs, put on `PATH` for the duration of one test. */
+/**
+ * A directory of fake CLIs, put on `PATH` for the duration of one test.
+ *
+ * Written the way each platform actually installs one, because that is the
+ * whole thing under test. On POSIX a vendor CLI is an executable script with a
+ * shebang. On Windows it is a `.cmd` shim beside a `.js` — which is exactly
+ * what npm writes for a global install, and exactly the shape `spawn` refuses
+ * to execute without a shell. A harness that wrote shebang scripts on Windows
+ * would fail with `spawn ENOENT` for a reason no real machine has, and would
+ * say nothing about the reason a real machine fails.
+ */
 async function withFakeClis(
   files: Record<string, string>,
   run: (usage: UsageModule) => Promise<void>,
@@ -335,6 +345,20 @@ async function withFakeClis(
   const previous = process.env["PATH"];
   try {
     for (const [name, body] of Object.entries(files)) {
+      if (process.platform === "win32") {
+        // The shim npm writes, and the script it points at. `detectAgents`
+        // looks for `<name>.cmd` before the extensionless file, so this is
+        // also what it will find.
+        await writeFile(path.join(dir, `${name}.js`), body, "utf8");
+        await writeFile(
+          path.join(dir, `${name}.cmd`),
+          `@echo off
+node "%~dp0${name}.js" %*
+`,
+          "utf8",
+        );
+        continue;
+      }
       const file = path.join(dir, name);
       await writeFile(file, body, { mode: 0o755 });
     }

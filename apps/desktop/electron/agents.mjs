@@ -123,6 +123,32 @@ async function findOnPath(dirs, names) {
 }
 
 /**
+ * Where a known agent's executable actually is, whatever `pinPath` says.
+ *
+ * `detectAgents` withholds Claude's path on purpose — its npm shim cannot be
+ * spawned on Windows and its adapter goes looking for the native binary
+ * instead, so naming the shim in the project config would override the one
+ * lookup that knows better. That is right for the worker and wrong for
+ * everything else: asking a CLI a question still has to start *a* program, and
+ * a bare name on Windows is resolved by the same PATHEXT search that lands on
+ * the `.cmd` and then refuses it with `spawn EINVAL`.
+ *
+ * So the path is available to whoever needs it, and what to do with a batch
+ * shim once you have one is `runnable`'s business rather than this module's.
+ */
+export async function findAgentCommand(id) {
+  const agent = KNOWN_AGENTS.find((known) => known.id === id);
+  if (agent === undefined) {
+    return undefined;
+  }
+  const dirs = [
+    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean),
+    ...wellKnownBinDirectories(),
+  ];
+  return await findOnPath(dirs, agent.commands);
+}
+
+/**
  * Writes the worker's own project config, reconciled with what is installed.
  *
  * This used to return an existing config untouched, which made the file a
