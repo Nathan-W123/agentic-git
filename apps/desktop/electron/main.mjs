@@ -52,7 +52,12 @@ import {
 // install offer, the sign-in — was skipped in silence. Agents connected,
 // looked connected, and could run nothing.
 import { detectAgents } from "./agents.mjs";
-import { setStayAwake, startWorker, stopWorker } from "./worker.mjs";
+import {
+  setStayAwake,
+  startWorker,
+  stopWorker,
+  workerLogPath,
+} from "./worker.mjs";
 import { readVendorUsage } from "./usage.mjs";
 import {
   INSTALLABLE_VENDORS,
@@ -303,6 +308,14 @@ function buildMenu() {
       // credential) are all things only they can fix.
       label: workerStatus,
       enabled: false,
+    },
+    {
+      // The rest of what that one line came from. A machine running agents
+      // has no terminal open, so without this the worker's account of a task
+      // — which phase took the time, what a CLI said before it gave up —
+      // exists only until the next line replaces it.
+      label: "Open Worker Log",
+      click: () => void shell.openPath(workerLogPath()),
     },
     { type: "separator" },
     {

@@ -27,7 +27,8 @@
  */
 import { app, powerMonitor, powerSaveBlocker, utilityProcess } from "electron";
 import { spawnSync } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { mkdir, rename, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -242,12 +243,20 @@ async function startWorkerOnce(here, session, onEvent) {
     },
   });
 
-  child.stdout?.on("data", (line) => {
-    onEvent?.({ state: "running", detail: String(line).trim() });
-  });
-  child.stderr?.on("data", (line) => {
-    onEvent?.({ state: "running", detail: String(line).trim() });
-  });
+  // Kept, as well as shown. The menu holds one line — the most recent — and
+  // everything before it went nowhere, so the worker's account of a task was
+  // gone by the time anybody thought to ask about it. That is exactly the
+  // wrong shape for the questions this output answers: why a task was slow,
+  // which phase it was slow in, what the CLI said before it gave up. None of
+  // those are things somebody is watching the menu for when they happen.
+  const log = await openWorkerLog();
+  const heard = (line) => {
+    const text = String(line);
+    log?.write(text);
+    onEvent?.({ state: "running", detail: text.trim() });
+  };
+  child.stdout?.on("data", heard);
+  child.stderr?.on("data", heard);
   // Held for the lease's lifetime and no longer. Sleeping halfway through an
   // agent's execution loses the work and strands the lease until it expires;
   // holding the machine open for as long as the worker is merely *enabled*
@@ -402,3 +411,38 @@ function deviceName() {
 function describe(error) {
   return error instanceof Error ? error.message : String(error);
 }
+
+/** Where the worker's own account of itself is kept. */
+export function workerLogPath() {
+  return path.join(app.getPath("userData"), "worker.log");
+}
+
+/**
+ * Opens the log, rolling it over once it gets long.
+ *
+ * One generation back is kept and no more. This is a diagnostic somebody
+ * reads within minutes of noticing something, not an audit trail — and a file
+ * that grows without bound on a machine running agents all day is a bug of its
+ * own.
+ */
+async function openWorkerLog() {
+  const file = workerLogPath();
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+    const size = await stat(file)
+      .then((info) => info.size)
+      .catch(() => 0);
+    if (size > MAX_LOG_BYTES) {
+      await rename(file, `${file}.1`).catch(() => undefined);
+    }
+    const stream = createWriteStream(file, { flags: "a" });
+    // A log that cannot be written is not worth failing a worker over.
+    stream.on("error", () => undefined);
+    stream.write(`\n--- ${new Date().toISOString()} worker started ---\n`);
+    return stream;
+  } catch {
+    return undefined;
+  }
+}
+
+const MAX_LOG_BYTES = 4 * 1024 * 1024;
