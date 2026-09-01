@@ -9031,40 +9031,51 @@ function pinnedBanner(repositoryId) {
       </button>
       <div class="chan-pins-list-frame" aria-hidden="false">
         <div class="chan-pins-list">${pins
-        .map((entry) => {
-          const title = threadTitle(entry) || "(no text)";
-          const resolvedAuthor = channelAuthor(repositoryId, entry);
-          const sender = String(resolvedAuthor?.name ?? "Unknown sender");
-          const author = { name: sender, agent: resolvedAuthor?.agent };
-          const sentAt = historyWhen(entry.at ?? entry.createdAt);
-          const pinner =
-            entry.pinnedBy === undefined
-              ? "someone"
-              : (memberName(entry.pinnedBy) ?? entry.pinnedBy);
-          return `<div class="chan-pin-row">
-                <button type="button" class="chan-pin-jump"
-                  data-act="channel-pinned-open" data-value="${esc(entry.id)}"
-                  title="Pinned by ${esc(pinner)}">
-                  <span class="cp-avatar">${authorFace(author, 24, repositoryId)}</span>
-                  <span class="cp-copy">
-                    <span class="cp-meta">
-                      <span class="cp-sender">${esc(sender)}</span>
-                      <span class="cp-time">${esc(sentAt)}</span>
-                    </span>
-                    <span class="cp-title">${esc(title)}</span>
-                  </span>
-                </button>
-                ${iconButton("close", {
-                  act: "channel-pin",
-                  value: entry.id,
-                  title: "Unpin",
-                  small: true,
-                })}
-              </div>`;
-        })
+        .map((entry) => pinnedRow(repositoryId, entry))
         .join("")}</div>
       </div>
     </div>
+  </div>`;
+}
+
+/**
+ * One pin: where it goes, and how to take it back.
+ *
+ * The row used to end in a bare ✕, which beside a list of messages reads as
+ * "hide this row" rather than "unpin this message" — and in the pins panel,
+ * where the same cross also closes the panel itself in the header above, it
+ * read as nothing anybody would risk clicking. So the second control says
+ * what it does in words. It cannot use the pin glyph: the panel is already
+ * the pin, and a pin icon on a pinned row means "pin" as often as "unpin".
+ * `channel-pin` is a toggle, so unpinning is the same action the overflow
+ * menu already offers, aimed at a message that is by definition pinned.
+ */
+function pinnedRow(repositoryId, entry) {
+  const title = threadTitle(entry) || "(no text)";
+  const resolvedAuthor = channelAuthor(repositoryId, entry);
+  const sender = String(resolvedAuthor?.name ?? "Unknown sender");
+  const author = { name: sender, agent: resolvedAuthor?.agent };
+  const sentAt = historyWhen(entry.at ?? entry.createdAt);
+  const pinner =
+    entry.pinnedBy === undefined
+      ? "someone"
+      : (memberName(entry.pinnedBy) ?? entry.pinnedBy);
+  return `<div class="chan-pin-row">
+    <button type="button" class="chan-pin-jump"
+      data-act="channel-pinned-open" data-value="${esc(entry.id)}"
+      title="Pinned by ${esc(pinner)}">
+      <span class="cp-avatar">${authorFace(author, 24, repositoryId)}</span>
+      <span class="cp-copy">
+        <span class="cp-meta">
+          <span class="cp-sender">${esc(sender)}</span>
+          <span class="cp-time">${esc(sentAt)}</span>
+        </span>
+        <span class="cp-title">${esc(title)}</span>
+      </span>
+    </button>
+    <button type="button" class="chan-pin-off" data-act="channel-pin"
+      data-value="${esc(entry.id)}" title="Unpin this message"
+      aria-label="Unpin the message from ${esc(sender)}">Unpin</button>
   </div>`;
 }
 

@@ -832,6 +832,14 @@ test("pinned messages stay available and open at their thread root", async () =>
     /\$\{icon\("pin"\)\}/u,
     "the pinned-message pullout should not repeat the pin icon",
   );
+  // The shelf above the conversation and the pins panel beside it are one
+  // renderer — the panel is this banner with the shelf forced open — so a
+  // row gained in one is a row gained in the other.
+  assert.match(banner, /pinnedRow\(repositoryId, entry\)/u);
+  assert.match(
+    slice(chats, "function pinnedMessagesPanel(", "\n/**"),
+    /const pins = pinnedBanner\(repositoryId\);/u,
+  );
   assert.match(action, /state\.activeChannelThread = value;/u);
   assert.match(action, /state\.scrollToThreadMessage = value;/u);
   // The thread joins the column rather than emptying it: a plan or a file
@@ -854,6 +862,41 @@ test("pinned messages stay available and open at their thread root", async () =>
     "/**\n * Removes one whole thread",
   );
   assert.match(deletion, /if \(response\?\.redacted !== true\)/u);
+});
+
+test("a pin can be taken back from the row that lists it", async () => {
+  const [chats, css] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+  const row = slice(
+    chats,
+    "function pinnedRow(",
+    "\nfunction composerThreadChip(",
+  );
+
+  // Every listed pin carries its own way off the list, aimed at the same
+  // `channel-pin` toggle the message's own overflow menu uses. The row used
+  // to end in a bare ✕, which beside a list of messages reads as "hide this
+  // row" — and in the pins panel it sat under the header's ✕, which closes
+  // the panel, so nothing there visibly unpinned anything.
+  assert.match(row, /class="chan-pin-off" data-act="channel-pin"/u);
+  assert.match(row, /data-value="\$\{esc\(entry\.id\)\}"/u);
+  assert.match(row, />Unpin<\/button>/u, "the control should say what it does");
+  assert.doesNotMatch(
+    row,
+    /iconButton\("close"/u,
+    "unpinning should not be spelled as a close cross",
+  );
+
+  // A column of buttons all reading "Unpin" is unusable to anybody listening
+  // rather than looking, so each names the message it would drop.
+  assert.match(row, /aria-label="Unpin the message from \$\{esc\(sender\)\}"/u);
+
+  // Drawn always, not on hover: a control that needs a pointer over the row
+  // is a control a touch screen does not have.
+  assert.match(css, /\.chan-pin-off \{/u);
+  assert.doesNotMatch(css, /:hover \.chan-pin-off \{/u);
 });
 
 test("a reaction is only offered where it can be saved, and is taken back when it is not", async () => {
