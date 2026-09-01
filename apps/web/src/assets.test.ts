@@ -2052,6 +2052,40 @@ test("a connected agent can have its CLI checked without disconnecting", async (
 });
 
 /**
+ * Nothing says the connect worked until the machine has been asked.
+ *
+ * The success toast used to fire before a single question had been put to the
+ * machine, and it was the same message whether the CLI was installed and
+ * signed in or whether nothing on the computer could run the agent at all.
+ * Somebody connected three agents that way and was told three times that it
+ * had worked; every one of them then accepted work and did none of it.
+ */
+test("connecting checks the machine before it reports success", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const connect = agents.slice(
+    agents.indexOf("async function connectLocalAgent"),
+    agents.indexOf("export async function disconnectAgent"),
+  );
+
+  // Order is the whole fix: the machine, then the message.
+  const setup = connect.indexOf("await finishLocalSetup(");
+  const said = connect.indexOf("toast(outcome.text");
+  assert.notEqual(setup, -1, "the machine must be checked during connect");
+  assert.ok(setup < said, "it must be checked before anything claims success");
+
+  // And the message distinguishes the outcomes rather than always cheering.
+  assert.match(connect, /is not installed on this machine yet/u);
+  assert.match(connect, /Open the Kumi app on the machine that will run it/u);
+  assert.match(connect, /could not be added to every repository/u);
+
+  // The report is earned, not assumed: an install that was declined or failed
+  // must not come back as ready just because an installer was offered.
+  const finish = agents.slice(agents.indexOf("async function finishLocalSetup"));
+  assert.match(finish.slice(0, 2_600), /const after = await bridge\.detected\(\)/u);
+  assert.match(finish.slice(0, 2_600), /\? "ready" : "missing"/u);
+});
+
+/**
  * An agent that runs on somebody's machine can still be put into a channel.
  *
  * `connected` means a credential is stored here, and since an agent stopped
@@ -2096,8 +2130,11 @@ test("a credential-less agent is listed in channels and offered to rooms", async
 test("check the CLI says something when the machine cannot be asked", async () => {
   const agents = await publicFile("screen-agents.js");
   const setup = agents.slice(agents.indexOf("async function finishLocalSetup"));
-  assert.match(setup.slice(0, 900), /detected === undefined/u);
-  assert.match(setup.slice(0, 900), /Could not ask this machine what is installed/u);
+  assert.match(setup.slice(0, 2_600), /detected === undefined/u);
+  assert.match(
+    setup.slice(0, 2_600),
+    /Could not ask this machine what is installed/u,
+  );
 });
 
 test("a conversation is scoped to one user's own provider connection", async () => {

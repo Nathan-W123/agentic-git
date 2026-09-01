@@ -354,15 +354,51 @@ async function connectLocalAgent(providerId, rerender) {
     state.providerConnecting?.delete(providerId);
   }
   await loadProviders();
-  const failedRepositories = await addAgentToAllRepositories(providerId);
-  toast(
-    failedRepositories.length === 0
-      ? `${agent?.callSign ?? agentLabelOf(providerId)} is yours`
-      : `${agentLabelOf(providerId)} connected, but could not be added to every repository`,
-    failedRepositories.length === 0 ? "ok" : "error",
-  );
+  // Drawn before the machine is touched, so the agent and its name are on
+  // screen while an install runs — that can take a minute, and a blank wait
+  // after pressing Connect reads as nothing having happened.
   rerender();
-  await finishLocalSetup(providerId, rerender);
+
+  // The machine, *before* anything claims this worked.
+  //
+  // This used to run last, after a toast saying the agent was yours. So the
+  // success message was written before a single question had been asked of the
+  // machine, and it was the same message whether the CLI was installed and
+  // signed in or whether nothing on the computer could run the agent at all.
+  // Somebody connected three agents that way and was told three times that it
+  // had worked.
+  const ready = await finishLocalSetup(providerId, rerender);
+
+  const failedRepositories = await addAgentToAllRepositories(providerId);
+  const name = agent?.callSign ?? agentLabelOf(providerId);
+  const vendor = PROVIDER_VENDOR[providerId] ?? agentLabelOf(providerId);
+  // One message, saying which of the things that had to happen actually did.
+  // The agent exists either way — that part is done and is worth saying, so
+  // nobody presses Connect again on an agent they already have.
+  const outcome =
+    failedRepositories.length > 0
+      ? {
+          text: `${name} is yours, but could not be added to every repository`,
+          tone: "error",
+        }
+      : ready === "ready"
+        ? { text: `${name} is yours`, tone: "ok" }
+        : ready === "missing"
+          ? {
+              text: `${name} is yours, but ${vendor} is not installed on this machine yet — it cannot run until it is`,
+              tone: "error",
+            }
+          : ready === "no-machine"
+            ? {
+                text: `${name} is yours. Open the Kumi app on the machine that will run it to finish setting it up`,
+                tone: "error",
+              }
+            : {
+                text: `${name} is yours, but this machine could not be checked — use Check the CLI on its row`,
+                tone: "error",
+              };
+  toast(outcome.text, outcome.tone);
+  rerender();
   return true;
 }
 
@@ -513,11 +549,14 @@ export async function checkLocalCli(providerId, rerender) {
 async function finishLocalSetup(providerId, rerender) {
   const bridge = window.KUMI_INSTALL;
   if (bridge === undefined) {
-    return;
+    // A browser, or an app too old to have the bridge. Either way nothing here
+    // can see the machine, and the caller has to say so rather than report a
+    // success it did not establish.
+    return "no-machine";
   }
   const vendor = PROVIDER_VENDOR[providerId];
   if (vendor === undefined) {
-    return;
+    return "unknown";
   }
   const detected = await bridge.detected().catch(() => undefined);
   if (detected === undefined) {
@@ -531,14 +570,18 @@ async function finishLocalSetup(providerId, rerender) {
         `and try again.`,
       "error",
     );
-    return;
+    return "unknown";
   }
   if (!detected.includes(vendor)) {
     // Nothing here can run it. `installVendorCli` shows what it will run,
     // runs it, and opens the sign-in afterwards — the whole remaining setup,
     // in the place somebody is already standing.
     await installVendorCli(vendor, rerender);
-    return;
+    // Asked again rather than assumed: the install may have been declined, or
+    // failed, and reporting a success because an installer was *offered* is
+    // the same mistake this ordering exists to fix.
+    const after = await bridge.detected().catch(() => undefined);
+    return after?.includes(vendor) === true ? "ready" : "missing";
   }
   // Installed, but nothing here can tell whether it is signed in — that lives
   // inside the vendor's own config and reading it would be guessing at a
@@ -557,6 +600,11 @@ async function finishLocalSetup(providerId, rerender) {
   if (now !== undefined) {
     await bridge.signIn(vendor).catch(() => false);
   }
+  // Installed, and the sign-in has been offered. Whether they completed it is
+  // the vendor's own business and cannot be read from here without guessing at
+  // a config format none of them promise — so "ready" means the machine has
+  // what it needs, not that every login is live.
+  return "ready";
 }
 
 async function signInAgent(providerId, mode, rerender, intent) {
