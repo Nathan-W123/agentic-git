@@ -208,7 +208,6 @@ import {
   checkLocalCli,
   connectAgent,
   disconnectAgent,
-  linkAgentAccount,
   installVendorCli,
   connectGitHubAccount,
   pauseTask,
@@ -2348,16 +2347,14 @@ function agentsCard() {
                       : localAgent
                         ? // The agent already exists — it was created without a
                           // credential, which is all a local deployment needs.
-                          // The vendor sign-in is still on offer, demoted to
-                          // what it actually buys here: the usage figures on
-                          // this card. Making it the price of having an agent
-                          // is what had somebody signing in twice.
+                          // No vendor sign-in is offered here any more: the
+                          // usage figure was the last thing it bought, and
+                          // that now comes from this machine's own CLI, which
+                          // is signed in already. A button that reads like
+                          // connecting, on a row that is connected, is what
+                          // sent the first person who tried it to a second
+                          // vendor sign-in they never needed.
                           `<button type="button" class="btn btn-sm"
-                          data-act="agent-link-account"
-                          data-value="${esc(agent.id)}"
-                          title="Link your ${esc(agent.label ?? agent.id)} account so Kumi can show your remaining usage"
-                          >Link for usage</button>
-                          <button type="button" class="btn btn-sm"
                           data-act="agent-check-cli"
                           data-value="${esc(agent.id)}"
                           title="Check that this agent's CLI is installed and signed in on this machine"
@@ -10310,11 +10307,6 @@ document.addEventListener("click", (event) => {
       // only thing that ran it, which left an agent whose CLI was missing or
       // signed out with no way to reach the installer at all.
       void checkLocalCli(value, render);
-      return;
-    case "agent-link-account":
-      // The vendor sign-in on its own terms: the agent already exists, and
-      // this attaches the credential that the usage figures read.
-      void linkAgentAccount(value, render);
       return;
     case "github-connect":
       void connectGitHubAccount(render);

@@ -1914,9 +1914,10 @@ test("Settings Agents rows ask whether the agent exists, not whether a secret is
     true,
     "the status line, the rename control and the connect control all read it",
   );
-  // An agent that exists says so, and offers the sign-in as the extra it is.
+  // An agent that exists says so, and is not asked to sign in a second time
+  // to prove it: the row offers the machine and nothing else.
   assert.match(body, /runs on this machine/u);
-  assert.match(body, /data-act="agent-link-account"/u);
+  assert.doesNotMatch(body, /data-act="agent-link-account"/u);
 
   // Both halves of the signal reach the browser. `exists` is the server's
   // answer, and the flag has to be readable from Settings — which can be
@@ -1944,12 +1945,12 @@ test("an agent can be disconnected, including one with no credential", async () 
   const start = app.indexOf("function agentsCard()");
   const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
 
-  // Offered on the local-agent row, beside the sign-in it does not require.
-  assert.match(body, /data-act="agent-link-account"/u);
+  // Offered on the local-agent row, beside the CLI check it sits with.
+  assert.match(body, /data-act="agent-check-cli"/u);
   assert.match(
-    body.slice(body.indexOf('data-act="agent-link-account"')),
+    body.slice(body.indexOf('data-act="agent-check-cli"')),
     /data-act="agent-disconnect"/u,
-    "the row that offers Link for usage must also offer Disconnect",
+    "the row that offers Check the CLI must also offer Disconnect",
   );
 
   // The click goes through the flow, not straight at the route. The bare
@@ -1979,36 +1980,81 @@ test("an agent can be disconnected, including one with no credential", async () 
 });
 
 /**
- * The one button on a connected row that still leads to a vendor sign-in must
- * say so first.
+ * A connected row offers no vendor sign-in at all.
  *
- * A connected agent has no Connect button — it is connected — so the row reads
- * Rename, Link for usage, Disconnect. Somebody who has just disconnected an
- * agent and wants it back presses the only one of those that sounds like
- * connecting, and lands on the vendor's sign-in page: exactly the second
- * sign-in this release removed, reached by the one control that still goes
- * there. It happened to the first person who tried it.
+ * The credential stopped being what makes an agent, and the usage figure was
+ * the last thing it still bought. That figure now comes from this machine's
+ * own CLI — the one already signed in, doing the work — so there is nothing
+ * left for a second sign-in to be an extra for.
+ *
+ * The button that offered it had to go rather than be relabelled. A connected
+ * agent has no Connect button, because it is connected, so the row read
+ * Rename, Link for usage, Disconnect: somebody who had just disconnected an
+ * agent and wanted it back pressed the only one of those that sounded like
+ * connecting and landed on the vendor's sign-in page. It happened to the
+ * first person who tried it.
  */
-test("linking a vendor account asks before it opens a sign-in", async () => {
+test("a connected local row offers no second vendor sign-in", async () => {
+  const app = await publicFile("app.js");
   const agents = await publicFile("screen-agents.js");
-  const start = agents.indexOf("export async function linkAgentAccount");
+
+  // Gone from the row, from the dispatch, and from the module — a dispatch
+  // case with no button is how a removed control comes back by accident.
+  assert.doesNotMatch(app, /agent-link-account/u);
+  assert.doesNotMatch(agents, /linkAgentAccount/u);
+
+  // And the local branch of the sign-in has no exception left to take. The
+  // guard existed only so the removed button could reach past it.
+  assert.match(
+    agents,
+    /if \(state\.localAgentsOnly === true\) \{\s*\n\s*return await connectLocalAgent/u,
+  );
+  assert.doesNotMatch(agents, /link-account/u);
+});
+
+/**
+ * The usage figure surfaces itself.
+ *
+ * It used to need a credential stored on the control plane, and the only way
+ * to get one there was a second vendor sign-in — for a number about an account
+ * that is already signed in on the machine doing the work. So the question is
+ * asked where the answer is: the page asks this machine's own CLI whenever it
+ * is about to show the card, and files what it said. Nothing is pressed.
+ */
+test("usage is read from this machine whenever the card is about to be shown", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("async function reportMachineUsage");
   assert.notEqual(start, -1);
-  const body = agents.slice(start, agents.indexOf("\nexport async function connectAgent", start));
+  const body = data.slice(start, data.indexOf("\nexport async function ensureProviderUsage", start));
 
-  // Asked before anything opens, and a way out that does nothing.
-  const confirm = body.indexOf("await showModal(");
-  const signIn = body.indexOf("await signInAgent(");
-  assert.notEqual(confirm, -1, "there must be a confirmation");
-  assert.ok(confirm < signIn, "it must come before the sign-in, not after");
-  assert.match(body, /if \(proceed === undefined\) \{\s*\n\s*return;/u);
+  // Through the desktop bridge, keyed by vendor — "anthropic" issues the
+  // credential, `claude` is the program with the login.
+  assert.match(body, /window\.KUMI_INSTALL/u);
+  assert.match(body, /PROVIDER_VENDOR\[providerId\]/u);
+  assert.match(body, /bridge\.usage\(vendor\)/u);
 
-  // It says the two things the button cannot fit: that this is optional, and
-  // that the agent already works without it.
-  assert.match(body, /This is optional/u);
-  assert.match(body, /already works/u);
-  // And names the agent, because the row is about somebody called Nyx rather
-  // than about a vendor.
-  assert.match(body, /agent\?\.hasName === true \? agent\.name/u);
+  // One table, in the module both the reader and the connect flow import.
+  // Two copies is how the roster's vendor names drifted from the server's.
+  assert.match(data, /export const PROVIDER_VENDOR = \{/u);
+  const agents = await publicFile("screen-agents.js");
+  assert.doesNotMatch(agents, /^const PROVIDER_VENDOR = \{/mu);
+  assert.match(agents, /\n  PROVIDER_VENDOR,\n/u);
+
+  // A browser has no bridge, and that is not a failure — it falls through to
+  // the server's answer exactly as before.
+  assert.match(body, /return undefined;/u);
+  // Nor is a CLI that is absent or would not answer: filing an empty reading
+  // would stand as this account's usage until something replaced it.
+  assert.match(body, /reading\?\.ok !== true/u);
+
+  // And the fetch it feeds asks the machine first, for one's own agent only.
+  // The roster shows other people's agents, and this machine's CLI is signed
+  // in as this account — asking it about theirs reports the wrong quota under
+  // their name.
+  assert.match(
+    data,
+    /const fromMachine = ownerId \? undefined : await reportMachineUsage\(providerId\);/u,
+  );
 });
 
 /**
@@ -2029,10 +2075,10 @@ test("a connected agent can have its CLI checked without disconnecting", async (
   const start = app.indexOf("function agentsCard()");
   const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
 
-  // On the connected row, beside the other two — the row that has no Connect.
-  assert.match(body, /data-act="agent-check-cli"/u);
-  const link = body.indexOf('data-act="agent-link-account"');
-  assert.ok(link !== -1 && body.indexOf('data-act="agent-check-cli"') > link);
+  // On the connected row, before the disconnect — the row that has no Connect.
+  const check = body.indexOf('data-act="agent-check-cli"');
+  assert.notEqual(check, -1);
+  assert.ok(body.indexOf('data-act="agent-disconnect"', check) > check);
   assert.match(app, /void checkLocalCli\(value, render\)/u);
 
   // The same setup connecting runs, not a second copy of it.
