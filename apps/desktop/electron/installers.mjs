@@ -33,6 +33,64 @@ function windowsSystem32(...parts) {
   return path.join(root, "System32", ...parts);
 }
 
+/**
+ * The same argv, in a form Windows will actually start.
+ *
+ * A `.cmd` or `.bat` is not a program. Since the CVE-2024-27980 fix
+ * `child_process.spawn` refuses to execute one unless it is told to use a
+ * shell, and it says so as `spawn EINVAL` — which reads like a fault in this
+ * app rather than a rule about the platform. The installer hit that on
+ * `npm.cmd`; anything that spawns a *detected* CLI hits it too, because npm
+ * installs its global binaries on Windows as exactly these shims. `codex.cmd`
+ * and `agent.cmd` are what `detectAgents` finds and pins.
+ *
+ * So the rule lives in one place and everything that spawns a path found on
+ * PATH goes through it. A real program is passed through untouched, which is
+ * every case on every other platform.
+ */
+export function runnable(command, args, platform = process.platform) {
+  if (platform !== "win32" || !/\.(?:bat|cmd)$/iu.test(command)) {
+    return { command, args };
+  }
+  return {
+    command: windowsSystem32("cmd.exe"),
+    // `/d` skips any AutoRun the registry has, so a batch file runs in a shell
+    // nobody else has furnished.
+    args: ["/d", "/c", command, ...args],
+  };
+}
+
+/**
+ * The argv that ends a process *and everything it started*, or nothing where a
+ * signal already does.
+ *
+ * Beside {@link runnable} because it is the other half of the same rule. Once
+ * a `.cmd` has to be run through `cmd.exe`, the process this side holds is the
+ * interpreter, and signalling it leaves the vendor CLI behind it running —
+ * still holding the stdout pipe it inherited, so the read never ends and
+ * whoever is waiting on it waits forever.
+ *
+ * `taskkill.exe` is named by its full path for the same reason `cmd.exe` is,
+ * and this time the reason is not hypothetical: asked for by bare name, it is
+ * resolved through `PATH`, and anything that has narrowed `PATH` — a test
+ * harness pinning which CLIs exist, a sanitised environment — makes the one
+ * thing that ends a Windows process tree unfindable. `spawnSync` then reports
+ * ENOENT into a result nobody read, and the tree survived the call that exists
+ * to kill it.
+ *
+ * Everywhere else a signal reaches the program directly, because there is no
+ * interpreter standing in front of it.
+ */
+export function treeKill(pid, platform = process.platform) {
+  if (platform !== "win32") {
+    return undefined;
+  }
+  return {
+    command: windowsSystem32("taskkill.exe"),
+    args: ["/pid", String(pid), "/T", "/F"],
+  };
+}
+
 /** Where the interpreter for a shell one-liner lives on this machine. */
 function powershell() {
   return windowsSystem32("WindowsPowerShell", "v1.0", "powershell.exe");

@@ -13,9 +13,10 @@
  * keep in step with vendors who change their output without warning.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
-import { detectAgents } from "./agents.mjs";
+import { detectAgents, findAgentCommand } from "./agents.mjs";
+import { runnable, treeKill } from "./installers.mjs";
 
 /**
  * Codex's app-server handshake, written to stdin in one go.
@@ -126,7 +127,14 @@ export async function readVendorUsage(vendor) {
   }
   // The path this machine's own detection found, so the command asked about
   // usage is the same program that does the work.
-  const executable = entry.command ?? vendor;
+  //
+  // Resolved even where the project config deliberately does not pin it. A
+  // bare name is fine on any platform that has an executable of that name;
+  // on Windows it is resolved by a PATHEXT search that finds the `.cmd` npm
+  // installed and then refuses to start it. Holding the real path is what
+  // lets `runnable` see a batch shim and run it through an interpreter.
+  const executable =
+    entry.command ?? (await findAgentCommand(vendor)) ?? vendor;
   let last;
   for (const attempt of attempts) {
     const result = await runOnce(executable, attempt);
@@ -144,8 +152,13 @@ export async function readVendorUsage(vendor) {
 function runOnce(executable, attempt) {
   return new Promise((resolve) => {
     let child;
+    // Through `cmd.exe` when the detected CLI is a batch shim, which on
+    // Windows is what npm installs its global binaries as. Spawning one
+    // directly is `spawn EINVAL` — the same rule that made the installer
+    // impossible, reached by a different road.
+    const { command, args } = runnable(executable, attempt.args);
     try {
-      child = spawn(executable, attempt.args, {
+      child = spawn(command, args, {
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -171,11 +184,7 @@ function runOnce(executable, attempt) {
         clearTimeout(timer);
         // The app-server does not exit on its own; it is killed here, after
         // it has already answered.
-        try {
-          child.kill();
-        } catch {
-          // It exited between the state check and the signal.
-        }
+        stop(child);
         resolve(value);
       }
     };
@@ -225,6 +234,45 @@ function runOnce(executable, attempt) {
     }
     child.stdin?.end();
   });
+}
+
+/**
+ * Ends a reader, and everything it started.
+ *
+ * `kill` signals one process. On Windows the process it signals is `cmd.exe`,
+ * because a batch shim is not a program and has to be run through an
+ * interpreter — and killing the interpreter leaves the vendor CLI it launched
+ * running. That is not a tidiness problem. The orphan inherits this process's
+ * stdout pipe, so the pipe never closes, the read never ends, and whoever is
+ * waiting on it waits forever: a `codex app-server` asked for a usage figure
+ * would be left running on somebody's machine after every reading, and the
+ * suite that exercises it hangs rather than fails, which is how this arrived —
+ * as twenty-five minutes of a Windows job sitting on a four-second step.
+ *
+ * {@link treeKill} names the tool by its full path, because the first cut
+ * asked for `taskkill` by name and a narrowed `PATH` is exactly the condition
+ * this runs under. Its result is read for the same reason: a kill that could
+ * not run has to fall through to the signal, which reaches less than the tree
+ * does but is better than the tree surviving unremarked.
+ */
+function stop(child) {
+  try {
+    const tree = child.pid === undefined ? undefined : treeKill(child.pid);
+    if (tree !== undefined) {
+      const ended = spawnSync(tree.command, tree.args, {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      // A non-zero status is usually 128 — the tree was already gone — and
+      // signalling a dead child below is a no-op, so both roads are safe.
+      if (ended.error === undefined && ended.status === 0) {
+        return;
+      }
+    }
+    child.kill();
+  } catch {
+    // It exited between the state check and the signal.
+  }
 }
 
 function describe(error) {

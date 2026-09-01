@@ -84,7 +84,6 @@ import {
   type FilePatchStatus,
   type SequencedAuditEvent,
 } from "@coord/shared-types";
-
 import {
   AuthService,
   AuthenticationError,
@@ -3913,6 +3912,39 @@ export interface ApiOperations {
     have?: string,
   ): Promise<Buffer | undefined>;
   /**
+   * Hands a solo remote task the whole repository, so it can skip the planning
+   * round trip the way an in-process one always has.
+   *
+   * Optional, and answering `undefined` is the ordinary case rather than a
+   * fault: it means the conditions were not met and the worker plans exactly
+   * as it does today. A deployment that omits this behaves the same way.
+   */
+  claimWorkRepository?(input: {
+    leaseId: string;
+    actorId: string;
+    protocolVersion: number;
+  }): Promise<{ plan?: unknown; planningContext?: string }>;
+  /**
+   * The two directions of a repository claim, folded onto the heartbeat.
+   *
+   * Up goes what the holder has written; down comes a claim that was narrowed
+   * underneath it and the ask that turns an arrival's retry into a run. The
+   * gateway carries the traffic and decides none of it — everything this
+   * answers is about leases and holders, which live on the other side of this
+   * interface with every other decision of that kind.
+   */
+  claimHeartbeat?(input: {
+    leaseId: string;
+    workingChanges?: unknown;
+  }): Promise<Record<string, unknown>>;
+  /** A holder's answer to the ask, posted on its own route. */
+  settleClaimDeclaration?(input: {
+    leaseId: string;
+    askId: string;
+    declaration?: unknown;
+    workingChanges?: unknown;
+  }): Promise<boolean>;
+  /**
    * Arbitrates a worker's plan before it executes. A deployment that omits
    * this cannot run plan-first workers, and the endpoint says so.
    */
@@ -7092,7 +7124,7 @@ export class ApiGateway {
     const leaseMatch = matchPath(
       path,
       new RegExp(
-        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|scope|result|release|progress)$`,
+        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|claim|declaration|plan|scope|result|release|progress)$`,
         "u",
       ),
     );
@@ -7169,8 +7201,9 @@ export class ApiGateway {
         // here rather than only at the end is what makes a token budget a cap
         // instead of a post-mortem: an overspending task is stopped while it
         // is still spending.
+        const beat = await this.readHeartbeatBody(request);
         const reported = await this.recordLeaseTokenUsage(
-          request,
+          beat,
           lease,
           now.toISOString(),
         );
@@ -7253,7 +7286,10 @@ export class ApiGateway {
           );
         }
         await this.options.store.touchWorker(lease.workerId, now.toISOString());
-        this.sendJson(response, 200, extended);
+        this.sendJson(response, 200, {
+          ...extended,
+          ...(await this.claimTraffic(lease, beat)),
+        });
         return;
       }
 
@@ -7291,6 +7327,80 @@ export class ApiGateway {
             "Content-Length": bundle.byteLength,
           })
           .end(bundle);
+        return;
+      }
+
+      if (action === "claim" && method === "POST") {
+        // Asked once, between the bundle and the plan, and cheap to refuse.
+        //
+        // A worker that gets nothing back plans exactly as it did before this
+        // route existed, so every reason to say no — blanket claims switched
+        // off, somebody else in the repository, an objective the estimator
+        // could not anchor, a control plane too old to have the operation —
+        // is the same answer: 204, carry on.
+        const claimOperation = this.options.operations.claimWorkRepository;
+        const body = objectBody(await this.readJson(request));
+        const prepared =
+          claimOperation === undefined
+            ? {}
+            : await claimOperation({
+                leaseId,
+                actorId: principal.user.id,
+                // Absent reads as 0, which is below the version a claim
+                // requires — so a worker that does not say cannot be granted
+                // one by accident.
+                protocolVersion:
+                  typeof body["protocolVersion"] === "number" &&
+                  Number.isFinite(body["protocolVersion"])
+                    ? Math.trunc(body["protocolVersion"])
+                    : 0,
+              });
+        if (
+          prepared.plan === undefined &&
+          (prepared.planningContext ?? "") === ""
+        ) {
+          response.writeHead(204).end();
+          return;
+        }
+        this.sendJson(response, 200, {
+          ...(prepared.plan === undefined ? {} : { plan: prepared.plan }),
+          ...(prepared.planningContext === undefined
+            ? {}
+            : { planningContext: prepared.planningContext }),
+        });
+        return;
+      }
+
+      if (action === "declaration" && method === "POST") {
+        // The answer to an ask the heartbeat carried down.
+        //
+        // Its own route rather than a field on the next heartbeat, because the
+        // two have opposite deadlines: a heartbeat must return promptly to
+        // keep a lease alive, and this arrives whenever a paused agent has
+        // finished thinking. Somebody is waiting on it — the arrival that
+        // asked — so the sooner it is posted the sooner they run.
+        //
+        // The working changes travel with it because this is the one
+        // observation of a remote holder that is *exact*: taken at the moment
+        // the agent was paused, rather than up to a heartbeat old.
+        const body = objectBody(await this.readJson(request));
+        const askId =
+          stringField(body["askId"], "askId", { max: 200, optional: true }) ?? "";
+        const settle = this.options.operations.settleClaimDeclaration;
+        const settled =
+          settle === undefined
+            ? false
+            : await settle({
+                leaseId,
+                askId,
+                declaration: body["declaration"],
+                workingChanges: body["workingChanges"],
+              });
+        // Never an error. An ask that has been abandoned — the arrival gave up
+        // and retried — is answered by a holder that could not have known, and
+        // the honest reply is that nobody is listening any more rather than a
+        // failure the worker would log.
+        this.sendJson(response, 202, { settled });
         return;
       }
 
@@ -23502,26 +23612,72 @@ export class ApiGateway {
    * failing a running task over a miscounted bill, and a gap in the data is
    * the honest record of an agent that could not say what it spent.
    */
-  private async recordLeaseTokenUsage(
+  /**
+   * The heartbeat's body, read once.
+   *
+   * A request body is a stream and can only be consumed once, and this one now
+   * carries two unrelated things — the agent's running token total and, while a
+   * repository claim is held, what the holder has written. Reading it here and
+   * handing the parsed object to both readers is what stops the second one
+   * finding an empty stream.
+   */
+  private async readHeartbeatBody(
     request: IncomingMessage,
-    lease: WorkLease,
-    at: string,
-  ): Promise<number> {
+  ): Promise<Record<string, unknown>> {
     const declared = Number.parseInt(
       request.headers["content-length"] ?? "0",
       10,
     );
-    if (Number.isFinite(declared) && declared > 0) {
-      const body = await this.readJson(request).catch(() => undefined);
-      const entries = (body as { tokenUsage?: unknown } | undefined)
-        ?.tokenUsage;
-      if (Array.isArray(entries)) {
-        await this.recordReportedTokenUsage(lease, entries, at);
-      }
+    if (!Number.isFinite(declared) || declared <= 0) {
+      return {};
+    }
+    const body = await this.readJson(request).catch(() => undefined);
+    return typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  }
+
+  private async recordLeaseTokenUsage(
+    body: Record<string, unknown>,
+    lease: WorkLease,
+    at: string,
+  ): Promise<number> {
+    const entries = body["tokenUsage"];
+    if (Array.isArray(entries)) {
+      await this.recordReportedTokenUsage(lease, entries, at);
     }
     return (
       await this.options.store.listTokenUsage({ leaseId: lease.id })
     ).reduce((sum, entry) => sum + entry.totalTokens, 0);
+  }
+
+  /**
+   * The two directions of a repository claim, carried on the heartbeat.
+   *
+   * A holder reports what it has written; the reply may carry a claim that was
+   * narrowed underneath it, the ask that turns an arrival's retry into a run,
+   * and the faster cadence a claim is held at. Every one of those is a
+   * question about leases and holders, so none of them is decided here — this
+   * hands the report across and puts the answer on the wire.
+   *
+   * Nothing new stays connected either way. The heartbeat already runs against
+   * a live lease and already carries usage up and lease-loss down, and a
+   * worker holding no claim pays one lookup.
+   */
+  private async claimTraffic(
+    lease: WorkLease,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const traffic = this.options.operations.claimHeartbeat;
+    if (traffic === undefined || lease.plan === undefined) {
+      return {};
+    }
+    return await traffic({
+      leaseId: lease.id,
+      ...(body["workingChanges"] === undefined
+        ? {}
+        : { workingChanges: body["workingChanges"] }),
+    });
   }
 
   /** Writes one batch of reported phase totals against a lease. */

@@ -30,6 +30,8 @@ import {
   type WaitingWorkRequest,
 } from "@coord/coordinator";
 import type { CoordinationStore, WorkLease } from "@coord/persistence";
+
+import { freshWorkingChanges } from "./remote-holders.js";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -1421,6 +1423,21 @@ export class LeasePlanAuthority implements PlanAuthority {
     holderTaskId: TaskId,
     repository: CanonicalRepository,
   ): Promise<Array<{ path: string; status: FilePatchStatus }> | undefined> {
+    // A holder on somebody's laptop has no workspace this process can read, so
+    // it reports one instead — on every heartbeat while it holds a claim, and
+    // exactly at the moment it is paused to be asked. Only a *fresh* reading
+    // counts: a freeze hands the arrival everything the holder is not standing
+    // on, so an observation older than the holder's last write is not a weaker
+    // one, it is a wrong one. Stale answers nothing, the caller raises, and the
+    // arrival retries — which is the behaviour a holder that cannot be read has
+    // always had.
+    const reported = freshWorkingChanges(holderTaskId);
+    if (reported !== undefined) {
+      return reported.map((change) => ({
+        path: change.path,
+        status: change.status,
+      }));
+    }
     const list = this.workspaces.listWorkingChanges?.bind(this.workspaces);
     if (list === undefined) {
       return undefined;

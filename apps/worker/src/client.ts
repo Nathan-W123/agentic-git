@@ -1,4 +1,7 @@
-import type { WorkAssignment } from "@coord/cli/worker-operations";
+import {
+  WORKER_PROTOCOL_VERSION,
+  type WorkAssignment,
+} from "@coord/cli/worker-operations";
 import type { AgentTokenUsage } from "@coord/agent-protocol";
 import type {
   AgentPlan,
@@ -113,6 +116,40 @@ export interface WorkerClientOptions {
   connectionAttempts?: number;
   /** First backoff between connection retries; doubles, with jitter. */
   connectionBackoffMs?: number;
+}
+
+/**
+ * What the control plane already knew, before this worker planned anything.
+ *
+ * `plan` is the repository itself — a claim, after which there is nothing to
+ * plan. `planningContext` is the cheaper half: where the objective's words
+ * appear in the index and where the repository has been working lately, which
+ * is what stops an agent searching for something already computed. Both empty
+ * is the ordinary answer and means "plan exactly as before".
+ */
+export interface PreparedWork {
+  plan?: AgentPlan;
+  planningContext?: string;
+}
+
+/** One dirty path in a holder's workspace, as the control plane reads it. */
+export interface WorkingChange {
+  path: string;
+  status: "added" | "modified" | "deleted";
+}
+
+/**
+ * What the control plane says back on a beat.
+ *
+ * Everything here is optional and everything is about a repository claim: a
+ * plan the claim was narrowed to while this worker was working, an ask to say
+ * what the rest of the work needs, and a cadence to beat at while holding one.
+ * A worker holding no claim gets none of it and behaves exactly as before.
+ */
+export interface HeartbeatReply {
+  narrowedPlan?: AgentPlan;
+  declareScope?: { askId: string };
+  heartbeatIntervalMs?: number;
 }
 
 export class WorkerClient {
@@ -375,12 +412,37 @@ export class WorkerClient {
   public async heartbeat(
     leaseId: string,
     tokenUsage: readonly AgentTokenUsage[] = [],
-  ): Promise<void> {
+    /**
+     * What this holder has written so far, while it holds a repository claim.
+     *
+     * Sent on the beat rather than on request because the only observation of
+     * a remote holder an arrival can act on is a recent one, and a request it
+     * has to make first is a request that arrives after the decision. Omitted
+     * entirely when no claim is held, so an ordinary run's heartbeat is the
+     * same call it always was.
+     */
+    workingChanges?: readonly WorkingChange[],
+  ): Promise<HeartbeatReply> {
     try {
-      await this.request(`/api/v1/workers/leases/${leaseId}/heartbeat`, {
-        method: "POST",
-        ...(tokenUsage.length === 0 ? {} : { body: { tokenUsage } }),
-      });
+      const { json } = await this.request(
+        `/api/v1/workers/leases/${leaseId}/heartbeat`,
+        {
+          method: "POST",
+          ...(tokenUsage.length === 0 &&
+          (workingChanges === undefined || workingChanges.length === 0)
+            ? {}
+            : {
+                body: {
+                  ...(tokenUsage.length === 0 ? {} : { tokenUsage }),
+                  ...(workingChanges === undefined
+                    ? {}
+                    : { workingChanges }),
+                },
+              }),
+        },
+      );
+      const reply = (json ?? {}) as HeartbeatReply;
+      return reply;
     } catch (error) {
       if (
         error instanceof ControlPlaneError &&
@@ -422,6 +484,74 @@ export class WorkerClient {
    * The answer is the coordinator's, not an acknowledgement: only an approved
    * status licenses the worker to spend agent execution time.
    */
+  /**
+   * The answer to an ask the heartbeat carried down.
+   *
+   * Posted on its own rather than folded into the next beat because the two
+   * have opposite deadlines: a heartbeat must return promptly to keep the
+   * lease alive, and this arrives whenever a paused agent has finished
+   * thinking. Somebody is waiting on it, so the sooner it lands the sooner
+   * they run — and a failure is not the worker's problem to solve, because an
+   * unanswered ask leaves the claim blanket, which is the recoverable state.
+   */
+  public async postDeclaration(
+    leaseId: string,
+    askId: string,
+    declaration: unknown,
+    workingChanges: readonly WorkingChange[],
+  ): Promise<void> {
+    try {
+      await this.request(`/api/v1/workers/leases/${leaseId}/declaration`, {
+        method: "POST",
+        body: {
+          askId,
+          workingChanges,
+          ...(declaration === undefined ? {} : { declaration }),
+        },
+      });
+    } catch {
+      // Swallowed for the same reason `progress` is: this is a courtesy to a
+      // decision happening somewhere else, and a run must not fail because it
+      // could not be delivered.
+    }
+  }
+
+  /**
+   * Asks for the whole repository before paying to plan it.
+   *
+   * The one call in the protocol whose ordinary answer is "no". A control
+   * plane that says nothing — 204, a route it does not have, a version too
+   * old, blanket claims switched off, somebody else already in the repository
+   * — leaves the worker planning exactly as it did before this existed, so
+   * every failure here is a fall-through rather than an error.
+   *
+   * The protocol version travels in the body because the grant depends on it:
+   * a claim can be narrowed while it is held, and a worker that could not be
+   * told about that must never be given one.
+   *
+   * Asked even by an agent that cannot accept a claim, because the answer has
+   * a second half. Where the control plane cannot hand over the repository it
+   * can still say where to start reading, and that is worth having precisely
+   * on the tasks a claim cannot help — the contended ones, the slow ones.
+   */
+  public async claimRepository(leaseId: string): Promise<PreparedWork> {
+    try {
+      const { json, status } = await this.request(
+        `/api/v1/workers/leases/${leaseId}/claim`,
+        {
+          method: "POST",
+          body: { protocolVersion: WORKER_PROTOCOL_VERSION },
+        },
+      );
+      if (status === 204) {
+        return {};
+      }
+      return (json ?? {}) as PreparedWork;
+    } catch {
+      return {};
+    }
+  }
+
   public async submitPlan(
     leaseId: string,
     plan: AgentPlan,

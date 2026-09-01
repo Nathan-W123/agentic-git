@@ -24,9 +24,18 @@ interface InstallersModule {
     platform?: string,
   ) => { command: string; args: string[] } | undefined;
   wellKnownBinDirectories: (platform?: string) => string[];
+  runnable: (
+    command: string,
+    args: string[],
+    platform?: string,
+  ) => { command: string; args: string[] };
   installArgv: (
     vendor: unknown,
     platform: string,
+  ) => { command: string; args: string[] } | undefined;
+  treeKill: (
+    pid: number,
+    platform?: string,
   ) => { command: string; args: string[] } | undefined;
   openSignIn: (vendor: unknown) => boolean;
 }
@@ -265,4 +274,74 @@ test("the standard places Node and npm's globals live are searched too", async (
   const unix = wellKnownBinDirectories("darwin").join("|");
   assert.match(unix, /homebrew/u);
   assert.match(unix, /usr.local.bin/u);
+});
+
+/**
+ * The rule that made the installer impossible, applied everywhere it bites.
+ *
+ * `npm install -g` writes its Windows binaries as `.cmd` shims, so the thing
+ * `detectAgents` finds and pins for Codex and Cursor is a batch file — and
+ * spawning one is the same `spawn EINVAL` that killed every install. The
+ * installer was only the first place this reached. Anything that starts a CLI
+ * found on PATH reaches it too, which on Windows is all of them.
+ */
+test("a detected batch shim is run through an interpreter, everything else untouched", async () => {
+  const { runnable } = await load();
+
+  const shim = runnable("C:\\Users\\n\\AppData\\Roaming\\npm\\codex.cmd", ["--status"], "win32");
+  assert.match(shim.command, /System32.cmd\.exe$/u);
+  assert.deepEqual(shim.args.slice(0, 2), ["/d", "/c"]);
+  assert.equal(shim.args.at(-1), "--status");
+  assert.ok(
+    shim.args.includes("C:\\Users\\n\\AppData\\Roaming\\npm\\codex.cmd"),
+    "the shim itself becomes the interpreter's argument",
+  );
+
+  // A real program is started directly, on Windows as anywhere else — this
+  // must not put an interpreter in front of things that never needed one.
+  for (const [command, platform] of [
+    ["C:\\Program Files\\nodejs\\claude.exe", "win32"],
+    ["/usr/local/bin/codex", "darwin"],
+    ["codex", "linux"],
+  ] as const) {
+    const direct = runnable(command, ["--status"], platform);
+    assert.equal(direct.command, command);
+    assert.deepEqual(direct.args, ["--status"]);
+  }
+
+  // `.bat` is the same rule; case does not save it.
+  assert.match(runnable("x\\agent.BAT", [], "win32").command, /cmd\.exe$/u);
+});
+
+/**
+ * And the tool that ends the tree is named the same way the interpreter is.
+ *
+ * A bare `taskkill` is resolved through `PATH`, which is the one thing that is
+ * not dependable here: the fake-CLI harness narrows `PATH` on purpose, and a
+ * worker's environment is sanitised on purpose. Asked for by name under either,
+ * `spawnSync` reports ENOENT into a result nothing read, and the process tree
+ * that call exists to kill went on running — holding the stdout pipe that the
+ * reader was still waiting to see close. That is a hang, not a leak, and it
+ * cost twenty-five minutes of a Windows release job twice before it was found.
+ */
+test("the process-tree kill is found by path, not by PATH", async () => {
+  const { treeKill } = await load();
+
+  const windows = treeKill(4321, "win32");
+  assert.ok(windows !== undefined, "Windows needs the tree, not the process");
+  assert.match(windows.command, /System32.taskkill\.exe$/u);
+  // `path.win32`, because this assertion is about a Windows path and the
+  // suite that makes it usually runs on Linux, where `path.isAbsolute` reads
+  // `C:\...` as a relative name and passes the test for the wrong reason.
+  assert.ok(
+    path.win32.isAbsolute(windows.command),
+    "resolved here, so a narrowed PATH cannot lose it",
+  );
+  assert.deepEqual(windows.args, ["/pid", "4321", "/T", "/F"]);
+
+  // Everywhere else a signal reaches the program itself, so there is no tree
+  // to walk and nothing to spawn to walk it.
+  for (const platform of ["darwin", "linux"] as const) {
+    assert.equal(treeKill(4321, platform), undefined);
+  }
 });

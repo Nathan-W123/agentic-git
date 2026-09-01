@@ -357,6 +357,112 @@ test("a worker executes a leased task end to end over HTTP", async (t) => {
   assert.deepEqual(await worker.runOnce(), { worked: false });
 });
 
+/**
+ * A solo remote task is handed its repository instead of describing it.
+ *
+ * The plan an agent writes before it edits anything exists so a second task
+ * can arbitrate against it. Where there is no second task it buys nothing —
+ * and it is the single largest fixed cost before the first edit, an agent
+ * round trip rather than a request. The in-process coordinator has skipped it
+ * since blanket claims existed; a worker never could, because its protocol had
+ * no claim step. Moving execution onto people's own machines therefore put
+ * every desktop task back through planning without anybody deciding to.
+ *
+ * Checked the way the benchmark says to check it: the task has a
+ * `blanket_claim_granted` event and no plan of its own.
+ */
+test("a solo remote task is granted the repository and never plans", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+
+  // An objective naming a real path, because a claim is granted only against
+  // an *anchored* estimate: a claim that could never be narrowed early is not
+  // worth the planning round it saves, so a vague objective plans as before.
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value in src/value.js",
+    agentId: "local",
+    validationCommands: [],
+  });
+
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+
+  const audit = await runtime.store.listAudit();
+  const granted = audit.find(
+    (event) => event.type === "blanket_claim_granted" && event.taskId === task.id,
+  );
+  assert.ok(granted, "the repository should have been claimed");
+  assert.equal(granted?.data["planningCallsSaved"], 1);
+
+  // The contract on the lease is the claim itself, which is what makes the
+  // agent's own writes approved without anybody arbitrating them.
+  const lease = (await runtime.store.listWorkLeases({})).find(
+    (candidate) => candidate.taskId === task.id,
+  );
+  assert.equal(lease?.plan?.plan.claim?.kind, "blanket");
+  assert.equal(lease?.status, "completed");
+
+  // And the work still lands. A claimed task edits, reports and integrates
+  // exactly as a planned one does — only the round trip in front of it is
+  // gone.
+  const tasks = await runtime.store.listSubmittedTasks();
+  assert.equal(
+    tasks.find((entry) => entry.id === task.id)?.status,
+    "integrated",
+  );
+  const collected = audit.find(
+    (event) => event.type === "changeset_collected" && event.taskId === task.id,
+  );
+  assert.deepEqual(collected?.data["files"], ["src/value.js"]);
+});
+
+/**
+ * And a second worker in the organization is enough to withhold it.
+ *
+ * Phase 1 ships without the narrowing that gives a claim back, so the only
+ * honest version of "this can be taken back" is "there is nobody to take it
+ * from". A claim held by a machine that cannot be told to let go would block
+ * everybody else until its task ended.
+ */
+test("a claim is withheld while a second worker could arrive", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+  // Registered against the same account as the one that just registered, so
+  // this is a second machine rather than a second tenant.
+  const mine = (await runtime.store.listWorkers({}))[0];
+  assert.ok(mine, "the worker should have registered");
+  await runtime.store.registerWorker({
+    userId: mine.userId,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    name: "somebody else's laptop",
+    adapters: ["generic-cli"],
+    version: "test",
+  });
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value in src/value.js",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+
+  const audit = await runtime.store.listAudit();
+  assert.ok(
+    audit.find((event) => event.type === "blanket_claim_granted"),
+    "a registered second machine is not somebody executing",
+  );
+  const tasks = await runtime.store.listSubmittedTasks();
+  assert.equal(
+    tasks.find((entry) => entry.id === task.id)?.status,
+    "integrated",
+  );
+});
+
 test("a mid-run scope expansion is arbitrated and granted", async (t) => {
   const runtime = await startRuntime(t);
   const worker = makeWorker(runtime);

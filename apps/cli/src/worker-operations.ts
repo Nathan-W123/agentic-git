@@ -11,6 +11,10 @@ import {
   DEFAULT_PLAN_RETRY_MS,
   OwnershipService,
   PlanAdmissionController,
+  blanketPlan,
+  estimateScope,
+  recentTouchPoints,
+  scopeStartingPoints,
   BLOCKED_ADMISSION_LIFETIME_CAP,
   BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   ScopeExpansionError,
@@ -30,6 +34,16 @@ import {
   type ChangeSetSplit,
 } from "@coord/coordinator";
 import { IntegrationService } from "@coord/integration-service";
+
+import {
+  CLAIM_HEARTBEAT_INTERVAL_MS,
+  askToDeliver,
+  parseWorkingChanges,
+  registerRemoteHolder,
+  releaseRemoteHolder,
+  rememberWorkingChanges,
+  settleDeclaration,
+} from "./remote-holders.js";
 import type {
   CoordinationStore,
   SubmittedTask,
@@ -47,6 +61,7 @@ import {
   assertChangeSet,
   createId,
   deferredFilePaths,
+  isBlanketClaim,
   mergePlanScope,
   normalizeRepositoryPath,
   planAdmissionApproved,
@@ -54,6 +69,7 @@ import {
   projectBudgets,
   reducePlanScope,
   summariseChangedFiles,
+  rankTouchedFiles,
   uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
@@ -222,8 +238,12 @@ export function configuredBlanketClaims(explicit?: boolean): boolean {
  * 2 submits the plan for admission first and only executes once the control
  *   plane grants ownership, so a conflict costs a planning round trip instead
  *   of a discarded execution.
+ * 3 asks for a repository claim before planning, reports its working changes
+ *   on the heartbeat, and adopts a claim the control plane narrows underneath
+ *   it. A version-2 worker is never granted a claim, because a claim it could
+ *   not be told about is one nobody could take back.
  */
-export const WORKER_PROTOCOL_VERSION = 2;
+export const WORKER_PROTOCOL_VERSION = 3;
 
 export interface WorkAssignment {
   lease: WorkLease;
@@ -710,6 +730,7 @@ async function rejectWorkerResult(
   lease: WorkLease,
   reason: string,
 ): Promise<WorkResultAcceptance> {
+  letGoOfClaim(lease.taskId);
   const now = new Date().toISOString();
   const settled = await store.finishWorkLease(
     lease.id,
@@ -1180,6 +1201,300 @@ async function gateRemotePlan(
     stage: "remote_plan_admission",
   });
   return { outcome: "pending", admission: pendingAdmission(request.id, runId) };
+}
+
+/**
+ * How long the control plane will spend deciding whether a remote worker can
+ * have the repository, before answering "plan it yourself".
+ *
+ * A claim is worth an index build — a planning round trip is an agent round
+ * trip and this is the cheaper of the two — but the trade only holds while
+ * somebody is *waiting* on it. Here the waiter is a laptop holding an open
+ * HTTP request, so past this the answer is no and the worker plans exactly as
+ * it does today. The fall-through is free; the wait is not.
+ */
+export const BLANKET_CLAIM_DEADLINE_MS = 20_000;
+
+/**
+ * What the control plane already knows, handed down before a worker plans.
+ *
+ * Either the repository itself — in which case there is nothing to plan — or,
+ * failing that, where to start reading. The second is the cheaper half of the
+ * same idea and applies to the tasks the first cannot help: planning is an
+ * agent reading its way into a repository a tool call at a time, and most of
+ * that reading is a search for something the control plane has already
+ * computed. In-process both have been handed to the planning prompt for as
+ * long as they have existed; a remote worker was told neither, and started
+ * every plan from nothing.
+ */
+export interface WorkClaimOutcome {
+  plan?: AgentPlan;
+  planningContext?: string;
+}
+
+export interface WorkClaimInput {
+  leaseId: string;
+  /** The protocol the caller speaks; below 3 there is no claim to grant. */
+  protocolVersion: number;
+}
+
+interface WorkClaimServices {
+  repositories?: RepositoryService;
+  intelligence?: CodeIntelligenceService;
+  admissions?: PlanAdmissionController;
+  blanketClaims?: boolean;
+  deadlineMs?: number;
+}
+
+/**
+ * The whole repository, for a remote task nobody is competing with.
+ *
+ * This is the step the worker protocol never had. In-process, a solo task is
+ * handed its repository and never asked to describe itself: the plan an agent
+ * would have written exists so a second task can arbitrate against it, and
+ * where there is no second task the round trip buys nothing. Moving execution
+ * onto people's own machines put that step on the far side of a boundary it
+ * did not cross, so every desktop task went back to paying a full agent
+ * planning call before its first edit — measured in the repository's own
+ * benchmark at two thirds of all executions, and minutes each.
+ *
+ * The conditions are the in-process ones, restated against durable state
+ * because that is all a remote holder and its arrivals can both see:
+ *
+ * - blanket claims are on for this deployment;
+ * - the lease is live and has no contract yet (a resumed turn or a retry
+ *   after a deferral already has one, and widening it is what the
+ *   immutability rule on approved admissions forbids);
+ * - nothing else is active in this repository, including a task that has
+ *   leased but not yet planned — admitting a claim beside one of those would
+ *   refuse it everything the moment it submitted, and it has paid for its
+ *   plan by then;
+ * - the objective produced an *anchored* scope estimate, so the claim can be
+ *   narrowed the moment somebody arrives. A claim that can never be given
+ *   back early is not worth the planning round it saves.
+ *
+ * There is no longer a condition about how many workers are live. There was
+ * one while a remote claim could not be given back: a claim that cannot be
+ * narrowed is worse than no claim, so "there is nobody to block" stood in for
+ * the safety property until the property itself existed. It exists now — the
+ * heartbeat carries what a holder has written, the ask reaches it wherever it
+ * is running, and an arrival that cannot get an answer waits rather than
+ * freezing on a guess. A second machine is no longer a reason to withhold.
+ */
+export async function claimWorkRepository(
+  store: CoordinationStore,
+  input: WorkClaimInput,
+  services: WorkClaimServices = {},
+): Promise<WorkClaimOutcome> {
+  const now = new Date().toISOString();
+  await store.expireWorkLeases(now);
+  const lease = await store.getWorkLease(input.leaseId);
+  if (lease === undefined || lease.status !== "active" || lease.expiresAt <= now) {
+    return {};
+  }
+  const task = await submittedTask(store, lease);
+  if (task === undefined || task.status !== "claimed") {
+    return {};
+  }
+  const storedRepository = await store.getRepository(lease.repositoryId);
+  if (storedRepository === undefined) {
+    return {};
+  }
+  const repositories = services.repositories ?? new RepositoryService();
+  const intelligence =
+    services.intelligence ?? new CodeIntelligenceService(repositories);
+  const admissions = services.admissions ?? new PlanAdmissionController();
+  const repository = canonical(storedRepository);
+  let baseVersion: CanonicalVersion;
+  try {
+    baseVersion = await repositories.getVersionAtRevision(
+      repository,
+      lease.baseRevision,
+    );
+  } catch {
+    return {};
+  }
+
+  // The expensive step, and the one with a stopwatch on it. Everything above
+  // is a read of durable state; this builds a symbol index at the lease's
+  // revision, and it pays for itself twice — once as the ground a claim can
+  // later be narrowed to, and once as the note that stops an agent reading
+  // its way into a repository to find a file the objective already named.
+  const estimate = await withDeadline(
+    intelligence
+      .index(repository, lease.baseRevision)
+      .then((built) => estimateScope(task.objective, built))
+      .catch(() => undefined),
+    services.deadlineMs ?? BLANKET_CLAIM_DEADLINE_MS,
+    undefined,
+  );
+  // Where this repository has been working lately. Cheap, durable, and the
+  // other half of the same problem: the estimate is silent whenever the words
+  // a person used are not the words in the paths, which is most of the time.
+  const recentlyTouched = await store
+    .recentlyTouchedFiles({ repositoryId: lease.repositoryId })
+    .then((samples) => rankTouchedFiles(samples, Date.now()))
+    .catch(() => []);
+  const planningContext = [
+    estimate === undefined ? "" : scopeStartingPoints(estimate),
+    recentTouchPoints(recentlyTouched),
+  ]
+    .filter((part) => part !== "")
+    .join("\n\n");
+
+  const estimatedFiles =
+    estimate?.confidence === "anchored"
+      ? estimate.files.map((file) => file.path)
+      : [];
+  const claim = await grantBlanketClaim({
+    store,
+    admissions,
+    lease,
+    task,
+    baseVersion,
+    estimatedFiles,
+    protocolVersion: input.protocolVersion,
+    ...(services.blanketClaims === undefined
+      ? {}
+      : { blanketClaims: services.blanketClaims }),
+  });
+  return {
+    ...(claim === undefined ? {} : { plan: claim }),
+    // Carried even when a claim was granted is *not* what happens: a claimed
+    // task never plans, so a note about where to start reading is a paragraph
+    // nobody reads. This is the consolation prize, and the tasks that get it
+    // are exactly the contended ones — the slow ones.
+    ...(claim !== undefined || planningContext === "" ? {} : { planningContext }),
+  };
+}
+
+/**
+ * The claim itself, once everything it needs has been gathered.
+ *
+ * Split from the gathering because the two have different failure modes: the
+ * reads above are worth doing whatever happens, and every refusal here means
+ * "plan as you always did" rather than "something went wrong".
+ */
+async function grantBlanketClaim(input: {
+  store: CoordinationStore;
+  admissions: PlanAdmissionController;
+  lease: WorkLease;
+  task: SubmittedTask;
+  baseVersion: CanonicalVersion;
+  estimatedFiles: readonly string[];
+  protocolVersion: number;
+  blanketClaims?: boolean;
+}): Promise<AgentPlan | undefined> {
+  const { store, lease, task } = input;
+  if (!configuredBlanketClaims(input.blanketClaims)) {
+    return undefined;
+  }
+  if (input.protocolVersion < 3) {
+    // A worker that cannot be told its claim was narrowed must never be given
+    // one. It would hold the repository until its task ended, and every
+    // arrival would wait that out.
+    return undefined;
+  }
+  if (lease.plan !== undefined) {
+    // A contract already exists — a resumed turn, or a retry after a deferral.
+    // Replacing it with a wider one is what the immutability rule on approved
+    // admissions forbids.
+    return undefined;
+  }
+  if (input.estimatedFiles.length === 0) {
+    // An objective that anchored nothing cannot be narrowed by declaration
+    // either, and a claim that can never be given back early is not worth the
+    // planning round it saves.
+    return undefined;
+  }
+  const others = (
+    await store.listWorkLeases({
+      status: "active",
+      repositoryId: lease.repositoryId,
+    })
+  ).filter((candidate) => candidate.id !== lease.id);
+  if (others.length > 0) {
+    return undefined;
+  }
+  const plan = blanketPlan(
+    {
+      id: task.id,
+      objective: task.objective,
+      agentId: task.agentId,
+      validationCommands: task.validationCommands,
+    },
+    undefined,
+    input.estimatedFiles,
+  );
+  const admission = input.admissions.admit({
+    plan,
+    agentId: task.agentId,
+    baseRevision: input.baseVersion.revision,
+    baseVersion: input.baseVersion.sequence,
+    active: [],
+    planRevision: 1,
+  });
+  if (!planAdmissionApproved(admission)) {
+    return undefined;
+  }
+  const saved = await store.saveWorkLeasePlan({
+    leaseId: lease.id,
+    submission: { plan, admission },
+    // Nothing else is admitted here, and the write is refused if that stopped
+    // being true between the read above and this line. A refusal is not an
+    // error: somebody arrived, and the worker plans as it always did.
+    observedApprovedLeaseIds: [],
+  });
+  if (saved.outcome !== "saved") {
+    return undefined;
+  }
+  // Published the moment the claim is, so an arrival can reach the holder
+  // through exactly the registry a local one is reached through.
+  registerRemoteHolder({
+    task: {
+      id: task.id,
+      objective: task.objective,
+      agentId: task.agentId,
+      validationCommands: task.validationCommands,
+    },
+    repositoryId: lease.repositoryId,
+    leaseId: lease.id,
+  });
+  await store.appendAudit(undefined, {
+    type: "blanket_claim_granted",
+    taskId: task.id,
+    data: {
+      ...(lease.projectId === undefined ? {} : { projectId: lease.projectId }),
+      repositoryId: lease.repositoryId,
+      leaseId: lease.id,
+      workerId: lease.workerId,
+      baseRevision: lease.baseRevision,
+      planningCallsSaved: 1,
+    },
+  });
+  return plan;
+}
+
+/** Resolves with the fallback rather than keeping a caller waiting. */
+async function withDeadline<T>(
+  work: Promise<T>,
+  milliseconds: number,
+  fallback: T,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), milliseconds);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export interface WorkPlanInput {
@@ -2433,6 +2748,19 @@ function planScopeEscapes(
  * harmless. Exact-base integration and stale requeueing provide the remote
  * equivalent of dynamic replanning when canonical advances.
  */
+/**
+ * Lets go of a remote holder the moment its lease stops being one.
+ *
+ * Called on every way a lease ends rather than only the happy one: a holder
+ * left published is a holder an arrival can pause, and pausing a task that
+ * finished five minutes ago is a network round trip to nobody. Harmless for a
+ * task that never held a claim, which is what lets every settle path call it
+ * without first asking.
+ */
+function letGoOfClaim(taskId: string): void {
+  releaseRemoteHolder(taskId);
+}
+
 export async function acceptWorkResult(
   store: CoordinationStore,
   input: WorkResultInput,
@@ -2540,6 +2868,7 @@ export async function acceptWorkResult(
         "The agent answered with nothing",
       );
     }
+    letGoOfClaim(task.id);
     const settled = await store.finishWorkLease(
       input.leaseId,
       "completed",
@@ -2569,6 +2898,7 @@ export async function acceptWorkResult(
   }
 
   if (input.status === "failed") {
+    letGoOfClaim(task.id);
     const settled = await store.finishWorkLease(
       input.leaseId,
       "failed",
@@ -3005,6 +3335,7 @@ export async function acceptWorkResult(
         );
       }
     }
+    letGoOfClaim(task.id);
     const settled = await store.finishWorkLease(
       input.leaseId,
       "completed",
@@ -3366,6 +3697,67 @@ export function workerOperations(
     }) => await leaseWork(store, input, repositories, project),
     leaseBundle: async (leaseId: string, have?: string) =>
       await leaseBundle(store, leaseId, repositories, have),
+    claimHeartbeat: async (input: {
+      leaseId: string;
+      workingChanges?: unknown;
+    }): Promise<Record<string, unknown>> => {
+      const lease = await store.getWorkLease(input.leaseId);
+      const held = lease?.plan?.plan;
+      if (lease === undefined || held === undefined) {
+        return {};
+      }
+      const reported = parseWorkingChanges(input.workingChanges);
+      if (reported !== undefined) {
+        rememberWorkingChanges(lease.taskId, reported);
+      }
+      if (!isBlanketClaim(held)) {
+        // The claim became an ordinary plan while this holder was working, and
+        // the holder does not know. Told here, because a holder that is not
+        // told goes on believing it has the repository and goes on telling its
+        // agent so — the same fault the in-process poll exists to prevent, at
+        // a distance.
+        return { narrowedPlan: held };
+      }
+      const askId = askToDeliver(lease.taskId);
+      return {
+        // Beaten faster while a claim is held, so an arrival's window onto
+        // this holder is ten seconds wide rather than sixty. Nothing else is
+        // paced by it, and an idle claim costs six cheap calls a minute
+        // against a lease that is already open.
+        heartbeatIntervalMs: CLAIM_HEARTBEAT_INTERVAL_MS,
+        ...(askId === undefined ? {} : { declareScope: { askId } }),
+      };
+    },
+    settleClaimDeclaration: async (input: {
+      leaseId: string;
+      askId: string;
+      declaration?: unknown;
+      workingChanges?: unknown;
+    }): Promise<boolean> => {
+      const lease = await store.getWorkLease(input.leaseId);
+      if (lease === undefined) {
+        return false;
+      }
+      const declared = input.declaration;
+      return settleDeclaration(
+        lease.taskId,
+        input.askId,
+        typeof declared === "object" && declared !== null
+          ? (declared as { files: readonly string[]; symbols: readonly string[] })
+          : undefined,
+        parseWorkingChanges(input.workingChanges),
+      );
+    },
+    claimWorkRepository: async (input: {
+      leaseId: string;
+      actorId: string;
+      protocolVersion: number;
+    }) =>
+      await claimWorkRepository(
+        store,
+        { leaseId: input.leaseId, protocolVersion: input.protocolVersion },
+        { repositories, intelligence },
+      ),
     admitWorkPlan: async (input: WorkPlanInput) => {
       const lease = await store.getWorkLease(input.leaseId);
       const key = lease?.repositoryId ?? input.leaseId;

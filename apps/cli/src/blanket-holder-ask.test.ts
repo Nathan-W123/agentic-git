@@ -35,6 +35,16 @@ import {
 } from "@coord/workspace-manager";
 
 import { LeasePlanAuthority } from "./lease-admission.js";
+import {
+  askToDeliver,
+  rememberWorkingChanges,
+  releaseRemoteHolder,
+  settleDeclaration,
+} from "./remote-holders.js";
+import {
+  WORKER_PROTOCOL_VERSION,
+  claimWorkRepository,
+} from "./worker-operations.js";
 
 /**
  * The ask, at the timing production actually runs it at.
@@ -1000,6 +1010,232 @@ test("a holder with no registered session is narrowed without being asked", asyn
     const frozen = (await store.getWorkLease(holder.leaseId))!.plan!.plan;
     assert.equal(frozen.claim?.kind, "frozen");
     assert.ok(!frozen.expectedFiles.includes("src/quiet.ts"));
+  } finally {
+    await real.cleanup();
+  }
+});
+
+/**
+ * The whole point of the remote path, driven end to end.
+ *
+ * A task alone on somebody's laptop is handed the repository without planning.
+ * Somebody else then arrives — and what must happen is not that the arrival
+ * waits, and not that the holder is quietly stripped of ground it is standing
+ * on. The holder is *paused, asked what the rest of its work needs, and
+ * resumed*, and what it says becomes an ordinary plan naming files and symbols.
+ * From that moment two agents can work in one repository, and in one file,
+ * around each other's declarations.
+ *
+ * In-process this has worked since the ask existed. Across the wire every
+ * piece of it is new: the holder answers over HTTP rather than through a
+ * closure, and the observation it is frozen against is one it reported rather
+ * than one this process read off a disk. What is asserted here is that the
+ * arrival cannot tell the difference.
+ */
+test("a remote holder pauses, declares, and keeps files and symbols rather than the repository", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  let holderTaskId = "";
+  try {
+    // The holder: leased, and handed the repository by the claim route rather
+    // than by a plan of its own.
+    const held = await leaseFor(
+      store,
+      worker,
+      "rename holderOne in src/shared.ts",
+      real.version,
+    );
+    const { plan: claim } = await claimWorkRepository(
+      store,
+      { leaseId: held.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+    assert.ok(claim, "the solo task should have been given the repository");
+    assert.equal(isBlanketClaim(claim), true);
+    holderTaskId = held.task.id;
+
+    // What it has written so far, as its heartbeat would have reported it.
+    rememberWorkingChanges(held.task.id, [
+      { path: "src/shared.ts", status: "modified" },
+    ]);
+
+    // The ask is delivered exactly once, and answered the way a paused agent
+    // answers it — which on a real worker is a `requestReplan` round trip
+    // posted back on its own route.
+    const answering = (async () => {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const askId = askToDeliver(held.task.id);
+        if (askId !== undefined) {
+          settleDeclaration(
+            held.task.id,
+            askId,
+            { files: ["src/shared.ts"], symbols: ["holderOne"] },
+            [{ path: "src/shared.ts", status: "modified" }],
+          );
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    })();
+
+    // And somebody arrives, wanting a different function in the same file.
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a prefix to candidateOne",
+      real.version,
+    );
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+      workspaces: stubWorkspaces([]),
+    });
+    const decision = await arriving.admit({
+      task: second.task,
+      plan: candidatePlan(second.task.id, ["src/shared.ts"], ["candidateOne"]),
+      planRevision: 1,
+      baseVersion: real.version,
+      repository: real.repository,
+    });
+    await answering;
+
+    // The claim is gone, and what replaced it names things rather than
+    // everything — which is what lets the arrival into the same file.
+    const converted = (await store.getWorkLease(held.leaseId))?.plan?.plan;
+    assert.ok(converted);
+    assert.equal(isBlanketClaim(converted), false);
+    assert.ok(
+      converted.expectedFiles.includes("src/shared.ts"),
+      "the holder keeps the file it is working in",
+    );
+    assert.ok(
+      converted.expectedSymbols.includes("holderOne"),
+      "and the declaration it named, which is what the arrival is admitted around",
+    );
+    assert.equal(
+      decision.outcome,
+      "admitted",
+      `the arrival should run: ${JSON.stringify(decision)}`,
+    );
+  } finally {
+    releaseRemoteHolder(holderTaskId);
+    await real.cleanup();
+  }
+});
+
+/**
+ * And an answer that has not come back yet is not an answer of "nothing".
+ *
+ * A freeze is permanent: it covers the estimate unioned with everything the
+ * holder has touched, and is never narrowed again. Freezing on a slow answer
+ * therefore throws that answer away and locks the repository for the rest of
+ * the run — which is why the arrival is told to come back instead. The claim
+ * stays blanket, which is the recoverable state.
+ */
+test("a remote holder that has not answered leaves its claim whole", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    const held = await leaseFor(
+      store,
+      worker,
+      "rename holderOne in src/shared.ts",
+      real.version,
+    );
+    const { plan: claim } = await claimWorkRepository(
+      store,
+      { leaseId: held.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+    assert.ok(claim);
+    // Nothing reported and nothing answered: a laptop that has gone quiet.
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a prefix to candidateOne",
+      real.version,
+    );
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+      workspaces: stubWorkspaces([]),
+      blanketAskTimeoutMs: 50,
+    });
+    const decision = await arriving.admit({
+      task: second.task,
+      plan: candidatePlan(second.task.id, ["src/shared.ts"], ["candidateOne"]),
+      planRevision: 1,
+      baseVersion: real.version,
+      repository: real.repository,
+    });
+
+    const stillHeld = (await store.getWorkLease(held.leaseId))?.plan?.plan;
+    assert.ok(stillHeld);
+    assert.equal(
+      isBlanketClaim(stillHeld),
+      true,
+      "an unanswered ask must not freeze the claim",
+    );
+    assert.notEqual(
+      decision.outcome,
+      "admitted",
+      "and the arrival waits rather than being let into files nobody asked about",
+    );
+  } finally {
+    await real.cleanup();
+  }
+});
+
+/**
+ * A task that cannot have the repository is still told where to start.
+ *
+ * Planning is not one inference: it is an agent reading its way into a
+ * repository a tool call at a time, and most of that reading is a search for
+ * something already computed — which files declare the names the objective
+ * used, and where the repository has been working lately. The in-process
+ * planner has been handed both for as long as they have existed. A remote
+ * worker was handed neither and started every plan from nothing, which is the
+ * same shape of gap as the missing claim, one layer down.
+ *
+ * Asserted on the contended case on purpose. That is the one a claim can never
+ * help, and it is also the slow one.
+ */
+test("a contended remote task is told where the objective already lives", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    // Somebody is already executing here, so no claim is possible.
+    const holder = await leaseFor(store, worker, "work on quiet", real.version);
+    assert.ok(holder.leaseId);
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a prefix to candidateOne",
+      real.version,
+    );
+    const prepared = await claimWorkRepository(
+      store,
+      { leaseId: second.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+
+    assert.equal(
+      prepared.plan,
+      undefined,
+      "a repository with somebody in it cannot be claimed",
+    );
+    assert.ok(
+      prepared.planningContext,
+      "but the agent should still be told where to look",
+    );
+    assert.match(
+      String(prepared.planningContext),
+      /src\/shared\.ts/u,
+      "the file that declares candidateOne",
+    );
+    // Offered as a starting point, never as a scope: an agent that adopted it
+    // wholesale would plan the estimate instead of the task.
+    assert.match(String(prepared.planningContext), /starting point|not a scope/iu);
   } finally {
     await real.cleanup();
   }

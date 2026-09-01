@@ -326,7 +326,17 @@ interface UsageModule {
   }>;
 }
 
-/** A directory of fake CLIs, put on `PATH` for the duration of one test. */
+/**
+ * A directory of fake CLIs, put on `PATH` for the duration of one test.
+ *
+ * Written the way each platform actually installs one, because that is the
+ * whole thing under test. On POSIX a vendor CLI is an executable script with a
+ * shebang. On Windows it is a `.cmd` shim beside a `.js` — which is exactly
+ * what npm writes for a global install, and exactly the shape `spawn` refuses
+ * to execute without a shell. A harness that wrote shebang scripts on Windows
+ * would fail with `spawn ENOENT` for a reason no real machine has, and would
+ * say nothing about the reason a real machine fails.
+ */
 async function withFakeClis(
   files: Record<string, string>,
   run: (usage: UsageModule) => Promise<void>,
@@ -335,20 +345,61 @@ async function withFakeClis(
   const previous = process.env["PATH"];
   try {
     for (const [name, body] of Object.entries(files)) {
+      if (process.platform === "win32") {
+        // The shim npm writes, and the script it points at. `detectAgents`
+        // looks for `<name>.cmd` before the extensionless file, so this is
+        // also what it will find.
+        await writeFile(path.join(dir, `${name}.js`), body, "utf8");
+        await writeFile(
+          path.join(dir, `${name}.cmd`),
+          `@echo off
+node "%~dp0${name}.js" %*
+`,
+          "utf8",
+        );
+        continue;
+      }
       const file = path.join(dir, name);
       await writeFile(file, body, { mode: 0o755 });
     }
-    // Deliberately *only* this directory, so a real vendor CLI installed on
-    // the machine running the suite can never be spawned by it.
-    process.env["PATH"] = `${dir}${path.delimiter}${path.dirname(process.execPath)}`;
+    process.env["PATH"] = onlyTheFakes(dir);
     const usage = (await import(
       pathToFileURL(path.join(electronDir, "usage.mjs")).href
     )) as UsageModule;
     await run(usage);
   } finally {
-    process.env["PATH"] = previous;
+    if (previous === undefined) {
+      delete process.env["PATH"];
+    } else {
+      process.env["PATH"] = previous;
+    }
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * A `PATH` holding the fakes, node, and the operating system — and nothing
+ * else.
+ *
+ * The "nothing else" is the point: a real vendor CLI installed on the machine
+ * running this suite must never be the thing these tests spawn. But the first
+ * cut took that literally and dropped `System32` along with it, which is where
+ * `taskkill.exe` lives — so on Windows the one tool that ends a process tree
+ * could not be found, the fakes below were never killed, and the pipes they
+ * had inherited held the test process open. `node --test` waits on a child
+ * that will not exit, with no deadline of its own, so the Windows release job
+ * sat on a four-second step until somebody cancelled it.
+ *
+ * Removing a vendor's directory is the requirement. Removing the platform's
+ * own was a mistake that the platform then charged twenty-five minutes for.
+ */
+function onlyTheFakes(dir: string): string {
+  const parts = [dir, path.dirname(process.execPath)];
+  if (process.platform === "win32") {
+    const root = process.env["SystemRoot"] ?? "C:\\Windows";
+    parts.push(path.join(root, "System32"), root);
+  }
+  return parts.join(path.delimiter);
 }
 
 /**
