@@ -197,16 +197,17 @@ test("the channel composer rests as a 48px pill with a 0 14px, gap 12px row", as
   // 12px in from the pane it sits in, which is the wrapper's own margin.
   assert.match(css, /\n\.chan-composer-wrap \{[\s\S]{0,120}margin: 0 12px 12px;/u);
 
-  // The right-hand glyph is the icon set's arrow, not a second drawing of
-  // one, and the placeholder names the channel the way everything else does.
+  // The right-hand glyph is the icon set's paper plane — not a second
+  // drawing of one, and not the arrow that doubles as "next" — and the
+  // placeholder names the channel the way everything else does.
   const room_markup = chats.slice(
     chats.indexOf("function composer(repositoryId)"),
     chats.indexOf("/**\n * The edge you drag"),
   );
-  assert.match(room_markup, /esc\(`Message #\$\{repositoryLabel\(repositoryId\)\}`\)/u);
+  assert.match(room_markup, /`Message \$\{subChannelLabel\(/u);
   assert.doesNotMatch(room_markup, /Message Main chat/u);
-  assert.match(room_markup, /<button class="send-btn" type="submit"[\s\S]{0,120}icon\("arrowRight"\)/u);
-  assert.doesNotMatch(room_markup, /icon\("send"\)/u);
+  assert.match(room_markup, /<button class="send-btn" type="submit"[\s\S]{0,120}icon\("send"\)/u);
+  assert.doesNotMatch(room_markup, /icon\("arrowRight"\)/u);
 });
 
 test("the private-agent and DM composers keep the full toolbar layout", async () => {

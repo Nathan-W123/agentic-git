@@ -4580,7 +4580,7 @@ function composer(repositoryId) {
         ${composerCount("channel", state.chatDraft)}
         <button class="send-btn" type="submit" title="Send"${
           sendable ? "" : " disabled"
-        }>${icon("arrowRight")}</button>
+        }>${icon("send")}</button>
       </div>
     </form>
   </div>`;
@@ -7030,14 +7030,14 @@ function threadPanel(repositoryId, selectedMessageId) {
           <span class="spacer"></span>
           ${composerCount("thread", state.threadDraft)}
           <!-- Pause, or play, for the run this thread is following — beside
-               the arrow because stopping the work and saying the next thing
-               are one decision, and the hand is already here. Drawn only
+               the send button because stopping the work and saying the next
+               thing are one decision, and the hand is already here. Drawn only
                when there is a run to act on, and kept visible by the
                stylesheet even while the rest of this row is resting. -->
           ${threadTaskControl(root)}
           <button class="send-btn" type="submit" title="Send"${
             threadSendable ? "" : " disabled"
-          }>${icon("arrowRight")}</button>
+          }>${icon("send")}</button>
         </div>
       </form>
     </div>

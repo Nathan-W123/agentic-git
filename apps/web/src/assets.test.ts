@@ -2116,15 +2116,20 @@ test("the composer is one card with bottom utilities and a send arrow", async ()
   );
   // A paper plane, not an arrow. The arrow was the same picture as "next",
   // and the composer's primary action should not read as a navigation mark —
-  // ui.js says so where the icon is defined. Asserted as the plane's body
-  // plus the fold line across it, loosely enough that the path may be
-  // renumbered and tightly enough that swapping it back for a chevron fails.
+  // ui.js says so where the icon is defined. Asserted as the two closed
+  // halves and the fold left open between them, loosely enough that the
+  // plane may be redrawn and tightly enough that a bar-and-chevron arrow put
+  // back here fails. The fold is that gap rather than a drawn crease,
+  // because a stroke beside these fills would be the only one in the set.
   const icons = await publicFile("ui.js");
-  assert.match(
-    icons,
-    /send: S\(\s*'<path d="M[\d.]+ [\d.]+ [\d.]+ [\d.]+a\.85\.85 0 0 0[^"]+"\/><path d="m[\d.]+ [\d.]+ [\d.]+-[\d.]+"\/>',/u,
+  const send = /\n {2}send: S\(\n([\s\S]*?)\n {2}\),/u.exec(icons)?.[1];
+  assert.notEqual(send, undefined, "the send icon is still drawn inline");
+  assert.equal(
+    (send ?? "").match(/<path d="M[\d.]+ [\d.]+A[^"]+Z"\/>/gu)?.length,
+    2,
+    "the plane is two closed halves with the fold open between them",
   );
-  assert.doesNotMatch(icons, /send: S\('<path d="M[\d.]+ 12h[\d.]+"/u);
+  assert.doesNotMatch(send ?? "", /stroke|d="M[\d.]+ 12h[\d.]+"/u);
 });
 
 test("the composer stays open over a decision the textarea cannot see", async () => {
