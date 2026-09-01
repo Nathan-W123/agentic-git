@@ -355,6 +355,8 @@ export function createChatterFilter(
   };
 }
 
+export { speakerIsActor } from "./speaker.js";
+
 export {
   createLocalSummariser,
   DEFAULT_SUMMARY_BUDGET_MS,

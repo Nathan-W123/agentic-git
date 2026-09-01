@@ -111,6 +111,7 @@ import {
 import {
   createChatterFilter,
   createLocalSummariser,
+  speakerIsActor,
   type ChatterFilter,
   type LocalSummariser,
 } from "@coord/local-triage";
@@ -22543,6 +22544,29 @@ export class ApiGateway {
     // channel is conversation, and paying a vendor to be told so was the
     // cost of reading every message rather than matching it.
     const readable = withoutAttachments(content);
+    // Before the embedding, because grammar is what the embedding cannot see.
+    //
+    // "I can probably wire back api pretty easily" is a colleague thinking
+    // out loud; "wire up the api" is a request. To a sentence encoder they
+    // mean nearly the same thing, so all four of the messages that spawned
+    // unwanted tasks in a live channel landed on the work side of the line —
+    // and across a wider sample of that same channel the embedding alone
+    // fired on sixteen of twenty-nine ordinary remarks. Re-shaping the
+    // prototypes could not fix it: the classes overlap, so every line that
+    // pushed a misfire down pulled a genuine request with it.
+    //
+    // See {@link speakerIsActor} for why a closed class of pronouns and
+    // auxiliaries is not the topic word list that was removed from this path.
+    // On that sample this takes sixteen false fires to three and loses none
+    // of twenty-five real requests.
+    if (speakerIsActor(readable)) {
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: the speaker is the one acting, so nobody is being asked",
+      );
+      return;
+    }
     if (await this.chatterFilter.readsAsChatter(readable)) {
       // Traced, because this is the one refusal decided by a local model
       // nobody can interrogate afterwards. Every way an unaddressed message
