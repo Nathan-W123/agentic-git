@@ -2951,8 +2951,12 @@ test("a session summary is reported as the CLI not publishing a figure, not as a
     }),
   );
   assert.deepEqual(report.windows, []);
-  assert.match(String(report.unavailableReason), /does not publish a usage figure/u);
-  assert.match(String(report.unavailableReason), /Nothing is wrong with the account/u);
+  assert.match(String(report.unavailableReason), /no subscription window to report/u);
+  assert.match(String(report.unavailableReason), /machine that holds your CLI login/u);
+  // Never the claim that the CLI cannot publish it: a subscription account
+  // reports percentages perfectly well, and saying otherwise sent the reader
+  // looking for a missing feature instead of a misdirected question.
+  assert.doesNotMatch(String(report.unavailableReason), /does not publish/u);
   assert.doesNotMatch(String(report.unavailableReason), /unless the account is on a subscription/u);
 
   // An API-key account is still named as such, because that reading is
@@ -2965,6 +2969,86 @@ test("a session summary is reported as the CLI not publishing a figure, not as a
   // And anything else is quoted rather than diagnosed.
   const odd = parseClaudeUsage(JSON.stringify({ result: "Not logged in." }));
   assert.match(String(odd.unavailableReason), /It said: Not logged in\./u);
+});
+
+/**
+ * An agent that exists without a credential can still be configured.
+ *
+ * `setSettings` asked the old question — is a secret stored — and refused
+ * every change to an agent created by the local flow: its model, its
+ * reasoning level, its name, and the visibility that decides whether
+ * teammates may task it. Somebody watching that agent do work was told to
+ * connect the account it was plainly already using.
+ */
+test("settings can be changed on an agent that has no stored credential", async () => {
+  const harness = await createHarness();
+  const signs = new Map<string, string>();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns: {
+      listAgentCallSigns: async () =>
+        [...signs.entries()].map(([key, callSign]) => {
+          const [userId = "", provider = ""] = key.split("\u0000");
+          return { userId, provider, callSign };
+        }),
+      setAgentCallSign: async (userId, provider, callSign) => {
+        signs.set(`${userId}\u0000${provider}`, callSign);
+      },
+      clearAgentCallSign: async (userId, provider) => {
+        signs.delete(`${userId}\u0000${provider}`);
+      },
+    },
+  });
+
+  // No credential and no connection entry — but the agent record exists,
+  // which is what having an agent means since local execution.
+  signs.set("u1\u0000anthropic", "Nyx");
+  await assert.doesNotReject(
+    service.setSettings({ userId: "u1", provider: "anthropic", effort: "high" }),
+  );
+
+  // And an account with no agent at all is still told to connect one.
+  await assert.rejects(
+    service.setSettings({ userId: "u2", provider: "anthropic", effort: "high" }),
+    /Connect Anthropic/u,
+  );
+});
+
+/**
+ * And visibility in particular, which had a second refusal behind the first:
+ * it is written to the credential store, so with no credential it threw and
+ * "only me" was permanent for every locally-run agent.
+ */
+test("visibility can be widened on an agent that has no stored credential", async () => {
+  const harness = await createHarness();
+  const signs = new Map<string, string>();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns: {
+      listAgentCallSigns: async () =>
+        [...signs.entries()].map(([key, callSign]) => {
+          const [userId = "", provider = ""] = key.split("\u0000");
+          return { userId, provider, callSign };
+        }),
+      setAgentCallSign: async (userId, provider, callSign) => {
+        signs.set(`${userId}\u0000${provider}`, callSign);
+      },
+      clearAgentCallSign: async (userId, provider) => {
+        signs.delete(`${userId}\u0000${provider}`);
+      },
+    },
+  });
+  signs.set("u1\u0000anthropic", "Nyx");
+
+  await assert.doesNotReject(
+    service.setSettings({
+      userId: "u1",
+      provider: "anthropic",
+      visibility: "org",
+    }),
+  );
 });
 
 test("cursor usage reports that Cursor usage is not reported without running the CLI", async () => {

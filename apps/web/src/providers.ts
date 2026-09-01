@@ -1062,11 +1062,29 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
   if (/Total cost|Total duration|tokens? used/iu.test(text)) {
     return {
       windows: [],
+      // Which account was asked, not whether the CLI can answer.
+      //
+      // `/usage` reports percentages for an account that has a subscription
+      // ceiling to be a percentage *of*. Run as an account without one — an
+      // API-key login, an agent token, or the container's own sign-in — it
+      // has nothing to report and falls back to the session's cost summary.
+      //
+      // On a deployment that runs agents locally that is the ordinary case
+      // and it is a question of *where*, not of what: no credential of the
+      // owner's is stored here, so the command runs as whatever this machine
+      // is signed in as rather than as them. Asked on the machine that holds
+      // their login it answers normally, which is what the desktop reader
+      // exists for.
+      //
+      // Said this way because the first attempt at this sentence claimed the
+      // CLI could not publish the figure at all, which is false, and was
+      // arrived at by testing one account that happened to have no
+      // subscription and generalising from it.
       unavailableReason:
-        "This Claude CLI does not publish a usage figure outside its own " +
-        "interactive `/usage` view — it answered with a session summary " +
-        "instead. Nothing is wrong with the account; the number is not " +
-        "available to ask for.",
+        "That reply came from an account with no subscription window to " +
+        "report — it answered with a session summary instead. Usage is read " +
+        "on the machine that holds your CLI login; until the Kumi app there " +
+        "reports one, there is nothing here to show.",
     };
   }
   return {
@@ -2639,6 +2657,16 @@ export class ProviderChatService {
       }
     }
     return changed;
+  }
+
+  /** Whether this account has an agent of this vendor at all, credential or not. */
+  private async agentRecordExists(
+    userId: string,
+    provider: ProviderId,
+  ): Promise<boolean> {
+    return (await this.storedCallSigns()).some(
+      (entry) => entry.userId === userId && entry.provider === provider,
+    );
   }
 
   /** Every name this deployment has handed out, or none if it cannot ask. */
@@ -5095,13 +5123,35 @@ export class ProviderChatService {
     visibility?: "personal" | "org";
   }): Promise<ProviderStatus[]> {
     const file = await this.readConnections();
-    const connection = file[input.userId]?.[input.provider];
+    let connection = file[input.userId]?.[input.provider];
     if (connection === undefined) {
-      throw new ProviderChatError(
-        409,
-        "not_connected",
-        `Connect ${PROVIDER_NAMES[input.provider]} before changing its settings`,
+      // An agent exists without a credential, and its settings are still its
+      // settings.
+      //
+      // This asked the old question — is a secret stored — and refused every
+      // change to an agent created by the local flow: its model, its
+      // reasoning level, its name, and the visibility that decides whether
+      // teammates may task it. Somebody watching that agent do work was told
+      // to connect the account it was plainly already using.
+      //
+      // The connections file holds *settings*; the credential store holds
+      // credentials. They were always separate, so a settings record with no
+      // credential behind it is a perfectly ordinary row, and writing one is
+      // what lets an agent that exists be configured.
+      const exists = (await this.storedCallSigns()).some(
+        (entry) =>
+          entry.userId === input.userId && entry.provider === input.provider,
       );
+      if (!exists) {
+        throw new ProviderChatError(
+          409,
+          "not_connected",
+          `Connect ${PROVIDER_NAMES[input.provider]} before changing its settings`,
+        );
+      }
+      const byProvider = (file[input.userId] ??= {});
+      connection = { kind: "account", createdAt: new Date().toISOString() };
+      byProvider[input.provider] = connection;
     }
     const options = await this.options({ provider: input.provider });
     // Partial updates merge: changing the effort alone must not drop the
@@ -5236,11 +5286,18 @@ export class ProviderChatService {
       try {
         await store.setVisibility(input.userId, vendor, input.visibility);
       } catch (error) {
-        throw new ProviderChatError(
-          409,
-          "not_connected",
-          error instanceof Error ? error.message : String(error),
-        );
+        // No credential to carry it, which is the ordinary state of an agent
+        // that runs on somebody's own machine. The agent record is where its
+        // visibility lives then, and the caller writes it there — see the
+        // settings route. Refusing here made "only me" a permanent setting
+        // for every local agent.
+        if (!(await this.agentRecordExists(input.userId, input.provider))) {
+          throw new ProviderChatError(
+            409,
+            "not_connected",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
     }
     return await this.list({ userId: input.userId, systemAdmin: true });
