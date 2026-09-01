@@ -485,9 +485,24 @@ const PROVIDER_VENDOR = {
  */
 export async function checkLocalCli(providerId, rerender) {
   if (window.KUMI_INSTALL === undefined) {
+    // Two very different reasons, and telling them apart is the whole value of
+    // the message. `KUMI_SERVER` has been in the app's preload since the app
+    // was first something you could download; the install bridge beside it
+    // came much later. So a page with the first and not the second is the app,
+    // just an old one — and saying "open the app" to somebody who is already
+    // in it sends them to check the one thing that is not wrong.
+    //
+    // That mattered: a build without the bridge cannot install a CLI, cannot
+    // offer a sign-in, and cannot say that it cannot. Every agent connected
+    // from it looks connected and can run nothing, which is exactly how this
+    // was found.
     toast(
-      "Open the Kumi app on the machine that runs this agent — a browser " +
-        "cannot see what is installed there.",
+      window.KUMI_SERVER === undefined
+        ? "Open the Kumi app on the machine that runs this agent — a browser " +
+            "cannot see what is installed there."
+        : "This copy of the Kumi app is too old to install or check a CLI. " +
+            "Download the latest version and open it again — your agents and " +
+            "their names are kept.",
       "error",
     );
     return;
