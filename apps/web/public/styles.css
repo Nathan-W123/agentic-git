@@ -769,7 +769,7 @@ svg.ui-icon {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 2px;
-  align-self: end;
+  flex: none;
   padding: 6px 8px;
   border-top: 1px solid var(--border-soft);
   background: var(--bg-panel);
@@ -4822,9 +4822,10 @@ button.chip.lg:hover {
 .chan-sidebar {
   width: var(--chan-sidebar-w);
   flex: none;
-  /* The panel owns its scrollbar, so its workspace identity, destinations,
-     lists, and account controls travel as one uninterrupted surface. */
-  display: block;
+  /* Keep the account row at the panel's foot while the roster uses the
+     remaining height as an independently scrolling region. */
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   background: var(--bg-panel);
   /* The middle of the group, so it has no edge of its own on the left: the
@@ -4841,7 +4842,7 @@ button.chip.lg:hover {
   border-left: 0;
   border-radius: 0;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
   transition: width var(--motion-content) var(--ease-motion);
 }
 
@@ -4911,10 +4912,14 @@ button.chip.lg:hover {
   color: var(--salmon);
 }
 
-/* The sidebar is the only vertical scroller. This wrapper remains in normal
-   flow so it moves together with the controls above and below it. */
+/* The roster takes whatever height remains between the workspace controls
+   and account row. It alone scrolls, leaving the account reachable at the
+   bottom of the panel even when the lists are long. */
 .chan-scroll {
-  overflow: visible;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 4px 0 14px;
 }
 
@@ -4923,7 +4928,7 @@ button.chip.lg:hover {
 }
 
 /* A section heading, and the "+" that adds to the list under it. It stays
-   with its list while the complete sidebar scrolls. */
+   with its list while the roster scrolls. */
 .chan-sec {
   position: static;
   display: flex;
@@ -5388,7 +5393,7 @@ button.chip.lg:hover {
 }
 
 /* A profile card opens *below* the row and inside the roster's own width.
-   `.chan-sidebar` scrolls, and a scroll container clips any absolutely
+   `.chan-scroll` scrolls, and a scroll container clips any absolutely
    positioned descendant that reaches outside it — so a card opening sideways
    out of the sidebar is not merely off-panel, it is invisible. Anchored to
    the avatar rather than the row for the same reason on the other axis: a

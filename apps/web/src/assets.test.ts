@@ -1153,14 +1153,18 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
   assert.match(app, /value: "settings", label: "Settings"/u);
   assert.match(userMenu, /\{ width: 184 \}/u);
   assert.match(css, /\.chats-shell\.chan-collapsed \.chan-sidebar-foot \{[\s\S]{0,120}grid-template-columns: 40px;/u);
-  // The whole sidebar is one scroller: its crown, destinations, lists, and
-  // account control travel together instead of leaving fixed fragments.
+  // The account stays pinned to the bottom of the sidebar. The roster takes
+  // the remaining height and scrolls independently when its lists are long.
   assert.match(css, /::-webkit-scrollbar-corner \{\s*background: transparent;/u);
   assert.match(
     css,
-    /\.chan-sidebar \{\s*width: var\(--chan-sidebar-w\);[\s\S]{0,500}display: block;[\s\S]{0,900}overflow-y: auto;/u,
+    /\.chan-sidebar \{\s*width: var\(--chan-sidebar-w\);[\s\S]{0,500}display: flex;\s*flex-direction: column;[\s\S]{0,900}overflow-y: hidden;/u,
   );
-  assert.match(css, /\.chan-scroll \{\s*overflow: visible;/u);
+  assert.match(
+    css,
+    /\.chan-scroll \{\s*flex: 1 1 auto;\s*min-height: 0;\s*overflow-x: hidden;\s*overflow-y: auto;/u,
+  );
+  assert.match(css, /\.chan-sidebar-foot \{[\s\S]{0,180}flex: none;/u);
   assert.match(css, /\.chan-sec \{\s*position: static;/u);
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
