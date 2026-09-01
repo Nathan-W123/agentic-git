@@ -1625,20 +1625,58 @@ export class RepositoryService {
         // the receiver cannot resolve is worse than a large one, because it
         // fails to unbundle at all — so anything unverifiable falls back to
         // full history, which is exactly the behaviour that came before.
-        const usable =
-          have !== undefined &&
-          /^[0-9a-f]{40}$/u.test(have) &&
+        const holds = async (commit: string): Promise<boolean> =>
           (
             await this.git.run(
               [
                 `--git-dir=${repository.path}`,
                 "cat-file",
                 "-e",
-                `${have}^{commit}`,
+                `${commit}^{commit}`,
               ],
               { allowFailure: true },
             )
           ).exitCode === 0;
+        const usable =
+          have !== undefined &&
+          /^[0-9a-f]{40}$/u.test(have) &&
+          (await holds(have));
+        // What to leave out, which is not simply "everything the worker has".
+        //
+        // A bundle must carry at least one object beyond its prerequisites;
+        // `git bundle create` answers an empty one with `fatal: Refusing to
+        // create empty bundle` and a non-zero exit. Excluding exactly what the
+        // worker holds produces precisely that whenever canonical has not moved
+        // since its last task — which is not a corner case, it is the ordinary
+        // second task on a repository. The first mention after a cache filled
+        // worked, every one after it failed on an unhandled 500, and the agent
+        // relayed it into the room as "I could not finish this".
+        //
+        // So the exclusion is walked back one commit when the difference is
+        // empty. The bundle then carries the one commit the worker already has
+        // — a few hundred bytes — and, importantly, the ref that names it,
+        // which is the thing the worker actually fetches. A root commit has no
+        // parent to step back to, so that falls through to a full bundle, which
+        // for a single-commit history is the same thing.
+        const exclusion = !usable
+          ? undefined
+          : (
+                await this.git.run(
+                  [
+                    `--git-dir=${repository.path}`,
+                    "rev-list",
+                    "--count",
+                    "--end-of-options",
+                    refName,
+                    `^${have}`,
+                  ],
+                  { allowFailure: true },
+                )
+              ).stdout.trim() !== "0"
+            ? `^${have}`
+            : (await holds(`${have}~1`))
+              ? `^${have}~1`
+              : undefined;
         await this.git.run([
           `--git-dir=${repository.path}`,
           "bundle",
@@ -1646,7 +1684,7 @@ export class RepositoryService {
           bundlePath,
           "--end-of-options",
           refName,
-          ...(usable ? [`^${have}`] : []),
+          ...(exclusion === undefined ? [] : [exclusion]),
         ]);
         return await readFile(bundlePath);
       } finally {
