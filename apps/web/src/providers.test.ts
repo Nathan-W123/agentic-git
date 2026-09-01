@@ -22,6 +22,7 @@ import {
   parseReportedUsage,
   parseCursorModelList,
   saysSignedIn,
+  saysSignedOut,
   parseCodexAppServerRateLimits,
   parseCodexRateLimits,
   parseCodexStatusRateLimits,
@@ -2986,6 +2987,33 @@ test("cursor usage reports that Cursor usage is not reported without running the
   assert.equal(report.planType, undefined);
   assert.equal(report.notes, undefined);
   assert.deepEqual(tried, []);
+});
+
+/**
+ * And a confirmation nobody recognises is not read as a refusal.
+ *
+ * The mirror of the test below, and the one that was missing. A signed-in
+ * Codex may say "Logged in using ChatGPT", or "Authenticated", or print an
+ * account line with no verb in it — the wording has changed between releases.
+ * Demanding one of two English phrases before believing it told somebody with
+ * a live ChatGPT session that they were not signed in, and offered them the
+ * one remedy they had already carried out.
+ *
+ * So the exit code decides and the words only veto: a refusal is stated, a
+ * success is merely exit zero.
+ */
+test("an unfamiliar success message is not read as a refusal", () => {
+  // None of these say "logged in", and none of them are a refusal.
+  assert.equal(saysSignedOut("Authenticated as nathan@example.com"), false);
+  assert.equal(saysSignedOut("Account: nathan@example.com\nPlan: Plus"), false);
+  assert.equal(saysSignedOut("gpt-5.6-terra medium"), false);
+  assert.equal(saysSignedOut(""), false);
+
+  // The refusals still are, in the phrasings the CLI has actually used.
+  assert.equal(saysSignedOut("Not logged in. Run `codex login`."), true);
+  assert.equal(saysSignedOut("not signed in"), true);
+  assert.equal(saysSignedOut("No active session"), true);
+  assert.equal(saysSignedOut("Please log in to continue"), true);
 });
 
 test("a refusal is not read as a confirmation", () => {
