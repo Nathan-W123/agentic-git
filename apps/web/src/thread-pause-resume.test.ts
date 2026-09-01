@@ -133,6 +133,11 @@ test("the pause and play control sits in the thread composer beside send", async
   );
   // Ordered rather than placed, like everything else on this row.
   assert.match(css, /\.composer-run-btn \{[\s\S]{0,80}order: 2;/u);
+  assert.match(
+    css,
+    /\.composer-run-btn \{[\s\S]{0,80}margin-right: -4px;/u,
+    "the run control should sit slightly nearer to send",
+  );
   // And with a glyph standing there, the placeholder stops before it.
   assert.match(
     css,

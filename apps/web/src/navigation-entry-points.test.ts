@@ -176,15 +176,19 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(app, /document\.querySelector\("#layer-root"\)\.append\(layer\)/u);
   assert.match(css, /\.qs-layer \{[^}]*z-index: 85;/u);
   const switcher = slice(app, "function openSwitcher({ keyboard = false } = {}) {", "/** What the keys do");
-  const shortcuts = slice(app, "function openShortcutSheet() {", "/** Whether the keyboard");
+  const shortcuts = slice(app, "function openShortcutSheet({ keyboard = false } = {}) {", "/** Whether the keyboard");
   assert.match(switcher, /qs-layer-search\$\{keyboard \? " qs-layer-keyboard"/u);
-  assert.doesNotMatch(shortcuts, /qs-layer-search/u);
+  assert.match(shortcuts, /qs-layer-shortcuts\$\{keyboard \? " qs-layer-keyboard"/u);
   assert.match(
     css,
     /\.qs-layer-search \{[^}]*display: block;[^}]*padding: 0;/u,
   );
   assert.match(app, /function positionSwitcher\(layer\)/u);
   assert.match(app, /box\.bottom \+ 6/u);
+  assert.match(app, /function positionShortcutSheet\(layer\)/u);
+  assert.match(shortcuts, /positionShortcutSheet\(layer\)/u);
+  assert.match(css, /\.qs-layer-shortcuts \{[^}]*display: block;[^}]*padding: 0;/u);
+  assert.match(css, /\.qs-layer-shortcuts\.qs-layer-keyboard \{[^}]*display: grid;/u);
 
   // The results are exactly as wide as the bar they drop out of. The panel
   // used to stop at a fixed cap while the search control grows with its
@@ -214,7 +218,8 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(app, /function typingSomewhere\(target\)/u);
   assert.match(app, /input, textarea, select, \[contenteditable='true'\]/u);
   assert.match(app, /if \(event\.key === "\?"\)/u);
-  assert.match(app, /function openShortcutSheet\(\)/u);
+  assert.match(app, /function openShortcutSheet\(\{ keyboard = false \} = \{\}\)/u);
+  assert.match(app, /openShortcutSheet\(\{ keyboard: true \}\)/u);
   assert.match(app, /class="global-search" data-act="switch-open"/u);
 });
 

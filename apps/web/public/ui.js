@@ -380,11 +380,15 @@ export const ICONS = {
       '<circle cx="11.6" cy="12" r="3.1"/>' +
       '<path d="M14.13 13.86L19.53 16.06A1.25 1.25 0 0 0 20.47 13.74L15.07 11.54A1.25 1.25 0 0 0 14.13 13.86Z"/>',
   ),
-  // A paper plane with its fold cut into the silhouette — the arrow this
-  // used to be was the same picture as "next", and the composer's primary
-  // action should not be a navigation mark.
+  // A paper plane in two halves with the fold left open between them — the
+  // arrow this used to be was the same picture as "next", and the composer's
+  // primary action should not be a navigation mark. The crease closes to a
+  // point at the nose and opens toward the tail, because a gap in the fill is
+  // the only fold a solid mark can carry: a line drawn over the silhouette
+  // would be the stroke this set does not have.
   send: S(
-    '<path d="M20.7 3.3 4.4 8.85a.85.85 0 0 0-.07 1.67l5.1 2.44c.32.15.57.4.72.72l2.44 5.1a.85.85 0 0 0 1.67-.07z"/>',
+    '<path d="M19.17 3.82A0.29 0.29 0 0 1 19.44 4.32L10.5 12.11A1.63 1.63 0 0 1 8.57 12.26L4.8 9.95A0.91 0.91 0 0 1 5.01 8.3L19.17 3.82Z"/>' +
+      '<path d="M19.58 4.46A0.23 0.23 0 0 1 19.97 4.7L14.03 19.16A0.8 0.8 0 0 1 12.53 19.1L11.4 15.55A2.31 2.31 0 0 1 11.86 13.33L19.58 4.46Z"/>',
   ),
   sliders: S(
     '<path d="M4.3 9.2L7.6 9.2A1.2 1.2 0 0 0 7.6 6.8L4.3 6.8A1.2 1.2 0 0 0 4.3 9.2Z"/>' +

@@ -1153,14 +1153,15 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
   assert.match(app, /value: "settings", label: "Settings"/u);
   assert.match(userMenu, /\{ width: 184 \}/u);
   assert.match(css, /\.chats-shell\.chan-collapsed \.chan-sidebar-foot \{[\s\S]{0,120}grid-template-columns: 40px;/u);
-  // The roster scroller must not paint WebKit's dual-axis corner above the
-  // account row — a bright square and hairline that sat on the dark panel.
+  // The whole sidebar is one scroller: its crown, destinations, lists, and
+  // account control travel together instead of leaving fixed fragments.
   assert.match(css, /::-webkit-scrollbar-corner \{\s*background: transparent;/u);
   assert.match(
     css,
-    /\.chan-scroll \{\s*overflow-x: hidden;\s*overflow-y: auto;/u,
+    /\.chan-sidebar \{\s*width: var\(--chan-sidebar-w\);[\s\S]{0,500}display: block;[\s\S]{0,900}overflow-y: auto;/u,
   );
-  assert.match(css, /\.chan-scroll::-webkit-scrollbar \{\s*height: 0;/u);
+  assert.match(css, /\.chan-scroll \{\s*overflow: visible;/u);
+  assert.match(css, /\.chan-sec \{\s*position: static;/u);
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
     sidebar,
@@ -1223,11 +1224,10 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
     sidebarRule ?? "",
     /transition: width var\(--motion-content\) var\(--ease-motion\);/u,
   );
-  // Four owned rows: workspace identity, destinations, the one roster
-  // scroller, and the account footer.
-  assert.match(
+  assert.doesNotMatch(
     css,
-    /grid-template-rows: auto auto minmax\(0, 1fr\) auto;/u,
+    /\.chan-sec \{\s*position: sticky;/u,
+    "section headings should not remain behind when their lists scroll away",
   );
 
   // Changing the class on the existing shell gives the width transition an
@@ -2475,15 +2475,20 @@ test("the composer is one card with bottom utilities and a send arrow", async ()
   );
   // A paper plane, not an arrow. The arrow was the same picture as "next",
   // and the composer's primary action should not read as a navigation mark —
-  // ui.js says so where the icon is defined. Asserted as the plane's body
-  // plus the fold line across it, loosely enough that the path may be
-  // renumbered and tightly enough that swapping it back for a chevron fails.
+  // ui.js says so where the icon is defined. Asserted as the two closed
+  // halves and the fold left open between them, loosely enough that the
+  // plane may be redrawn and tightly enough that a bar-and-chevron arrow put
+  // back here fails. The fold is that gap rather than a drawn crease,
+  // because a stroke beside these fills would be the only one in the set.
   const icons = await publicFile("ui.js");
-  assert.match(
-    icons,
-    /send: S\(\s*'<path d="M[\d.]+ [\d.]+ [\d.]+ [\d.]+a\.85\.85 0 0 0[^"]+"\/><path d="m[\d.]+ [\d.]+ [\d.]+-[\d.]+"\/>',/u,
+  const send = /\n {2}send: S\(\n([\s\S]*?)\n {2}\),/u.exec(icons)?.[1];
+  assert.notEqual(send, undefined, "the send icon is still drawn inline");
+  assert.equal(
+    (send ?? "").match(/<path d="M[\d.]+ [\d.]+A[^"]+Z"\/>/gu)?.length,
+    2,
+    "the plane is two closed halves with the fold open between them",
   );
-  assert.doesNotMatch(icons, /send: S\('<path d="M[\d.]+ 12h[\d.]+"/u);
+  assert.doesNotMatch(send ?? "", /stroke|d="M[\d.]+ 12h[\d.]+"/u);
 });
 
 test("the composer stays open over a decision the textarea cannot see", async () => {
