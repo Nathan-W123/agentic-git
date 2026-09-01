@@ -86,15 +86,23 @@ jobs:
       # Tested here as well as on every commit, because this is the last point
       # at which a broken sign-in flow is still cheaper to find than to ship.
       #
-      # The suite runs under `--test-force-exit` (see the package's own `test`
-      # script). `node --test` has no deadline of its own: a test file that
-      # leaves a handle open never exits, the runner waits on it forever, and
-      # this step — four seconds on every other platform — sat for twenty-five
-      # minutes on the Windows runner twice before anyone read the log. The
-      # leak that caused it is fixed at its source and pinned by a test; this
-      # is the seatbelt, so the next one costs a red cross rather than a
-      # release.
+      # `timeout-minutes`, because `node --test` has no deadline of its own: a
+      # test file that leaves a handle open never exits, the runner waits on it
+      # forever, and this step — three seconds on every platform — sat for
+      # twenty-five minutes on the Windows runner twice before anyone read the
+      # log. The leak that caused it is fixed at its source and pinned by a
+      # test; this is the seatbelt.
+      #
+      # It is the *step's* deadline and not `--test-force-exit`, which was the
+      # first attempt at one. Forcing the exit calls `process.exit()` the
+      # instant the tests finish, and on Windows a handle still closing at that
+      # moment aborts the process from inside libuv —
+      # `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c`
+      # — so two files that had passed every one of their assertions were
+      # reported as failures. A seatbelt that fails the build it was added to
+      # protect is worse than the hang.
       - name: Build and test the app
+        timeout-minutes: 10
         run: npx turbo run build test --filter=@coord/desktop
 
       # The worker the app supervises, flattened to one file it can ship. Its
