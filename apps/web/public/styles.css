@@ -5616,6 +5616,20 @@ button.chip.lg:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* Kumi's own measure, where a vendor publishes no quota. Deliberately not a
+   bar: a bar is a fraction of something and nothing here knows the ceiling. */
+.rr-usage-spend {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2, #9ca3af);
+}
+
+.rr-usage-spend strong {
+  color: var(--text-1, #e5e7eb);
+  font-variant-numeric: tabular-nums;
+}
+
 .rr-usage-reset {
   display: block;
   margin-top: 3px;

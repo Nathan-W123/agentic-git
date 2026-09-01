@@ -206,6 +206,7 @@ interface TestRuntime {
    * there was a local pass. A test about the filter says otherwise.
    */
   setLocalChatter: (reads: (text: string) => boolean) => void;
+  setLocalWork: (reads: (text: string) => boolean) => void;
   /**
    * Holds every classify call open until the test releases it — a stand-in
    * for the case this fixture cannot otherwise reach: a real CLI spin-up
@@ -491,6 +492,10 @@ async function startRuntime(
   // filter gets one that decides nothing, which is also the honest default:
   // "unsure" is what it answers for anything it is not certain about.
   let localChatter: (text: string) => boolean = () => false;
+  // The mirror the local-agents auto-claim path reads. Undefined means
+  // "whatever is not conversation is work", which is the shape an
+  // embedding model with a margin actually has minus its uncertain middle.
+  let localWork: ((text: string) => boolean) | undefined;
   // A gate a test can hold shut, so a classify call takes real, controllable
   // time rather than always resolving on the same tick every other test
   // relies on.
@@ -593,6 +598,34 @@ async function startRuntime(
         : { usage: { thinkingTokens: chatAnswer.thinkingTokens } }),
     };
   };
+  /**
+   * The provider list, shared by `list` and `setSettings`.
+   *
+   * Both return it in the real service, and a settings response is what the
+   * browser replaces its whole provider list with — so a fixture where only
+   * one of them answers faithfully cannot show whether a write empties the
+   * Agents tab, which is exactly the bug this shape exists to catch.
+   */
+  const listProviderStatuses = (userId: string): unknown[] => {
+    const connections = chatConnections.get(userId) ?? [];
+    return ["anthropic", "openai", "cursor"].map((id) => {
+      const connection = connections.find((entry) => entry.provider === id);
+      return {
+        id,
+        name: id,
+        connected: connection !== undefined,
+        ...(connection === undefined
+          ? {}
+          : {
+              ownCredential: {
+                kind: "oauth_token",
+                visibility: connection.visibility ?? "personal",
+              },
+            }),
+      };
+    });
+  };
+
   const operations: ApiOperations = {
     chatProviders: {
       // Faithful in the one respect the gateway acts on: the route decides,
@@ -600,23 +633,7 @@ async function startRuntime(
       // `ownCredential` to do it. A stub that answered `[]` meant that
       // decision was made over an empty list and never exercised.
       async list(input) {
-        const connections = chatConnections.get(input.userId) ?? [];
-        return ["anthropic", "openai", "cursor"].map((id) => {
-          const connection = connections.find((entry) => entry.provider === id);
-          return {
-            id,
-            name: id,
-            connected: connection !== undefined,
-            ...(connection === undefined
-              ? {}
-              : {
-                  ownCredential: {
-                    kind: "oauth_token",
-                    visibility: connection.visibility ?? "personal",
-                  },
-                }),
-          };
-        });
+        return listProviderStatuses(input.userId);
       },
       async signIn() {
         return {};
@@ -656,10 +673,26 @@ async function startRuntime(
           (entry) => entry.provider === input.provider,
         );
         if (connection === undefined) {
-          throw Object.assign(
-            new Error(`Connect ${input.provider} before changing its settings`),
-            { status: 409, code: "not_connected" },
+          // An agent that exists as a durable record and has no credential is
+          // configurable, which is the ordinary shape since local execution.
+          // The fixture has to behave like the real service here or it tests
+          // a rule the service no longer has.
+          //
+          // And it must *not* invent a connection to represent that: this map
+          // stands for credentials, so pushing one makes a credential-less
+          // agent look credential-backed, and the visibility the gateway wrote
+          // to its record is then correctly ignored on the way back out. The
+          // real service writes a settings row, which is a different thing.
+          const record = (await store.listAgentCallSigns()).find(
+            (sign) =>
+              sign.userId === input.userId && sign.provider === input.provider,
           );
+          if (record === undefined) {
+            throw Object.assign(
+              new Error(`Connect ${input.provider} before changing its settings`),
+              { status: 409, code: "not_connected" },
+            );
+          }
         }
         if (input.callSign !== undefined) {
           const trimmed = input.callSign.trim();
@@ -670,14 +703,21 @@ async function startRuntime(
             );
           }
           if (trimmed === "") {
-            delete connection.callSign;
+            if (connection !== undefined) {
+              delete connection.callSign;
+            }
             await store.clearAgentCallSign(input.userId, input.provider);
           } else {
-            connection.callSign = trimmed;
+            if (connection !== undefined) {
+              connection.callSign = trimmed;
+            }
             await store.setAgentCallSign(input.userId, input.provider, trimmed);
           }
         }
-        return {};
+        // The provider list, as the real service returns — this response is
+        // what the browser replaces its whole list with, so a fixture that
+        // answers `{}` cannot show that the tab survives a write.
+        return listProviderStatuses(input.userId);
       },
       async complete(input: any) {
         return await performChat(input);
@@ -1092,6 +1132,16 @@ async function startRuntime(
     bootstrapToken: BOOTSTRAP_TOKEN,
     chatterFilter: {
       readsAsChatter: async (text: string) => localChatter(text),
+      // The mirror the local-agents path reads. Anything the stub does not
+      // call conversation is work here, which is what makes the free verdict
+      // testable without standing up an embedding model.
+      readsAsWork: async (text: string) =>
+        localWork === undefined ? !localChatter(text) : localWork(text),
+      classify: async (text: string) => ({
+        chatter: localChatter(text),
+        work: localWork === undefined ? !localChatter(text) : localWork(text),
+        lean: 0.5,
+      }),
       available: async () => true,
     },
     catchUpSummariser: options.catchUpSummariser ?? (async () => undefined),
@@ -1189,6 +1239,9 @@ async function startRuntime(
     },
     setLocalChatter: (reads) => {
       localChatter = reads;
+    },
+    setLocalWork: (reads: (text: string) => boolean) => {
+      localWork = reads;
     },
     setClassifyGate: () => {
       let release: () => void = () => undefined;
@@ -6119,6 +6172,234 @@ test("a question about repository files is answered in the channel, not turned i
   assert.doesNotMatch(String(agentMessages[0]?.content), /ANSWER_TASK/u);
   assert.deepEqual(agentMessages[0].replies ?? [], []);
   assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
+});
+
+/**
+ * A deployment that executes nothing itself still picks up unaddressed work.
+ *
+ * The paid verdict — a provider turn per message in a populated channel — is
+ * the operator's turn on a local-agents deployment, since there is no
+ * credential of the asker's here. So it was refused outright and unaddressed
+ * messages did nothing at all, which switched the feature off for exactly the
+ * people whose agents run on their own accounts.
+ *
+ * The local classifier already embeds both prototype sets to answer "is this
+ * confidently conversation". The mirror question costs nothing beyond the
+ * embedding it just did, and only its confident half acts.
+ */
+test("unaddressed work is picked up locally, without spending a provider turn", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-autoclaim");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Conversation to the local model; work to its mirror. The uncertain middle
+  // is everything neither answers true for.
+  runtime.setLocalChatter((text) => text.startsWith("hi "));
+  runtime.setLocalWork((text) => text.includes("retry loop"));
+  const before = runtime.chatPrompts.length;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "the retry loop keeps failing on timeouts" },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "an unaddressed message the local model read as work was never picked up",
+  );
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /retry loop/u,
+  );
+  // And the point of the whole exercise: no provider turn was spent deciding.
+  assert.deepEqual(
+    runtime.chatPrompts.slice(before),
+    [],
+    "the verdict must cost nothing on a deployment that executes nothing",
+  );
+});
+
+/**
+ * And the uncertain middle still does nothing, which is what the path did
+ * before. This can only add dispatches the local model is sure about.
+ */
+test("a message the local model is unsure about is left alone", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-autoclaim-middle");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Neither confidently conversation nor confidently work.
+  runtime.setLocalChatter(() => false);
+  runtime.setLocalWork(() => false);
+  const before = runtime.chatPrompts.length;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "wonder if that thing from yesterday matters" },
+    })).status,
+    201,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(runtime.submittedTasks.length, 0, "the middle must not act");
+  assert.deepEqual(runtime.chatPrompts.slice(before), []);
+});
+
+/**
+ * A settings write must not empty the Agents tab.
+ *
+ * The browser replaces its whole provider list with whatever a settings write
+ * answers. The GET route decorated its answer with `exists` — whether an agent
+ * for this vendor exists at all, which stopped being the same question as
+ * whether a credential is stored — and the settings route returned the
+ * service's list raw. So any write, a rename or a model or a visibility
+ * change, replaced the list with one whose `exists` was missing, and every
+ * agent that runs on its owner's machine vanished from the tab until the next
+ * reload. It read as though the setting had deleted them.
+ */
+test("changing a setting leaves every agent still on the tab", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const base = `/api/v1/chat/providers`;
+
+  // An agent that exists as a record and has no credential — the ordinary
+  // shape since local execution.
+  assert.equal(
+    (await owner.request(`${base}/anthropic/agent`, { method: "POST", body: {} }))
+      .status,
+    200,
+  );
+  const before = await owner.request(base);
+  const listedBefore = (before.data.providers ?? []).filter(
+    (entry: { exists?: boolean }) => entry.exists === true,
+  );
+  assert.equal(listedBefore.length, 1, JSON.stringify(before.data.providers));
+
+  // The write the tab performs, and the list it replaces its state with.
+  const written = await owner.request(`${base}/anthropic/settings`, {
+    method: "POST",
+    body: { visibility: "org" },
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.data));
+  const listedAfter = (written.data.providers ?? []).filter(
+    (entry: { exists?: boolean }) => entry.exists === true,
+  );
+  assert.equal(
+    listedAfter.length,
+    1,
+    "the settings response must carry the same agents the tab was drawn from",
+  );
+
+  // And the setting is readable afterwards, which is the other half: it lives
+  // on the agent record when no credential can hold it, and something has to
+  // read it back.
+  const reloaded = await owner.request(base);
+  const anthropic = (reloaded.data.providers ?? []).find(
+    (entry: { id?: string }) => entry.id === "anthropic",
+  );
+  assert.equal(anthropic?.exists, true);
+  assert.equal(
+    anthropic?.recordVisibility,
+    "org",
+    "visibility set on a credential-less agent must survive a reload",
+  );
+  assert.equal(bootstrapped.user.id.length > 0, true);
+});
+
+/**
+ * A screenshot must not stop a request being read as one.
+ *
+ * A pasted image arrives inside the message text as
+ * `![shot.png](attachment:<32 hex>.png)`. The unaddressed-message reader is a
+ * sentence-embedding model, so that blob is not neutral — it is thirty
+ * characters of hex and punctuation pulling a short sentence away from
+ * anything resembling a request. The same words were picked up without an
+ * image and passed over with one, which is a strange rule for a product where
+ * "here is a screenshot of the bug" is the most natural way to ask.
+ */
+test("an image in the message does not hide the request inside it", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "autoclaim-image");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // The classifier is asked about the words. If the markup reached it, this
+  // stub would see the hex and answer false.
+  runtime.setLocalChatter(() => false);
+  runtime.setLocalWork((text) => !/attachment:/u.test(text) && text.includes("unpin"));
+
+  const shot = `${"a1b2c3d4".repeat(4)}.png`;
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: {
+        content: `there is no way to unpin a message, please add one\n![shot.png](attachment:${shot})`,
+      },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "a request carrying a screenshot was never picked up",
+  );
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /unpin/u);
+});
+
+/**
+ * And a bare screenshot is still nothing to read: its markup is full of
+ * letters, so the structural guard has to be asked about the words too.
+ */
+test("a message that is only a screenshot is not treated as a request", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "autoclaim-bare-image");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.setLocalChatter(() => false);
+  runtime.setLocalWork(() => true);
+
+  const shot = `${"b1c2d3e4".repeat(4)}.png`;
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: `![shot.png](attachment:${shot})` },
+    })).status,
+    201,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(runtime.submittedTasks.length, 0);
 });
 
 function withLocalAgentsOnly(t: { after: (fn: () => void) => void }): void {

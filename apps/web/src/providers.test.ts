@@ -22,6 +22,7 @@ import {
   parseReportedUsage,
   parseCursorModelList,
   saysSignedIn,
+  saysSignedOut,
   parseCodexAppServerRateLimits,
   parseCodexRateLimits,
   parseCodexStatusRateLimits,
@@ -2927,6 +2928,49 @@ test("Cursor's reported model list is read back, markers and colours and all", (
   ]);
 });
 
+/**
+ * A card must not diagnose somebody's billing from evidence that says nothing
+ * about it.
+ *
+ * `claude -p "/usage"` is a prompt that happens to begin with a slash, not an
+ * invocation of the interactive `/usage` view. A CLI that does not recognise
+ * it as a command answers with the ordinary end-of-session summary — "Total
+ * cost", "Total duration", token counts — and no percentage is in it. The card
+ * read that as "expected unless the account is on a subscription with limits",
+ * so somebody on an ordinary subscription was told their plan was the reason
+ * and had nowhere to go from there.
+ */
+test("a session summary is reported as the CLI not publishing a figure, not as a billing verdict", () => {
+  const report = parseClaudeUsage(
+    JSON.stringify({
+      result: [
+        "Total cost:            $0.0312",
+        "Total duration (API):  4s",
+        "Usage:                 120 input, 340 output",
+      ].join("\n"),
+    }),
+  );
+  assert.deepEqual(report.windows, []);
+  assert.match(String(report.unavailableReason), /no subscription window to report/u);
+  assert.match(String(report.unavailableReason), /machine that holds your CLI login/u);
+  // Never the claim that the CLI cannot publish it: a subscription account
+  // reports percentages perfectly well, and saying otherwise sent the reader
+  // looking for a missing feature instead of a misdirected question.
+  assert.doesNotMatch(String(report.unavailableReason), /does not publish/u);
+  assert.doesNotMatch(String(report.unavailableReason), /unless the account is on a subscription/u);
+
+  // An API-key account is still named as such, because that reading is
+  // supported by what the CLI actually said.
+  assert.match(
+    String(parseClaudeUsage(JSON.stringify({ result: "Using API key billing" })).unavailableReason),
+    /API key/u,
+  );
+
+  // And anything else is quoted rather than diagnosed.
+  const odd = parseClaudeUsage(JSON.stringify({ result: "Not logged in." }));
+  assert.match(String(odd.unavailableReason), /It said: Not logged in\./u);
+});
+
 test("cursor usage reports that Cursor usage is not reported without running the CLI", async () => {
   // Cursor's `status` answers with an account, a plan and a version, and no
   // subscription figure — so the card was filled with facts nobody asked a
@@ -2947,6 +2991,33 @@ test("cursor usage reports that Cursor usage is not reported without running the
   assert.equal(report.planType, undefined);
   assert.equal(report.notes, undefined);
   assert.deepEqual(tried, []);
+});
+
+/**
+ * And a confirmation nobody recognises is not read as a refusal.
+ *
+ * The mirror of the test below, and the one that was missing. A signed-in
+ * Codex may say "Logged in using ChatGPT", or "Authenticated", or print an
+ * account line with no verb in it — the wording has changed between releases.
+ * Demanding one of two English phrases before believing it told somebody with
+ * a live ChatGPT session that they were not signed in, and offered them the
+ * one remedy they had already carried out.
+ *
+ * So the exit code decides and the words only veto: a refusal is stated, a
+ * success is merely exit zero.
+ */
+test("an unfamiliar success message is not read as a refusal", () => {
+  // None of these say "logged in", and none of them are a refusal.
+  assert.equal(saysSignedOut("Authenticated as nathan@example.com"), false);
+  assert.equal(saysSignedOut("Account: nathan@example.com\nPlan: Plus"), false);
+  assert.equal(saysSignedOut("gpt-5.6-terra medium"), false);
+  assert.equal(saysSignedOut(""), false);
+
+  // The refusals still are, in the phrasings the CLI has actually used.
+  assert.equal(saysSignedOut("Not logged in. Run `codex login`."), true);
+  assert.equal(saysSignedOut("not signed in"), true);
+  assert.equal(saysSignedOut("No active session"), true);
+  assert.equal(saysSignedOut("Please log in to continue"), true);
 });
 
 test("a refusal is not read as a confirmation", () => {

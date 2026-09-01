@@ -39,6 +39,34 @@ export { CHATTER_PROTOTYPES, WORK_PROTOTYPES } from "./prototypes.js";
 export const DEFAULT_CHATTER_MARGIN = 0.2;
 
 /**
+ * How far onto the work side a message must fall to be *acted on* locally.
+ *
+ * Zero, meaning it must lean to work at all rather than by some amount, and
+ * that is a measurement rather than a preference. A first cut used
+ * `DEFAULT_CHATTER_MARGIN` — a safety threshold on *dropping*, how sure the
+ * model must be before discarding something somebody typed — and reusing it
+ * here imported a strictness chosen for a different decision. A second cut
+ * guessed 0.05. Then a real message went through a real deployment:
+ *
+ *   "please add a way t unpin a message from the pinned sidetab"  →  +0.012
+ *
+ * An unmistakable request, correctly on the work side of the line, and four
+ * times under the bar. Anything above zero would have kept dropping it.
+ *
+ * The scale is a difference of nearest-prototype similarities, so its useful
+ * signal is the sign, not the size. The confident-chatter gate has already run
+ * by the time this is asked — a message that leans hard to conversation is
+ * long gone — so the question left is only which side of the middle the
+ * remainder falls on, and demanding a *margin* on top of that was asking the
+ * same question twice.
+ *
+ * Raise it with `COORD_TRIAGE_WORK_MARGIN` if a channel starts picking up
+ * things it should not. The lean is written to the log on every message that
+ * is passed over, so that number can be chosen from evidence too.
+ */
+export const DEFAULT_WORK_MARGIN = 0;
+
+/**
  * How long a message will wait for a model that is still loading.
  *
  * Short on purpose. A message that gives up here is not mis-classified, it is
@@ -70,6 +98,37 @@ export interface ChatterFilter {
    * existed.
    */
   readsAsChatter(text: string): Promise<boolean>;
+  /**
+   * Whether this message is confidently a piece of work.
+   *
+   * The mirror of the above, against the same prototypes and the same margin,
+   * and it is deliberately not the negation of it. Three answers come out of
+   * one embedding: confidently conversation, confidently work, and the wide
+   * middle that is neither — where "false" from *both* means the local model
+   * has no opinion worth acting on.
+   *
+   * That middle is the whole reason this is a separate question. A deployment
+   * that cannot spend a provider turn on classification (see
+   * `COORD_LOCAL_AGENTS_ONLY`) needs a decision it can make for free, and the
+   * only honest free decision is one that acts on what it is sure about and
+   * stays out of the way otherwise. False is the safe answer here too: every
+   * failure produces it, and it means "do nothing", which is what a
+   * deployment with no verdict available did before.
+   */
+  readsAsWork(text: string): Promise<boolean>;
+  /**
+   * Both answers and the number behind them, from one embedding.
+   *
+   * `lean` is absent when the model could not answer at all — not loaded, not
+   * available, timed out — which is a different fact from a message that
+   * landed in the middle, and the only one of the two that is worth an
+   * operator's attention.
+   */
+  classify(text: string): Promise<{
+    chatter: boolean;
+    work: boolean;
+    lean?: number;
+  }>;
   /** Whether the model is loaded and usable. For diagnostics and tests. */
   available(): Promise<boolean>;
 }
@@ -86,6 +145,8 @@ export interface ChatterFilterOptions {
   embedder?: Embedder;
   /** How decisive the answer has to be. Higher keeps more messages. */
   margin?: number;
+  /** How decisive acting has to be. See {@link DEFAULT_WORK_MARGIN}. */
+  workMargin?: number;
   /**
    * How long a message waits for a model that is still loading. Anything
    * but a finite, positive number means "wait as long as it takes".
@@ -183,6 +244,7 @@ export function createChatterFilter(
   options: ChatterFilterOptions = {},
 ): ChatterFilter {
   const margin = options.margin ?? DEFAULT_CHATTER_MARGIN;
+  const workMargin = options.workMargin ?? DEFAULT_WORK_MARGIN;
   const model = options.model ?? DEFAULT_TRIAGE_MODEL;
   const warmupBudgetMs = options.warmupBudgetMs ?? DEFAULT_WARMUP_BUDGET_MS;
   const decisionBudgetMs =
@@ -222,40 +284,73 @@ export function createChatterFilter(
     return await loading;
   };
 
+  /**
+   * How far this message leans, on one embedding.
+   *
+   * Positive means nearer the work prototypes, negative nearer conversation.
+   * Both questions read the same number, so they can never disagree about the
+   * same message — which they could if each embedded it separately and one
+   * timed out.
+   */
+  const lean = async (text: string): Promise<number | undefined> => {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+    // Starts the load if it has not started, but does not stand in the
+    // message's way while it runs.
+    const loaded = await within(ready(), warmupBudgetMs);
+    if (loaded === undefined) {
+      return undefined;
+    }
+    try {
+      const embedded = await within(
+        loaded.embedder([trimmed]),
+        decisionBudgetMs,
+      );
+      const vector = embedded?.[0];
+      if (vector === undefined) {
+        return undefined;
+      }
+      return nearest(vector, loaded.work) - nearest(vector, loaded.chatter);
+    } catch {
+      return undefined;
+    }
+  };
+
   return {
     // Diagnostics wait for the real answer: "is this deployment able to
     // filter at all" is a different question from "can it filter this
     // message right now", and only the second one has somebody waiting on it.
     available: async () => (await ready()) !== undefined,
     readsAsChatter: async (text) => {
-      const trimmed = text.trim();
-      if (trimmed.length === 0) {
-        return false;
+      const leaning = await lean(text);
+      // Strictly greater by the whole margin. A message that is merely
+      // closer to chatter is not confidently chatter, and the agent is the
+      // one qualified to say which.
+      return leaning === undefined ? false : -leaning >= margin;
+    },
+    readsAsWork: async (text) => {
+      const leaning = await lean(text);
+      // Strictly, so a message dead on the line is not work.
+      return leaning === undefined ? false : leaning > workMargin;
+    },
+    // One embedding, every answer, and the number they were derived from.
+    // A caller that has to explain itself — the auto-claim trace — cannot do
+    // that from a boolean: "the local model did not read it as work" is the
+    // same sentence whether the model was absent, timed out, or answered
+    // 0.04 against a threshold of 0.05, and only the last of those is a
+    // threshold worth moving.
+    classify: async (text) => {
+      const leaning = await lean(text);
+      if (leaning === undefined) {
+        return { chatter: false, work: false };
       }
-      // Starts the load if it has not started, but does not stand in the
-      // message's way while it runs.
-      const loaded = await within(ready(), warmupBudgetMs);
-      if (loaded === undefined) {
-        return false;
-      }
-      try {
-        const embedded = await within(
-          loaded.embedder([trimmed]),
-          decisionBudgetMs,
-        );
-        const vector = embedded?.[0];
-        if (vector === undefined) {
-          return false;
-        }
-        const chatter = nearest(vector, loaded.chatter);
-        const work = nearest(vector, loaded.work);
-        // Strictly greater by the whole margin. A message that is merely
-        // closer to chatter is not confidently chatter, and the agent is the
-        // one qualified to say which.
-        return chatter - work >= margin;
-      } catch {
-        return false;
-      }
+      return {
+        chatter: -leaning >= margin,
+        work: leaning > workMargin,
+        lean: leaning,
+      };
     },
   };
 }

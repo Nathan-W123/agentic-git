@@ -1139,6 +1139,28 @@ const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
 const ATTACHMENT_REFERENCE =
   /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
 
+/**
+ * A message as the local classifier should read it: the words, without the
+ * plumbing.
+ *
+ * A pasted screenshot arrives inside the text as
+ * `![shot.png](attachment:<32 hex>.png)`. The reader is a sentence-embedding
+ * model, so that blob is not neutral — it is thirty characters of hex and
+ * punctuation pulling a short sentence away from anything resembling a
+ * request. A message that was picked up perfectly well without an image
+ * stopped being picked up with one, which is a strange rule for a product
+ * where "here is a screenshot of the bug" is the most natural way to ask for
+ * something.
+ *
+ * The alt text goes with it. It reads like the part somebody wrote, and for a
+ * pasted screenshot it is not — the browser fills it with the file name, so
+ * keeping it left "shot.png" behind, which is letters enough to make a message
+ * containing nothing but an image look like a request.
+ */
+function withoutAttachments(content: string): string {
+  return content.replace(ATTACHMENT_REFERENCE, " ").replace(/\s+/gu, " ").trim();
+}
+
 const CHANNEL_ANSWER_CONTEXT = 8;
 
 /**
@@ -2791,10 +2813,22 @@ function defaultChatterFilter(): ChatterFilter {
   if (["0", "false", "off", "no"].includes(raw)) {
     return {
       readsAsChatter: async () => false,
+      readsAsWork: async () => false,
+      classify: async () => ({ chatter: false, work: false }),
       available: async () => false,
     };
   }
-  return createChatterFilter();
+  // Tunable without a code change, because the right value is a property of a
+  // channel's own phrasing rather than of this repository: the bar starts at
+  // "leans to work at all", and the lean is written to the log every time a
+  // message is passed over, so raising it is a decision somebody can make from
+  // their own numbers.
+  const configured = Number.parseFloat(
+    process.env["COORD_TRIAGE_WORK_MARGIN"]?.trim() ?? "",
+  );
+  return createChatterFilter(
+    Number.isFinite(configured) ? { workMargin: configured } : {},
+  );
 }
 
 /**
@@ -3358,6 +3392,22 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const REPOSITORY_PICTURE_MAX_CHARS = 256 * 1024;
 /** How long a worker holds a task before it must heartbeat again. */
 const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
+/**
+ * How far back the usage card's own spend figure reaches.
+ *
+ * Thirty days, which is the retention the audit sweep keeps anyway, so this
+ * never claims a total whose evidence has already been pruned.
+ */
+const SPEND_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** What one agent has spent through Kumi. See {@link ApiGateway.agentSpend}. */
+interface AgentSpend {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  tasks: number;
+  since: string;
+}
 /** A week: long enough to be useful, short enough to be a poor thing to leak. */
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -12277,15 +12327,6 @@ export class ApiGateway {
 
       if (path === `${API_PREFIX}/chat/providers` && method === "GET") {
         const listed = await performChat(() => chatOperations.list(identity));
-        // Whether an agent for this vendor exists at all, which is no longer
-        // the same question as whether a credential is stored. The settings
-        // screen needs both: one decides "Connect" from "Link for usage", and
-        // the credential alone can no longer answer it.
-        const owned = new Set(
-          (await this.options.store.listAgentCallSigns().catch((): [] => []))
-            .filter((sign) => sign.userId === principal.user.id)
-            .map((sign) => sign.provider),
-        );
         this.sendJson(response, 200, {
           // Deployment-wide, and sent here because this is the response the
           // Settings screen loads. It also arrives on a channel's roster, but
@@ -12293,20 +12334,7 @@ export class ApiGateway {
           // it was, the screen fell back to "false" and drew the connect
           // button for agents that already existed.
           localAgentsOnly: localAgentsOnly(),
-          providers: (Array.isArray(listed) ? listed : []).map((entry) => {
-            // `ownCredential`, not `mine`: `mine` is the browser's word for
-            // this, computed in `myAgents`, and testing for it here was
-            // testing a field the provider list has never carried. Harmless
-            // only because the call-sign lookup answers the same question for
-            // every connection made since agents got names.
-            const provider = entry as { id?: unknown; ownCredential?: unknown };
-            return {
-              ...provider,
-              exists:
-                provider.ownCredential !== undefined ||
-                (typeof provider.id === "string" && owned.has(provider.id)),
-            };
-          }),
+          providers: await this.describeProviders(principal.user.id, listed),
         });
         return;
       }
@@ -12589,9 +12617,22 @@ export class ApiGateway {
               usage = codexUsageReport(snapshot);
             }
           }
-          this.sendJson(response, 200, {
-            usage,
-          });
+          // Kumi's own accounting, added to whatever the vendor said. It is
+          // the only figure available for a vendor that publishes no quota,
+          // and it is worth having beside one that does: a percentage says
+          // how much ceiling is left, this says what the work cost.
+          const spend = await this.agentSpend(
+            owner === undefined || owner === "" ? identity.userId : owner,
+            provider,
+          );
+          const merged =
+            spend !== undefined &&
+            typeof usage === "object" &&
+            usage !== null &&
+            !Array.isArray(usage)
+              ? { ...(usage as Record<string, unknown>), spend }
+              : usage;
+          this.sendJson(response, 200, { usage: merged });
           return;
         }
         if (action === "usage" && method === "POST") {
@@ -12670,6 +12711,35 @@ export class ApiGateway {
               ...(visibility === undefined ? {} : { visibility }),
             }),
           );
+          // Visibility belongs to the agent record when no credential holds it.
+          //
+          // The credential store is where it lives for an agent that has a
+          // credential, because there it decides whose secret a teammate's
+          // prompt may spend. An agent running on its owner's machine has no
+          // credential here at all, and the durable record carries the column
+          // for exactly this case — see `AgentCallSign.visibility`, which says
+          // so. Written after the service call so a refusal there leaves this
+          // untouched.
+          if (visibility === "personal" || visibility === "org") {
+            const existing = (
+              await this.options.store.listAgentCallSigns().catch((): [] => [])
+            ).find(
+              (sign) =>
+                sign.userId === identity.userId && sign.provider === provider,
+            );
+            if (existing !== undefined) {
+              await this.options.store
+                .setAgentCallSign(
+                  identity.userId,
+                  provider,
+                  // The name is unchanged; this write is about the column
+                  // beside it, and the store's upsert takes both together.
+                  callSign ?? existing.callSign,
+                  visibility,
+                )
+                .catch(() => undefined);
+            }
+          }
           // A rename is account-wide, so nothing per-repository may go on
           // shadowing it: an override naming this agent in one channel wins
           // over the call sign there (`resolveChannelAgentPresentation`), and
@@ -12689,7 +12759,14 @@ export class ApiGateway {
               },
             });
           }
-          this.sendJson(response, 200, { providers });
+          this.sendJson(response, 200, {
+            // Through the same decorator the GET uses. Returning the service's
+            // list raw is what emptied the Agents tab on every settings write:
+            // the browser replaces its provider list with this response, and
+            // without `exists` every agent that has no credential reads as one
+            // that does not exist.
+            providers: await this.describeProviders(identity.userId, providers),
+          });
           return;
         }
         throw new HttpError(405, "method_not_allowed", "Unsupported method");
@@ -14227,6 +14304,145 @@ export class ApiGateway {
     return (connections[candidate.userId] ?? []).some(
       (connection) => connection.provider === candidate.provider,
     );
+  }
+
+  /**
+   * The provider list as the browser needs it, wherever it is sent from.
+   *
+   * Two facts the service cannot supply, both of which stopped being optional
+   * when an agent became a record rather than a credential:
+   *
+   *  - `exists`. Whether there is an agent for this vendor at all, which is no
+   *    longer the same question as whether a credential is stored. The
+   *    Settings screen decides "Connect" from "Disconnect" on it.
+   *  - `visibility`. `list()` reports it off the credential summary, so an
+   *    agent with no credential reads as `personal` no matter what anybody
+   *    sets. The durable agent record carries the column; this is where it is
+   *    read back.
+   *
+   * One method because it was two. The GET route decorated its answer and the
+   * settings route returned the service's list raw, so *any* settings write —
+   * a rename, a model, an effort — replaced the browser's provider list with
+   * one whose `exists` was missing, and every locally-run agent vanished from
+   * the Agents tab until the next reload. It looked like the setting had
+   * deleted them.
+   */
+  private async describeProviders(
+    userId: string,
+    listed: unknown,
+  ): Promise<unknown[]> {
+    const records = await this.options.store
+      .listAgentCallSigns()
+      .catch((): [] => []);
+    const owned = new Map(
+      records
+        .filter((sign) => sign.userId === userId)
+        .map((sign) => [sign.provider, sign]),
+    );
+    return (Array.isArray(listed) ? listed : []).map((entry) => {
+      // `ownCredential`, not `mine`: `mine` is the browser's word for this,
+      // computed in `myAgents`, and testing for it here was testing a field
+      // the provider list has never carried.
+      const provider = entry as {
+        id?: unknown;
+        ownCredential?: { visibility?: unknown } | undefined;
+      };
+      const record =
+        typeof provider.id === "string" ? owned.get(provider.id) : undefined;
+      return {
+        ...provider,
+        exists: provider.ownCredential !== undefined || record !== undefined,
+        // The credential's own visibility still wins where there is one: it is
+        // the thing that decides whose secret a teammate's prompt may spend,
+        // and the record is only the answer when no credential holds it.
+        ...(provider.ownCredential !== undefined || record === undefined
+          ? {}
+          : { recordVisibility: record.visibility ?? "personal" }),
+      };
+    });
+  }
+
+  /**
+   * What one agent has actually spent through Kumi, measured rather than asked.
+   *
+   * The vendors answer a different question and two of the three will not
+   * answer it at all: Claude publishes no quota outside its own interactive
+   * view, and Cursor publishes none anywhere. So the usage card had nothing to
+   * show for them, permanently, and said so in a sentence that read like a
+   * fault.
+   *
+   * This is the figure Kumi already has. A worker reports a running token
+   * total on every heartbeat and it is stored per task, so the work done here
+   * is measured on the way past. It cannot say what fraction of a limit is
+   * gone — only the vendor knows the limit — but it can say what was spent,
+   * for every vendor, without asking any CLI anything.
+   *
+   * Attribution runs through the task rather than the usage row: a row names
+   * the *configured agent* that ran (a key from the operator's config), and
+   * the question here is about a person's agent. `submittedBy` is what pins a
+   * task to its owner everywhere else in this file, so it is what pins the
+   * spend too.
+   *
+   * Bounded by time and failing to `undefined`: this rides on a request
+   * somebody is waiting for, and a figure nobody can produce is a card
+   * without a number rather than a card with an error.
+   */
+  private async agentSpend(
+    ownerId: string,
+    provider: string,
+  ): Promise<AgentSpend | undefined> {
+    const vendor = PROVIDER_TO_VENDOR[provider];
+    if (vendor === undefined) {
+      return undefined;
+    }
+    const since = new Date(Date.now() - SPEND_WINDOW_MS).toISOString();
+    try {
+      // Not scoped to a project: this route is about an account's agent and
+      // carries no project, and an agent's spend is its spend wherever the
+      // work was done. The time window is what bounds the read.
+      const [usage, tasks] = await Promise.all([
+        this.options.store.listTokenUsage({ recordedAfter: since }),
+        this.options.store.listSubmittedTasks({ kind: "any" }),
+      ]);
+      const mine = new Set(
+        tasks
+          .filter(
+            (task) =>
+              task.submittedBy === ownerId &&
+              task.agentId.toLowerCase().includes(vendor),
+          )
+          .map((task) => task.id),
+      );
+      if (mine.size === 0) {
+        return undefined;
+      }
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let totalTokens = 0;
+      const counted = new Set<string>();
+      for (const row of usage) {
+        if (!mine.has(row.taskId)) {
+          continue;
+        }
+        inputTokens += row.inputTokens;
+        outputTokens += row.outputTokens;
+        totalTokens += row.totalTokens;
+        counted.add(row.taskId);
+      }
+      if (counted.size === 0) {
+        return undefined;
+      }
+      return {
+        inputTokens,
+        outputTokens,
+        totalTokens,
+        tasks: counted.size,
+        since,
+      };
+    } catch {
+      // A card without a number, never a card with an error.
+      return undefined;
+    }
   }
 
   /**
@@ -22180,8 +22396,19 @@ export class ApiGateway {
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
     // One structural guard, and no vocabulary. A message with no letters in
-    // it is an emoji or punctuation and there is nothing to read.
-    if (!/\p{L}/u.test(content)) {
+    // it is an emoji or punctuation and there is nothing to read. Asked of the
+    // words rather than the raw text, so a bare screenshot — whose markup is
+    // full of letters — is still nothing to read.
+    if (!/\p{L}/u.test(withoutAttachments(content))) {
+      // Traced like every other way this path can end. It was the one gate
+      // that dropped a message without a word, and an evening spent asking
+      // "why did nothing happen" is exactly what a silent gate costs — the
+      // others were given lines for that reason and this one was missed.
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: nothing to read once images and punctuation are set aside",
+      );
       return;
     }
     // Then the local pass, before anything is read from the store and long
@@ -22190,7 +22417,8 @@ export class ApiGateway {
     // about goes on to the agent, which is what decides. Most of a working
     // channel is conversation, and paying a vendor to be told so was the
     // cost of reading every message rather than matching it.
-    if (await this.chatterFilter.readsAsChatter(content)) {
+    const readable = withoutAttachments(content);
+    if (await this.chatterFilter.readsAsChatter(readable)) {
       // Traced, because this is the one refusal decided by a local model
       // nobody can interrogate afterwards. Every way an unaddressed message
       // can end now leaves one line saying which gate ended it — silence
@@ -22298,17 +22526,73 @@ export class ApiGateway {
     context?: string;
     referencedMessageId?: string;
   }): Promise<void> {
-    // The most expensive habit this server has: a provider turn for every
-    // message in a channel that has an agent in it, whether or not anybody
-    // addressed one. Gated here rather than inside the verdict so a refusal
-    // costs no loop at all — the understudy would only be asked to refuse a
-    // second time. Nothing is lost that a person cannot recover by
-    // @mentioning somebody, which is the same fallback an unreachable CLI
-    // already has.
+    const { projectId, repositoryId, content, senderId, context } = input;
+    // A deployment that executes nothing itself cannot pay for the verdict.
+    //
+    // The paid reader below is the most expensive habit this server has: a
+    // provider turn for every message in a channel that has an agent in it,
+    // whether or not anybody addressed one. On a local-agents deployment it is
+    // also the *operator's* turn — there is no credential of the asker's here
+    // — so it used to be refused outright, and unaddressed messages simply did
+    // nothing. Correct about the cost, and it left the feature switched off
+    // for exactly the people whose agents run on their own accounts.
+    //
+    // The local classifier already embeds both prototype sets to answer "is
+    // this confidently conversation". Asking the mirror question costs nothing
+    // beyond the embedding it just did, and gives three outcomes rather than
+    // two: confidently conversation, confidently work, and the wide middle.
+    // Only the second acts. The middle does what the whole path used to do —
+    // nothing — so this can only ever add dispatches to messages the local
+    // model is sure about, never take one away.
+    //
+    // The run it starts is on the owner's machine and the owner's account,
+    // like every other dispatch here. Nothing is spent on the control plane.
     if (localAgentsOnly()) {
+      const [candidate] = input.ranked;
+      if (candidate === undefined) {
+        return;
+      }
+      const read = await this.chatterFilter
+        .classify(withoutAttachments(content))
+        .catch(() => ({ chatter: false, work: false, lean: undefined }));
+      if (!read.work) {
+        // The number, not just the verdict. "The local model did not read it
+        // as work" is the same sentence whether the model was absent, timed
+        // out, or answered 0.04 against a threshold of 0.05 — and only the
+        // last of those is a threshold worth moving. Without the figure the
+        // next report of "it did not pick this up" is another round of
+        // guessing, which is the thing this whole evening has been.
+        this.traceAutoClaim(
+          repositoryId,
+          content,
+          read.lean === undefined
+            ? "dropped: the local model could not read it, so nothing can " +
+                "pick up unaddressed work on this deployment"
+            : `dropped: local model leaned ${read.lean.toFixed(3)} toward ` +
+                "work, under the bar for acting",
+        );
+        return;
+      }
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        `acted on by ${candidate.name} on the local model's reading` +
+          (read.lean === undefined ? "" : ` (lean ${read.lean.toFixed(3)})`),
+      );
+      await this.dispatchOneMention({
+        projectId,
+        repositoryId,
+        content,
+        senderId,
+        candidate,
+        trigger: "auto_claim",
+        ...(input.referencedMessageId === undefined
+          ? {}
+          : { referencedMessageId: input.referencedMessageId }),
+        ...(context === undefined ? {} : { context }),
+      });
       return;
     }
-    const { projectId, repositoryId, content, senderId, context } = input;
     // The agent that would take it reads the message, on the cheap model —
     // see CEREMONIAL_MODELS — and says which of three things to do about it.
     //
@@ -22974,9 +23258,28 @@ export class ApiGateway {
         if (clearWinner) {
           return best.candidate;
         }
+        // Among equals, the one that can start now.
+        //
+        // The tier above deliberately ignores `busy`, because being the right
+        // agent to ask outranks being the free one — that still holds for a
+        // clear winner. It does not hold for a tie: when two agents are
+        // equally apt there is no rightness left to outrank anything, and
+        // handing the work to the one already running it means a queue behind
+        // a busy agent while an identical idle one watches. Somebody with
+        // three connected agents saw every unaddressed message go to the same
+        // one, because the tie-break below is stable by design and their
+        // agents are all their own, so the sender-owned rule never
+        // discriminated either.
         const tied = matched.filter((entry) => entry.score === best.score);
+        const free = tied.filter((entry) => !busy(entry.candidate));
+        // The sender's own agent first within whichever set survived — a
+        // person spending their own account needs no protecting from
+        // themselves — and otherwise the earliest, which keeps identical
+        // messages landing in the same place rather than at random.
+        const preferred = free.length > 0 ? free : tied;
         return (
-          tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]
+          preferred.find((entry) => entry.candidate.userId === senderId) ??
+          preferred[0]
         )?.candidate;
       }
 
