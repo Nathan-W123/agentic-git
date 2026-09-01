@@ -6015,10 +6015,10 @@ function agentSpec(agent, repositoryId) {
   // A task is in exactly one of these. Nothing running is an honest headline;
   // the zone already has those words.
   const queuedTasks = agentTasks.filter((candidate) =>
-    QUEUED_TASK_STATUS.has(candidate.status),
+    taskIsQueued(candidate, agent),
   );
   const runningTasks = agentTasks.filter(
-    (candidate) => !QUEUED_TASK_STATUS.has(candidate.status),
+    (candidate) => !taskIsQueued(candidate, agent),
   );
   const task =
     runningTasks.find(
@@ -6210,14 +6210,31 @@ function agentCurrentWorkZone(agent, repositoryId, { task, taskMessage, taskRepo
  * mis-click.
  */
 /**
- * Statuses that mean "filed, and nothing has picked it up".
+ * Filed, and nothing has picked it up.
  *
- * `claimed` sits here beside `submitted` because a claim is a lease, not a
- * start: a worker that claimed and then went offline leaves a row that reads
- * as taken and is going nowhere, and that is precisely the row somebody needs
- * to be able to cancel.
+ * `claimed` used to sit here unconditionally beside `submitted`, on the
+ * reasoning that a claim is a lease rather than a start: a worker that claimed
+ * and then went offline leaves a row that reads as taken and is going nowhere,
+ * and that is exactly the row somebody needs to be able to cancel.
+ *
+ * The concern is right and the test for it was not. It caught every claimed
+ * task, including one visibly planning and reading code a second earlier — so
+ * the panel filed a running agent under "Queued" and left its current-work
+ * headline empty, while the dot two inches away called the same task working
+ * (`WORKING_STATUS` in data.js has always counted `claimed`). Two halves of one
+ * screen disagreeing about one task.
+ *
+ * So the discriminator is the thing the comment was actually about: whether
+ * there is a machine listening. A claimed task on a live agent is running. A
+ * claimed task whose owner's machine has gone is the stranded row, and it
+ * stays in the queue where it can be cancelled.
  */
-const QUEUED_TASK_STATUS = new Set(["submitted", "claimed"]);
+function taskIsQueued(task, agent) {
+  if (task.status === "submitted") {
+    return true;
+  }
+  return task.status === "claimed" && agentOwnerOffline(agent);
+}
 
 function agentQueuedZone(agent, queued) {
   if (queued.length === 0) {

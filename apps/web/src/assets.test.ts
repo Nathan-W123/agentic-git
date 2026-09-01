@@ -2013,6 +2013,41 @@ test("a connected local row offers no second vendor sign-in", async () => {
 });
 
 /**
+ * A running agent is not queued work.
+ *
+ * The panel bucketed every `claimed` task as queued, so an agent visibly
+ * planning and reading code was filed under "Queued · 1" with an empty
+ * current-work headline — while the dot two inches away called the same task
+ * working, because `WORKING_STATUS` in data.js has always counted `claimed`.
+ * Two halves of one screen disagreeing about one task.
+ *
+ * The original reasoning was sound and its test was not: a worker that claimed
+ * and then went offline does leave a stranded row somebody needs to cancel.
+ * That is now what is actually asked.
+ */
+test("a claimed task counts as running unless its machine has gone", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function taskIsQueued");
+  assert.notEqual(start, -1, "the split must be a predicate, not a status set");
+  const body = chats.slice(start, chats.indexOf("\n\nfunction", start));
+
+  // Submitted is always queued; claimed only when nothing is listening.
+  assert.match(body, /task\.status === "submitted"/u);
+  assert.match(
+    body,
+    /task\.status === "claimed" && agentOwnerOffline\(agent\)/u,
+  );
+
+  // And the status set it replaced is gone, so nothing can drift back to
+  // bucketing by status alone.
+  assert.doesNotMatch(chats, /QUEUED_TASK_STATUS/u);
+
+  // Both sides of the split read the same predicate.
+  assert.match(chats, /queuedTasks = agentTasks\.filter\(\(candidate\) =>\s*\n\s*taskIsQueued\(candidate, agent\)/u);
+  assert.match(chats, /!taskIsQueued\(candidate, agent\)/u);
+});
+
+/**
  * A loader that takes an optional rerender must treat it as optional.
  *
  * `ensureChannelRoster` called `rerender()` unconditionally while one caller
