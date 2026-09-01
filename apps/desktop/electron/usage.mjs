@@ -15,7 +15,8 @@
 
 import { spawn } from "node:child_process";
 
-import { detectAgents } from "./agents.mjs";
+import { detectAgents, findAgentCommand } from "./agents.mjs";
+import { runnable } from "./installers.mjs";
 
 /**
  * Codex's app-server handshake, written to stdin in one go.
@@ -126,7 +127,14 @@ export async function readVendorUsage(vendor) {
   }
   // The path this machine's own detection found, so the command asked about
   // usage is the same program that does the work.
-  const executable = entry.command ?? vendor;
+  //
+  // Resolved even where the project config deliberately does not pin it. A
+  // bare name is fine on any platform that has an executable of that name;
+  // on Windows it is resolved by a PATHEXT search that finds the `.cmd` npm
+  // installed and then refuses to start it. Holding the real path is what
+  // lets `runnable` see a batch shim and run it through an interpreter.
+  const executable =
+    entry.command ?? (await findAgentCommand(vendor)) ?? vendor;
   let last;
   for (const attempt of attempts) {
     const result = await runOnce(executable, attempt);
@@ -144,8 +152,13 @@ export async function readVendorUsage(vendor) {
 function runOnce(executable, attempt) {
   return new Promise((resolve) => {
     let child;
+    // Through `cmd.exe` when the detected CLI is a batch shim, which on
+    // Windows is what npm installs its global binaries as. Spawning one
+    // directly is `spawn EINVAL` — the same rule that made the installer
+    // impossible, reached by a different road.
+    const { command, args } = runnable(executable, attempt.args);
     try {
-      child = spawn(executable, attempt.args, {
+      child = spawn(command, args, {
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
       });

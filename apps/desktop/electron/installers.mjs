@@ -33,6 +33,33 @@ function windowsSystem32(...parts) {
   return path.join(root, "System32", ...parts);
 }
 
+/**
+ * The same argv, in a form Windows will actually start.
+ *
+ * A `.cmd` or `.bat` is not a program. Since the CVE-2024-27980 fix
+ * `child_process.spawn` refuses to execute one unless it is told to use a
+ * shell, and it says so as `spawn EINVAL` — which reads like a fault in this
+ * app rather than a rule about the platform. The installer hit that on
+ * `npm.cmd`; anything that spawns a *detected* CLI hits it too, because npm
+ * installs its global binaries on Windows as exactly these shims. `codex.cmd`
+ * and `agent.cmd` are what `detectAgents` finds and pins.
+ *
+ * So the rule lives in one place and everything that spawns a path found on
+ * PATH goes through it. A real program is passed through untouched, which is
+ * every case on every other platform.
+ */
+export function runnable(command, args, platform = process.platform) {
+  if (platform !== "win32" || !/\.(?:bat|cmd)$/iu.test(command)) {
+    return { command, args };
+  }
+  return {
+    command: windowsSystem32("cmd.exe"),
+    // `/d` skips any AutoRun the registry has, so a batch file runs in a shell
+    // nobody else has furnished.
+    args: ["/d", "/c", command, ...args],
+  };
+}
+
 /** Where the interpreter for a shell one-liner lives on this machine. */
 function powershell() {
   return windowsSystem32("WindowsPowerShell", "v1.0", "powershell.exe");
