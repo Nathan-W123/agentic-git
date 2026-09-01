@@ -899,6 +899,114 @@ export class Worker {
     return cache;
   }
 
+  /**
+   * Fills the workspace with the revision this lease is for.
+   *
+   * From the cache this is a *local clone*, which hardlinks the object store
+   * instead of copying it, and that is the whole of the change: the workspace
+   * ends up a complete, ordinary repository whose packs are the same files on
+   * disk as the cache's.
+   *
+   * What it replaces was `init` + `fetch` + `checkout`, and `fetch` is a
+   * transfer even when both ends are on the same disk — git resolves what is
+   * missing, generates a pack, and writes a second copy of every object the
+   * cache already holds. Measured on a 45 MB checkout: 2.95s and 80 MB written
+   * per task, against 0.20s and 45 MB. The tenfold gap is on Linux with a warm
+   * page cache, which is the friendly case; on Windows the 35 MB it stops
+   * writing is 35 MB an antivirus does not read, per task, forever.
+   *
+   * It is also what the coordinator always did for itself. A server-side run
+   * took a worktree off a clone it already held; the worker was the only place
+   * paying to rebuild an object store it was standing next to.
+   *
+   * A worktree of the cache would be faster still and is not used: its `.git`
+   * is a *file* pointing outside the workspace, which breaks the moment the
+   * workspace is mounted into a container — and the sandbox path does exactly
+   * that. A local clone is a real repository wherever it is mounted, and where
+   * hardlinks are impossible git copies, which is what happened before anyway.
+   *
+   * Checked out by revision rather than by ref name: `clone` copies branches
+   * and tags, and the lease ref is deliberately neither, so it does not travel.
+   * That is the same tidiness the fetch had — the workspace carries no refs of
+   * the coordinator's — reached without the transfer.
+   */
+  private async materialise(
+    git: GitClient,
+    source: string,
+    fromCache: boolean,
+    assignment: WorkAssignment,
+    workspacePath: string,
+  ): Promise<void> {
+    if (fromCache) {
+      const revision = await git
+        .run(["-C", source, "rev-parse", "--verify", "--quiet", assignment.bundleRef], {
+          allowFailure: true,
+        })
+        .then((result) => (result.exitCode === 0 ? result.stdout.trim() : ""))
+        .catch(() => "");
+      if (/^[0-9a-f]{40}$/u.test(revision)) {
+        await git.run(
+          [
+            "clone",
+            "--local",
+            "--no-checkout",
+            "--no-tags",
+            "--end-of-options",
+            source,
+            workspacePath,
+          ],
+          { timeoutMs: GIT_COMMAND_TIMEOUT_MS },
+        );
+        await git.run(
+          // No `--end-of-options` here: `checkout` does not accept it in this
+          // position, and it would guard nothing anyway — `revision` has just
+          // been matched against forty hex characters.
+          ["-C", workspacePath, "checkout", "--detach", revision],
+          { timeoutMs: GIT_COMMAND_TIMEOUT_MS },
+        );
+        // `clone` leaves an `origin` pointing at the cache, which the fetch it
+        // replaces never did. The objects are already here, so the remote buys
+        // nothing and offers something: an agent that decides to `push` or
+        // `pull` would be writing into the store every later task reads its
+        // delta base from. Removed, so the workspace is what it was before —
+        // a detached checkout with nothing to talk to.
+        await git
+          .run(["-C", workspacePath, "remote", "remove", "origin"], {
+            allowFailure: true,
+            timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+          })
+          .catch(() => undefined);
+        return;
+      }
+      // The cache does not hold the ref it just absorbed, which should not
+      // happen and is not worth failing a task over. Fall through to the
+      // transfer, which asks no questions about what is already there.
+    }
+    // A bundle, or a cache that could not answer. `clone --branch` cannot name
+    // a ref outside `refs/heads/`, and the lease ref deliberately lives under
+    // `refs/coord/leases/` so an in-flight lease is not a branch of the
+    // canonical repository — so this fetches the ref by its full name and
+    // checks out detached, which reaches the same state.
+    await git.run(["init", "--end-of-options", workspacePath], {
+      timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+    });
+    await git.run(
+      [
+        "-C",
+        workspacePath,
+        "fetch",
+        "--no-tags",
+        "--end-of-options",
+        source,
+        assignment.bundleRef,
+      ],
+      { timeoutMs: GIT_COMMAND_TIMEOUT_MS },
+    );
+    await git.run(["-C", workspacePath, "checkout", "--detach", "FETCH_HEAD"], {
+      timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+    });
+  }
+
   /** Materialises the workspace and gets the agent's plan — no editing yet. */
   private async plan(
     assignment: WorkAssignment,
@@ -931,31 +1039,7 @@ export class Worker {
     this.laps?.mark("fetch");
 
     const workspacePath = path.join(scratch, "workspace");
-    // `clone --branch` cannot name a ref outside `refs/heads/`, and the lease
-    // ref deliberately lives under `refs/coord/leases/` so an in-flight lease
-    // is not a branch of the canonical repository. Fetching the ref by its
-    // full name and checking out detached reaches the same state and is
-    // tidier about it: the workspace ends up carrying no refs at all, where a
-    // clone left the lease ref and a remote-tracking copy of it behind.
-    await git.run(["init", "--end-of-options", workspacePath], {
-      timeoutMs: GIT_COMMAND_TIMEOUT_MS,
-    });
-    await git.run(
-      [
-        "-C",
-        workspacePath,
-        "fetch",
-        "--no-tags",
-        "--end-of-options",
-        source,
-        assignment.bundleRef,
-      ],
-      { timeoutMs: GIT_COMMAND_TIMEOUT_MS },
-    );
-    await git.run(
-      ["-C", workspacePath, "checkout", "--detach", "FETCH_HEAD"],
-      { timeoutMs: GIT_COMMAND_TIMEOUT_MS },
-    );
+    await this.materialise(git, source, source === cache, assignment, workspacePath);
     this.laps?.mark("checkout");
 
     const workspace: TaskWorkspace = {
