@@ -1557,6 +1557,68 @@ export const MIGRATIONS: readonly Migration[] = [
          ADD COLUMN visibility TEXT NOT NULL DEFAULT 'personal'`,
     ],
   },
+  {
+    /**
+     * The MCP servers a project has chosen for its agents, and who said so.
+     *
+     * An approved MCP server is an arbitrary process. A project admin picks
+     * it, and it then runs on a teammate's own laptop, under that teammate's
+     * account, every time one of the project's agents takes a task there. That
+     * is a bigger thing to hand a row than a URL or a label, which is why the
+     * table records approval as an act rather than as a flag somebody set:
+     * `approved_by` and `approved_at` say who decided and when, and `enabled`
+     * defaults to off so a server that was merely configured — by the person
+     * who typed it in, or by a migration, or by a client that forgot the
+     * field — arms nothing until somebody with the standing to do so turns it
+     * on. Disabling clears both, so a re-approval is a fresh decision with a
+     * fresh name on it and not the old one quietly resumed.
+     *
+     * Secrets live in `secrets_json` as sealed triples, the same shape the
+     * credential store has always written, and never come back on an
+     * ordinary read: a listing says which names are set and nothing else.
+     * `values_json` is the part that is not secret — a stdio server's plain
+     * environment, an HTTP server's plain headers — so a screen can show it.
+     *
+     * `scope` decides which of the project's repositories the server is
+     * attached to. `repository` is the default because it is the narrow one:
+     * a server nobody widened reaches only the repositories explicitly listed
+     * in the join table, which for a fresh row is none. No foreign keys, as
+     * with the neighbouring tables; the store removes join rows itself.
+     *
+     * The name is unique per project ignoring case because it becomes the key
+     * in a vendor's config file, where `Linear` and `linear` would be the
+     * same entry and one would silently win.
+     */
+    version: 54,
+    name: "project-mcp-servers",
+    statements: [
+      `CREATE TABLE project_mcp_servers (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        command TEXT,
+        args_json TEXT NOT NULL DEFAULT '[]',
+        url TEXT,
+        values_json TEXT NOT NULL DEFAULT '{}',
+        secrets_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 0,
+        scope TEXT NOT NULL DEFAULT 'repository',
+        approved_by TEXT,
+        approved_at TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE UNIQUE INDEX project_mcp_servers_project_name_idx
+         ON project_mcp_servers (project_id, LOWER(name))`,
+      `CREATE TABLE project_mcp_server_repositories (
+        server_id TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        PRIMARY KEY (server_id, repository_id)
+      )`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

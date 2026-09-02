@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -1743,4 +1743,151 @@ test("cache work on one repository never overlaps", async (t) => {
     "after",
   );
   assert.equal(guarded.cacheChains.size, 0);
+});
+
+/**
+ * A stand-in for the Claude CLI: records its argv, answers planning with a
+ * plan and execution with a completion, and edits the one file. What it is
+ * given on the command line is the whole of what this test is about.
+ */
+const FAKE_CLAUDE = [
+  `#!${process.execPath}`,
+  'import fs from "node:fs";',
+  'import path from "node:path";',
+  "fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');",
+  'process.stdin.setEncoding("utf8");',
+  'process.stdin.on("data", () => {});',
+  'process.stdin.on("end", () => {',
+  '  let result;',
+  '  if (process.argv.includes("--permission-mode")) {',
+  "    result = {",
+  '      taskId: "task_stand_in", objective: "raise the value",',
+  '      expectedFiles: ["src/value.js"], expectedSymbols: ["value"],',
+  '      dependencies: [], commands: [], externalAccess: [], riskLevel: "low",',
+  "    };",
+  "  } else {",
+  '    fs.writeFileSync(path.join(process.cwd(), "src", "value.js"), "export const value = 2;\\n", "utf8");',
+  "    result = {",
+  '      outcome: "completed", symbolsChanged: ["value"], explanation: "raised with claude",',
+  '      requestId: "", additionalFiles: [], additionalSymbols: [], additionalApis: [],',
+  '      additionalSchemas: [], additionalConfigKeys: [], additionalTests: [],',
+  '      additionalServices: [], reason: "",',
+  "    };",
+  "  }",
+  '  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(result) }) + "\\n");',
+  "});",
+  "",
+].join("\n");
+
+test("a Claude worker loads the lease's MCP servers from scratch, strictly, and commits none of it", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the stand-in CLI is a shebang script");
+    return;
+  }
+  const runtime = await startRuntime(t);
+  const log = path.join(runtime.root, "claude-argv.jsonl");
+  const fake = path.join(runtime.root, "fake-claude.mjs");
+  await writeFile(fake, FAKE_CLAUDE, { encoding: "utf8", mode: 0o755 });
+  runtime.project.config.agents = {
+    local: { adapter: "claude", command: fake, env: { FAKE_CLAUDE_LOG: log } },
+  };
+  runtime.project.config.mcp = { allow: "all" };
+  await runtime.project.save();
+
+  // The control plane under test predates the field, so the lease is given
+  // its servers on the way in — the shape the worker receives is the same.
+  const offered = [
+    {
+      name: "github",
+      transport: "http" as const,
+      url: "https://mcp.example/github",
+      headers: { Authorization: "Bearer ghp_opened_secret" },
+    },
+  ];
+  class LeaseWithServers extends WorkerClient {
+    public override async lease(
+      ...args: Parameters<WorkerClient["lease"]>
+    ): ReturnType<WorkerClient["lease"]> {
+      const assignment = await super.lease(...args);
+      return assignment === undefined
+        ? undefined
+        : { ...assignment, mcpServers: offered };
+    }
+  }
+  const worker = makeWorker(runtime, {
+    client: new LeaseWithServers({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+  });
+  await worker.register();
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with claude",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+
+  const argvs = (await readFile(log, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+  assert.equal(argvs.length, 2);
+  for (const argv of argvs) {
+    const at = argv.indexOf("--mcp-config");
+    assert.ok(at >= 0, `${argv.join(" ")} carries no --mcp-config`);
+    const configPath = argv[at + 1] ?? "";
+    assert.equal(argv[at + 2], "--strict-mcp-config");
+    // Beside the workspace, under the run's scratch, never inside the tree
+    // the changeset is collected from.
+    assert.equal(path.basename(configPath), "claude.json");
+    assert.equal(path.basename(path.dirname(configPath)), "mcp");
+    assert.equal(configPath.includes(`${path.sep}workspace${path.sep}`), false);
+    assert.equal(argv.some((arg) => arg.includes("ghp_opened_secret")), false);
+  }
+  // Removed with the run.
+  await assert.rejects(access(argvs[0]?.[argvs[0].indexOf("--mcp-config") + 1] ?? ""));
+
+  const storedTask = (await runtime.store.listSubmittedTasks()).find(
+    (entry) => entry.id === task.id,
+  );
+  const run = await runtime.store.getRun(storedTask?.runId ?? "");
+  assert.deepEqual(
+    run?.changeSets[0]?.patches.map((patch) => patch.path),
+    ["src/value.js"],
+  );
+  const progress = (await runtime.store.listAudit())
+    .filter((event) => event.type === "agent_progress")
+    .map((event) => String(event.data["message"]));
+  assert.ok(progress.includes("Running with tools: github."), progress.join("\n"));
+
+  // The same machine, told to run nothing: the servers are still offered,
+  // the agent runs without them, and the room hears why.
+  runtime.project.config.mcp = { allow: [] };
+  await rm(log, { force: true });
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with claude again",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const withheld = await worker.runOnce();
+  assert.equal(withheld.accepted, true, withheld.reason);
+  const later = (await readFile(log, "utf8")).trim().split("\n");
+  assert.ok(later.length >= 2);
+  for (const line of later) {
+    assert.equal((JSON.parse(line) as string[]).includes("--mcp-config"), false);
+  }
+  const explained = (await runtime.store.listAudit())
+    .filter((event) => event.type === "agent_progress")
+    .map((event) => String(event.data["message"]));
+  assert.ok(
+    explained.includes(
+      "This project offers MCP servers github; this machine has not allowed them (Kumi → Settings on this computer).",
+    ),
+    explained.join("\n"),
+  );
 });

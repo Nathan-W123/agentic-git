@@ -64,6 +64,7 @@ import {
   type WorkingChange,
 } from "./client.js";
 import { holdHost } from "./host-signal.js";
+import { stageMcpServers, type StagedMcpServers } from "./mcp-config.js";
 import type { WorkNudge } from "./nudge.js";
 import {
   shouldClaimWork,
@@ -1445,11 +1446,39 @@ export class Worker {
             worktrees,
           );
     const workspaces: WorkspaceManager = docker ?? worktrees;
+    // The lease's MCP servers, after this machine's allowlist. Staged under
+    // scratch — the same root the workspace has, so the `finally` that
+    // removes the run removes the config and its secrets with it — and
+    // staged before the adapter exists, because the adapter is what carries
+    // them. Both outcomes are said aloud: a room told nothing sees a run with
+    // no tools and cannot tell whether nobody offered any or this machine
+    // declined them, and those have different fixes in different places.
+    const offered = assignment.mcpServers ?? [];
+    const mcp = await stageMcpServers({
+      scratch,
+      vendor: configuredAgent.adapter ?? "generic-cli",
+      servers: offered,
+      allow: this.options.project.config.mcp,
+    });
+    if (offered.length > 0 && mcp.withheld.length > 0) {
+      await this.options.client.progress(
+        assignment.lease.id,
+        `This project offers MCP servers ${mcp.withheld.join(", ")}; this ` +
+          "machine has not allowed them (Kumi → Settings on this computer).",
+      );
+    }
+    if (mcp.staged.length > 0) {
+      await this.options.client.progress(
+        assignment.lease.id,
+        `Running with tools: ${mcp.staged.join(", ")}.`,
+      );
+    }
     const adapter = this.adapterFor(
       assignment,
       workspace,
       workspaces,
       agentSandbox,
+      mcp,
     );
     // Whatever conversation this request was asked inside travels with it —
     // the hosted path has the same problem the local one does: a follow-up
@@ -1858,6 +1887,7 @@ export class Worker {
     workspace: TaskWorkspace,
     workspaces: WorkspaceManager,
     sandbox: WorkspaceSandbox | undefined,
+    mcp: StagedMcpServers,
   ): AgentAdapter {
     const [agentId, agent]: [string, AgentConfig] =
       this.options.project.requireAgent(assignment.task.agentId);
@@ -1918,6 +1948,7 @@ export class Worker {
         ...(workerExecutionSandbox === undefined
           ? {}
           : { executionSandbox: workerExecutionSandbox }),
+        ...(mcp.codex === undefined ? {} : { mcpServers: mcp.codex.servers }),
         ...(agent.env === undefined ? {} : { env: { ...process.env, ...agent.env } }),
         ...(this.options.codexRunner === undefined
           ? {}
@@ -1974,6 +2005,9 @@ export class Worker {
           ? {}
           : { executionTimeoutMs: agent.executionTimeoutMs }),
         ...(promptEffort === undefined ? {} : { effort: promptEffort }),
+        ...(mcp.claude === undefined
+          ? {}
+          : { mcpConfigPath: mcp.claude.configPath }),
         ...(agent.env === undefined
           ? {}
           : { env: { ...process.env, ...agent.env } }),

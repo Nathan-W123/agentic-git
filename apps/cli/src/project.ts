@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import type { ValidationCommand } from "@coord/shared-types";
+import type { ResolvedMcpServer, ValidationCommand } from "@coord/shared-types";
 import {
   openCoordinationStore,
   type CoordinationStore,
@@ -189,6 +189,30 @@ export interface ProjectConfig {
   buildCommand?: PreviewCommand;
   /** Per-repository overrides, keyed by repository id. */
   buildCommands?: Record<string, PreviewCommand>;
+  /**
+   * Which of the MCP servers a lease offers this machine will actually run.
+   *
+   * This is the machine owner's allowlist, and it is the only one. The
+   * control plane decides what a repository *offers* — a project admin
+   * approves a server and the gateway resolves its secrets into the lease —
+   * but an MCP server is a process, and nothing else in this system lets a
+   * project admin start a process on a member's laptop. A worker runs on
+   * somebody's own computer with their own login and their own files, so the
+   * decision to run a stdio server there, or to hand an HTTP server a token
+   * from their machine, is theirs and is made here.
+   *
+   * Absent means run nothing: a project that has never been asked runs no
+   * offered server, and the worker says so on the task rather than quietly
+   * starting without its tools. `"all"` accepts whatever the control plane
+   * offers; a list accepts the named servers only, matched exactly by the
+   * name the lease carries.
+   */
+  mcp?: McpAllowlist;
+}
+
+/** See {@link ProjectConfig.mcp}. */
+export interface McpAllowlist {
+  allow: "all" | string[];
 }
 
 /** A {@link ValidationCommand} that may also carry the app's configuration. */
@@ -620,6 +644,68 @@ function assertSandbox(value: unknown): SandboxConfig {
   };
 }
 
+/**
+ * Checked the way an agent's `args` are: strings, non-empty, no NUL. A name
+ * here is only ever compared against the name a lease carries, so nothing
+ * crosses into a process from it — but an empty or NUL-bearing entry can
+ * match nothing and is a typo somebody would rather hear about at open than
+ * discover as a server that never starts.
+ */
+function assertMcp(value: unknown): McpAllowlist {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(`"mcp" must be an object`);
+  }
+  const allow = (value as Partial<McpAllowlist>).allow;
+  if (allow === "all") {
+    return { allow: "all" };
+  }
+  if (
+    !Array.isArray(allow) ||
+    !allow.every(
+      (entry) =>
+        typeof entry === "string" &&
+        entry.trim().length > 0 &&
+        !entry.includes("\0"),
+    )
+  ) {
+    fail(`"mcp.allow" must be "all" or an array of non-empty server names`);
+  }
+  return { allow: [...allow] };
+}
+
+/**
+ * Splits the servers a lease offers into the ones this machine will run and
+ * the names it will not, so the worker can start the former and say so about
+ * the latter.
+ *
+ * Matching is by name, exactly and case-sensitively: `name` is the stable,
+ * lower-case identifier the vendor config will be keyed by, and an allowlist
+ * that matched loosely would let `GitHub` admit a server called `github` that
+ * nobody wrote down. The withheld names come back so the worker can post
+ * them; a server withheld in silence looks, from the task, like a server the
+ * project never offered.
+ */
+export function allowedMcpServers(
+  config: ProjectConfig,
+  servers: readonly ResolvedMcpServer[],
+): { allowed: ResolvedMcpServer[]; withheld: string[] } {
+  const allow = config.mcp?.allow;
+  if (allow === "all") {
+    return { allowed: [...servers], withheld: [] };
+  }
+  const names = new Set(allow ?? []);
+  const allowed: ResolvedMcpServer[] = [];
+  const withheld: string[] = [];
+  for (const server of servers) {
+    if (names.has(server.name)) {
+      allowed.push(server);
+    } else {
+      withheld.push(server.name);
+    }
+  }
+  return { allowed, withheld };
+}
+
 export function assertProjectConfig(value: unknown): ProjectConfig {
   if (typeof value !== "object" || value === null) {
     fail("the file must contain a JSON object");
@@ -742,6 +828,12 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     ...(config.sandbox === undefined
       ? {}
       : { sandbox: assertSandbox(config.sandbox) }),
+    // Rebuilt like everything else here, and for the same reason it has to
+    // be listed at all: this object is what `save` writes back, so a field
+    // this function forgets is a field the next save silently drops — and
+    // dropping this one turns a machine that ran its tools into one that
+    // withholds them, with nothing changed that anybody did on purpose.
+    ...(config.mcp === undefined ? {} : { mcp: assertMcp(config.mcp) }),
   };
 }
 

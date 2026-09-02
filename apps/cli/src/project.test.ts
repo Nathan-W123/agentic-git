@@ -4,8 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import type { ResolvedMcpServer } from "@coord/shared-types";
+
 import {
   CoordinatorProject,
+  allowedMcpServers,
   assertProjectConfig,
   type ProjectConfig,
 } from "./project.js";
@@ -416,4 +419,68 @@ test("buildCommand and buildCommands are validated like preview commands", () =>
       }),
     /buildCommand needs "env.API_BASE" to be a string/u,
   );
+});
+
+test("the mcp allowlist is validated and survives a save", () => {
+  // The control plane decides what is offered; this machine decides what is
+  // run. The allowlist is the only place that decision lives, so a save that
+  // dropped it would turn a machine that runs its tools into one that
+  // withholds them without anybody having changed anything on purpose.
+  const all: ProjectConfig = { ...VALID, mcp: { allow: "all" } };
+  assert.deepEqual(assertProjectConfig(all), all);
+  const some: ProjectConfig = { ...VALID, mcp: { allow: ["github", "jira"] } };
+  assert.deepEqual(assertProjectConfig(some), some);
+
+  assert.throws(
+    () => assertProjectConfig({ ...VALID, mcp: "all" }),
+    /"mcp" must be an object/u,
+  );
+  assert.throws(
+    () => assertProjectConfig({ ...VALID, mcp: { allow: "some" } }),
+    /"mcp.allow" must be "all" or an array/u,
+  );
+  assert.throws(
+    () => assertProjectConfig({ ...VALID, mcp: { allow: ["github", ""] } }),
+    /"mcp.allow" must be "all" or an array/u,
+  );
+  assert.throws(
+    () => assertProjectConfig({ ...VALID, mcp: { allow: ["git\0hub"] } }),
+    /"mcp.allow" must be "all" or an array/u,
+  );
+  assert.throws(
+    () => assertProjectConfig({ ...VALID, mcp: { allow: [42] } }),
+    /"mcp.allow" must be "all" or an array/u,
+  );
+});
+
+test("allowedMcpServers withholds everything until the machine owner says otherwise", () => {
+  const servers: ResolvedMcpServer[] = [
+    { name: "github", transport: "http", url: "https://mcp.example/github" },
+    { name: "jira", transport: "stdio", command: "jira-mcp" },
+    { name: "GitHub", transport: "http", url: "https://mcp.example/other" },
+  ];
+
+  // Absent means run nothing: nobody on this machine has been asked.
+  assert.deepEqual(allowedMcpServers(VALID, servers), {
+    allowed: [],
+    withheld: ["github", "jira", "GitHub"],
+  });
+  assert.deepEqual(allowedMcpServers({ ...VALID, mcp: { allow: "all" } }, servers), {
+    allowed: servers,
+    withheld: [],
+  });
+  // By name, exactly: `GitHub` is not `github`, and an allowlist that said
+  // otherwise would admit a server nobody wrote down.
+  assert.deepEqual(
+    allowedMcpServers({ ...VALID, mcp: { allow: ["github"] } }, servers),
+    { allowed: [servers[0]], withheld: ["jira", "GitHub"] },
+  );
+  assert.deepEqual(
+    allowedMcpServers({ ...VALID, mcp: { allow: [] } }, servers),
+    { allowed: [], withheld: ["github", "jira", "GitHub"] },
+  );
+  assert.deepEqual(allowedMcpServers({ ...VALID, mcp: { allow: "all" } }, []), {
+    allowed: [],
+    withheld: [],
+  });
 });

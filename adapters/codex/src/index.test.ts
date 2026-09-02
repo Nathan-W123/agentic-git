@@ -2390,3 +2390,177 @@ test("a task asked with no conversation still carries the order not to ask for o
   assert.match(replanning, /never answer that you lack context/u);
   assert.doesNotMatch(replanning, /The conversation this was asked inside/u);
 });
+
+test("MCP servers ride every exec as -c overrides, the resumed turn included", async () => {
+  // A `-c` override lasts one process, not one thread. The resumed turn is
+  // the case worth the test: an adapter that spliced the overrides into the
+  // fresh exec alone would give a conversation its tools on turn one and
+  // lose them on turn two, with nothing failing anywhere.
+  const fixture = await createFixture();
+  const calls: Array<{ args: readonly string[]; options: ProcessOptions }> = [];
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    calls.push({ args, options });
+    if (args[1] === "resume") {
+      assert.ok(options.cwd !== undefined);
+      await writeFile(
+        path.join(String(options.cwd), "src", "value.js"),
+        "export const value = 2;\n",
+        "utf8",
+      );
+      return {
+        ...completedWith("1,204"),
+        stderr: "codex\nsession id: thread-cdx-mcp-2222\ntokens used\n1,204\n",
+      };
+    }
+    return output(JSON.stringify(PLAN), {
+      stderr: "codex\nsession id: thread-cdx-mcp-1111\n",
+    });
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+      mcpServers: [
+        {
+          name: "jira",
+          transport: "stdio",
+          command: "node",
+          args: ["jira.js", 'say "hi"', "back\\slash"],
+          env: { JIRA_SITE: "example", JIRA_TOKEN: "jira-opened-secret" },
+        },
+        {
+          name: "github-tools",
+          transport: "http",
+          url: "https://mcp.example/github",
+          headers: { Authorization: "Bearer ghp_opened_secret" },
+        },
+      ],
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+      conversational: true,
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await adapter.sendContext(session.id, contextFor(workspace));
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]?.args[1], "resume");
+
+    const expected = [
+      'mcp_servers.jira.command="node"',
+      'mcp_servers.jira.args=["jira.js","say \\"hi\\"","back\\\\slash"]',
+      'mcp_servers.jira.env={JIRA_SITE="example",JIRA_TOKEN="jira-opened-secret"}',
+      'mcp_servers.github-tools.url="https://mcp.example/github"',
+      'mcp_servers.github-tools.bearer_token_env_var="KUMI_MCP_GITHUB_TOOLS_TOKEN"',
+    ];
+    for (const call of calls) {
+      for (const override of expected) {
+        const at = call.args.indexOf(override);
+        assert.ok(at > 0, `${call.args[1]}: missing ${override}`);
+        assert.equal(call.args[at - 1], "-c");
+      }
+      // The bearer token is named on argv and carried in the environment,
+      // never the other way round.
+      assert.equal(call.args.some((arg) => arg.includes("ghp_opened_secret")), false);
+      assert.equal(
+        call.options.env?.["KUMI_MCP_GITHUB_TOOLS_TOKEN"],
+        "ghp_opened_secret",
+      );
+    }
+    // The fresh exec carries them after --ignore-user-config, which skips the
+    // config file and leaves overrides in force.
+    assert.ok(calls[0]?.args.includes("--ignore-user-config"));
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a server Codex cannot carry is refused when the adapter is built", async () => {
+  const fixture = await createFixture();
+  const build = (
+    server: NonNullable<ConstructorParameters<typeof CodexAdapter>[0]["mcpServers"]>,
+  ) =>
+    new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      mcpServers: server,
+    });
+  try {
+    // A name that is not a bare TOML key would be an override Codex either
+    // rejects or, worse, parses as something else.
+    assert.throws(
+      () => build([{ name: "GitHub", transport: "http", url: "https://x" }]),
+      /not a valid Codex config key/u,
+    );
+    assert.throws(
+      () => build([{ name: "a.b", transport: "http", url: "https://x" }]),
+      /not a valid Codex config key/u,
+    );
+    // Codex reads a bearer token from a named variable and nothing else, so
+    // any other header shape is a server that would start without its
+    // credential.
+    assert.throws(
+      () =>
+        build([
+          {
+            name: "svc",
+            transport: "http",
+            url: "https://x",
+            headers: { "X-Api-Key": "k" },
+          },
+        ]),
+      /headers Codex cannot be given/u,
+    );
+    assert.throws(
+      () =>
+        build([
+          {
+            name: "svc",
+            transport: "http",
+            url: "https://x",
+            headers: { Authorization: "Bearer t", "X-Trace": "1" },
+          },
+        ]),
+      /headers Codex cannot be given/u,
+    );
+    assert.throws(
+      () =>
+        build([
+          {
+            name: "svc",
+            transport: "http",
+            url: "https://x",
+            headers: { Authorization: "Basic dXNlcjpwdw==" },
+          },
+        ]),
+      /headers Codex cannot be given/u,
+    );
+    // Headerless HTTP and a well-formed stdio server are fine.
+    build([
+      { name: "open", transport: "http", url: "https://x" },
+      { name: "local", transport: "stdio", command: "svc" },
+    ]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

@@ -16,6 +16,8 @@ import {
 import os from "node:os";
 import path from "node:path";
 
+import type { SealedSecret } from "@coord/shared-types";
+
 import type { VendorCliKind } from "./vendor-credentials.js";
 
 /**
@@ -198,7 +200,12 @@ interface StoredRecord {
   hint: string;
   /** Absent means `"personal"` — see {@link CredentialVisibility}. */
   visibility?: CredentialVisibility;
-  /** AES-256-GCM, all base64. */
+  /**
+   * AES-256-GCM, all base64. Spelled out rather than extending
+   * {@link SealedSecret} so the on-disk layout stays readable here as a
+   * flat record; the two are the same shape and {@link openSecret} reads a
+   * stored record directly.
+   */
   iv: string;
   tag: string;
   ciphertext: string;
@@ -405,41 +412,36 @@ export class UserCredentialStore {
     StoredRecord,
     "iv" | "tag" | "ciphertext"
   > {
-    const iv = randomBytes(IV_BYTES);
-    const cipher = createCipheriv("aes-256-gcm", this.key, iv);
-    const ciphertext = Buffer.concat([
-      cipher.update(secret, "utf8"),
-      cipher.final(),
-    ]);
-    return {
-      iv: iv.toString("base64"),
-      tag: cipher.getAuthTag().toString("base64"),
-      ciphertext: ciphertext.toString("base64"),
-    };
+    return sealSecret(this.key, secret);
   }
 
   private decrypt(record: StoredRecord): string {
-    const decipher = createDecipheriv(
-      "aes-256-gcm",
-      this.key,
-      Buffer.from(record.iv, "base64"),
-    );
-    decipher.setAuthTag(Buffer.from(record.tag, "base64"));
-    try {
-      return Buffer.concat([
-        decipher.update(Buffer.from(record.ciphertext, "base64")),
-        decipher.final(),
-      ]).toString("utf8");
-    } catch {
-      // GCM authentication failing means the key changed or the file was
-      // edited. Either way the stored bytes are unusable, and saying so beats
-      // surfacing a raw cipher error to a dashboard user.
-      throw new UserCredentialError(
-        "The stored credential could not be decrypted with the current key; " +
-          "reconnect the provider to replace it",
-        "undecryptable",
-      );
-    }
+    return openSecret(this.key, record);
+  }
+
+  /**
+   * The store's cipher, for secrets that live somewhere other than this file.
+   *
+   * The MCP gateway keeps server credentials in its own records, encrypted
+   * under the same key as the vendor credentials here so an operator has one
+   * `COORD_CREDENTIAL_KEY` to set and one key file to back up. The obvious
+   * way to give it that key is to call {@link resolveCredentialKey} again.
+   * That is wrong twice over. Without a configured key, resolving it *creates*
+   * the key file when none exists, and two callers doing so at boot can each
+   * generate their own — the second write wins, and whichever store kept the
+   * first key has just encrypted its records under bytes nothing will ever
+   * read back. And a bare `Buffer` is the one thing here that must not travel:
+   * anything handed it can log it, serialise it, or pass it on.
+   *
+   * So the process opens the store once, as it already does, and asks the
+   * store for a sealer. The sealer holds the key in a closure and offers only
+   * seal and open; there is no accessor, so a caller that has been handed one
+   * cannot be talked into surrendering the key, and every record in the
+   * process is provably under the same bytes because there is only one place
+   * they were ever resolved.
+   */
+  public sealer(): SecretSealer {
+    return createSecretSealer(this.key);
   }
 
   /**
@@ -823,6 +825,105 @@ export class UserCredentialStore {
     delete connections[vendor];
     await this.write(file);
   }
+}
+
+/* -------------------------------------------------------------- sealing --- */
+
+/**
+ * Encrypts one secret under `key`, AES-256-GCM with a fresh 12-byte IV.
+ *
+ * Extracted from the store's own encrypt so a second copy of the cipher never
+ * exists. The MCP gateway needs to seal credentials it keeps outside this
+ * file, and a second AES implementation — however small — is a second place
+ * to get the IV length, the tag handling, or the encoding subtly wrong, and a
+ * second place to fix when the first is found wanting. The store and the
+ * gateway calling one function is what keeps their records interchangeable
+ * under the same key.
+ *
+ * The IV is random per call, never derived from the plaintext or a counter,
+ * because GCM's guarantees collapse entirely when an IV is reused under one
+ * key: two sealings of the same text therefore never produce the same bytes,
+ * and that is a property the tests check rather than an accident.
+ */
+export function sealSecret(key: Buffer, plaintext: string): SealedSecret {
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(plaintext, "utf8"),
+    cipher.final(),
+  ]);
+  return {
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  };
+}
+
+/**
+ * The inverse of {@link sealSecret}. Throws {@link UserCredentialError} with
+ * code `undecryptable` when the tag does not verify, which is the one signal
+ * GCM gives for both "wrong key" and "edited bytes" — it cannot tell them
+ * apart, and neither can this.
+ */
+export function openSecret(key: Buffer, sealed: SealedSecret): string {
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    key,
+    Buffer.from(sealed.iv, "base64"),
+  );
+  decipher.setAuthTag(Buffer.from(sealed.tag, "base64"));
+  try {
+    return Buffer.concat([
+      decipher.update(Buffer.from(sealed.ciphertext, "base64")),
+      decipher.final(),
+    ]).toString("utf8");
+  } catch {
+    // GCM authentication failing means the key changed or the file was
+    // edited. Either way the stored bytes are unusable, and saying so beats
+    // surfacing a raw cipher error to a dashboard user.
+    throw new UserCredentialError(
+      "The stored credential could not be decrypted with the current key; " +
+        "reconnect the provider to replace it",
+      "undecryptable",
+    );
+  }
+}
+
+/**
+ * A cipher bound to one key, which it never reveals.
+ *
+ * This is the shape to pass around: a gateway, a persistence layer or a test
+ * can seal and open as much as it likes and still cannot learn the key, so
+ * handing one to a component is not the same decision as handing it the
+ * `Buffer`. See {@link UserCredentialStore.sealer} for why that matters at
+ * boot.
+ */
+export interface SecretSealer {
+  seal(plaintext: string): SealedSecret;
+  open(sealed: SealedSecret): string;
+}
+
+/**
+ * Binds {@link sealSecret} and {@link openSecret} to `key`.
+ *
+ * The key lives in the closure and nowhere on the returned object, so the
+ * usual ways of extracting a field — spreading, `JSON.stringify`, a debug log
+ * of the object — show two functions and nothing else. Same length check as
+ * the store's constructor, and for the same reason: `createCipheriv` would
+ * refuse a wrong-sized key too, but only on first use, from inside whatever
+ * component was handed the sealer rather than at the place that made it.
+ */
+export function createSecretSealer(key: Buffer): SecretSealer {
+  if (key.length !== KEY_BYTES) {
+    throw new UserCredentialError(
+      `The credential key must be ${KEY_BYTES} bytes`,
+      "invalid_key",
+    );
+  }
+  return {
+    seal: (plaintext) => sealSecret(key, plaintext),
+    open: (sealed) => openSecret(key, sealed),
+  };
 }
 
 function summarize(

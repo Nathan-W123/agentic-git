@@ -80,6 +80,7 @@ import {
   type DeferredResource,
   type IntegrationResult,
   type PlanAdmission,
+  type ResolvedMcpServer,
   type ResourceType,
   type ScopeChangeDecision,
   type ScopeChangeRequest,
@@ -257,6 +258,12 @@ export interface WorkAssignment {
   protocolVersion: number;
   /** Submit the agent's plan here before executing anything. */
   planUrl: string;
+  /**
+   * Approved for this repository, secrets already opened. Absent from an
+   * older control plane and empty when nothing is approved; the worker treats
+   * both the same.
+   */
+  mcpServers?: readonly ResolvedMcpServer[];
 }
 
 export interface WorkResultInput {
