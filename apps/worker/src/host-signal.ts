@@ -54,3 +54,43 @@ export function signalHost(type: HostSignal["type"]): void {
     // See above.
   }
 }
+
+/** How many tasks are holding the machine awake right now. */
+let holders = 0;
+
+/**
+ * Holds the machine awake for one task, and lets it sleep when the last one
+ * ends.
+ *
+ * A worker runs several tasks at once, and "busy" is a statement about the
+ * machine rather than about a task. Sent as a bare pair of signals, the first
+ * run to finish says "idle" while three agents are still working, and the
+ * laptop sleeps on top of them — losing exactly the work the signal exists to
+ * protect. So the signals are edges on a count: `busy` when the count leaves
+ * zero, `idle` when it returns.
+ *
+ * The returned release is idempotent, because the run that took the hold
+ * releases it from a `finally` that a cancellation can reach twice.
+ */
+export function holdHost(): () => void {
+  holders += 1;
+  if (holders === 1) {
+    signalHost("busy");
+  }
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    holders -= 1;
+    if (holders === 0) {
+      signalHost("idle");
+    }
+  };
+}
+
+/** For tests: how many holds are outstanding. */
+export function hostHoldCount(): number {
+  return holders;
+}

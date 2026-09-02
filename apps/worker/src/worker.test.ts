@@ -60,6 +60,28 @@ const AGENT = [
   '    index = buffer.indexOf("\\n");',
   "  }",
   "});",
+  // Which file this run is for. Absent from the objective it is the original
+  // single file, so every test written before concurrency existed is
+  // unchanged by this.
+  "function target() {",
+  '  const match = /^edit (\\S+)/u.exec(started.objective);',
+  '  return match ? match[1] : "src/value.js";',
+  "}",
+  // The name that file declares, so concurrent runs declare different symbols
+  // and are arbitrated on their own merits rather than on a shared one.
+  "function symbolName() {",
+  '  const base = target().split("/").pop() || "";',
+  '  return base.replace(/\\.js$/u, "");',
+  "}",
+  "function finish(message) {",
+  '  const file = path.join(message.workspacePath, ...target().split("/"));',
+  '  fs.writeFileSync(file, "export const " + symbolName() + " = 2;\\n", "utf8");',
+  "  send({",
+  '    type: "done",',
+  "    symbolsChanged: [symbolName()],",
+  '    explanation: "raised the value",',
+  "  });",
+  "}",
   "function send(message) {",
   '  process.stdout.write(JSON.stringify(message) + "\\n");',
   "}",
@@ -71,8 +93,8 @@ const AGENT = [
   "      plan: {",
   "        taskId: started.taskId,",
   "        objective: started.objective,",
-  '        expectedFiles: ["src/value.js"],',
-  '        expectedSymbols: ["value"],',
+  "        expectedFiles: [target()],",
+  "        expectedSymbols: [symbolName()],",
   "        dependencies: [], commands: [], externalAccess: [],",
   '        riskLevel: "low",',
   "      },",
@@ -97,13 +119,15 @@ const AGENT = [
   "      });",
   "      return;",
   "    }",
-  '    const file = path.join(message.workspacePath, "src", "value.js");',
-  '    fs.writeFileSync(file, "export const value = 2;\\n", "utf8");',
-  "    send({",
-  '      type: "done",',
-  '      symbolsChanged: ["value"],',
-  '      explanation: "raised the value",',
-  "    });",
+  // Held open for a moment when asked, so several runs are demonstrably in
+  // flight together and not merely submitted together. A run that is cancelled
+  // during this — which is what a worker sharing one session between runs
+  // would do to its siblings — never writes its file.
+  '    if (started.objective.endsWith("slowly")) {',
+  "      setTimeout(() => finish(message), 400);",
+  "      return;",
+  "    }",
+  "    finish(message);",
   "    return;",
   "  }",
   '  if (message.type === "scope_decision") {',
@@ -128,6 +152,9 @@ const AGENT = [
   'process.stdin.on("end", () => process.exit(0));',
   "",
 ].join("\n");
+
+/** One per concurrently executed task in the tests that need several. */
+const CONCURRENT_FILES = ["one", "two", "three"] as const;
 
 interface Runtime {
   origin: string;
@@ -173,6 +200,16 @@ async function startRuntime(t: TestContext): Promise<Runtime> {
     "export const extra = 1;\n",
     "utf8",
   );
+  // One file per concurrent run, each declaring its own name: tasks that share
+  // a symbol are arbitrated against each other, and a test of concurrency must
+  // not be measuring the conflict detector.
+  for (const name of CONCURRENT_FILES) {
+    await writeFile(
+      path.join(sourcePath, "src", `${name}.js`),
+      `export const ${name} = 1;\n`,
+      "utf8",
+    );
+  }
   await repositories.commitAll(sourcePath, "seed");
   const canonical = await repositories.importLocalRepository(
     sourcePath,
@@ -252,7 +289,10 @@ async function startRuntime(t: TestContext): Promise<Runtime> {
   return { origin, store, project, root, token, repositoryId: canonical.id };
 }
 
-function makeWorker(runtime: Runtime): Worker {
+function makeWorker(
+  runtime: Runtime,
+  overrides: Partial<ConstructorParameters<typeof Worker>[0]> = {},
+): Worker {
   return new Worker({
     client: new WorkerClient({ serverUrl: runtime.origin, token: runtime.token }),
     project: runtime.project,
@@ -260,7 +300,27 @@ function makeWorker(runtime: Runtime): Worker {
     workspaceRoot: path.join(runtime.root, "w"),
     name: "test-worker",
     version: "1.0.0",
+    ...overrides,
   });
+}
+
+/** Polls `read` until it answers, or gives up loudly rather than hanging. */
+async function waitFor<T>(
+  read: () => Promise<T | undefined>,
+  what: string,
+  timeoutMs = 30_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const answer = await read();
+    if (answer !== undefined) {
+      return answer;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for ${what}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 test("lease ids cannot select or collapse the worker scratch root", () => {
@@ -1436,4 +1496,251 @@ test("a notice that does not span the whole gap is refused", async (t) => {
   // Planned cold, so the submitted footprint is the real one.
   const settled = (await runtime.store.listWorkLeases({}))[0];
   assert.deepEqual(settled?.plan?.plan.expectedFiles, ["src/value.js"]);
+});
+
+/**
+ * A worker runs several tasks at once rather than one after another.
+ *
+ * This is the shape of the regression it exists to hold down. The control
+ * plane leases up to a repository's parallelism bound and executes the wave
+ * together; a worker awaited a single lease before asking for another, so a
+ * deployment that moved execution onto people's own machines went from four
+ * concurrent agents to one without anybody deciding to — and read from the
+ * outside as a coordinator that had stopped, because two of the three tasks
+ * somebody sent simply sat in the queue until the first was stopped by hand.
+ *
+ * Three tasks that never finish on their own, so all three are demonstrably
+ * *held* at the same moment rather than merely observed to have completed in
+ * some order. Whether a given one is executing or waiting on admission is not
+ * the point and is deliberately not asserted: holding the lease is what a
+ * repository slot is, and holding three is what this worker could not do.
+ */
+test("a worker runs several tasks at once rather than one after another", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime, {
+    concurrency: 3,
+    // The queue is not empty, so this only decides how quickly the loop comes
+    // back for the second and third; a test should not wait five seconds for
+    // each.
+    pollIntervalMs: 25,
+  });
+
+  for (let index = 0; index < 3; index += 1) {
+    await runtime.store.submitTask({
+      repositoryId: runtime.repositoryId,
+      objective: "hang until stopped",
+      agentId: "local",
+      validationCommands: [],
+    });
+  }
+
+  const loop = worker.run();
+  // Registered before the first assertion. A wave left running would hold the
+  // gateway open and the agents alive, so a failure here would arrive as a
+  // hung test run rather than as a failed assertion.
+  t.after(async () => {
+    await worker.stop();
+    await loop.catch(() => undefined);
+  });
+  const held = await waitFor(
+    async () => {
+      const active = await runtime.store.listWorkLeases({ status: "active" });
+      return active.length >= 3 ? active : undefined;
+    },
+    "three leases held at once",
+  );
+
+  assert.equal(held.length, 3);
+  assert.equal(worker.activeRunCount, 3);
+  assert.equal(worker.concurrencyLimit, 3);
+  // Three distinct tasks, not one task counted three times.
+  assert.equal(new Set(held.map((lease) => lease.taskId)).size, 3);
+
+  // The bound is the machine's own, and it is enforced where a caller can
+  // reach it rather than only inside the loop.
+  await assert.rejects(async () => await worker.runOnce(), /limit/u);
+
+  // Every one of them is handed back, not just whichever was leased last.
+  await worker.stop();
+  await loop;
+  assert.deepEqual(await runtime.store.listWorkLeases({ status: "active" }), []);
+  assert.equal(worker.activeRunCount, 0);
+});
+
+/**
+ * Three unrelated tasks are all carried through to canonical.
+ *
+ * The concurrency test above proves the leases are held together; this proves
+ * the runs do not tread on each other while they are. Each holds its own
+ * session, its own claim and its own admission wait, and on a single set of
+ * fields the second run's session would overwrite the first's — after which
+ * the worker cancels one agent and reports another's plan. Three files rather
+ * than one, so admission has no reason to sequence them and the failure would
+ * be a wrong result rather than a slow one.
+ */
+test("concurrent runs keep their own session, plan and result", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime, { concurrency: 3, pollIntervalMs: 25 });
+
+  for (const name of CONCURRENT_FILES) {
+    await runtime.store.submitTask({
+      repositoryId: runtime.repositoryId,
+      objective: `edit src/${name}.js slowly`,
+      agentId: "local",
+      validationCommands: [],
+    });
+  }
+
+  const loop = worker.run();
+  t.after(async () => {
+    await worker.stop();
+    await loop.catch(() => undefined);
+  });
+  await waitFor(
+    async () => {
+      const tasks = await runtime.store.listSubmittedTasks({});
+      return tasks.length === 3 &&
+        tasks.every((task) => task.status === "integrated")
+        ? tasks
+        : undefined;
+    },
+    "all three tasks integrated",
+    120_000,
+  );
+  await worker.stop();
+  await loop;
+
+  // Each run reported its own edit. A shared session or a shared plan shows up
+  // here as a file that never changed, or as one changed twice.
+  const repository = await runtime.store.getRepository(runtime.repositoryId);
+  assert.ok(repository);
+  const repositories = new RepositoryService();
+  const canonical = {
+    id: repository.id,
+    path: repository.path,
+    branch: repository.branch,
+  };
+  const version = await repositories.getCanonicalVersion(canonical);
+  for (const name of CONCURRENT_FILES) {
+    assert.equal(
+      await repositories.readFile(canonical, version.revision, `src/${name}.js`),
+      `export const ${name} = 2;\n`,
+      `src/${name}.js did not receive its own run's edit`,
+    );
+  }
+});
+
+test("the concurrency limit is validated wherever it comes from", async (t) => {
+  const runtime = await startRuntime(t);
+  const options = {
+    client: new WorkerClient({ serverUrl: runtime.origin, token: runtime.token }),
+    project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    workspaceRoot: path.join(runtime.root, "w"),
+  };
+  assert.throws(() => new Worker({ ...options, concurrency: 0 }), /positive/u);
+  assert.throws(() => new Worker({ ...options, concurrency: 2.5 }), /positive/u);
+
+  const previous = process.env["COORD_WORKER_CONCURRENCY"];
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_WORKER_CONCURRENCY"];
+    } else {
+      process.env["COORD_WORKER_CONCURRENCY"] = previous;
+    }
+  });
+
+  process.env["COORD_WORKER_CONCURRENCY"] = "2";
+  assert.equal(new Worker(options).concurrencyLimit, 2);
+  process.env["COORD_WORKER_CONCURRENCY"] = "nonsense";
+  assert.throws(() => new Worker(options), /COORD_WORKER_CONCURRENCY/u);
+
+  // Absent, a machine offers what the control plane would size it at rather
+  // than a number picked here — and never fewer than the one task it used to
+  // take, which is the floor that keeps this from being a regression for
+  // anybody.
+  delete process.env["COORD_WORKER_CONCURRENCY"];
+  assert.ok(new Worker(options).concurrencyLimit >= 1);
+});
+
+/**
+ * Work on one repository's cache is serialised.
+ *
+ * Every run fetches into the same bare repository, and concurrently that is
+ * not merely slow: git takes a ref lock, the loser's fetch fails, and the
+ * failure path deletes the cache out from under the run still reading it.
+ * Reached through the private guard because the property is about the guard —
+ * that a second caller waits, that a failure does not poison the queue behind
+ * it, and that the chain is dropped rather than accumulated per repository.
+ */
+test("cache work on one repository never overlaps", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  const guarded = worker as unknown as {
+    serialisedByRepository: <T>(id: string, work: () => Promise<T>) => Promise<T>;
+    cacheChains: Map<string, unknown>;
+  };
+
+  // Counted per repository, because overlap *between* repositories is the
+  // point of keying the chain at all: two agents in different repositories
+  // share no cache and must not wait for each other.
+  const inside = new Map<string, number>();
+  const overlapped = new Set<string>();
+  const order: string[] = [];
+  let otherStartedWhileRepoRan = false;
+  const body = async (chain: string, label: string): Promise<string> => {
+    const depth = (inside.get(chain) ?? 0) + 1;
+    inside.set(chain, depth);
+    if (depth > 1) {
+      overlapped.add(chain);
+    }
+    if (chain === "other" && (inside.get("repo") ?? 0) > 0) {
+      otherStartedWhileRepoRan = true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    inside.set(chain, (inside.get(chain) ?? 1) - 1);
+    order.push(label);
+    return label;
+  };
+
+  const results = await Promise.all([
+    guarded.serialisedByRepository("repo", async () => await body("repo", "a")),
+    guarded.serialisedByRepository("repo", async () => await body("repo", "b")),
+    guarded.serialisedByRepository("repo", async () => await body("repo", "c")),
+    // A different repository is a different chain and must not be held up.
+    guarded.serialisedByRepository(
+      "other",
+      async () => await body("other", "other"),
+    ),
+  ]);
+
+  assert.deepEqual(
+    [...overlapped],
+    [],
+    "two callers were inside one repository's guard at once",
+  );
+  assert.equal(
+    otherStartedWhileRepoRan,
+    true,
+    "a second repository waited on the first, which is not what the key is for",
+  );
+  assert.deepEqual(results, ["a", "b", "c", "other"]);
+  assert.deepEqual(order.filter((entry) => entry !== "other"), ["a", "b", "c"]);
+  // Nothing queued behind them, so nothing is kept.
+  assert.equal(guarded.cacheChains.size, 0);
+
+  // One caller's failure is its own. A rejected link that took the chain with
+  // it would strand every later task in that repository.
+  await assert.rejects(
+    async () =>
+      await guarded.serialisedByRepository("repo", async () => {
+        throw new Error("broken cache");
+      }),
+    /broken cache/u,
+  );
+  assert.equal(
+    await guarded.serialisedByRepository("repo", async () => "after"),
+    "after",
+  );
+  assert.equal(guarded.cacheChains.size, 0);
 });
