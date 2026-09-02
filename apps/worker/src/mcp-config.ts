@@ -1,7 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { allowedMcpServers, type ProjectConfig } from "@coord/cli/project";
+import {
+  allowedMcpServers,
+  type ProjectConfig,
+  type WithheldMcpServer,
+} from "@coord/cli/project";
 import type { ResolvedMcpServer } from "@coord/shared-types";
 
 /**
@@ -18,7 +22,7 @@ export interface StagedMcpServers {
   claude?: { configPath: string };
   codex?: { servers: ResolvedMcpServer[] };
   /** Offered by the lease and refused by this machine's allowlist. */
-  withheld: string[];
+  withheld: WithheldMcpServer[];
   /** Allowed and made available to the agent. */
   staged: string[];
 }

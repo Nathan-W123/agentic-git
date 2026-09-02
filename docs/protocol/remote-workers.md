@@ -489,11 +489,16 @@ audit event naming which failed when it does not:
 - the sealing key is present, and every secret opens with it
 
 Nothing in that list starts anything. The worker applies its own allowlist
-(`mcp.allow` in the project file, absent meaning run nothing), writes what
-survives into the run's scratch directory beside the workspace — never into
-it, where the changeset would commit it — and hands the file to the vendor
-CLI. What it withheld is posted into the thread and offered to the desktop
-app, which asks the machine's owner before changing the allowlist.
+(`mcp.allow` in the project file: `"all"`, or a list of `{ name, digest }`
+entries, absent meaning run nothing), writes what survives into the run's
+scratch directory beside the workspace — never into it, where the changeset
+would commit it — and hands the file to the vendor CLI. The digest is
+computed by the worker from what the lease carried — the command and
+arguments or URL, and the names of the secrets — so a server the project
+redefines after the owner allowed it is withheld again, and said to have
+changed. What was withheld is posted into the thread and offered to the
+desktop app, which shows the owner what each server runs or talks to before
+asking; the app's Agents menu can take every yes back.
 
 ## What a worker never gets
 

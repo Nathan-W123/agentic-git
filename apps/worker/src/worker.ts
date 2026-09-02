@@ -63,7 +63,7 @@ import {
   type HeartbeatReply,
   type WorkingChange,
 } from "./client.js";
-import { holdHost, signalHost } from "./host-signal.js";
+import { holdHost, hostAttached, signalHost } from "./host-signal.js";
 import { stageMcpServers, type StagedMcpServers } from "./mcp-config.js";
 import type { WorkNudge } from "./nudge.js";
 import {
@@ -1474,18 +1474,37 @@ export class Worker {
       allow: this.options.project.config.mcp,
     });
     if (offered.length > 0 && mcp.withheld.length > 0) {
+      const names = mcp.withheld.map((server) => server.name);
+      const changed = mcp.withheld
+        .filter((server) => server.changed)
+        .map((server) => server.name);
       await this.options.client.progress(
         assignment.lease.id,
-        `This project offers MCP servers ${mcp.withheld.join(", ")}; this ` +
-          "machine has not allowed them (Kumi → Settings on this computer).",
+        `This project offers MCP servers ${names.join(", ")}; this machine ` +
+          "has not allowed them" +
+          (changed.length === 0
+            ? ""
+            : ` (${changed.join(", ")} changed since it was allowed here)`) +
+          (hostAttached()
+            ? ". Kumi on that machine will ask its owner."
+            : ". They run once listed under mcp.allow in the worker's " +
+              ".coordinator/config.json."),
       );
       // Said to the host as well as to the room, because the room cannot
       // fix it. The allowlist belongs to whoever owns this machine, the
       // desktop app is the one thing that can put the question in front of
       // them, and this process read its config once at start — so the most
-      // it can do is name what was withheld and let the app ask. Nowhere to
-      // send it is the ordinary case and is a no-op.
-      signalHost({ type: "mcp-offered", names: mcp.withheld });
+      // it can do is say what was withheld, and what agreeing would mean,
+      // and let the app ask. Nowhere to send it is the ordinary case and is
+      // a no-op.
+      signalHost({
+        type: "mcp-offered",
+        servers: mcp.withheld.map(({ name, digest, summary }) => ({
+          name,
+          digest,
+          summary,
+        })),
+      });
     }
     if (mcp.staged.length > 0) {
       await this.options.client.progress(

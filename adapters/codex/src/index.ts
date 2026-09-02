@@ -661,6 +661,11 @@ function codexMcpOverrides(
   const args: string[] = [];
   const env: Record<string, string> = {};
   const seen = new Set<string>();
+  // Which server each variable was minted for. Names are unique, but the
+  // variable folds a dash and an underscore together, so `linear-a` and
+  // `linear_a` would otherwise share one — and the second write would hand
+  // the first server's URL the second server's token, silently.
+  const variables = new Map<string, string>();
   for (const server of servers) {
     if (!MCP_SERVER_NAME.test(server.name)) {
       throw new Error(
@@ -708,6 +713,15 @@ function codexMcpOverrides(
       );
     }
     const variable = `KUMI_MCP_${server.name.toUpperCase().replace(/-/gu, "_")}_TOKEN`;
+    const holder = variables.get(variable);
+    if (holder !== undefined) {
+      throw new Error(
+        `MCP servers ${holder} and ${server.name} would both carry their ` +
+          `bearer token in ${variable}: rename one so the two differ by ` +
+          "more than a dash or underscore",
+      );
+    }
+    variables.set(variable, server.name);
     args.push("-c", `${key}.bearer_token_env_var=${tomlString(variable)}`);
     env[variable] = bearer[1];
   }

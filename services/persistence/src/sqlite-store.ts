@@ -734,6 +734,18 @@ export class SqliteCoordinationStore implements CoordinationStore {
     projectId: string,
     repositoryId: string,
   ): Promise<void> {
+    // The project's MCP servers let go of the repository too: their
+    // attachment is a fact about this project, and a repository linked back
+    // later must not find last year's servers waiting for it.
+    this.db
+      .prepare(
+        `DELETE FROM project_mcp_server_repositories
+         WHERE repository_id = ?
+           AND server_id IN (
+             SELECT id FROM project_mcp_servers WHERE project_id = ?
+           )`,
+      )
+      .run(repositoryId, projectId);
     this.db
       .prepare(
         `DELETE FROM project_repositories
@@ -2188,6 +2200,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
   public async removeRepository(id: string): Promise<void> {
     const owned = this.begin();
     try {
+      // An MCP server's attachment goes with the repository it was attached
+      // to. Left behind, the join row would re-attach the server — secrets
+      // and all — to whatever repository next took this id.
+      this.db
+        .prepare(
+          "DELETE FROM project_mcp_server_repositories WHERE repository_id = ?",
+        )
+        .run(id);
       this.db
         .prepare(
           `DELETE FROM channel_message_reactions

@@ -6097,6 +6097,58 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: an MCP server lets go of a repository that is removed or unlinked`, async () => {
+    // The join row is the only thing that says "this server runs for that
+    // repository". Repository ids are derived from folder names and reused,
+    // so a row that outlived its repository would hand an approved server —
+    // secrets and all — to whatever checkout next took the same id, with
+    // nobody having attached it.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(
+        mcpServer({
+          id: "mcp_gone",
+          name: "gone-with-repo",
+          scope: "repository",
+          repositoryIds: ["r1", "r2"],
+        }),
+      );
+      await store.setMcpServerApproval("mcp_gone", {
+        enabled: true,
+        approvedBy: "user_owner",
+        approvedAt: "2026-01-01T00:00:00.000Z",
+      });
+      const attachedTo = async (repositoryId: string): Promise<string[]> =>
+        (
+          await store.listMcpServers(DEFAULT_PROJECT_ID, {
+            repositoryId,
+            enabledOnly: true,
+          })
+        ).map((server) => server.id);
+      assert.deepEqual(await attachedTo("r1"), ["mcp_gone"]);
+
+      await store.removeRepository("r1");
+      assert.deepEqual(await attachedTo("r1"), []);
+      assert.deepEqual(
+        present(await store.getMcpServer("mcp_gone"), "mcp_gone").repositoryIds,
+        ["r2"],
+      );
+
+      // Unlinking from the project is the same fact from the project's side.
+      await store.unlinkRepository(DEFAULT_PROJECT_ID, "r2");
+      assert.deepEqual(await attachedTo("r2"), []);
+      assert.deepEqual(
+        present(await store.getMcpServer("mcp_gone"), "mcp_gone").repositoryIds,
+        [],
+      );
+      // Still there, still approved: what went was the attachment, not the
+      // server or the decision about it.
+      assert.equal(present(await store.getMcpServer("mcp_gone"), "mcp_gone").enabled, true);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: MCP servers attach by scope and repository`, async () => {
     const { store, cleanup } = await backend.open();
     try {

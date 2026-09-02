@@ -9144,6 +9144,19 @@ export class ApiGateway {
             ? undefined
             : mcpServerNameField(body["name"]);
         const transport = mcpTransportField(body["transport"], true);
+        // Fixed at creation. The stores keep it that way — a secret sealed
+        // as a header must not turn up in a child process's environment
+        // because somebody flipped one field — so accepting the change here
+        // and dropping it there would answer 200 to an edit that never
+        // happened. Said outright instead.
+        if (transport !== undefined && transport !== current.transport) {
+          throw new HttpError(
+            400,
+            "transport_fixed",
+            `This server is ${current.transport}; to change how it is reached, ` +
+              "remove it and create it again",
+          );
+        }
         const command = mcpCommandField(body["command"]);
         const args = mcpArgsField(body["args"]);
         const url = mcpUrlField(body["url"], ownHosts);
@@ -9155,7 +9168,7 @@ export class ApiGateway {
         // switching transport without supplying what the new one needs, or
         // clearing the command a stdio server runs, leaves a row nothing can
         // start.
-        const effectiveTransport = transport ?? current.transport;
+        const effectiveTransport = current.transport;
         const effectiveCommand =
           command === null ? undefined : (command ?? current.command);
         const effectiveUrl = url === null ? undefined : (url ?? current.url);
@@ -9185,7 +9198,6 @@ export class ApiGateway {
         try {
           server = await this.options.store.updateMcpServer(current.id, {
             ...(name === undefined ? {} : { name }),
-            ...(transport === undefined ? {} : { transport }),
             ...(command === undefined ? {} : { command }),
             ...(args === undefined ? {} : { args }),
             ...(url === undefined ? {} : { url }),

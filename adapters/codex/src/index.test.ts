@@ -2391,6 +2391,44 @@ test("a task asked with no conversation still carries the order not to ask for o
   assert.doesNotMatch(replanning, /The conversation this was asked inside/u);
 });
 
+test("two http servers whose names differ only by dash and underscore are refused, not merged", async () => {
+  // The bearer token's variable name folds `-` into `_`. Without this check
+  // `linear-a` and `linear_a` share KUMI_MCP_LINEAR_A_TOKEN, the second
+  // write wins, and one server's URL is sent the other server's credential
+  // with nothing failing anywhere.
+  const fixture = await createFixture();
+  try {
+    assert.throws(
+      () =>
+        new CodexAdapter({
+          agentId: "codex",
+          repository: fixture.repository,
+          workspaces: fixture.workspaces,
+          planningRoot: fixture.planningRoot,
+          command: "codex-test",
+          runner: async () => output(JSON.stringify(PLAN)),
+          mcpServers: [
+            {
+              name: "linear-a",
+              transport: "http",
+              url: "https://a.example/mcp",
+              headers: { Authorization: "Bearer token-a" },
+            },
+            {
+              name: "linear_a",
+              transport: "http",
+              url: "https://b.example/mcp",
+              headers: { Authorization: "Bearer token-b" },
+            },
+          ],
+        }),
+      /linear-a and linear_a would both carry their bearer token in KUMI_MCP_LINEAR_A_TOKEN/u,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("MCP servers ride every exec as -c overrides, the resumed turn included", async () => {
   // A `-c` override lasts one process, not one thread. The resumed turn is
   // the case worth the test: an adapter that spliced the overrides into the

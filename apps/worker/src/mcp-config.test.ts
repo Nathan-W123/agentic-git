@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { describeMcpServer, mcpServerDigest } from "@coord/cli/project";
 import type { ResolvedMcpServer } from "@coord/shared-types";
 
 import { stageMcpServers } from "./mcp-config.js";
@@ -22,6 +23,16 @@ const JIRA: ResolvedMcpServer = {
   args: ["--site", "example"],
   env: { JIRA_TOKEN: "jira_opened_secret" },
 };
+
+/** What the room and the app are told about a server this machine did not run. */
+function withheld(server: ResolvedMcpServer, changed = false) {
+  return {
+    name: server.name,
+    digest: mcpServerDigest(server),
+    summary: describeMcpServer(server),
+    changed,
+  };
+}
 
 async function withScratch(
   run: (scratch: string) => Promise<void>,
@@ -90,7 +101,10 @@ test("an absent allowlist withholds everything and writes nothing", async () => 
       servers: [GITHUB, JIRA],
       allow: undefined,
     });
-    assert.deepEqual(staged, { withheld: ["github", "jira"], staged: [] });
+    assert.deepEqual(staged, {
+      withheld: [withheld(GITHUB), withheld(JIRA)],
+      staged: [],
+    });
     // Not even an empty config: a machine that has not been asked leaves no
     // trace of the offer on its disk.
     await assert.rejects(access(path.join(scratch, "mcp")));
@@ -103,10 +117,23 @@ test("a named allowlist stages what it names and reports the rest", async () => 
       scratch,
       vendor: "claude",
       servers: [GITHUB, JIRA],
-      allow: { allow: ["jira"] },
+      allow: { allow: [{ name: "jira", digest: mcpServerDigest(JIRA) }] },
     });
-    assert.deepEqual(staged.withheld, ["github"]);
+    assert.deepEqual(staged.withheld, [withheld(GITHUB)]);
     assert.deepEqual(staged.staged, ["jira"]);
+
+    // The same name under a different definition is not what was agreed
+    // to: withheld, and said to have changed.
+    const moved = await stageMcpServers({
+      scratch,
+      vendor: "claude",
+      servers: [{ ...JIRA, args: ["--site", "elsewhere"] }],
+      allow: { allow: [{ name: "jira", digest: mcpServerDigest(JIRA) }] },
+    });
+    assert.deepEqual(moved, {
+      withheld: [withheld({ ...JIRA, args: ["--site", "elsewhere"] }, true)],
+      staged: [],
+    });
     const written = JSON.parse(
       await readFile(staged.claude?.configPath ?? "", "utf8"),
     ) as { mcpServers: Record<string, unknown> };
@@ -146,7 +173,7 @@ test("a vendor that cannot load servers is refused loudly, and only when there i
         scratch,
         vendor: "gemini",
         servers: [JIRA],
-        allow: { allow: ["jira"] },
+        allow: { allow: [{ name: "jira", digest: mcpServerDigest(JIRA) }] },
       }),
       /gemini cannot be given managed MCP servers yet/u,
     );
@@ -159,7 +186,7 @@ test("a vendor that cannot load servers is refused loudly, and only when there i
         servers: [GITHUB],
         allow: undefined,
       }),
-      { withheld: ["github"], staged: [] },
+      { withheld: [withheld(GITHUB)], staged: [] },
     );
     assert.deepEqual(
       await stageMcpServers({

@@ -9,6 +9,8 @@ import type { ResolvedMcpServer } from "@coord/shared-types";
 import {
   CoordinatorProject,
   allowedMcpServers,
+  describeMcpServer,
+  mcpServerDigest,
   assertProjectConfig,
   type ProjectConfig,
 } from "./project.js";
@@ -428,29 +430,85 @@ test("the mcp allowlist is validated and survives a save", () => {
   // withholds them without anybody having changed anything on purpose.
   const all: ProjectConfig = { ...VALID, mcp: { allow: "all" } };
   assert.deepEqual(assertProjectConfig(all), all);
-  const some: ProjectConfig = { ...VALID, mcp: { allow: ["github", "jira"] } };
+  const some: ProjectConfig = {
+    ...VALID,
+    mcp: {
+      allow: [
+        { name: "github", digest: "0123456789abcdef0123456789abcdef" },
+        { name: "jira", digest: "fedcba9876543210fedcba9876543210" },
+      ],
+    },
+  };
   assert.deepEqual(assertProjectConfig(some), some);
+
+  // A bare name is the shape from before entries carried a digest. It says
+  // nothing about what was agreed to, so it is dropped — the owner is asked
+  // again — rather than either honoured or made a reason the worker cannot
+  // start.
+  assert.deepEqual(
+    assertProjectConfig({ ...VALID, mcp: { allow: ["github", { name: "jira", digest: "d" }] } }),
+    { ...VALID, mcp: { allow: [{ name: "jira", digest: "d" }] } },
+  );
 
   assert.throws(
     () => assertProjectConfig({ ...VALID, mcp: "all" }),
     /"mcp" must be an object/u,
   );
-  assert.throws(
-    () => assertProjectConfig({ ...VALID, mcp: { allow: "some" } }),
-    /"mcp.allow" must be "all" or an array/u,
+  for (const allow of [
+    "some",
+    [{ name: "github" }],
+    [{ digest: "d" }],
+    [{ name: "", digest: "d" }],
+    [{ name: "github", digest: "" }],
+    [{ name: "git\0hub", digest: "d" }],
+    [42],
+    [null],
+  ]) {
+    assert.throws(
+      () => assertProjectConfig({ ...VALID, mcp: { allow } }),
+      /"mcp.allow" must be "all" or an array of \{ name, digest \} entries/u,
+      JSON.stringify(allow),
+    );
+  }
+});
+
+test("a server's digest follows what it runs, not the secrets it runs with", () => {
+  const server: ResolvedMcpServer = {
+    name: "jira",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@jira/mcp@1.2.3"],
+    env: { JIRA_SITE: "example", JIRA_TOKEN: "opened-secret" },
+  };
+  const digest = mcpServerDigest(server);
+  assert.match(digest, /^[0-9a-f]{32}$/u);
+  // The same program with a rotated credential is the same agreement.
+  assert.equal(
+    mcpServerDigest({ ...server, env: { JIRA_TOKEN: "rotated", JIRA_SITE: "example" } }),
+    digest,
   );
-  assert.throws(
-    () => assertProjectConfig({ ...VALID, mcp: { allow: ["github", ""] } }),
-    /"mcp.allow" must be "all" or an array/u,
+  // Anything that changes what starts is a new agreement.
+  assert.notEqual(mcpServerDigest({ ...server, command: "/bin/sh" }), digest);
+  assert.notEqual(mcpServerDigest({ ...server, args: ["-y", "@jira/mcp@1.2.4"] }), digest);
+  assert.notEqual(
+    mcpServerDigest({ ...server, env: { JIRA_SITE: "example", JIRA_TOKEN: "x", EXTRA: "y" } }),
+    digest,
   );
-  assert.throws(
-    () => assertProjectConfig({ ...VALID, mcp: { allow: ["git\0hub"] } }),
-    /"mcp.allow" must be "all" or an array/u,
+  assert.notEqual(mcpServerDigest({ ...server, name: "jira2" }), digest);
+  const http: ResolvedMcpServer = {
+    name: "github",
+    transport: "http",
+    url: "https://mcp.example/github",
+    headers: { Authorization: "Bearer one" },
+  };
+  assert.equal(
+    mcpServerDigest({ ...http, headers: { authorization: "Bearer two" } }),
+    mcpServerDigest(http),
   );
-  assert.throws(
-    () => assertProjectConfig({ ...VALID, mcp: { allow: [42] } }),
-    /"mcp.allow" must be "all" or an array/u,
-  );
+  assert.notEqual(mcpServerDigest({ ...http, url: "https://mcp.example/other" }), mcpServerDigest(http));
+
+  assert.equal(describeMcpServer(server), "jira: runs npx -y @jira/mcp@1.2.3");
+  assert.equal(describeMcpServer(http), "github: talks to https://mcp.example/github");
 });
 
 test("allowedMcpServers withholds everything until the machine owner says otherwise", () => {
@@ -459,25 +517,45 @@ test("allowedMcpServers withholds everything until the machine owner says otherw
     { name: "jira", transport: "stdio", command: "jira-mcp" },
     { name: "GitHub", transport: "http", url: "https://mcp.example/other" },
   ];
+  const digests = servers.map(mcpServerDigest);
+  const withheld = (index: number, changed = false) => ({
+    name: servers[index]?.name ?? "",
+    digest: digests[index] ?? "",
+    summary: describeMcpServer(servers[index] as ResolvedMcpServer),
+    changed,
+  });
 
   // Absent means run nothing: nobody on this machine has been asked.
   assert.deepEqual(allowedMcpServers(VALID, servers), {
     allowed: [],
-    withheld: ["github", "jira", "GitHub"],
+    withheld: [withheld(0), withheld(1), withheld(2)],
   });
   assert.deepEqual(allowedMcpServers({ ...VALID, mcp: { allow: "all" } }, servers), {
     allowed: servers,
     withheld: [],
   });
-  // By name, exactly: `GitHub` is not `github`, and an allowlist that said
-  // otherwise would admit a server nobody wrote down.
+  // By name and digest, exactly: `GitHub` is not `github`, and an allowlist
+  // that said otherwise would admit a server nobody wrote down.
   assert.deepEqual(
-    allowedMcpServers({ ...VALID, mcp: { allow: ["github"] } }, servers),
-    { allowed: [servers[0]], withheld: ["jira", "GitHub"] },
+    allowedMcpServers(
+      { ...VALID, mcp: { allow: [{ name: "github", digest: digests[0] ?? "" }] } },
+      servers,
+    ),
+    { allowed: [servers[0]], withheld: [withheld(1), withheld(2)] },
+  );
+  // Allowed once, redefined since: withheld, and said to have changed, so
+  // the owner hears that what they agreed to moved rather than that
+  // something new appeared.
+  assert.deepEqual(
+    allowedMcpServers(
+      { ...VALID, mcp: { allow: [{ name: "github", digest: "stale" }] } },
+      servers,
+    ),
+    { allowed: [], withheld: [withheld(0, true), withheld(1), withheld(2)] },
   );
   assert.deepEqual(
     allowedMcpServers({ ...VALID, mcp: { allow: [] } }, servers),
-    { allowed: [], withheld: ["github", "jira", "GitHub"] },
+    { allowed: [], withheld: [withheld(0), withheld(1), withheld(2)] },
   );
   assert.deepEqual(allowedMcpServers({ ...VALID, mcp: { allow: "all" } }, []), {
     allowed: [],

@@ -1,3 +1,29 @@
+### 0.5.12 — your project's tools, on your say-so
+
+A project can now give its agents MCP servers — a Linear server, a Sentry
+server, a GitHub server — from Settings → Project controls. Approving one
+there is a recorded decision about the project's agents. It is not a decision
+about your computer, and this app treats the two differently.
+
+The first time a task arrives carrying a server your computer has not agreed
+to, the agent runs without it and this app asks you: here is what would start
+here, or what would be talked to, under your account. Say yes and the next
+task runs with it; say not now and nothing changes. What you agree to is that
+exact server — if the project later changes what `github` runs, you are asked
+again, and told that it moved rather than that something new appeared. Agents
+→ Forget Allowed MCP Servers takes every yes back.
+
+Nothing about this runs on the server. The control plane keeps the server's
+definition and its sealed secrets, and hands them only to the machine of the
+person who submitted the task; the program itself starts on that machine, as
+the agent always has.
+
+Two things to know. Codex can be handed a bearer token and nothing else, so an
+http server that needs some other header runs only under Claude. And this app
+now speaks worker protocol 4: it still works against a control plane on 3, it
+just runs without tools until that control plane is updated — the thread says
+so when it happens.
+
 ### 0.5.11 — your machine runs four agents, not one
 
 Send three requests and one of them ran. The other two sat in the queue until

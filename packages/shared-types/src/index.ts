@@ -3186,6 +3186,24 @@ export async function mcpServersForLease(
       taskId: input.taskId,
       data: { ...context, reason: "not_owner", names },
     });
+    // Said in the thread as well as the audit log, as the stale-worker case
+    // is below: a run with no tools and no sentence looks like a project
+    // that never offered any, and the fix — submit it as yourself, from the
+    // room, so it lands on your own machine — is not one anybody would
+    // guess from silence.
+    await store.appendAudit(undefined, {
+      type: "agent_progress",
+      taskId: input.taskId,
+      data: {
+        ...context,
+        message:
+          `Running without the tools this project approved (${names.join(", ")}): ` +
+          "they are handed only to the machine of the person who submitted " +
+          (input.taskSubmittedBy === undefined
+            ? "the task, and this one has no submitter on record."
+            : "the task, and this run is on somebody else's."),
+      },
+    });
     return undefined;
   }
   const version = input.workerProtocolVersion ?? 1;

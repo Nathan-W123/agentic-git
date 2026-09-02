@@ -650,6 +650,16 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     this.projectRepositories.delete(
       this.projectRepositoryKey(projectId, repositoryId),
     );
+    // The project's MCP servers let go of the repository too: their
+    // attachment is a fact about this project, and a repository linked back
+    // later must not find last year's servers waiting for it.
+    for (const stored of this.mcpServers.values()) {
+      if (stored.record.projectId === projectId) {
+        stored.record.repositoryIds = stored.record.repositoryIds.filter(
+          (id) => id !== repositoryId,
+        );
+      }
+    }
   }
 
   public async listProjectRepositories(
@@ -1540,6 +1550,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     // comment. The refusal this used to throw surfaced in production as a raw
     // foreign-key error with no path forward, and the durable record of what
     // happened lives in the audit log, which none of this touches.
+    //
+    // An MCP server's attachment goes too. Left behind, it would re-attach
+    // the server — secrets and all — to whatever repository next took this
+    // id.
+    for (const stored of this.mcpServers.values()) {
+      stored.record.repositoryIds = stored.record.repositoryIds.filter(
+        (repositoryId) => repositoryId !== id,
+      );
+    }
     for (const [taskId, task] of [...this.submitted]) {
       if (task.repositoryId === id) {
         this.submitted.delete(taskId);

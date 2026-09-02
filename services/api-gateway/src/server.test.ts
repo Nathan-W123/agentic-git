@@ -21627,12 +21627,22 @@ test("approving an MCP server records who, is audited, and an edit takes it back
   assert.equal(trimmed.data.reapprovalRequired, false);
   assert.deepEqual(trimmed.data.server.secretNames, ["X-Other"]);
 
-  // A transport switch has to bring what the new transport needs.
-  const incomplete = await client.request(
+  // The transport is fixed at creation: the stores never change it, and a
+  // 200 that left the row as it was would be a lie — worse, the secrets
+  // sealed for a header would start travelling as a child's environment.
+  // Saying the same transport back is not a change.
+  const switched = await client.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
-    { method: "PATCH", body: { transport: "stdio" } },
+    { method: "PATCH", body: { transport: "stdio", command: "npx" } },
   );
-  assert.equal(incomplete.status, 400);
+  assert.equal(switched.status, 400, JSON.stringify(switched.data));
+  assert.equal(switched.data.error.code, "transport_fixed");
+  const same = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { transport: "http" } },
+  );
+  assert.equal(same.status, 200, JSON.stringify(same.data));
+  assert.equal(same.data.server.transport, "http");
 
   const disabled = await client.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,

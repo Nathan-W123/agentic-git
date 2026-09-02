@@ -848,11 +848,24 @@ export class PostgresCoordinationStore implements CoordinationStore {
     projectId: string,
     repositoryId: string,
   ): Promise<void> {
-    await this.query(
-      `DELETE FROM project_repositories
-       WHERE project_id = $1 AND repository_id = $2`,
-      [projectId, repositoryId],
-    );
+    await this.transaction(async (client) => {
+      // The project's MCP servers let go of the repository too: their
+      // attachment is a fact about this project, and a repository linked
+      // back later must not find last year's servers waiting for it.
+      await client.query(
+        `DELETE FROM project_mcp_server_repositories
+         WHERE repository_id = $2
+           AND server_id IN (
+             SELECT id FROM project_mcp_servers WHERE project_id = $1
+           )`,
+        [projectId, repositoryId],
+      );
+      await client.query(
+        `DELETE FROM project_repositories
+         WHERE project_id = $1 AND repository_id = $2`,
+        [projectId, repositoryId],
+      );
+    });
   }
 
   public async listProjectRepositories(
@@ -1932,7 +1945,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         input.id,
         normalizeMcpRepositoryIds(input.repositoryIds ?? []),
       );
-    });
+    }, { serialize: true });
     return await this.requireMcpServer(input.id);
   }
 
@@ -1974,7 +1987,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
                  WHERE server_id = project_mcp_servers.id
                    AND repository_id = $2))
           AND ($3::boolean = false OR enabled)
-        ORDER BY LOWER(name), id`,
+        ORDER BY LOWER(name) COLLATE "C", id COLLATE "C"`,
       [projectId, filter.repositoryId ?? null, filter.enabledOnly === true],
     );
     const records: McpServerRecord[] = [];
@@ -2044,7 +2057,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
           normalizeMcpRepositoryIds(patch.repositoryIds),
         );
       }
-    });
+    }, { serialize: true });
     return await this.requireMcpServer(id);
   }
 
@@ -2256,6 +2269,13 @@ export class PostgresCoordinationStore implements CoordinationStore {
    */
   public async removeRepository(id: string): Promise<void> {
     await this.transaction(async (client) => {
+      // An MCP server's attachment goes with the repository it was attached
+      // to. Left behind, the join row would re-attach the server — secrets
+      // and all — to whatever repository next took this id.
+      await client.query(
+        "DELETE FROM project_mcp_server_repositories WHERE repository_id = $1",
+        [id],
+      );
       await client.query(
         `DELETE FROM channel_message_reactions
            WHERE message_id IN (

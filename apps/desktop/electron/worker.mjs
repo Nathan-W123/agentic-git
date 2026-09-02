@@ -37,7 +37,8 @@ import { askDialog } from "./dialog.mjs";
 import { treeKill } from "./installers.mjs";
 import {
   allowMcpServers,
-  missingMcpNames,
+  forgetMcpAllow,
+  missingMcpServers,
   readAllowedMcp,
 } from "./mcp-consent.mjs";
 
@@ -300,7 +301,7 @@ async function startWorkerOnce(here, session, onEvent) {
     } else if (message?.type === "mcp-offered") {
       // The child ran without these and has said so to the room; the one
       // thing it cannot do is ask the person whose machine this is.
-      void offerMcpConsent(message.names, here, session, onEvent);
+      void offerMcpConsent(message.servers, here, session, onEvent);
     }
   });
 
@@ -339,18 +340,18 @@ async function startWorkerOnce(here, session, onEvent) {
  * settings window can change it between two leases and asking about a
  * server that was allowed a minute ago would be asking twice.
  */
-async function offerMcpConsent(names, here, session, onEvent) {
-  if (askingMcp || !Array.isArray(names)) {
+async function offerMcpConsent(servers, here, session, onEvent) {
+  if (askingMcp || !Array.isArray(servers)) {
     return;
   }
   const root = workerRoot();
   let missing;
   try {
-    missing = missingMcpNames(await readAllowedMcp(root), names);
+    missing = missingMcpServers(await readAllowedMcp(root), servers);
   } catch {
     return;
   }
-  const key = missing.join("\n");
+  const key = missing.map((server) => `${server.name}@${server.digest}`).join("\n");
   if (missing.length === 0 || askedMcp.has(key)) {
     return;
   }
@@ -358,16 +359,22 @@ async function offerMcpConsent(names, here, session, onEvent) {
   askingMcp = true;
   let allowed = false;
   try {
+    // What each one is, not just what it is called: the owner is agreeing
+    // to a program or a URL, and a server that was allowed before and has
+    // since been redefined is said to have changed, so a yes given to the
+    // old definition is not mistaken for one given to the new.
+    const lines = missing
+      .map((server) => `• ${server.summary}${server.changed ? " (changed since you allowed it)" : ""}`)
+      .join("\n");
     const choice = await askDialog({
       kind: "question",
       title: "Kumi",
       heading: "This project wants to run tools on this computer",
       body:
-        `${projectLabel} has approved MCP servers for its agents: ` +
-        `${missing.join(", ")}. Allowing them starts those programs on this ` +
-        "computer, under your account, whenever one of your agents runs a " +
-        "task here. You can change this later in Kumi's settings on this " +
-        "computer.",
+        `${projectLabel} has approved MCP servers for its agents:\n\n${lines}\n\n` +
+        "Allowing them starts those programs on this computer, under your " +
+        "account, whenever one of your agents runs a task here. To take " +
+        "this back later, use Agents → Forget Allowed MCP Servers.",
       buttons: ["Allow these", "Not now"],
       cancelId: 1,
     });
@@ -390,13 +397,39 @@ async function offerMcpConsent(names, here, session, onEvent) {
     });
     return;
   }
-  // `stopWorker` lets go of the stay-awake offer along with everything else,
-  // because it is what a quit calls. This is not a quit, and the person's
-  // answer to "keep this machine up for work" has not changed.
+  await restartForMcp(here, session, onEvent);
+}
+
+/**
+ * The restart a change to the allowlist needs.
+ *
+ * `stopWorker` lets go of the stay-awake offer along with everything else,
+ * because it is what a quit calls. This is not a quit, and the person's
+ * answer to "keep this machine up for work" has not changed.
+ */
+async function restartForMcp(here, session, onEvent) {
   const keepAwake = stayAwake;
   stopWorker();
   await startWorker(here, session, onEvent);
   setStayAwake(keepAwake);
+}
+
+/**
+ * Withdraws every MCP server this computer has allowed.
+ *
+ * The menu's half of the consent: a yes that could not be taken back from
+ * the same app would be a yes given once and kept forever. The worker reads
+ * the list at start, so it is restarted if it is running; the "not now"
+ * answers this process remembered are forgotten too, so the next lease that
+ * offers a server asks again.
+ */
+export async function forgetMcpServers(here, session, onEvent) {
+  await forgetMcpAllow(workerRoot());
+  askedMcp.clear();
+  if (child === undefined) {
+    return;
+  }
+  await restartForMcp(here, session, onEvent);
 }
 
 /**

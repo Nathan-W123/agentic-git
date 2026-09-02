@@ -35,7 +35,16 @@
 export type HostSignal =
   | { readonly type: "busy" }
   | { readonly type: "idle" }
-  | { readonly type: "mcp-offered"; readonly names: readonly string[] };
+  | {
+      readonly type: "mcp-offered";
+      readonly servers: ReadonlyArray<{
+        readonly name: string;
+        /** What this machine would be agreeing to; see `mcpServerDigest`. */
+        readonly digest: string;
+        /** One readable line: what starts, or what is talked to. */
+        readonly summary: string;
+      }>;
+    };
 
 interface ParentPort {
   postMessage: (message: unknown) => void;
@@ -73,6 +82,18 @@ export function signalHost(signal: "busy" | "idle" | HostSignal): void {
   } catch {
     // See above.
   }
+}
+
+/**
+ * Whether anybody is listening.
+ *
+ * Decides how the worker phrases what it withheld: a desktop app that can
+ * ask the owner is told to, and a bare `node` process names the file the
+ * owner would edit instead. Saying "the app will ask" to a machine with no
+ * app is a sentence nothing can act on.
+ */
+export function hostAttached(): boolean {
+  return port() !== undefined;
 }
 
 /** How many tasks are holding the machine awake right now. */

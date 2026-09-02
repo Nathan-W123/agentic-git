@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { holdHost, hostHoldCount, signalHost } from "./host-signal.js";
+import { holdHost, hostAttached, hostHoldCount, signalHost } from "./host-signal.js";
 
 /**
  * Captures what the host would have been told, by standing in for the port an
@@ -115,15 +115,21 @@ test("a signal with no host listening is a no-op rather than a failure", () => {
  * less deserving of a machine kept awake, and a count moved by this signal
  * would let the laptop sleep on a task still running, or never sleep at all.
  */
-test("the host is told which MCP servers were withheld, by name", (t) => {
+test("the host is told which MCP servers were withheld, and what each one is", (t) => {
+  // Nothing listening: the worker phrases what it withheld for a person
+  // with a config file, not for an app that will ask.
+  assert.equal(hostAttached(), false);
   const recorder = recordSignals();
   t.after(recorder.restore);
+  assert.equal(hostAttached(), true);
   assert.equal(hostHoldCount(), 0);
 
-  signalHost({ type: "mcp-offered", names: ["github", "linear"] });
-  assert.deepEqual(recorder.messages, [
-    { type: "mcp-offered", names: ["github", "linear"] },
-  ]);
+  const servers = [
+    { name: "github", digest: "0123", summary: "github: talks to https://mcp.example/github" },
+    { name: "linear", digest: "4567", summary: "linear: runs npx -y @linear/mcp" },
+  ];
+  signalHost({ type: "mcp-offered", servers });
+  assert.deepEqual(recorder.messages, [{ type: "mcp-offered", servers }]);
   assert.equal(hostHoldCount(), 0);
 
   // The older spelling still works, and lands as the same object shape the

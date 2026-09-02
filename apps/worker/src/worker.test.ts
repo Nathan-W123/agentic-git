@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
 import type { CodexProcessRunner } from "@coord/adapter-codex";
-import { CoordinatorProject } from "@coord/cli/project";
+import { CoordinatorProject, mcpServerDigest } from "@coord/cli/project";
 import { workerOperations } from "@coord/cli/worker-operations";
 import {
   DEFAULT_ORGANIZATION_ID,
@@ -14,10 +14,7 @@ import {
   SqliteCoordinationStore,
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
-import type {
-  AgentPlan,
-  CanonicalChangeNotice,
-} from "@coord/shared-types";
+import type { AgentPlan, CanonicalChangeNotice, ResolvedMcpServer } from "@coord/shared-types";
 
 /** Mirrors the worker's internal cache entry, which is not exported. */
 interface CachedPlanEntry {
@@ -1844,10 +1841,10 @@ test("a Claude worker loads the lease's MCP servers from scratch, strictly, and 
 
   // The control plane under test predates the field, so the lease is given
   // its servers on the way in — the shape the worker receives is the same.
-  const offered = [
+  const offered: ResolvedMcpServer[] = [
     {
       name: "github",
-      transport: "http" as const,
+      transport: "http",
       url: "https://mcp.example/github",
       headers: { Authorization: "Bearer ghp_opened_secret" },
     },
@@ -1946,14 +1943,74 @@ test("a Claude worker loads the lease's MCP servers from scratch, strictly, and 
     .map((event) => String(event.data["message"]));
   assert.ok(
     explained.includes(
-      "This project offers MCP servers github; this machine has not allowed them (Kumi → Settings on this computer).",
+      "This project offers MCP servers github; this machine has not allowed them. Kumi on that machine will ask its owner.",
     ),
     explained.join("\n"),
   );
+  const digest = mcpServerDigest(offered[0] as ResolvedMcpServer);
   assert.deepEqual(
     hostMessages.filter(
       (message) => (message as { type?: string }).type === "mcp-offered",
     ),
-    [{ type: "mcp-offered", names: ["github"] }],
+    [
+      {
+        type: "mcp-offered",
+        servers: [
+          {
+            name: "github",
+            digest,
+            summary: "github: talks to https://mcp.example/github",
+          },
+        ],
+      },
+    ],
   );
+
+  // The owner says yes to *this* github. The next task runs with it.
+  runtime.project.config.mcp = { allow: [{ name: "github", digest }] };
+  await rm(log, { force: true });
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with claude, allowed",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const allowedRun = await worker.runOnce();
+  assert.equal(allowedRun.accepted, true, allowedRun.reason);
+  for (const line of (await readFile(log, "utf8")).trim().split("\n")) {
+    assert.ok((JSON.parse(line) as string[]).includes("--mcp-config"), line);
+  }
+
+  // Then the project redefines github — same name, different place. What
+  // the owner agreed to is not what is on offer now, so it is withheld as
+  // if never allowed, and the room and the app both hear that it changed
+  // rather than that something new appeared.
+  offered[0] = { ...(offered[0] as ResolvedMcpServer), url: "https://mcp.example/elsewhere" };
+  hostMessages.length = 0;
+  await rm(log, { force: true });
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with claude, redefined",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const redefined = await worker.runOnce();
+  assert.equal(redefined.accepted, true, redefined.reason);
+  for (const line of (await readFile(log, "utf8")).trim().split("\n")) {
+    assert.equal((JSON.parse(line) as string[]).includes("--mcp-config"), false, line);
+  }
+  const afterChange = (await runtime.store.listAudit())
+    .filter((event) => event.type === "agent_progress")
+    .map((event) => String(event.data["message"]));
+  assert.ok(
+    afterChange.includes(
+      "This project offers MCP servers github; this machine has not allowed them (github changed since it was allowed here). Kumi on that machine will ask its owner.",
+    ),
+    afterChange.join("\n"),
+  );
+  const reoffered = hostMessages.find(
+    (message) => (message as { type?: string }).type === "mcp-offered",
+  ) as { servers: Array<{ digest: string; summary: string }> } | undefined;
+  assert.notEqual(reoffered?.servers[0]?.digest, digest);
+  assert.equal(reoffered?.servers[0]?.summary, "github: talks to https://mcp.example/elsewhere");
 });
