@@ -8179,12 +8179,12 @@ test("the settings module is a browser module built from the shared parts", asyn
   assert.doesNotMatch(settings, /from "node:/u);
   // The glyphs come from the one icon set rather than from a second one
   // standing beside it.
-  assert.match(settings, /import { esc, icon } from "./ui.js";/u);
-  assert.doesNotMatch(settings, /<svg(?![^>]*data-icon)/u);
+  assert.match(settings, /import \{ esc, icon \} from "\.\/ui\.js";/u);
+  assert.doesNotMatch(settings, /<svg(?![^>]*\bdata-icon)/u);
 
   // It is pure: no live state, no network, no router. That is what lets the
   // shape of a settings row be asserted without a browser.
-  assert.doesNotMatch(settings, /fetch(/u);
-  assert.doesNotMatch(settings, /from "./data.js"/u);
+  assert.doesNotMatch(settings, /\bfetch\(/u);
+  assert.doesNotMatch(settings, /from "\.\/data\.js"/u);
   assert.doesNotMatch(settings, /window.location/u);
 });
