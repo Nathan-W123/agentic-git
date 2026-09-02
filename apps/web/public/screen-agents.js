@@ -11,6 +11,7 @@ import {
   api,
   cancelGitHubSignIn,
   cancelProviderSignIn,
+  createEditorToken,
   createLocalAgent,
   connectGitHub,
   forgetAgentInLoadedRosters,
@@ -31,6 +32,7 @@ import {
   esc,
   showModal,
   toast,
+  VENDOR_LABEL,
   vendorMark,
 } from "./ui.js";
 
@@ -200,7 +202,231 @@ export async function startAddAgentFlow(rerender) {
   if (providerId === "") {
     return;
   }
-  await connectAgent(providerId, rerender);
+  await connectProviderSomehow(providerId, rerender);
+}
+
+/**
+ * Connects one editor on this machine, end to end.
+ *
+ * Three steps that used to be a person's job: mint a token scoped to filing
+ * work and nothing else, have the app write that editor's own config file,
+ * and say what is left. The token is never shown, because nobody has to
+ * carry it anywhere — which is also why it cannot be pasted with its angle
+ * brackets on, or without the word Bearer, or into the wrong scope.
+ *
+ * Failures land in the row rather than in a toast that scrolls away, since
+ * the row is where somebody will look next time they wonder whether it
+ * worked.
+ */
+export async function connectEditorToKumi(vendor, rerender) {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge?.connectEditor === undefined) {
+    return;
+  }
+  const label = VENDOR_LABEL[vendor] ?? vendor;
+  state.editorConnected = { ...state.editorConnected, [vendor]: "Connecting…" };
+  rerender();
+  try {
+    // Named for the editor and the machine, so the tokens list is something a
+    // person can actually revoke from rather than a column of identical rows.
+    const token = await createEditorToken(`${label} on ${deviceLabel()}`);
+    const written = await bridge.connectEditor(vendor, token);
+    if (written?.ok !== true) {
+      state.editorConnected = {
+        ...state.editorConnected,
+        [vendor]: `Could not connect: ${written?.detail ?? "unknown error"}`,
+      };
+      rerender();
+      return;
+    }
+    state.editorConnected = {
+      ...state.editorConnected,
+      [vendor]:
+        written.manual !== undefined
+          ? // Codex off Windows: the file is written and the variable is not,
+            // because a shell profile is the person's own file. Saying so
+            // beats reporting a job that is only half done.
+            `Config written. Add this to your shell, then reopen ${label}: ${written.manual}`
+          : vendor === "codex"
+            ? // Codex is the one vendor that reads its token from the
+              // environment rather than its config, and "restart Codex" is
+              // wrong advice for half of the people who will read it. The
+              // Store app is not restarted by closing its window: Windows
+              // suspends it and resumes the same process, still holding the
+              // environment it was launched with, so it never sees a variable
+              // set after that. The CLI in a fresh terminal sees it at once,
+              // which is exactly how this presents — working in one Codex and
+              // not the other.
+              `Connected. A new terminal will see it straight away. For the ` +
+              `Codex app, end it in Task Manager first — closing its window ` +
+              `only suspends it, so it keeps the environment it started with.`
+            : `Connected. Restart ${label} and ask it to have Kumi do something.`,
+    };
+  } catch (error) {
+    state.editorConnected = {
+      ...state.editorConnected,
+      [vendor]: `Could not connect: ${error.message}`,
+    };
+  }
+  rerender();
+}
+
+/** This computer, as the tokens list should name it. */
+function deviceLabel() {
+  const platform = /win/iu.test(navigator.platform ?? "")
+    ? "Windows"
+    : /mac/iu.test(navigator.platform ?? "")
+      ? "Mac"
+      : "this computer";
+  return platform;
+}
+
+/**
+ * Which of the three connections somebody wants, and then making it.
+ *
+ * There are three, they are genuinely different, and until now two of them
+ * lived on a Settings screen nobody looking at an agent would think to open.
+ * Asking here is the whole point: "connect Codex" is ambiguous, and the
+ * ambiguity is what left somebody with a connected agent that could not be
+ * mentioned, or a grey dot beside a CLI they had definitely installed.
+ *
+ * The CLI is asked about first because it is the one that makes an agent
+ * exist. The other two are MCP in opposite directions, which is why they are
+ * a second question rather than three items in one list: they are the same
+ * kind of thing pointing different ways, and flattening them reads as three
+ * unrelated options.
+ */
+async function connectProviderSomehow(providerId, rerender) {
+  const label = agentLabelOf(providerId);
+  const vendor = PROVIDER_VENDOR[providerId];
+  const bridge = window.KUMI_INSTALL;
+  // Only what this build can actually write, and only where there is an app
+  // to write it. In a browser the editor half is unreachable, and offering it
+  // would be offering a button that cannot work.
+  const editorable =
+    bridge?.connectEditor !== undefined &&
+    vendor !== undefined &&
+    (bridge.connectable ?? ["claude", "codex", "cursor"]).includes(vendor);
+
+  const kind = await chooseFrom({
+    title: `Connect ${label}`,
+    subtitle: "Two different things are called connecting. Which do you want?",
+    confirm: "Continue",
+    cancel: "Not now",
+    body: `<fieldset class="agent-provider-picker">
+      <legend class="sr-only">Connection kind</legend>
+      <label class="agent-provider-choice">
+        <input type="radio" name="connectionKind" value="cli" checked>
+        <span class="agent-provider-copy">
+          <strong>Run agents on this computer</strong>
+          <small>Installs and signs in ${esc(label)}'s CLI, so you can
+            @mention this agent and it does the work here. This is what makes
+            the agent exist.</small>
+        </span>
+      </label>
+      <label class="agent-provider-choice">
+        <input type="radio" name="connectionKind" value="mcp">
+        <span class="agent-provider-copy">
+          <strong>Connect tools with MCP</strong>
+          <small>Either let ${esc(label)} send work to Kumi, or give Kumi's
+            agents tools to use while they work.</small>
+        </span>
+      </label>
+    </fieldset>
+    <input type="hidden" name="kind" value="cli">`,
+  }, "connectionKind", "kind");
+  if (kind === undefined) {
+    return;
+  }
+  if (kind === "cli" || kind === "") {
+    await connectAgent(providerId, rerender);
+    return;
+  }
+
+  const direction = await chooseFrom({
+    title: "Which way?",
+    subtitle: "MCP goes both ways, and they do opposite things.",
+    confirm: "Set it up",
+    cancel: "Back",
+    body: `<fieldset class="agent-provider-picker">
+      <legend class="sr-only">Direction</legend>
+      <label class="agent-provider-choice${editorable ? "" : " is-disabled"}">
+        <input type="radio" name="mcpDirection" value="editor"${
+          editorable ? " checked" : " disabled"
+        }>
+        <span class="agent-provider-copy">
+          <strong>Ask Kumi for work from ${esc(label)}</strong>
+          <small>${
+            editorable
+              ? `Type "have Kumi fix the login redirect" in ${esc(label)} and it
+                 files the task here, with a thread following it. Kumi writes
+                 the config on this computer.`
+              : bridge?.connectEditor === undefined
+                ? "Open Kumi's desktop app to set this up — it writes a file on the computer the editor runs on."
+                : `Kumi cannot write ${esc(label)}'s config yet.`
+          }</small>
+        </span>
+      </label>
+      <label class="agent-provider-choice">
+        <input type="radio" name="mcpDirection" value="tools"${
+          editorable ? "" : " checked"
+        }>
+        <span class="agent-provider-copy">
+          <strong>Give Kumi's agents tools</strong>
+          <small>Approve a server — documentation, issues, a browser — and
+            every agent working on this repository can use it. Approving is
+            recorded, and each teammate's computer asks before running
+            anything.</small>
+        </span>
+      </label>
+    </fieldset>
+    <input type="hidden" name="way" value="${editorable ? "editor" : "tools"}">`,
+  }, "mcpDirection", "way");
+  if (direction === undefined) {
+    return;
+  }
+  if (direction === "editor") {
+    await connectEditorToKumi(vendor, rerender);
+    return;
+  }
+  // The servers themselves live in project settings, because approving one is
+  // a decision about the project rather than about this agent — and it is
+  // recorded there against whoever made it.
+  location.hash = "#/settings/mcp-servers";
+  rerender();
+}
+
+/**
+ * A modal whose radio group actually reports the chosen option.
+ *
+ * `showModal` collects ordinary form fields, and a group of radios hands back
+ * the last one in document order rather than the checked one — so every
+ * chooser here would answer with its final option no matter what was picked.
+ * A hidden field carries the real answer, kept in step by a listener that has
+ * to be attached *while the dialog is open*, which means starting the modal
+ * and awaiting it separately. The provider picker above does this by hand;
+ * this is the same thing, named.
+ */
+async function chooseFrom(spec, group, field) {
+  const pending = showModal(spec);
+  const dialog = document.querySelector("#modal");
+  const sync = (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.name !== group) {
+      return;
+    }
+    const hidden = dialog?.querySelector(`[name="${field}"]`);
+    if (hidden instanceof HTMLInputElement) {
+      hidden.value = input.value;
+    }
+  };
+  dialog?.addEventListener("change", sync);
+  try {
+    const values = await pending;
+    return values === undefined ? undefined : String(values[field] ?? "");
+  } finally {
+    dialog?.removeEventListener("change", sync);
+  }
 }
 
 /**

@@ -1142,7 +1142,11 @@ test("the editor connect card offers only what the app can write, and never a co
   // The page names a vendor. It never carries a command or an address — the
   // app decides both from the server it is signed in to, which is what stops
   // a remote document aiming somebody's editor and its token elsewhere.
-  const connect = sourceOf(app, "connectEditorToKumi", "deviceLabel");
+  //
+  // It lives beside the rest of connecting an agent rather than in the shell,
+  // because that is where somebody deciding how to connect one is looking.
+  const agents = await publicFile("screen-agents.js");
+  const connect = sourceOf(agents, "connectEditorToKumi", "deviceLabel");
   assert.match(connect, /bridge\.connectEditor\(vendor, token\)/u);
   assert.doesNotMatch(connect, /mcp add|claude\.json|config\.toml|https:/u);
 
@@ -1165,6 +1169,50 @@ test("the editor connect card offers only what the app can write, and never a co
   // registering as a worker, so an editor token carrying it could lease other
   // people's work.
   assert.match(data, /EDITOR_TOKEN_SCOPES = \["view", "submit_task"\]/u);
+});
+
+test("connecting an agent asks which of the three connections is meant", async () => {
+  const agents = await publicFile("screen-agents.js");
+
+  // "Connect Codex" meant three different things and the screen offered one
+  // of them, with the other two on a Settings page nobody looking at an agent
+  // would open. That ambiguity is what produced a connected agent nobody
+  // could mention, and a grey dot beside a CLI that was definitely installed.
+  // Sliced by index rather than with `sourceOf`, which anchors its end on a
+  // newline followed by `function` and so cannot see an `async function`.
+  const between = (from: string, to: string): string => {
+    const start = agents.indexOf(`function ${from}`);
+    const end = agents.indexOf(`function ${to}`, start);
+    assert.notEqual(start, -1, `${from} was not found`);
+    assert.ok(end > start, `${to} was not found after ${from}`);
+    return agents.slice(start, end);
+  };
+  const flow = between("connectProviderSomehow", "chooseFrom");
+  assert.match(flow, /Run agents on this computer/u);
+  assert.match(flow, /Connect tools with MCP/u);
+  // The two MCP directions are a second question, not two more items in the
+  // first list: they are the same thing pointing opposite ways.
+  assert.match(flow, /Ask Kumi for work from/u);
+  assert.match(flow, /Give Kumi's agents tools/u);
+  assert.match(flow, /connectAgent\(providerId, rerender\)/u);
+  assert.match(flow, /connectEditorToKumi\(vendor, rerender\)/u);
+
+  // Offered only where it can work: the editor half writes a file on the
+  // machine the editor runs on, which a browser cannot do.
+  assert.match(flow, /bridge\?\.connectEditor !== undefined/u);
+
+  // The chooser is entered from adding an agent, so the question is asked
+  // where the decision is made rather than after it.
+  assert.match(agents, /await connectProviderSomehow\(providerId, rerender\)/u);
+
+  // A radio group hands `showModal` its last option rather than the checked
+  // one, so every chooser would answer the same way regardless of the press.
+  // The listener has to be attached while the dialog is open, which means the
+  // modal is started and awaited separately.
+  const chooser = between("chooseFrom", "pause");
+  assert.match(chooser, /const pending = showModal\(spec\)/u);
+  assert.match(chooser, /addEventListener\("change", sync\)/u);
+  assert.match(chooser, /removeEventListener\("change", sync\)/u);
 });
 
 test("the catalogue pins every version and fills the form rather than creating", async () => {

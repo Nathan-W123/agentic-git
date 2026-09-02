@@ -1877,6 +1877,19 @@ export function toast(message, tone = "") {
   host.append(node);
 }
 
+/**
+ * What people call each vendor's editor, which is not its adapter id.
+ *
+ * Beside `agentLabelOf` because it answers the same question for the other
+ * half of the product: that one names the agent a vendor runs, this one names
+ * the editor a person opens.
+ */
+export const VENDOR_LABEL = {
+  claude: "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+};
+
 /* -------------------------------------------------------------- modal ---- */
 
 /** One application modal, as a native <dialog> so focus and Esc are free. */
