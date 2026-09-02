@@ -1,3 +1,42 @@
+### 0.5.14 — connect an editor with a button
+
+Kumi can now be used from inside Claude Code, Codex or Cursor: ask one of
+them to have Kumi do something and it files the task in a channel here,
+with the thread following it exactly as if you had typed it in Kumi.
+
+Setting that up used to mean copying a command out of a chat window and
+pasting it into a terminal, and every way of getting it slightly wrong
+failed silently hours later. The scope flag defaults to the folder you
+happened to be in, so the connection works from your home directory and
+is simply absent in your repository. A pasted placeholder keeps its angle
+brackets. The word Bearer goes missing. All three arrive as an
+unexplained 401 with nothing pointing at the cause.
+
+So Settings now lists the editors it found on this computer, and a button
+does the whole thing: it mints a token that can file work and nothing
+else, writes that editor's own config file, and tells you to restart it.
+Your files are merged rather than replaced — your projects, your history,
+your other MCP servers and your model settings all survive — and the
+token never appears on screen, because nobody has to carry it anywhere.
+
+Each editor on each machine gets its own token, named for both, so
+revoking the laptop you left somewhere does not break the desktop you are
+sitting at.
+
+The other direction got the same treatment. Adding a tool for your own
+agents meant typing a name, a command, arguments, a version and a scope,
+and any one of them being wrong failed quietly on somebody else's
+computer. Settings now offers a short list of known servers — Context7,
+Playwright, GitHub, Sentry — and picking one fills the form with a pinned
+version. It fills it rather than creating it, because what you are
+agreeing to is that program starting on every teammate's machine, and the
+command should be legible before you approve it.
+
+Also in this build: a machine now joins the organization that actually
+has a repository rather than whichever the server listed first, which is
+what left an invited teammate's agents grey with the app insisting it was
+running; and the app says which project and organization it joined.
+
 ### 0.5.13 — an unplugged laptop is still a laptop
 
 Two silences, both of which made a working machine look like a missing one.

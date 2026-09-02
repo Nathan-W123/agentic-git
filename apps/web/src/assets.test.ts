@@ -1068,7 +1068,7 @@ test("the settings module composes MCP servers into project controls", async () 
   // project-wide control in the same sense a token is.
   assert.match(
     app,
-    /function projectControlsSection\(\)[\s\S]{0,800}apiTokensCard\(\)\}\$\{mcpServersCard\(\)\}/u,
+    /function projectControlsSection\(\)[\s\S]{0,800}apiTokensCard\(\)\}\$\{editorMcpCard\(\)\}\$\{mcpServersCard\(\)\}/u,
   );
   const card = sourceOf(app, "mcpServersCard", "projectControlsSection");
   assert.match(card, /id: "mcp-servers"/u);
@@ -1117,8 +1117,76 @@ test("the settings module composes MCP servers into project controls", async () 
   // keeps the other off the screen.
   assert.match(
     app,
-    /Promise\.allSettled\(\[\s*loadApiTokens\(\),\s*ensureMcpServers\(state\.projectId\),\s*\]\)\.then\(\(\) => render\(\)\)/u,
+    // The machine scan joined them: three independent loads, none of which
+    // failing keeps the others off the screen.
+    /Promise\.allSettled\(\[\s*loadApiTokens\(\),\s*ensureMcpServers\(state\.projectId\),[\s\S]{0,600}\]\)\.then\(\(\) => render\(\)\)/u,
   );
+});
+
+test("the editor connect card offers only what the app can write, and never a command", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+
+  // Ordered so the two directions read together: give Kumi's agents tools,
+  // and make Kumi a tool inside an editor.
+  assert.match(
+    app,
+    /apiTokensCard\(\)\}\$\{editorMcpCard\(\)\}\$\{mcpServersCard\(\)\}/u,
+  );
+  const card = sourceOf(app, "editorMcpCard", "projectControlsSection");
+  assert.match(card, /data-act="editor-connect"/u);
+  // A browser cannot write a file on the machine the editor runs on, and the
+  // card says so rather than offering a button that cannot work.
+  assert.match(card, /bridge\?\.connectEditor === undefined/u);
+
+  // The page names a vendor. It never carries a command or an address — the
+  // app decides both from the server it is signed in to, which is what stops
+  // a remote document aiming somebody's editor and its token elsewhere.
+  const connect = sourceOf(app, "connectEditorToKumi", "deviceLabel");
+  assert.match(connect, /bridge\.connectEditor\(vendor, token\)/u);
+  assert.doesNotMatch(connect, /mcp add|claude\.json|config\.toml|https:/u);
+
+  // The token is minted for this editor on this machine, and is never shown:
+  // nobody has to carry it anywhere, which is what makes every way of
+  // mistyping it impossible.
+  assert.match(connect, /createEditorToken\(/u);
+  assert.doesNotMatch(connect, /state\.newApiToken/u);
+
+  // And it is not the desktop worker's scope set. `run_task` also admits
+  // registering as a worker, so an editor token carrying it could lease other
+  // people's work.
+  assert.match(data, /EDITOR_TOKEN_SCOPES = \["view", "submit_task"\]/u);
+});
+
+test("the catalogue pins every version and fills the form rather than creating", async () => {
+  const app = await publicFile("app.js");
+  const card = sourceOf(app, "mcpServersCard", "projectControlsSection");
+  assert.match(card, /data-act="mcp-pick"/u);
+
+  // Every stdio entry names an exact version. `npx -y <package>` without one
+  // resolves per machine, so each teammate downloads whatever was published
+  // that morning and runs it under their own account — the single worst
+  // hazard in this whole feature, and the one a typed form invites.
+  const catalogue = app.slice(
+    app.indexOf("const MCP_CATALOGUE = ["),
+    app.indexOf("];", app.indexOf("const MCP_CATALOGUE = [")),
+  );
+  assert.notEqual(catalogue, "", "the catalogue should be findable");
+  const packages = catalogue.match(/"(?:-y|@[^"]+)"/gu) ?? [];
+  const named = packages.filter((entry) => entry.startsWith('"@'));
+  assert.ok(named.length > 0, "no packages in the catalogue");
+  for (const entry of named) {
+    assert.match(entry, /@\d+\.\d+\.\d+"$/u, `${entry} is not pinned to a version`);
+  }
+  assert.doesNotMatch(catalogue, /@latest/u);
+
+  // Picking fills the form and stops. What is being agreed to is a program
+  // starting on every teammate's computer, so the command stays visible and
+  // approval remains a second, separate act.
+  const fill = sourceOf(app, "fillMcpFormFrom", "createMcpServerFromForm");
+  assert.match(fill, /data-mcp-command/u);
+  assert.match(fill, /data-mcp-args/u);
+  assert.doesNotMatch(fill, /createMcpServer\(|approveMcpServer\(/u);
 });
 
 test("the settings search index finds MCP servers under project controls", async () => {

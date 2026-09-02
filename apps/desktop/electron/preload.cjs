@@ -20,6 +20,9 @@
 
 const { contextBridge, ipcRenderer } = require("electron");
 
+/** Kept in step with `editor-mcp.mjs`; a preload cannot import an ES module. */
+const CONNECTABLE = ["claude", "codex", "cursor"];
+
 function argument(name) {
   const prefix = `--${name}=`;
   return (
@@ -93,6 +96,19 @@ expose("KUMI_INSTALL", () => ({
   // login rather than of a credential copied to a server. This is what makes
   // the second sign-in unnecessary: the account is already signed in here.
   usage: async (vendor) => await ipcRenderer.invoke("kumi:agent-usage", vendor),
+  /**
+   * Points one editor on this machine at this Kumi.
+   *
+   * The page passes a token it minted and the *vendor's name*, never a
+   * command and never an address — the app decides both from the server it is
+   * signed in to. That is the same rule `install` follows, and it is what
+   * keeps a remote document from writing an arbitrary config, or aiming
+   * somebody's editor and its credential somewhere else.
+   */
+  connectEditor: async (vendor, token) =>
+    await ipcRenderer.invoke("kumi:connect-editor", vendor, token),
+  /** Which editors this build knows how to write a config for. */
+  connectable: CONNECTABLE,
   // One listener per call site, removed by the returned function, so a page
   // that opens the dialog repeatedly does not accumulate them.
   onOutput: (listener) => {

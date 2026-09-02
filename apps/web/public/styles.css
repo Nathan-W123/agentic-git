@@ -15586,6 +15586,15 @@ dialog.modal[open]::backdrop {
 /* The new-server form: several fields under one stacked row. A grid rather
    than the row's inline control strip, because five inputs side by side is a
    form nobody can read, let alone fill in on a phone. */
+/* The catalogue row: a wrap of small buttons, not a grid of cards. What is
+   being offered is a shortcut into the form below, and anything larger would
+   read as the thing itself. */
+.st-mcp-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .st-mcp-form {
   display: grid;
   gap: 8px;

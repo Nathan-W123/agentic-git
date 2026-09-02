@@ -261,6 +261,7 @@ import {
   createApiToken,
   loadApiTokens,
   approveMcpServer,
+  createEditorToken,
   createMcpServer,
   deleteMcpServer,
   ensureMcpServers,
@@ -2516,6 +2517,48 @@ function apiTokensCard() {
  * — the row shows how many there are and never what they are, because the
  * list route never has them to give.
  */
+/**
+ * Servers worth offering by name, so adding one is a pick rather than a form.
+ *
+ * The form underneath stays for everything not on this list — it is a short
+ * list on purpose, not an attempt at a registry. What it removes is the class
+ * of mistake the form invites: a command typed slightly wrong, a package name
+ * misremembered, and above all a missing version, which means every teammate
+ * downloads whatever was published that morning and runs it under their own
+ * account. Every entry here is pinned for that reason.
+ *
+ * `secret` names the one credential the server needs, or is absent when it
+ * needs none. `note` is what a person needs to know before agreeing to run it.
+ */
+const MCP_CATALOGUE = [
+  {
+    id: "context7",
+    label: "Context7",
+    note: "Current documentation for whatever library your agents are using. No account needed.",
+    server: { name: "context7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp@1.0.14"] },
+  },
+  {
+    id: "playwright",
+    label: "Playwright",
+    note: "Drives a real browser, so an agent can check the page it just changed.",
+    server: { name: "playwright", transport: "stdio", command: "npx", args: ["-y", "@playwright/mcp@0.0.41"] },
+  },
+  {
+    id: "github",
+    label: "GitHub",
+    note: "Issues and pull requests. Needs a personal access token.",
+    secret: "a GitHub personal access token",
+    server: { name: "github", transport: "http", url: "https://api.githubcopilot.com/mcp/" },
+  },
+  {
+    id: "sentry",
+    label: "Sentry",
+    note: "The errors your users are actually hitting. Needs a Sentry auth token.",
+    secret: "a Sentry auth token",
+    server: { name: "sentry", transport: "http", url: "https://mcp.sentry.dev/mcp" },
+  },
+];
+
 function mcpServersCard() {
   const servers = state.mcpServers ?? [];
   const enabled = state.mcpServersEnabled;
@@ -2551,6 +2594,16 @@ function mcpServersCard() {
   return settingsSectionBlock({
     ...heading,
     body: `${settingRow({
+      row: "mcp-servers",
+      label: "Add a known one",
+      description:
+        "Fills the form below with a pinned version, so every teammate runs the same program rather than whatever was published this morning.",
+      stacked: true,
+      control: `<div class="st-mcp-picks">${MCP_CATALOGUE.map(
+        (entry) => `<button type="button" class="btn btn-sm" data-act="mcp-pick"
+          data-value="${esc(entry.id)}" title="${esc(entry.note)}">${esc(entry.label)}</button>`,
+      ).join("")}</div>`,
+    })}${settingRow({
       row: "mcp-servers",
       label: "New server",
       description:
@@ -2611,6 +2664,90 @@ function mcpServersCard() {
   });
 }
 
+/**
+ * Pointing the editors on this computer at Kumi.
+ *
+ * The reverse of the MCP servers card below it: that one gives Kumi's agents
+ * tools, this one makes Kumi a tool inside Claude Code, Codex or Cursor, so
+ * "have Kumi fix the login redirect" typed in an editor lands in a channel
+ * here.
+ *
+ * A button rather than a command to copy, because the commands are not
+ * stable and every way of getting one wrong fails silently — the wrong
+ * scope binds the server to one folder, a pasted placeholder keeps its
+ * angle brackets, the word Bearer goes missing, and all three arrive as an
+ * unexplained 401 hours later. The app writes the file instead.
+ *
+ * In a browser there is no bridge to write anything, so the command comes
+ * back — the same fall-back the CLI install row takes.
+ */
+/**
+ * What this computer actually has, so the connect rows offer only editors
+ * that are here.
+ *
+ * The same scan the worker registers from, so the card and the worker cannot
+ * disagree about what this machine can run. Absent in a browser, where the
+ * card says to open the app instead; a failed scan leaves the answer unknown,
+ * which the card reads as "offer it" rather than greying out a row because a
+ * lookup did not finish.
+ */
+async function loadMachineAgents() {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge?.detected === undefined) {
+    return;
+  }
+  state.machineAgents = await bridge.detected().catch(() => undefined);
+}
+
+/** What people call each vendor's editor, which is not its adapter id. */
+const VENDOR_LABEL = {
+  claude: "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+};
+
+function editorMcpCard() {
+  const bridge = typeof window === "undefined" ? undefined : window.KUMI_INSTALL;
+  const heading = {
+    id: "editor-mcp",
+    heading: "Use Kumi from your editor",
+    description:
+      "Ask Kumi for work from inside Claude Code, Codex or Cursor. It files the task in a channel here and the thread follows it, the same as if you had typed it in Kumi.",
+  };
+  if (bridge?.connectEditor === undefined) {
+    return settingsSectionBlock({
+      ...heading,
+      body: settingRow({
+        row: "editor-mcp",
+        label: "Open Kumi's desktop app to connect an editor",
+        description:
+          "Connecting writes a config file on the computer the editor runs on, so it happens in the app rather than in a browser tab.",
+      }),
+    });
+  }
+  // Asked once when Settings opens and remembered; `undefined` means the
+  // question has not been answered yet, which reads as "offer it" rather than
+  // "greyed out" — a row disabled because a scan has not finished is a row
+  // that looks broken.
+  const detected = state.machineAgents;
+  const rows = (bridge.connectable ?? ["claude", "codex", "cursor"]).map((vendor) => {
+    const here = detected === undefined || detected.includes(vendor);
+    const done = state.editorConnected?.[vendor];
+    return settingRow({
+      label: VENDOR_LABEL[vendor] ?? vendor,
+      description: here
+        ? (done ?? "Writes its config on this computer and mints a token that can file work and nothing else.")
+        : "Not installed on this computer.",
+      control: `<button type="button" class="btn btn-sm${
+        here ? " btn-primary" : ""
+      }" data-act="editor-connect" data-value="${esc(vendor)}"${
+        here ? "" : " disabled"
+      }>Connect</button>`,
+    });
+  });
+  return settingsSectionBlock({ ...heading, body: rows.join("") });
+}
+
 /** Repository, approval policy and app tokens — the project-wide controls. */
 function projectControlsSection() {
   return `${settingsSectionBlock({
@@ -2620,7 +2757,7 @@ function projectControlsSection() {
       "Canonical state is owned by the control plane. Publishing it to a remote branch is /push in the channel.",
     body: `<div data-settings-row="repository" id="settings-row-repository"
       tabindex="-1">${repositoryDefinitionList()}</div>`,
-  })}${approvalPolicySection()}${apiTokensCard()}${mcpServersCard()}`;
+  })}${approvalPolicySection()}${apiTokensCard()}${editorMcpCard()}${mcpServersCard()}`;
 }
 
 /** Everything the person who runs this deployment looks after. */
@@ -8601,6 +8738,114 @@ function mcpBearerHeader(token) {
   };
 }
 
+/**
+ * Connects one editor on this machine, end to end.
+ *
+ * Three steps that used to be a person's job: mint a token scoped to filing
+ * work and nothing else, have the app write that editor's own config file,
+ * and say what is left. The token is never shown, because nobody has to
+ * carry it anywhere — which is also why it cannot be pasted with its angle
+ * brackets on, or without the word Bearer, or into the wrong scope.
+ *
+ * Failures land in the row rather than in a toast that scrolls away, since
+ * the row is where somebody will look next time they wonder whether it
+ * worked.
+ */
+async function connectEditorToKumi(vendor) {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge?.connectEditor === undefined) {
+    return;
+  }
+  const label = VENDOR_LABEL[vendor] ?? vendor;
+  state.editorConnected = { ...state.editorConnected, [vendor]: "Connecting…" };
+  render();
+  try {
+    // Named for the editor and the machine, so the tokens list is something a
+    // person can actually revoke from rather than a column of identical rows.
+    const token = await createEditorToken(`${label} on ${deviceLabel()}`);
+    const written = await bridge.connectEditor(vendor, token);
+    if (written?.ok !== true) {
+      state.editorConnected = {
+        ...state.editorConnected,
+        [vendor]: `Could not connect: ${written?.detail ?? "unknown error"}`,
+      };
+      render();
+      return;
+    }
+    state.editorConnected = {
+      ...state.editorConnected,
+      [vendor]:
+        written.manual === undefined
+          ? `Connected. Restart ${label} and ask it to have Kumi do something.`
+          : // Codex off Windows: the file is written and the variable is not,
+            // because a shell profile is the person's own file. Saying so beats
+            // reporting a job that is only half done.
+            `Config written. Add this to your shell, then restart ${label}: ${written.manual}`,
+    };
+  } catch (error) {
+    state.editorConnected = {
+      ...state.editorConnected,
+      [vendor]: `Could not connect: ${error.message}`,
+    };
+  }
+  render();
+}
+
+/** This computer, as the tokens list should name it. */
+function deviceLabel() {
+  const platform = /win/iu.test(navigator.platform ?? "")
+    ? "Windows"
+    : /mac/iu.test(navigator.platform ?? "")
+      ? "Mac"
+      : "this computer";
+  return platform;
+}
+
+/**
+ * Puts one catalogue entry into the form, and leaves it there to be read.
+ *
+ * Deliberately not "create on click". What is being agreed to is that this
+ * program starts on every teammate's computer, and a person should see the
+ * command and the version before they approve that — the form is the last
+ * place it is legible, and approval is a second, separate act after it.
+ */
+function fillMcpFormFrom(id) {
+  const entry = MCP_CATALOGUE.find((candidate) => candidate.id === id);
+  if (entry === undefined) {
+    return;
+  }
+  const set = (selector, value) => {
+    const field = document.querySelector(selector);
+    if (field) {
+      field.value = value;
+    }
+  };
+  const http = entry.server.transport === "http";
+  set("[data-mcp-name]", entry.server.name);
+  set("[data-mcp-transport]", entry.server.transport);
+  set("[data-mcp-command]", entry.server.command ?? "");
+  set("[data-mcp-args]", (entry.server.args ?? []).join(" "));
+  set("[data-mcp-url]", entry.server.url ?? "");
+  // The transport picker's own handler shows and hides the right half, and
+  // setting `value` in script does not fire it.
+  const form = document.querySelector(".st-mcp-form");
+  for (const field of form?.querySelectorAll("[data-mcp-stdio], [data-mcp-stdio-only]") ?? []) {
+    field.hidden = http;
+  }
+  const httpFields = form?.querySelector("[data-mcp-http]");
+  if (httpFields) {
+    httpFields.hidden = !http;
+  }
+  const credential = document.querySelector(http ? "[data-mcp-token]" : "[data-mcp-secrets]");
+  toast(
+    entry.secret === undefined
+      ? `${entry.label} filled in — check it, then Create.`
+      : `${entry.label} filled in — paste ${entry.secret}, then Create.`,
+    "ok",
+  );
+  credential?.focus();
+}
+
 function createMcpServerFromForm() {
   const read = (selector) =>
     (document.querySelector(selector)?.value ?? "").trim();
@@ -8725,6 +8970,7 @@ function openSettings(section = "general") {
   void Promise.allSettled([
     loadApiTokens(),
     ensureMcpServers(state.projectId),
+    loadMachineAgents(),
   ]).then(() => render());
   state.settingsAgentsLoading = state.providers.length === 0;
   void loadProviders()
@@ -11671,6 +11917,12 @@ document.addEventListener("click", (event) => {
       return;
     case "mcp-create":
       createMcpServerFromForm();
+      return;
+    case "mcp-pick":
+      fillMcpFormFrom(value);
+      return;
+    case "editor-connect":
+      void connectEditorToKumi(value);
       return;
     case "mcp-approve": {
       const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
