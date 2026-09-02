@@ -578,6 +578,28 @@ export const ICONS = {
       '<path d="M4.1 10.4L19.7 10.4A1.2 1.2 0 0 0 19.7 8L4.1 8A1.2 1.2 0 0 0 4.1 10.4Z"/>' +
       '<path d="M3.7 16L19.3 16A1.2 1.2 0 0 0 19.3 13.6L3.7 13.6A1.2 1.2 0 0 0 3.7 16Z"/>',
   ),
+  // The three answers the theme control offers, drawn on the same grid as
+  // everything else here: a filled sun, a filled crescent, and a display for
+  // "whatever this device is doing".
+  sun: S(
+    '<path fill-rule="evenodd" d="M12 6.4a5.6 5.6 0 1 1 0 11.2 5.6 5.6 0 0 1 0-11.2Z"/>' +
+      '<path d="M10.8 2.6v1.9a1.2 1.2 0 0 0 2.4 0V2.6a1.2 1.2 0 0 0-2.4 0Z"/>' +
+      '<path d="M10.8 19.5v1.9a1.2 1.2 0 0 0 2.4 0v-1.9a1.2 1.2 0 0 0-2.4 0Z"/>' +
+      '<path d="M2.6 13.2h1.9a1.2 1.2 0 0 0 0-2.4H2.6a1.2 1.2 0 0 0 0 2.4Z"/>' +
+      '<path d="M19.5 13.2h1.9a1.2 1.2 0 0 0 0-2.4h-1.9a1.2 1.2 0 0 0 0 2.4Z"/>' +
+      '<path d="M4.93 6.63L6.27 7.97A1.2 1.2 0 0 0 7.97 6.27L6.63 4.93A1.2 1.2 0 0 0 4.93 6.63Z"/>' +
+      '<path d="M16.03 17.73L17.37 19.07A1.2 1.2 0 0 0 19.07 17.37L17.73 16.03A1.2 1.2 0 0 0 16.03 17.73Z"/>' +
+      '<path d="M17.73 7.97L19.07 6.63A1.2 1.2 0 0 0 17.37 4.93L16.03 6.27A1.2 1.2 0 0 0 17.73 7.97Z"/>' +
+      '<path d="M6.27 19.07L7.97 17.37A1.2 1.2 0 0 0 6.27 16.03L4.93 17.37A1.2 1.2 0 0 0 6.27 19.07Z"/>',
+  ),
+  moon: S(
+    '<path d="M20.1 14.6a8.6 8.6 0 0 1-10.7-10.7 1.2 1.2 0 0 0-1.6-1.4A9.9 9.9 0 1 0 21.5 16.2a1.2 1.2 0 0 0-1.4-1.6Z"/>',
+  ),
+  display: S(
+    '<path fill-rule="evenodd" d="M5.4 3.9h13.2a3.1 3.1 0 0 1 3.1 3.1v6.6a3.1 3.1 0 0 1-3.1 3.1H5.4a3.1 3.1 0 0 1-3.1-3.1V7a3.1 3.1 0 0 1 3.1-3.1Z' +
+      'M4.7 7.4a.9.9 0 0 1 .9-.9h12.8a.9.9 0 0 1 .9.9v5.8a.9.9 0 0 1-.9.9H5.6a.9.9 0 0 1-.9-.9z"/>' +
+      '<path d="M8.2 18.9h7.6a1.2 1.2 0 0 0 0-2.4H8.2a1.2 1.2 0 0 0 0 2.4Z"/>',
+  ),
   pencil: S(
     '<path fill-rule="evenodd" d="M3.8 20.2l1-4.6L15.6 4.8a2.2 2.2 0 0 1 3.1 0l.7.7a2.2 2.2 0 0 1 0 3.1L8.4 19.2z' +
       'M14.27 7.63L16.27 9.63A.75.75 0 0 0 17.33 8.57L15.33 6.57A.75.75 0 0 0 14.27 7.63Z"/>',
@@ -1865,6 +1887,9 @@ export function showModal({
   confirm = "Confirm",
   cancel = "Cancel",
   image,
+  // A confirmation whose Confirm removes something says so in the button, not
+  // only in the sentence above it. Red before the press is the whole point.
+  danger = false,
 }) {
   const dialog = $("#modal");
   const returnFocus = document.activeElement;
@@ -1889,7 +1914,7 @@ export function showModal({
           ${body}
           <div class="modal-actions">
             <button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>
-            <button class="btn btn-primary" value="confirm" type="submit">${esc(confirm)}</button>
+            <button class="btn ${danger ? "btn-danger" : "btn-primary"}" value="confirm" type="submit">${esc(confirm)}</button>
           </div>
         </form>`;
     const onBackdropClick = (event) => {

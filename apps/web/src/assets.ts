@@ -38,6 +38,7 @@ const PUBLIC_FILES = [
   ["screen-chats.js", "text/javascript; charset=utf-8"],
   ["screen-agents.js", "text/javascript; charset=utf-8"],
   ["screen-notifications.js", "text/javascript; charset=utf-8"],
+  ["screen-settings.js", "text/javascript; charset=utf-8"],
   // The mark, and then the sizes of it a browser cannot derive itself. The
   // SVG is the mark; the rasters exist because an installed home-screen icon
   // and an iOS touch icon are both asked for as PNGs at a fixed size, and

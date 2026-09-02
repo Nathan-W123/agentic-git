@@ -3251,6 +3251,11 @@ function messageRow(
     actions = "",
     compact = false,
     threadPath = undefined,
+    // What stands in the message's own words, when something else is a
+    // better account of them right now. The only caller is the live run line
+    // — see `threadLiveStatus` — and the stored text is untouched: it is the
+    // fallback the moment the override stops being offered.
+    bodyHtml = undefined,
   } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
@@ -3412,12 +3417,13 @@ function messageRow(
       )}">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
-          : messageFoldClip(
+          : (bodyHtml ??
+            messageFoldClip(
               `cmsg:${repositoryId}|${entry.id}`,
               entry.content,
               (shown) =>
                 `${messageBodyWithIcons({ ...entry, content: shown }, repositoryId)}${completedReference}`,
-            )
+            ))
       }</div>
       ${
         // Said plainly, beside a way to try again. The resend re-posts the
@@ -4189,6 +4195,29 @@ function isThreadEnding(reply) {
  */
 function isThreadThinking(reply) {
   return reply.kind === "progress";
+}
+
+/**
+ * How an agent says it has the task, as the gateway writes it.
+ *
+ * Mirrors the fixed handoff sentences in `services/api-gateway/src/server.ts`
+ * — one per way a task can be taken, all of them opening the same way. The
+ * words are the server's and stay the server's: this only recognises them, so
+ * that a thread whose run is still going can show the run in their place and
+ * hand them back the moment it stops. Nothing is rewritten or withheld.
+ *
+ * Deliberately the opening clause rather than the whole sentence. "…and I'm
+ * working on it", "…and I'm working on the plan" and the two queued endings
+ * are four variants of one announcement, and a fifth is a copy edit away.
+ */
+const THREAD_ACKNOWLEDGEMENT_RE = /^I've taken this task\b/u;
+
+/** Whether a reply is that announcement and nothing more. */
+function isThreadAcknowledgement(reply) {
+  return (
+    reply.kind === "agent" &&
+    THREAD_ACKNOWLEDGEMENT_RE.test(String(reply.content ?? "").trim())
+  );
 }
 
 /**
@@ -7459,6 +7488,82 @@ function threadThinkingBlock(rootId, turn, index) {
 }
 
 /**
+ * The run itself, in place of the sentence that said it had started.
+ *
+ * "I've taken this task and I'm working on it" is true for about a second.
+ * For the rest of the run it sits at the top of the thread as the newest
+ * thing the agent said, describing a moment that has long since passed, while
+ * everything actually happening is folded away inside "Thinking". So for as
+ * long as the task is live that row carries the run instead: the phase the
+ * narration has reached, or — when the agent said something the protocol
+ * never named — that line as written, which is the more useful of the two
+ * every time it happens.
+ *
+ * It is an ordinary `phase-slot`, so a change is the single legible swap
+ * `playPhaseSlots` already owns rather than a line rewriting itself under the
+ * reader, and it glimmers for exactly as long as the run does — a still line
+ * saying "Testing" is indistinguishable from a stalled one saying "Testing".
+ *
+ * Nothing is lost or rewritten. The acknowledgement is still the stored
+ * reply, and it comes back as ordinary words the moment the run stops.
+ */
+function threadLiveStatus(root) {
+  if (!threadIsWorking(root)) {
+    return undefined;
+  }
+  const turns = threadReplyTurns(planTranscriptReplies(root));
+  const turn = turns[turns.length - 1];
+  // An ended turn has its outcome to show and nothing left to narrate. A
+  // thread the reader has parked is stopped, and `threadIsWorking` already
+  // says so, but the ending is the case a stale busy frame can still get
+  // wrong — so it is checked here rather than trusted upstream.
+  if (turn === undefined || turn.replies.some(isThreadEnding)) {
+    return undefined;
+  }
+  const reply = turn.replies.find(isThreadAcknowledgement);
+  if (reply === undefined) {
+    return undefined;
+  }
+  // The newest line the run has narrated, whatever it turned out to be. A
+  // protocol beat becomes the same phase word every other surface speaks, so
+  // the room's row, the thread list and this line never disagree about what
+  // is happening. Anything else is the agent saying something nothing
+  // anticipated, and that sentence is worth more than the phase it left
+  // unchanged — it is shown as written and clipped to one line by the
+  // stylesheet, so the words that fit are the agent's own.
+  const narrated = turn.replies
+    .filter(isThreadThinking)
+    .flatMap((step) =>
+      String(step.content ?? "")
+        .split(/\n+/u)
+        .map((line) => line.replace(/\s+/gu, " ").trim())
+        .filter((line) => line !== ""),
+    );
+  const newest = narrated[narrated.length - 1];
+  let label = threadActivityLabel(root);
+  if (newest !== undefined) {
+    const phase = threadActivityLabel({
+      replies: [{ kind: "progress", content: newest }],
+    });
+    const known =
+      phase !== "Starting" ||
+      /starting on the code|Starting on |execution started/iu.test(newest);
+    label = known ? phase : newest;
+  }
+  return {
+    reply,
+    // `role="status"` rather than the dots' bare label: this replaces them,
+    // and a reader who cannot see the glimmer is told what the run is doing
+    // as it changes instead of only that something is still happening.
+    html: `<span class="thread-live-status" role="status">
+      <span class="sr-only">Working: </span>
+      <span class="tls-phase phase-slot glimmer-text"
+        data-phase-slot="thread-live:${esc(root.id)}">${esc(label)}</span>
+    </span>`,
+  };
+}
+
+/**
  * Renders each request with the thinking and answer that belong to that turn.
  *
  * The old renderer filtered the whole thread into one progress pile and one
@@ -7475,6 +7580,7 @@ function threadReplies(root, repositoryId) {
   const said = replies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
+  const live = threadLiveStatus(root);
   const flow = threadReplyTurns(replies)
     .map((turn, index) => {
       const thinking = threadThinkingBlock(root.id, turn, index);
@@ -7488,7 +7594,16 @@ function threadReplies(root, repositoryId) {
           // rather than the document itself — see `planLink`.
           reply.kind === "plan"
             ? planLink(root)
-            : summaryBlock(reply, repositoryId),
+            : // The handoff sentence, for as long as the run it announced is
+              // still going, shows the run instead — see `threadLiveStatus`.
+              // Still the same row, by the same author, at the same time: only
+              // the words it is carrying are the live ones.
+              reply === live?.reply
+              ? messageRow(reply, repositoryId, {
+                  isReply: true,
+                  bodyHtml: live.html,
+                })
+              : summaryBlock(reply, repositoryId),
         )
         .join("")}`;
     })
@@ -7613,6 +7728,13 @@ function threadTyping(root) {
     replies.length === 0 ||
     isThreadEnding(replies[replies.length - 1])
   ) {
+    return "";
+  }
+  // One running task, one continuous signal. Where the live line is up it is
+  // the better half of that pair — it says what is being done, and the dots
+  // only ever said that something was — so they stand down for it and come
+  // back for any run with no line of its own.
+  if (threadLiveStatus(root) !== undefined) {
     return "";
   }
   return `<div class="chan-typing thread-typing">
