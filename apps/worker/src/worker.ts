@@ -513,6 +513,9 @@ export class Worker {
     return this.identity?.id;
   }
 
+  /** Set by {@link register}; see {@link advertisedAdapters}. */
+  private advertised: string[] = [];
+
   public async register(): Promise<string> {
     const configured = new Set(
       Object.values(this.options.project.config.agents).map(
@@ -533,6 +536,7 @@ export class Worker {
             this.options.adapters?.includes(adapter),
           );
     const adapters = advertised;
+    this.advertised = [...adapters];
     const identity = await this.options.client.register({
       organizationId: this.options.organizationId,
       name: this.options.name ?? `worker-${process.pid}`,
@@ -541,6 +545,21 @@ export class Worker {
     });
     this.identity = identity;
     return identity.id;
+  }
+
+  /**
+   * What this worker told the control plane it can run.
+   *
+   * Worth reading back, because it is an intersection and an intersection can
+   * be empty. A worker that advertises nothing registers, polls happily
+   * forever, is never offered a single task, and reports itself as running
+   * the whole time — while the control plane, which decides an agent is
+   * reachable by exactly this list, draws every one of that person's agents
+   * as having no machine at all. Every symptom of it points somewhere else,
+   * so the list is said out loud at start rather than left to be inferred.
+   */
+  public get advertisedAdapters(): readonly string[] {
+    return this.advertised;
   }
 
   /** How many tasks this machine will hold at once. */

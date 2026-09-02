@@ -1776,6 +1776,38 @@ const FAKE_CLAUDE = [
   "",
 ].join("\n");
 
+test("a worker says which adapters it advertised, and an empty list is loud", async (t) => {
+  // The intersection of "what the config lists" and "what the host says this
+  // machine has" is what the control plane matches work against, and also
+  // what it decides an agent's reachability by. Empty, it produces a worker
+  // that registers, polls forever, is offered nothing, and reports itself as
+  // running — while every one of that person's agents is drawn as having no
+  // machine. Nothing about the symptom points at the list, so the list has to
+  // say itself.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "claude" },
+    theirs: { adapter: "codex" },
+  };
+  await runtime.project.save();
+
+  const both = makeWorker(runtime, { adapters: ["claude", "codex"] });
+  await both.register();
+  assert.deepEqual([...both.advertisedAdapters].sort(), ["claude", "codex"]);
+
+  // The host narrows it: a machine with only Codex installed advertises only
+  // Codex, however many agents the config lists.
+  const one = makeWorker(runtime, { adapters: ["codex"] });
+  await one.register();
+  assert.deepEqual([...one.advertisedAdapters], ["codex"]);
+
+  // And a host naming something the config has no agent for intersects to
+  // nothing. This is the state worth seeing, and it is reachable.
+  const none = makeWorker(runtime, { adapters: ["nonesuch"] });
+  await none.register();
+  assert.deepEqual([...none.advertisedAdapters], []);
+});
+
 test("a worker takes work from a control plane one protocol behind it, and refuses one two behind", async (t) => {
   // Protocol 4 added MCP servers to the lease, which are optional: a control
   // plane still on 3 never sends any, and the task it hands over is as good

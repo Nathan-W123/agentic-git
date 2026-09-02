@@ -1,4 +1,20 @@
-### 0.5.13 — Claude installed natively is Claude the app can see
+### 0.5.13 — say which agents this machine is actually running
+
+The Agents menu said "Running agents on this machine" whether it had found
+both your CLIs or one of them, and the worker log never mentioned the
+subject at all. That mattered more than it sounds. The list of CLIs this
+machine reports is exactly what the control plane uses to decide whether an
+agent is reachable — so a machine that found only one of two would take
+work for that one and, for the other, tell the room "no machine is running
+Kumi" and offer to install a CLI already sitting on the disk. Nothing
+failed, and the only two places that could have said so said nothing.
+
+The menu now names them. The worker log names them on every start, and if
+the list is empty — which is a worker that will never be given a single
+task, however healthy it looks — it says so outright, with both halves of
+the comparison printed so you can see which one is short.
+
+Also: Claude installed natively is now Claude the app can see.
 
 An agent whose CLI this app cannot find is an agent the control plane
 draws as having no machine at all. It goes grey, a mention brings up

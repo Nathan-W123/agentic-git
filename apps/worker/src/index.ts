@@ -66,7 +66,28 @@ async function main(): Promise<void> {
   });
 
   const id = await worker.register();
-  console.log(`Worker ${id} polling ${serverUrl}`);
+  const advertised = worker.advertisedAdapters;
+  console.log(
+    `Worker ${id} polling ${serverUrl} for ${
+      advertised.length === 0 ? "nothing" : advertised.join(", ")
+    }`,
+  );
+  if (advertised.length === 0) {
+    // The failure that looks like health. Registration succeeds, polling
+    // succeeds, the app says "running agents on this machine", and no task is
+    // ever offered — because the control plane matches work, and an agent's
+    // reachability, against exactly this list. Said as loudly as a log can,
+    // with both halves of the intersection named, because which one is empty
+    // is the whole diagnosis.
+    console.error(
+      "[worker] This worker advertised no adapters and will never be given " +
+        "work. Its project config lists " +
+        `${Object.keys(project.config.agents).join(", ") || "no agents"}, and ` +
+        "the host said this machine has " +
+        `${process.env["COORD_WORKER_ADAPTERS"]?.trim() || "(nothing)"}. ` +
+        "Work is only offered for an adapter present in both.",
+    );
+  }
 
   // A planned shutdown hands the lease back so the task is picked up again
   // immediately, instead of waiting out the expiry.
