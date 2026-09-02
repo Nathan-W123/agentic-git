@@ -13,6 +13,7 @@ import {
   type AuditEvent,
   type CanonicalVersion,
   type ChangeSet,
+  type McpServerTransport,
   type TouchedFileSample,
   type CommandResult,
   type ConflictAssessment,
@@ -61,10 +62,15 @@ import type {
   ChangesetComment,
   ChannelAgentOverride,
   ChannelEntryKind,
+  CreateMcpServerInput,
   CreateSubChannelInput,
+  McpServerRecord,
+  McpServerScope,
+  McpServerSecrets,
   SubChannel,
   SubChannelMember,
   SubChannelVisibility,
+  UpdateMcpServerInput,
   UpdateSubChannelInput,
   ChannelMessage,
   ChannelChangedFile,
@@ -127,7 +133,10 @@ import type {
 } from "./store.js";
 import {
   GENERAL_SUB_CHANNEL_SLUG,
+  applyMcpSecretsPatch,
   directPairKey,
+  mcpSecretNames,
+  normalizeMcpRepositoryIds,
   parseChangedFiles,
   repositoryConflicts,
 } from "./store.js";
@@ -186,6 +195,18 @@ function parseJson<T>(row: Row, column: string): T {
 function optionalJson<T>(row: Row, column: string): T | undefined {
   const value = optionalText(row, column);
   return value === undefined ? undefined : (JSON.parse(value) as T);
+}
+
+/**
+ * A nullable text column under a patch: `null` clears it, absent keeps what
+ * the row has, a string replaces it. The column is what goes into the
+ * statement, so the result is already SQL's NULL rather than `undefined`.
+ */
+function clearable(
+  patch: string | null | undefined,
+  current: string | undefined,
+): string | null {
+  return patch === undefined ? (current ?? null) : patch;
 }
 
 /** Appends `value` and returns its 1-based `$n` placeholder. */
@@ -827,11 +848,24 @@ export class PostgresCoordinationStore implements CoordinationStore {
     projectId: string,
     repositoryId: string,
   ): Promise<void> {
-    await this.query(
-      `DELETE FROM project_repositories
-       WHERE project_id = $1 AND repository_id = $2`,
-      [projectId, repositoryId],
-    );
+    await this.transaction(async (client) => {
+      // The project's MCP servers let go of the repository too: their
+      // attachment is a fact about this project, and a repository linked
+      // back later must not find last year's servers waiting for it.
+      await client.query(
+        `DELETE FROM project_mcp_server_repositories
+         WHERE repository_id = $2
+           AND server_id IN (
+             SELECT id FROM project_mcp_servers WHERE project_id = $1
+           )`,
+        [projectId, repositoryId],
+      );
+      await client.query(
+        `DELETE FROM project_repositories
+         WHERE project_id = $1 AND repository_id = $2`,
+        [projectId, repositoryId],
+      );
+    });
   }
 
   public async listProjectRepositories(
@@ -1874,6 +1908,299 @@ export class PostgresCoordinationStore implements CoordinationStore {
     };
   }
 
+  public async createMcpServer(
+    input: CreateMcpServerInput,
+  ): Promise<McpServerRecord> {
+    if ((await this.getProject(input.projectId)) === undefined) {
+      throw new Error(`Unknown project: ${input.projectId}`);
+    }
+    await this.transaction(async (client) => {
+      await this.assertMcpServerNameAvailable(client, input.projectId, input.name);
+      // `enabled` is not a parameter: a row is born off and only
+      // `setMcpServerApproval` turns it on. See `McpServerRecord`.
+      await client.query(
+        `INSERT INTO project_mcp_servers
+           (id, project_id, name, transport, command, args_json, url,
+            values_json, secrets_json, enabled, scope, created_by,
+            created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, $10, $11, $12, $13)`,
+        [
+          input.id,
+          input.projectId,
+          input.name,
+          input.transport,
+          input.command ?? null,
+          JSON.stringify(input.args ?? []),
+          input.url ?? null,
+          JSON.stringify(input.values ?? {}),
+          JSON.stringify(input.secrets ?? {}),
+          input.scope ?? "repository",
+          input.createdBy,
+          input.createdAt,
+          input.createdAt,
+        ],
+      );
+      await this.attachMcpServerRepositories(
+        client,
+        input.id,
+        normalizeMcpRepositoryIds(input.repositoryIds ?? []),
+      );
+    }, { serialize: true });
+    return await this.requireMcpServer(input.id);
+  }
+
+  public async getMcpServer(id: string): Promise<McpServerRecord | undefined> {
+    const row = await this.row(
+      "SELECT * FROM project_mcp_servers WHERE id = $1",
+      [id],
+    );
+    return row === undefined
+      ? undefined
+      : this.toMcpServer(row, await this.mcpServerRepositoryIds(id));
+  }
+
+  public async getMcpServerSecrets(
+    id: string,
+  ): Promise<McpServerSecrets | undefined> {
+    const row = await this.row(
+      "SELECT secrets_json FROM project_mcp_servers WHERE id = $1",
+      [id],
+    );
+    return row === undefined
+      ? undefined
+      : parseJson<McpServerSecrets>(row, "secrets_json");
+  }
+
+  public async listMcpServers(
+    projectId: string,
+    filter: { repositoryId?: string; enabledOnly?: boolean } = {},
+  ): Promise<McpServerRecord[]> {
+    // A project-wide server attaches everywhere; a repository-scoped one
+    // only where its join rows say. Both filters are folded into the one
+    // statement through nullable parameters so the query is the same shape
+    // whichever of them a caller passes.
+    const rows = await this.rows(
+      `SELECT * FROM project_mcp_servers
+        WHERE project_id = $1
+          AND ($2::text IS NULL OR scope = 'project' OR EXISTS (
+                SELECT 1 FROM project_mcp_server_repositories
+                 WHERE server_id = project_mcp_servers.id
+                   AND repository_id = $2))
+          AND ($3::boolean = false OR enabled)
+        ORDER BY LOWER(name) COLLATE "C", id COLLATE "C"`,
+      [projectId, filter.repositoryId ?? null, filter.enabledOnly === true],
+    );
+    const records: McpServerRecord[] = [];
+    for (const row of rows) {
+      records.push(
+        this.toMcpServer(
+          row,
+          await this.mcpServerRepositoryIds(text(row, "id")),
+        ),
+      );
+    }
+    return records;
+  }
+
+  public async updateMcpServer(
+    id: string,
+    patch: UpdateMcpServerInput,
+  ): Promise<McpServerRecord> {
+    await this.transaction(async (client) => {
+      // Locked for the length of the edit so two admins patching different
+      // secrets do not each write the other's out from under it.
+      const row = (
+        await client.query(
+          "SELECT * FROM project_mcp_servers WHERE id = $1 FOR UPDATE",
+          [id],
+        )
+      ).rows[0] as Row | undefined;
+      if (row === undefined) {
+        throw new Error(`Unknown MCP server: ${id}`);
+      }
+      const existing = this.toMcpServer(row, []);
+      if (patch.name !== undefined) {
+        await this.assertMcpServerNameAvailable(
+          client,
+          existing.projectId,
+          patch.name,
+          id,
+        );
+      }
+      const secrets = applyMcpSecretsPatch(
+        parseJson<McpServerSecrets>(row, "secrets_json"),
+        patch.secrets,
+      );
+      // `enabled`, `approved_by` and `approved_at` are deliberately absent
+      // from this statement; see `McpServerRecord`.
+      await client.query(
+        `UPDATE project_mcp_servers
+            SET name = $1, command = $2, args_json = $3, url = $4,
+                values_json = $5, secrets_json = $6, scope = $7, updated_at = $8
+          WHERE id = $9`,
+        [
+          patch.name ?? existing.name,
+          clearable(patch.command, existing.command),
+          JSON.stringify(patch.args ?? existing.args),
+          clearable(patch.url, existing.url),
+          JSON.stringify(patch.values ?? existing.values),
+          JSON.stringify(secrets),
+          patch.scope ?? existing.scope,
+          patch.updatedAt,
+          id,
+        ],
+      );
+      if (patch.repositoryIds !== undefined) {
+        await this.replaceMcpServerRepositories(
+          client,
+          id,
+          normalizeMcpRepositoryIds(patch.repositoryIds),
+        );
+      }
+    }, { serialize: true });
+    return await this.requireMcpServer(id);
+  }
+
+  public async setMcpServerApproval(
+    id: string,
+    approval: { enabled: boolean; approvedBy: string; approvedAt: string },
+  ): Promise<McpServerRecord> {
+    // Disabling clears who approved and when, so a later enable is a fresh
+    // decision with a fresh name on it rather than the old one resumed.
+    const result = await this.query(
+      `UPDATE project_mcp_servers
+          SET enabled = $1, approved_by = $2, approved_at = $3, updated_at = $4
+        WHERE id = $5`,
+      [
+        approval.enabled,
+        approval.enabled ? approval.approvedBy : null,
+        approval.enabled ? approval.approvedAt : null,
+        approval.approvedAt,
+        id,
+      ],
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      throw new Error(`Unknown MCP server: ${id}`);
+    }
+    return await this.requireMcpServer(id);
+  }
+
+  public async deleteMcpServer(id: string): Promise<void> {
+    // No foreign keys on the join table, so the attachments go explicitly
+    // and in the same transaction: an orphaned join row would re-attach a
+    // server later created under the same id.
+    await this.transaction(async (client) => {
+      await client.query(
+        "DELETE FROM project_mcp_server_repositories WHERE server_id = $1",
+        [id],
+      );
+      await client.query("DELETE FROM project_mcp_servers WHERE id = $1", [id]);
+    });
+  }
+
+  private async requireMcpServer(id: string): Promise<McpServerRecord> {
+    const record = await this.getMcpServer(id);
+    if (record === undefined) {
+      throw new Error(`Unknown MCP server: ${id}`);
+    }
+    return record;
+  }
+
+  private async mcpServerRepositoryIds(serverId: string): Promise<string[]> {
+    const rows = await this.rows(
+      `SELECT repository_id FROM project_mcp_server_repositories
+        WHERE server_id = $1 ORDER BY repository_id`,
+      [serverId],
+    );
+    return normalizeMcpRepositoryIds(
+      rows.map((row) => text(row, "repository_id")),
+    );
+  }
+
+  private async replaceMcpServerRepositories(
+    client: PoolClient,
+    serverId: string,
+    repositoryIds: string[],
+  ): Promise<void> {
+    await client.query(
+      "DELETE FROM project_mcp_server_repositories WHERE server_id = $1",
+      [serverId],
+    );
+    await this.attachMcpServerRepositories(client, serverId, repositoryIds);
+  }
+
+  /**
+   * Insert only. A create must not sweep the join table for its id first:
+   * that would quietly repair rows a delete failed to remove, and the
+   * primary key is what should say so instead.
+   */
+  private async attachMcpServerRepositories(
+    client: PoolClient,
+    serverId: string,
+    repositoryIds: string[],
+  ): Promise<void> {
+    for (const repositoryId of repositoryIds) {
+      await client.query(
+        `INSERT INTO project_mcp_server_repositories (server_id, repository_id)
+         VALUES ($1, $2)`,
+        [serverId, repositoryId],
+      );
+    }
+  }
+
+  /**
+   * Checked before the insert so the failure is a sentence rather than a
+   * constraint code; the unique index over LOWER(name) remains the
+   * guarantee if two writers race past this.
+   */
+  private async assertMcpServerNameAvailable(
+    client: PoolClient,
+    projectId: string,
+    name: string,
+    exceptId = "",
+  ): Promise<void> {
+    const existing = (
+      await client.query(
+        `SELECT id FROM project_mcp_servers
+          WHERE project_id = $1 AND LOWER(name) = LOWER($2) AND id <> $3`,
+        [projectId, name, exceptId],
+      )
+    ).rows[0] as Row | undefined;
+    if (existing !== undefined) {
+      throw new Error(
+        `An MCP server named ${name} already exists in project ${projectId}`,
+      );
+    }
+  }
+
+  private toMcpServer(row: Row, repositoryIds: string[]): McpServerRecord {
+    const command = optionalText(row, "command");
+    const url = optionalText(row, "url");
+    const approvedBy = optionalText(row, "approved_by");
+    const approvedAt = optionalText(row, "approved_at");
+    return {
+      id: text(row, "id"),
+      projectId: text(row, "project_id"),
+      name: text(row, "name"),
+      transport: text(row, "transport") as McpServerTransport,
+      ...(command === undefined ? {} : { command }),
+      args: parseJson<string[]>(row, "args_json"),
+      ...(url === undefined ? {} : { url }),
+      values: parseJson<Record<string, string>>(row, "values_json"),
+      // Names only. The triples in `secrets_json` leave this store through
+      // `getMcpServerSecrets` and nothing else.
+      secretNames: mcpSecretNames(parseJson<McpServerSecrets>(row, "secrets_json")),
+      enabled: flag(row, "enabled"),
+      scope: text(row, "scope") as McpServerScope,
+      repositoryIds,
+      ...(approvedBy === undefined ? {} : { approvedBy }),
+      ...(approvedAt === undefined ? {} : { approvedAt }),
+      createdBy: text(row, "created_by"),
+      createdAt: text(row, "created_at"),
+      updatedAt: text(row, "updated_at"),
+    };
+  }
+
   public async createAuthSession(session: AuthSessionRecord): Promise<void> {
     await this.query(
       `INSERT INTO auth_sessions
@@ -1942,6 +2269,13 @@ export class PostgresCoordinationStore implements CoordinationStore {
    */
   public async removeRepository(id: string): Promise<void> {
     await this.transaction(async (client) => {
+      // An MCP server's attachment goes with the repository it was attached
+      // to. Left behind, the join row would re-attach the server — secrets
+      // and all — to whatever repository next took this id.
+      await client.query(
+        "DELETE FROM project_mcp_server_repositories WHERE repository_id = $1",
+        [id],
+      );
       await client.query(
         `DELETE FROM channel_message_reactions
            WHERE message_id IN (
@@ -2185,6 +2519,15 @@ export class PostgresCoordinationStore implements CoordinationStore {
       { serialize: true },
     );
     return task;
+  }
+
+  public async getSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const row = await this.row("SELECT * FROM submitted_tasks WHERE id = $1", [
+      taskId,
+    ]);
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async listSubmittedTasks(

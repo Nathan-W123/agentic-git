@@ -260,6 +260,12 @@ import {
   invitationLink,
   createApiToken,
   loadApiTokens,
+  approveMcpServer,
+  createMcpServer,
+  deleteMcpServer,
+  ensureMcpServers,
+  parseMcpArgs,
+  parseMcpSecrets,
   loadInvitations,
   revokeApiToken,
   loadPendingQuestions,
@@ -2500,6 +2506,111 @@ function apiTokensCard() {
   });
 }
 
+/**
+ * MCP servers the project's agents may reach while they work.
+ *
+ * Approving one here does not start anything: it records that somebody with
+ * the standing to say so said yes, and each teammate's computer still asks
+ * before it runs the program. So the list shows who approved and when, the
+ * way an audit line would, rather than a bare switch. Secrets are write-only
+ * — the row shows how many there are and never what they are, because the
+ * list route never has them to give.
+ */
+function mcpServersCard() {
+  const servers = state.mcpServers ?? [];
+  const enabled = state.mcpServersEnabled;
+  const heading = {
+    id: "mcp-servers",
+    heading: "MCP servers",
+    description:
+      "Programs your agents can reach while they work — a Linear or Sentry server, say. Approving one starts it on each teammate's own computer when their agent runs here, so approval is a recorded act and each computer still gets to say yes.",
+  };
+  if (enabled === false) {
+    return settingsSectionBlock({
+      ...heading,
+      body: settingRow({
+        row: "mcp-servers",
+        label: "Switched off on this deployment",
+        description:
+          "Whoever runs this control plane has not enabled MCP servers. Setting <code>COORD_MCP_ENABLED=1</code> on it turns this section on.",
+      }),
+    });
+  }
+  const scopeOf = (server) =>
+    server.scope === "repository" ? "this repository" : "every repository";
+  const approvalOf = (server) =>
+    server.enabled === true && server.approvedBy !== undefined
+      ? `approved by ${esc(memberName(server.approvedBy) ?? server.approvedBy)} ${esc(
+          relativeTime(server.approvedAt),
+        )}`
+      : "not approved";
+  const secretsOf = (server) => {
+    const count = (server.secretNames ?? []).length;
+    return `${String(count)} secret${count === 1 ? "" : "s"}`;
+  };
+  return settingsSectionBlock({
+    ...heading,
+    body: `${settingRow({
+      row: "mcp-servers",
+      label: "New server",
+      description:
+        "Name it the way your agents will hear it. A stdio server is a command started on the agent's machine; an http server is a URL it talks to.",
+      stacked: true,
+      control: `<div class="st-mcp-form">
+        <input class="input input-sm" data-mcp-name placeholder="linear"
+          aria-label="Server name">
+        <select class="input input-sm" data-mcp-transport data-act="mcp-transport"
+          aria-label="Transport">
+          <option value="stdio">stdio — a command</option>
+          <option value="http">http — a URL</option>
+        </select>
+        <div data-mcp-stdio>
+          <input class="input input-sm" data-mcp-command placeholder="npx"
+            aria-label="Command">
+          <input class="input input-sm" data-mcp-args placeholder="-y @linear/mcp-server"
+            aria-label="Arguments, space-separated">
+        </div>
+        <div data-mcp-http hidden>
+          <input class="input input-sm" data-mcp-url placeholder="https://mcp.example.com/mcp"
+            aria-label="Server URL">
+          <input class="input input-sm" data-mcp-token type="password" autocomplete="off"
+            placeholder="Bearer token, if the server needs one" aria-label="Bearer token">
+        </div>
+        <textarea class="input st-textarea" rows="3" data-mcp-secrets data-mcp-stdio-only
+          placeholder="LINEAR_API_KEY=lin_api_…"
+          aria-label="Environment for the command, one per line as NAME=value"></textarea>
+        <select class="input input-sm" data-mcp-scope aria-label="Scope">
+          <option value="repository">This repository</option>
+          <option value="project">Every repository</option>
+        </select>
+        <span>
+          <button type="button" class="btn btn-sm btn-primary" data-act="mcp-create">Create</button>
+        </span>
+      </div>`,
+    })}${
+      servers.length === 0
+        ? `<div class="st-inline-empty">${icon("lock")}<span>No servers yet.</span></div>`
+        : servers
+            .map((server) =>
+              settingRow({
+                label: server.name ?? "Unnamed",
+                description: `${esc(server.transport ?? "stdio")} · ${scopeOf(server)} · ${secretsOf(
+                  server,
+                )} · ${approvalOf(server)}`,
+                control: `<button type="button" class="btn btn-sm${
+                  server.enabled === true ? "" : " btn-primary"
+                }" data-act="mcp-approve" data-value="${esc(server.id)}">${
+                  server.enabled === true ? "Disable" : "Approve"
+                }</button>
+                <button type="button" class="btn btn-sm btn-danger"
+                  data-act="mcp-remove" data-value="${esc(server.id)}">Remove</button>`,
+              }),
+            )
+            .join("")
+    }`,
+  });
+}
+
 /** Repository, approval policy and app tokens — the project-wide controls. */
 function projectControlsSection() {
   return `${settingsSectionBlock({
@@ -2509,7 +2620,7 @@ function projectControlsSection() {
       "Canonical state is owned by the control plane. Publishing it to a remote branch is /push in the channel.",
     body: `<div data-settings-row="repository" id="settings-row-repository"
       tabindex="-1">${repositoryDefinitionList()}</div>`,
-  })}${approvalPolicySection()}${apiTokensCard()}`;
+  })}${approvalPolicySection()}${apiTokensCard()}${mcpServersCard()}`;
 }
 
 /** Everything the person who runs this deployment looks after. */
@@ -8435,6 +8546,117 @@ async function revokeApiTokenConfirmed(id) {
 }
 
 /**
+ * Removing an MCP server, after the same confirmation a token revoke gets.
+ *
+ * Removal reaches further than disabling: an agent mid-task on somebody's
+ * machine loses the tools it was told it had, and the sealed secrets go with
+ * the record. Disable is the reversible button beside it, so this one asks.
+ */
+async function removeMcpServerConfirmed(id) {
+  const server = (state.mcpServers ?? []).find((entry) => entry.id === id);
+  const confirmed = await confirmDestructive({
+    title: `Remove ${server?.name ?? "this server"}?`,
+    subtitle:
+      "Agents stop being offered it on their next run, and its secrets are " +
+      "deleted with it. Disable it instead to keep the record.",
+    confirm: "Remove server",
+    cancel: "Keep it",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await deleteMcpServer(state.projectId, id);
+    toast("Server removed", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Reads the new-server form and registers it.
+ *
+ * The form is read at click time rather than mirrored into state as it is
+ * typed, the way the token form is: nothing else on the page needs the draft,
+ * and a half-typed secret has no business in a render cycle. Errors are the
+ * server's own words in the same toast a token error uses — a name already
+ * taken, a deployment with the feature off, a server that points back at
+ * this control plane.
+ */
+/**
+ * The one header an http MCP server can be given from the form.
+ *
+ * "Bearer " is prepended here so the person pastes the token as their
+ * provider showed it; a token already carrying the prefix is left alone
+ * rather than doubled.
+ */
+function mcpBearerHeader(token) {
+  const trimmed = String(token ?? "").trim();
+  if (trimmed === "") {
+    return {};
+  }
+  return {
+    Authorization: /^Bearer\s/iu.test(trimmed) ? trimmed : `Bearer ${trimmed}`,
+  };
+}
+
+function createMcpServerFromForm() {
+  const read = (selector) =>
+    (document.querySelector(selector)?.value ?? "").trim();
+  const name = read("[data-mcp-name]");
+  if (name === "") {
+    toast("Name the server the way your agents will hear it", "error");
+    return;
+  }
+  const transport = read("[data-mcp-transport]") === "http" ? "http" : "stdio";
+  const scope = read("[data-mcp-scope]") === "project" ? "project" : "repository";
+  if (scope === "repository" && !state.repositoryId) {
+    toast("Open a repository first, or pick every repository", "error");
+    return;
+  }
+  const input = { name, transport, scope };
+  if (transport === "stdio") {
+    const command = read("[data-mcp-command]");
+    if (command === "") {
+      toast("A stdio server needs a command to start", "error");
+      return;
+    }
+    input.command = command;
+    input.args = parseMcpArgs(read("[data-mcp-args]"));
+  } else {
+    const url = read("[data-mcp-url]");
+    if (url === "") {
+      toast("An http server needs a URL", "error");
+      return;
+    }
+    input.url = url;
+  }
+  // A stdio server's secrets are its environment, typed as NAME=value. An
+  // http server's are its headers, and the only header shape every vendor's
+  // CLI can be handed is one bearer token — Codex reads nothing else — so the
+  // form asks for the token alone and builds the header itself. A server
+  // that needs some other header is created through the API, and runs only
+  // on a Claude agent.
+  const secrets =
+    transport === "stdio"
+      ? parseMcpSecrets(document.querySelector("[data-mcp-secrets]")?.value ?? "")
+      : mcpBearerHeader(read("[data-mcp-token]"));
+  if (Object.keys(secrets).length > 0) {
+    input.secrets = secrets;
+  }
+  if (scope === "repository") {
+    input.repositoryIds = [state.repositoryId];
+  }
+  void createMcpServer(state.projectId, input)
+    .then(() => {
+      toast(`${name} added — approve it when you are ready`, "ok");
+      render();
+    })
+    .catch((error) => toast(error.message, "error"));
+}
+
+/**
  * Scrolls a row into view and puts focus on it.
  *
  * Focus lands on the row, not on the control inside it: the person searched
@@ -8499,11 +8721,11 @@ function openSettings(section = "general") {
     state.settingsPushedEntry = true;
   }
   // Fetched on open rather than at boot: nobody who never opens settings
-  // needs their token list, and the section renders its skeleton until it
-  // arrives.
-  void loadApiTokens()
-    .then(() => render())
-    .catch(() => undefined);
+  // needs these lists. Settled, so one failing still renders the other.
+  void Promise.allSettled([
+    loadApiTokens(),
+    ensureMcpServers(state.projectId),
+  ]).then(() => render());
   state.settingsAgentsLoading = state.providers.length === 0;
   void loadProviders()
     .catch(() => undefined)
@@ -11447,6 +11669,23 @@ document.addEventListener("click", (event) => {
     case "token-revoke":
       void revokeApiTokenConfirmed(value);
       return;
+    case "mcp-create":
+      createMcpServerFromForm();
+      return;
+    case "mcp-approve": {
+      const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
+      const enabled = server?.enabled !== true;
+      void approveMcpServer(state.projectId, value, enabled)
+        .then(() => {
+          toast(enabled ? "Server approved" : "Server disabled", "ok");
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "mcp-remove":
+      void removeMcpServerConfirmed(value);
+      return;
     case "invite-revoke":
       void revokeInvitation(value)
         .then(() => {
@@ -11779,6 +12018,23 @@ document.addEventListener("change", (event) => {
   // the keyboard fires no click at all.
   if (picker?.dataset?.act === "offline-target") {
     setOfflineTarget(picker.value, render);
+    return;
+  }
+  // Which fields a new MCP server needs depends on its transport. Toggled in
+  // place rather than re-rendered: a render would throw away the name and the
+  // secrets somebody has already typed into the same form.
+  if (picker?.dataset?.act === "mcp-transport") {
+    const http = picker.value === "http";
+    const form = picker.closest(".st-mcp-form");
+    for (const stdioField of form?.querySelectorAll(
+      "[data-mcp-stdio], [data-mcp-stdio-only]",
+    ) ?? []) {
+      stdioField.hidden = http;
+    }
+    const httpFields = form?.querySelector("[data-mcp-http]");
+    if (httpFields) {
+      httpFields.hidden = !http;
+    }
     return;
   }
   if (picker?.dataset?.act === "channel-picture-pick") {

@@ -19,7 +19,8 @@ import {
   type CoordinationStore,
 } from "@coord/persistence";
 
-import { AGENT_ACCOUNT_PREFIX } from "@coord/shared-types";
+import { AGENT_ACCOUNT_PREFIX, mcpServersForLease } from "@coord/shared-types";
+import { createSecretSealer, type SecretSealer } from "@coord/workspace-manager";
 
 import type { StripeClient } from "./stripe.js";
 import { effectiveRole, subscriptionAllowsWork } from "./billing.js";
@@ -422,6 +423,12 @@ async function startRuntime(
      * deployment without billing configured looks like.
      */
     stripe?: StripeClient;
+    /**
+     * Seals MCP secrets, standing in for the credential store. Absent for
+     * every test that is not about tools, which is also what a deployment
+     * with no credential store looks like to the routes that need one.
+     */
+    secretSealer?: SecretSealer;
     /**
      * Drops the optional `listAgents` operation, as a deployment that does
      * not implement it does — the fallback path for anything that joins
@@ -1071,7 +1078,24 @@ async function startRuntime(
       if (leased === undefined) {
         return undefined;
       }
+      // The same gate the real `leaseWork` runs, on the same store, with
+      // the sealer this runtime was given: what the gateway sends a worker
+      // is decided there, and a fake that skipped it would prove nothing
+      // about the wire.
+      const worker = await store.getWorker(input.workerId);
+      const mcpServers = await mcpServersForLease(store, {
+        opener: options.secretSealer,
+        projectId: input.projectId,
+        repositoryId: leased.task.repositoryId,
+        taskId: leased.task.id,
+        taskSubmittedBy: leased.task.submittedBy,
+        workerId: input.workerId,
+        workerUserId: worker?.userId ?? "",
+        workerProtocolVersion: input.protocolVersion,
+        leaseId: leased.lease.id,
+      });
       return {
+        ...(mcpServers === undefined ? {} : { mcpServers }),
         lease: leased.lease,
         task: leased.task,
         repository: { id: leased.task.repositoryId, branch: "main" },
@@ -1180,6 +1204,9 @@ async function startRuntime(
     ...(options.planHoldTtlMs === undefined
       ? {}
       : { planHoldTtlMs: options.planHoldTtlMs }),
+    ...(options.secretSealer === undefined
+      ? {}
+      : { secretSealer: options.secretSealer }),
     ...(options.codexUsageReader === undefined
       ? {}
       : { codexUsageReader: options.codexUsageReader }),
@@ -20952,4 +20979,887 @@ test("creating an agent twice keeps the name it was dealt", async (t) => {
     body: {},
   });
   assert.equal(again.data.agent.callSign, first.data.agent.callSign);
+});
+
+/**
+ * Kumi over MCP: the endpoint a co-founder adds to Claude Code or Cursor.
+ *
+ * These go through real HTTP with a real bearer token, because the three
+ * things most likely to break are not in the protocol layer: the token path,
+ * the absence of an `Origin` header, and whether a tool's answer is a sentence
+ * a model can act on.
+ */
+async function mcpRuntime(t: TestContext, scopes: string[] = ["view", "submit_task"]) {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "payments");
+  runtime.chatConnections.set(bootstrapped.user.id, [{ provider: "anthropic" }]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const created = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "editor", scopes },
+  });
+  assert.equal(created.status, 201);
+  return {
+    runtime,
+    owner,
+    user: bootstrapped.user,
+    repositoryId,
+    token: created.data.token as string,
+  };
+}
+
+/** One JSON-RPC message over the MCP route, cookie-less like a real client. */
+async function rpc(
+  origin: string,
+  token: string,
+  message: Record<string, unknown>,
+) {
+  return await bearer(origin, "/api/v1/mcp", token, {
+    method: "POST",
+    body: message,
+  });
+}
+
+test("an MCP client can hand-shake and see the tools", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+
+  const hello = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {} },
+  });
+  assert.equal(hello.status, 200);
+  assert.deepEqual(hello.data.result.capabilities, { tools: {} });
+  assert.equal(hello.data.result.serverInfo.name, "kumi");
+
+  // No Origin header is sent, which is what every non-browser client does.
+  // The gateway's origin check must let that through or nothing works.
+  const listed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/list",
+  });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(
+    (listed.data.result.tools as Array<{ name: string }>).map((tool) => tool.name),
+    [
+      "list_repositories",
+      "submit_task",
+      "task_status",
+      "cancel_task",
+      "answer_question",
+    ],
+  );
+});
+
+test("a GET is refused in a shape an MCP client can read", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const probed = await bearer(runtime.origin, "/api/v1/mcp", token);
+  assert.equal(probed.status, 405);
+  // Not the gateway's own error envelope: a client probing for a stream has to
+  // read "does not stream", not "transport failed".
+  assert.equal(probed.data.jsonrpc, "2.0");
+  assert.equal(probed.data.error.code, -32600);
+});
+
+test("list_repositories names the room's agents and whether they are live", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const listed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  const text = listed.data.result.content[0].text as string;
+  assert.match(text, /payments/u);
+  // The roster travels with the repository because there is no `list_agents`,
+  // and without it a model cannot answer the question submit_task asks it.
+  assert.match(text, /@.+ — (online|offline)/u);
+});
+
+test("a token without the scope is told which scope, not that the server broke", async (t) => {
+  const { runtime, token } = await mcpRuntime(t, ["view"]);
+  const refused = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "x", objective: "do it" },
+    },
+  });
+  assert.equal(refused.status, 200);
+  assert.equal(refused.data.error, undefined, "sent as a protocol error");
+  assert.equal(refused.data.result.isError, true);
+  assert.match(refused.data.result.content[0].text, /submit_task/u);
+});
+
+test("submit_task names the repositories it can reach when given a wrong one", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const missed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 5,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "nonesuch", agent: "x", objective: "do it" },
+    },
+  });
+  assert.equal(missed.data.result.isError, true);
+  assert.match(missed.data.result.content[0].text, /No repository called/u);
+  assert.match(missed.data.result.content[0].text, /payments/u);
+});
+
+test("submit_task refuses a channel command and the everyone broadcast", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  // Both would post a message and start nothing, and the route would answer
+  // 201 — success for work that will never run.
+  const command = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 6,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "x", objective: "/push" },
+    },
+  });
+  assert.equal(command.data.result.isError, true);
+  assert.match(command.data.result.content[0].text, /channel command/u);
+
+  const broadcast = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "agents", objective: "do it" },
+    },
+  });
+  assert.equal(broadcast.data.result.isError, true);
+  assert.match(broadcast.data.result.content[0].text, /does not start work/u);
+});
+
+test("task_status says where a task got to", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "raise the retry ceiling",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: user.id,
+  });
+
+  const queued = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 8,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: task.id } },
+  });
+  assert.match(queued.data.result.content[0].text, /raise the retry ceiling/u);
+  assert.match(queued.data.result.content[0].text, /queued/iu);
+
+  await runtime.store.cancelSubmittedTask(task.id);
+  const stopped = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 9,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: task.id } },
+  });
+  // It follows the row rather than snapshotting it.
+  assert.doesNotMatch(
+    stopped.data.result.content[0].text as string,
+    /Status: queued/iu,
+  );
+
+  const missing = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 10,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: "task_nope" } },
+  });
+  assert.equal(missing.data.result.isError, true);
+});
+
+test("submit_task posts into the channel and hands back a task id", async (t) => {
+  const { runtime, token, repositoryId } = await mcpRuntime(t);
+  const roster = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 20,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  // Address whoever the roster actually named, so the test does not encode a
+  // display-name format that is allowed to change.
+  const agent = /@(.+?) — /u.exec(
+    roster.data.result.content[0].text as string,
+  )?.[1];
+  assert.ok(agent, "no agent in the roster to address");
+
+  const sent = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 21,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the retry ceiling",
+      },
+    },
+  });
+  assert.equal(sent.data.result.isError, undefined, sent.data.result.content[0].text);
+  const said = sent.data.result.content[0].text as string;
+  assert.match(said, /Task task_/u);
+
+  // The message is really in the room — this is the half that makes a task
+  // dispatched from an editor visible to everybody else.
+  const messages = await runtime.store.listChannelMessages(repositoryId, "", {});
+  assert.ok(
+    messages.some((message) => message.content.includes("raise the retry ceiling")),
+    "nothing was posted into the channel",
+  );
+
+  // And the id it quoted names a real task, which is what task_status needs.
+  const quoted = /Task (task_[\w-]+)/u.exec(said)?.[1] ?? "";
+  assert.ok(await runtime.store.getSubmittedTask(quoted), "quoted a task id that does not exist");
+});
+
+/**
+ * The offline exchange, which is the popup translated for a tool.
+ *
+ * The room asks before it sends — queue, reroute, or cancel — because a task
+ * filed against a machine that is not listening will sit there. An editor has
+ * no room to ask in, so the tool refuses to write anything, states the three
+ * choices, and waits to be called again. The rule it must never break is that
+ * the first call leaves *nothing* behind: no message, no task.
+ */
+test("submit_task asks before filing work against a machine that is off", async (t) => {
+  const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
+  process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_AGENTS_ONLY"];
+    } else {
+      process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
+    }
+  });
+
+  const { runtime, token, repositoryId } = await mcpRuntime(t);
+  const roster = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 30,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  const agent = /@(.+?) — /u.exec(
+    roster.data.result.content[0].text as string,
+  )?.[1];
+  assert.ok(agent);
+  // Nobody has registered a worker, so no machine is listening for anyone.
+  assert.match(roster.data.result.content[0].text as string, /— offline/u);
+
+  const asked = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 31,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent, objective: "raise the ceiling" },
+    },
+  });
+  const question = asked.data.result.content[0].text as string;
+  assert.match(question, /offline/u);
+  assert.match(question, /queue/u);
+  assert.match(question, /reroute/u);
+  assert.match(question, /cancel/u);
+  assert.match(question, /when_offline/u);
+
+  // Nothing was written. This is the assertion the whole design turns on.
+  assert.deepEqual(await runtime.store.listSubmittedTasks({ repositoryId }), []);
+  assert.deepEqual(
+    (await runtime.store.listChannelMessages(repositoryId, "", {})).filter(
+      (message) => message.content.includes("raise the ceiling"),
+    ),
+    [],
+  );
+
+  // Cancelling is a call that writes nothing either.
+  const dropped = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 32,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the ceiling",
+        when_offline: "cancel",
+      },
+    },
+  });
+  assert.match(dropped.data.result.content[0].text as string, /Nothing was submitted/u);
+  assert.deepEqual(await runtime.store.listSubmittedTasks({ repositoryId }), []);
+
+  // Answering "queue" files it, and says so rather than implying it started.
+  const queued = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 33,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the ceiling",
+        when_offline: "queue",
+      },
+    },
+  });
+  const filed = queued.data.result.content[0].text as string;
+  assert.equal(queued.data.result.isError, undefined, filed);
+  assert.match(filed, /Queued/u);
+  assert.match(filed, /machine comes back/u);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).length,
+    1,
+  );
+});
+
+
+/**
+ * Turns the MCP switch on for one test and puts it back afterwards, so a
+ * test that proves the switch holds and a test that needs it open cannot
+ * leave the environment set for whichever runs next.
+ */
+function withMcpServersEnabled(
+  t: { after: (fn: () => void) => void },
+  enabled = true,
+): void {
+  const previous = process.env["COORD_MCP_ENABLED"];
+  if (enabled) {
+    process.env["COORD_MCP_ENABLED"] = "1";
+  } else {
+    delete process.env["COORD_MCP_ENABLED"];
+  }
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_MCP_ENABLED"];
+    } else {
+      process.env["COORD_MCP_ENABLED"] = previous;
+    }
+  });
+}
+
+const MCP_TEST_SECRET = "Bearer lin_api_the_plaintext_nobody_should_see";
+
+/** An HTTP server with one secret header, the way a settings screen posts it. */
+function mcpHttpServerBody(
+  name = "linear",
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    name,
+    transport: "http",
+    url: "https://mcp.linear.app/mcp",
+    values: { "X-Team": "platform" },
+    secrets: { Authorization: MCP_TEST_SECRET },
+    ...overrides,
+  };
+}
+
+test("an MCP server is stored sealed, listed by secret name only, and scoped to its project", async (t) => {
+  withMcpServersEnabled(t);
+  const sealer = createSecretSealer(randomBytes(32));
+  const runtime = await startRuntime(t, { secretSealer: sealer });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const server = created.data.server;
+  assert.equal(server.name, "linear");
+  assert.equal(server.enabled, false);
+  assert.deepEqual(server.secretNames, ["Authorization"]);
+  assert.equal(server.values["X-Team"], "platform");
+  assert.equal("secrets" in server, false);
+
+  // The ciphertext is in the store and only there. Every JSON the routes
+  // answer with is searched for it — and for the plaintext — because the
+  // record type keeping secrets out is the design, and this is the proof.
+  const sealed = await runtime.store.getMcpServerSecrets(server.id);
+  const ciphertext = sealed?.["Authorization"]?.ciphertext ?? "";
+  assert.ok(ciphertext.length > 0);
+  assert.equal(sealer.open(sealed!["Authorization"]!), MCP_TEST_SECRET);
+  const listed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+  );
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.enabled, true);
+  assert.deepEqual(listed.data.servers.map((entry: any) => entry.name), ["linear"]);
+  assert.deepEqual(listed.data.servers[0].secretNames, ["Authorization"]);
+  const fetched = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${server.id}`,
+  );
+  assert.equal(fetched.status, 200);
+  for (const body of [created.data, listed.data, fetched.data]) {
+    const raw = JSON.stringify(body);
+    assert.equal(raw.includes(ciphertext), false, "ciphertext leaked");
+    assert.equal(raw.includes(MCP_TEST_SECRET), false, "plaintext leaked");
+  }
+
+  // The same name again is a collision, not a second row.
+  const again = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(again.status, 409);
+  assert.equal(again.data.error.code, "name_taken");
+
+  // A server id is only addressable under the project it belongs to.
+  const other = await client.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/projects`,
+    { method: "POST", body: { slug: "other", name: "Other" } },
+  );
+  assert.equal(other.status, 201, JSON.stringify(other.data));
+  const otherId = other.data.project.id as string;
+  const crossed = await client.request(
+    `/api/v1/projects/${otherId}/mcp-servers/${server.id}`,
+  );
+  assert.equal(crossed.status, 404);
+  const crossedApproval = await client.request(
+    `/api/v1/projects/${otherId}/mcp-servers/${server.id}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(crossedApproval.status, 404);
+  const otherList = await client.request(`/api/v1/projects/${otherId}/mcp-servers`);
+  assert.deepEqual(otherList.data.servers, []);
+
+  // A repository-scoped server has to name repositories of this project.
+  const foreign = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    {
+      method: "POST",
+      body: mcpHttpServerBody("scoped", {
+        scope: "repository",
+        repositoryIds: ["not-a-repo"],
+      }),
+    },
+  );
+  assert.equal(foreign.status, 400);
+  assert.equal(foreign.data.error.code, "unknown_repository");
+
+  // A stdio command is an executable name or an absolute path, never a shell.
+  const shell = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    {
+      method: "POST",
+      body: { name: "shelly", transport: "stdio", command: "npx foo; rm -rf /" },
+    },
+  );
+  assert.equal(shell.status, 400);
+  assert.equal(shell.data.error.code, "invalid_command");
+
+  const removed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${server.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 204);
+  assert.equal(await runtime.store.getMcpServer(server.id), undefined);
+});
+
+test("an MCP server pointing at Kumi's own MCP endpoint is refused as a loop", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  for (const url of [
+    "https://kumi.example.com/api/v1/mcp",
+    "https://kumi.example.com/api/v1/mcp/",
+    "http://localhost:3000/api/v1/mcp",
+  ]) {
+    const refused = await client.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+      { method: "POST", body: mcpHttpServerBody("self", { url }) },
+    );
+    assert.equal(refused.status, 400, url);
+    assert.equal(refused.data.error.code, "mcp_loop", url);
+  }
+  // Plain http anywhere but loopback would put the secret header on the wire.
+  const plain = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody("plain", { url: "http://mcp.example.com/" }) },
+  );
+  assert.equal(plain.status, 400);
+  assert.equal(plain.data.error.code, "invalid_url");
+  // Somebody else's server, over https, is exactly what this is for.
+  const fine = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody("fine") },
+  );
+  assert.equal(fine.status, 201);
+});
+
+test("with the MCP switch off nothing can be stored or armed, and the listing says so", async (t) => {
+  withMcpServersEnabled(t, false);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 501);
+  assert.equal(created.data.error.code, "mcp_disabled");
+  assert.match(created.data.error.message, /COORD_MCP_ENABLED/u);
+
+  // A row that got in while the switch was on cannot be approved once it is
+  // off, and the listing still reads.
+  const seeded = await runtime.store.createMcpServer({
+    id: "mcp_seeded",
+    projectId: DEFAULT_PROJECT_ID,
+    scope: "project",
+    name: "seeded",
+    transport: "http",
+    url: "https://mcp.example.com/",
+    createdBy: "owner",
+    createdAt: new Date().toISOString(),
+  });
+  const approval = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${seeded.id}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(approval.status, 501);
+  assert.equal(approval.data.error.code, "mcp_disabled");
+  const listed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+  );
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.enabled, false);
+  assert.equal(listed.data.servers.length, 1);
+  assert.equal(listed.data.servers[0].enabled, false);
+});
+
+test("with the switch on but no credential store the MCP routes name what is missing", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 501);
+  assert.equal(created.data.error.code, "mcp_disabled");
+  assert.match(created.data.error.message, /COORD_CREDENTIAL_KEY/u);
+  const listed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+  );
+  assert.equal(listed.data.enabled, false);
+});
+
+test("approving an MCP server records who, is audited, and an edit takes it back", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const client = new TestClient(runtime.origin);
+  const setup = await bootstrap(client);
+  const ownerId = setup.user.id as string;
+
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 201);
+  const serverId = created.data.server.id as string;
+
+  const approved = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  assert.equal(approved.data.server.enabled, true);
+  assert.equal(approved.data.server.approvedBy, ownerId);
+  assert.ok(approved.data.server.approvedAt);
+  const enabledEvents = (
+    await runtime.store.listAuditEvents({ types: ["project_changed"] })
+  ).filter((entry) => entry.event.data["action"] === "mcp_server_enabled");
+  assert.equal(enabledEvents.length, 1);
+  assert.equal(enabledEvents[0]?.event.data["serverId"], serverId);
+  assert.equal(enabledEvents[0]?.event.data["actorId"], ownerId);
+  assert.equal(enabledEvents[0]?.event.data["name"], "linear");
+
+  // What was approved is a specific URL with specific secrets. Changing
+  // either is a new thing that nobody has approved yet.
+  const edited = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { values: { "X-Team": "infra" } } },
+  );
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+  assert.equal(edited.data.reapprovalRequired, true);
+  assert.equal(edited.data.server.enabled, false);
+  assert.equal(edited.data.server.approvedBy, undefined);
+  assert.equal(edited.data.server.values["X-Team"], "infra");
+  // The secret survived an edit that did not mention it.
+  assert.deepEqual(edited.data.server.secretNames, ["Authorization"]);
+
+  // An edit to a disabled server is just an edit; null removes a secret.
+  const trimmed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { secrets: { Authorization: null, "X-Other": "s3cret" } } },
+  );
+  assert.equal(trimmed.status, 200);
+  assert.equal(trimmed.data.reapprovalRequired, false);
+  assert.deepEqual(trimmed.data.server.secretNames, ["X-Other"]);
+
+  // The transport is fixed at creation: the stores never change it, and a
+  // 200 that left the row as it was would be a lie — worse, the secrets
+  // sealed for a header would start travelling as a child's environment.
+  // Saying the same transport back is not a change.
+  const switched = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { transport: "stdio", command: "npx" } },
+  );
+  assert.equal(switched.status, 400, JSON.stringify(switched.data));
+  assert.equal(switched.data.error.code, "transport_fixed");
+  const same = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { transport: "http" } },
+  );
+  assert.equal(same.status, 200, JSON.stringify(same.data));
+  assert.equal(same.data.server.transport, "http");
+
+  const disabled = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: false } },
+  );
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.data.server.enabled, false);
+});
+
+test("a view-only token can list MCP servers but neither create nor approve one", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 201);
+  const serverId = created.data.server.id as string;
+
+  const readOnly = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "read-only", scopes: ["view"] },
+  });
+  const token = readOnly.data.token as string;
+  const listed = await bearer(
+    runtime.origin,
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    token,
+  );
+  assert.equal(listed.status, 200);
+  const denied = await bearer(
+    runtime.origin,
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    token,
+    { method: "POST", body: mcpHttpServerBody("second") },
+  );
+  assert.equal(denied.status, 403);
+  const deniedApproval = await bearer(
+    runtime.origin,
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    token,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(deniedApproval.status, 403);
+  assert.equal(
+    (await runtime.store.getMcpServer(serverId))?.enabled,
+    false,
+  );
+});
+
+test("a lease carries approved MCP servers opened, only to a current worker owned by the task's submitter", async (t) => {
+  withMcpServersEnabled(t);
+  const sealer = createSecretSealer(randomBytes(32));
+  const runtime = await startRuntime(t, { secretSealer: sealer });
+  const client = new TestClient(runtime.origin);
+  const setup = await bootstrap(client);
+  const ownerId = setup.user.id as string;
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "fleet", scopes: ["view", "run_task"] },
+  });
+  const token = created.data.token as string;
+  const registered = await bearer(runtime.origin, "/api/v1/workers/register", token, {
+    method: "POST",
+    body: {
+      organizationId: DEFAULT_ORGANIZATION_ID,
+      name: "worker-a",
+      adapters: ["codex"],
+      version: "1.0.0",
+    },
+  });
+  assert.equal(registered.status, 201);
+  const workerId = registered.data.id as string;
+  await runtime.store.saveRepository({
+    id: "repo_tools",
+    path: "/canonical/tools.git",
+    branch: "main",
+  });
+
+  const server = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(server.status, 201);
+  const approved = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${server.data.server.id}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(approved.status, 200);
+
+  const submit = async (submittedBy: string) =>
+    await runtime.store.submitTask({
+      repositoryId: "repo_tools",
+      projectId: DEFAULT_PROJECT_ID,
+      objective: "file the ticket",
+      agentId: "codex",
+      validationCommands: [],
+      submittedBy,
+    });
+  // Each lease is completed before the next is asked for: a repository
+  // admits one active lease at a time, and every case below is a fresh
+  // lease on a fresh task. Completed rather than released, because a
+  // released task goes back to the front of the queue.
+  const lease = async (body: Record<string, unknown>) => {
+    const answer = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+      method: "POST",
+      body: { workerId, projectId: DEFAULT_PROJECT_ID, ...body },
+    });
+    if (answer.status === 200) {
+      await runtime.store.finishWorkLease(
+        answer.data.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+    }
+    return answer;
+  };
+
+  // A current worker, the owner's own task: the secret arrives in the open.
+  const own = await submit(ownerId);
+  const current = await lease({ protocolVersion: 4 });
+  assert.equal(current.status, 200, JSON.stringify(current.data));
+  assert.equal(current.data.task.id, own.id);
+  assert.equal(current.data.mcpServers.length, 1);
+  assert.equal(current.data.mcpServers[0].name, "linear");
+  assert.equal(current.data.mcpServers[0].transport, "http");
+  assert.equal(current.data.mcpServers[0].url, "https://mcp.linear.app/mcp");
+  assert.equal(current.data.mcpServers[0].headers.Authorization, MCP_TEST_SECRET);
+  assert.equal(current.data.mcpServers[0].headers["X-Team"], "platform");
+
+  // A version-3 worker never sees the field, and the thread is told why.
+  const stale = await submit(ownerId);
+  const old = await lease({ protocolVersion: 3 });
+  assert.equal(old.status, 200);
+  assert.equal(old.data.task.id, stale.id);
+  assert.equal("mcpServers" in old.data, false);
+  const withheld = await runtime.store.listAuditEvents({
+    taskId: stale.id,
+    types: ["mcp_servers_withheld"],
+  });
+  assert.equal(withheld.length, 1);
+  assert.equal(withheld[0]?.event.data["reason"], "stale_worker");
+  const told = await runtime.store.listAuditEvents({
+    taskId: stale.id,
+    types: ["agent_progress"],
+  });
+  assert.equal(told.length, 1);
+  assert.match(String(told[0]?.event.data["message"]), /linear/u);
+  assert.match(String(told[0]?.event.data["message"]), /version 3/u);
+  // Absent is the oldest version, not the newest.
+  const unversioned = await submit(ownerId);
+  const silent = await lease({});
+  assert.equal(silent.data.task.id, unversioned.id);
+  assert.equal("mcpServers" in silent.data, false);
+
+  // Somebody else's task on this machine gets nothing, whatever the version.
+  // The claim pins ownership so this cannot happen through the real lease;
+  // the fake here does not, which is what lets the gate be seen holding.
+  const somebodyElse = await runtime.store.createUser({
+    email: "else@example.com",
+    displayName: "Somebody Else",
+    passwordDigest: "digest",
+  });
+  const foreign = await submit(somebodyElse.id);
+  const notOwner = await lease({ protocolVersion: 4 });
+  assert.equal(notOwner.status, 200);
+  assert.equal(notOwner.data.task.id, foreign.id);
+  assert.equal("mcpServers" in notOwner.data, false);
+  const refused = await runtime.store.listAuditEvents({
+    taskId: foreign.id,
+    types: ["mcp_servers_withheld"],
+  });
+  assert.equal(refused[0]?.event.data["reason"], "not_owner");
+
+  // The switch, off, attaches nothing regardless of what is approved.
+  delete process.env["COORD_MCP_ENABLED"];
+  const later = await submit(ownerId);
+  const off = await lease({ protocolVersion: 4 });
+  assert.equal(off.data.task.id, later.id);
+  assert.equal("mcpServers" in off.data, false);
+  process.env["COORD_MCP_ENABLED"] = "1";
+
+  // A secret sealed under some other key leaves its server out, and says so,
+  // without costing the lease.
+  const otherKey = createSecretSealer(randomBytes(32));
+  await runtime.store.createMcpServer({
+    id: "mcp_rekeyed",
+    projectId: DEFAULT_PROJECT_ID,
+    scope: "project",
+    name: "rekeyed",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "some-mcp"],
+    secrets: { TOKEN: otherKey.seal("unreadable") },
+    createdBy: ownerId,
+    createdAt: new Date().toISOString(),
+  });
+  await runtime.store.setMcpServerApproval("mcp_rekeyed", {
+    enabled: true,
+    approvedBy: ownerId,
+    approvedAt: new Date().toISOString(),
+  });
+  const last = await submit(ownerId);
+  const partial = await lease({ protocolVersion: 4 });
+  assert.equal(partial.data.task.id, last.id);
+  assert.deepEqual(
+    partial.data.mcpServers.map((entry: { name: string }) => entry.name),
+    ["linear"],
+  );
+  const unopenable = await runtime.store.listAuditEvents({
+    taskId: last.id,
+    types: ["mcp_server_unopenable"],
+  });
+  assert.equal(unopenable[0]?.event.data["name"], "rekeyed");
+  assert.equal(unopenable[0]?.event.data["secretName"], "TOKEN");
 });

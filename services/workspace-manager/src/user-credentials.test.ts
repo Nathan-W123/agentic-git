@@ -16,10 +16,13 @@ import {
   captureBrowserSession,
   captureClaudeSession,
   captureCredentialKey,
+  createSecretSealer,
   credentialStagingRoot,
   openCredentialHome,
+  openSecret,
   resolveCredentialKey,
   restoreBrowserSession,
+  sealSecret,
   supportedCredentialKinds,
   supportsUserCredential,
   UserCredentialError,
@@ -1222,3 +1225,124 @@ test("credentialStagingRoot falls back to the process temp directory", () => {
   }
 });
 
+
+/* -------------------------------------------------------------- sealing --- */
+
+test("sealSecret and openSecret round-trip unicode and the empty string", () => {
+  const key = randomBytes(32);
+  for (const plaintext of [
+    "",
+    "plain ascii",
+    "ünïcödé — 日本語 — 🔐",
+    "line\nbreaks\tand\u0000nulls",
+  ]) {
+    const sealed = sealSecret(key, plaintext);
+    assert.equal(openSecret(key, sealed), plaintext);
+    // Every field is base64, so a sealed record is safe to put in JSON.
+    for (const field of [sealed.iv, sealed.tag, sealed.ciphertext]) {
+      assert.match(field, /^[A-Za-z0-9+/]*=*$/u);
+    }
+  }
+});
+
+test("a sealed secret opened under a different key is undecryptable", () => {
+  const sealed = sealSecret(randomBytes(32), "not for the other key");
+  assert.throws(
+    () => openSecret(randomBytes(32), sealed),
+    (error: unknown) =>
+      error instanceof UserCredentialError && error.code === "undecryptable",
+  );
+});
+
+test("a tampered ciphertext or tag is refused rather than opened to garbage", () => {
+  const key = randomBytes(32);
+  const sealed = sealSecret(key, "authenticated, not merely encrypted");
+  const flipFirstByte = (base64: string): string => {
+    const bytes = Buffer.from(base64, "base64");
+    bytes[0] = (bytes[0] ?? 0) ^ 0x01;
+    return bytes.toString("base64");
+  };
+  const undecryptable = (error: unknown) =>
+    error instanceof UserCredentialError && error.code === "undecryptable";
+
+  assert.throws(
+    () =>
+      openSecret(key, { ...sealed, ciphertext: flipFirstByte(sealed.ciphertext) }),
+    undecryptable,
+  );
+  assert.throws(
+    () => openSecret(key, { ...sealed, tag: flipFirstByte(sealed.tag) }),
+    undecryptable,
+  );
+  // A bit flipped in the IV is another way the record can be edited, and
+  // the tag must catch that one too.
+  assert.throws(
+    () => openSecret(key, { ...sealed, iv: flipFirstByte(sealed.iv) }),
+    undecryptable,
+  );
+  // The untouched record still opens, so the refusals above were about the
+  // edits and not about the key.
+  assert.equal(openSecret(key, sealed), "authenticated, not merely encrypted");
+});
+
+test("sealing the same secret twice yields different bytes that both open", () => {
+  const key = randomBytes(32);
+  const first = sealSecret(key, "same text");
+  const second = sealSecret(key, "same text");
+  assert.notEqual(first.iv, second.iv);
+  assert.notEqual(first.ciphertext, second.ciphertext);
+  assert.equal(openSecret(key, first), "same text");
+  assert.equal(openSecret(key, second), "same text");
+});
+
+test("a sealer opens what it seals and never surrenders its key", () => {
+  const key = randomBytes(32);
+  const sealer = createSecretSealer(key);
+  assert.equal(sealer.open(sealer.seal("bound to one key")), "bound to one key");
+  // Interchangeable with the free functions under the same key, which is
+  // what lets a record sealed by one component be opened by another.
+  assert.equal(openSecret(key, sealer.seal("shared cipher")), "shared cipher");
+  assert.equal(sealer.open(sealSecret(key, "shared cipher")), "shared cipher");
+  // Nothing on the object carries the key: there are two functions and no
+  // data, so spreading or serialising it reveals nothing.
+  assert.deepEqual(Object.keys(sealer).sort(), ["open", "seal"]);
+  assert.ok(!JSON.stringify(sealer).includes(key.toString("base64")));
+  assert.throws(
+    () => createSecretSealer(randomBytes(16)),
+    (error: unknown) =>
+      error instanceof UserCredentialError && error.code === "invalid_key",
+  );
+});
+
+test("a store's sealer uses the store's own key", async (t) => {
+  const directory = await scratch(t);
+  const key = randomBytes(32);
+  const filePath = path.join(directory, "user-credentials.json");
+  const vault = new UserCredentialStore(filePath, key);
+
+  const sealer = vault.sealer();
+  assert.equal(sealer.open(sealer.seal("x")), "x");
+
+  // Sealed under the store's key, so anything that knows the same key opens
+  // it — and a store opened under a different key does not.
+  const sealed = vault.sealer().seal("gateway-held secret");
+  assert.equal(openSecret(key, sealed), "gateway-held secret");
+  assert.throws(
+    () => new UserCredentialStore(filePath, randomBytes(32)).sealer().open(sealed),
+    (error: unknown) =>
+      error instanceof UserCredentialError && error.code === "undecryptable",
+  );
+
+  // The extraction left the store's own records byte-compatible: a record
+  // the store wrote opens with the free function, under the same key.
+  await vault.put("user-1", "claude", {
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-store-written",
+  });
+  const raw = JSON.parse(await readFile(filePath, "utf8")) as {
+    users: Record<string, Record<string, { iv: string; tag: string; ciphertext: string }>>;
+  };
+  const record = raw.users["user-1"]?.["claude"];
+  assert.ok(record !== undefined);
+  assert.equal(sealer.open(record), "sk-ant-oat01-store-written");
+});

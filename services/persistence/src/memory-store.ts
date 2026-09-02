@@ -37,10 +37,14 @@ import {
 import type {
   ApiTokenRecord,
   AppendAuditInput,
+  CreateMcpServerInput,
   LeaseTaskInput,
   LeasedWork,
+  McpServerRecord,
+  McpServerSecrets,
   SaveWorkLeasePlanInput,
   SaveWorkLeasePlanResult,
+  UpdateMcpServerInput,
   WorkLease,
   WorkLeaseStatus,
   WorkerRecord,
@@ -108,7 +112,10 @@ import type {
 } from "./store.js";
 import {
   GENERAL_SUB_CHANNEL_SLUG,
+  applyMcpSecretsPatch,
   directPairKey,
+  mcpSecretNames,
+  normalizeMcpRepositoryIds,
   repositoryConflicts,
 } from "./store.js";
 import {
@@ -131,6 +138,28 @@ interface RunState {
 
 function copy<T>(value: T): T {
   return structuredClone(value);
+}
+
+/**
+ * A server and its secrets, kept apart so the record can be handed out
+ * without a second thought and the secrets only ever by name.
+ */
+interface StoredMcpServer {
+  record: McpServerRecord;
+  secrets: McpServerSecrets;
+}
+
+/**
+ * Name order as the SQL stores list it — `ORDER BY LOWER(name), id` — so a
+ * screen sorted by this backend matches one sorted by the others.
+ */
+function compareMcpServers(left: McpServerRecord, right: McpServerRecord): number {
+  const leftName = left.name.toLowerCase();
+  const rightName = right.name.toLowerCase();
+  if (leftName !== rightName) {
+    return leftName < rightName ? -1 : 1;
+  }
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
 }
 
 interface StoredChannelReply {
@@ -241,6 +270,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly projectRepositories = new Set<string>();
   private readonly authSessions = new Map<string, AuthSessionRecord>();
   private readonly apiTokens = new Map<string, ApiTokenRecord>();
+  private readonly mcpServers = new Map<string, StoredMcpServer>();
   /** Keyed by usage key so a re-reported running total replaces its predecessor. */
   private readonly tokenUsage = new Map<string, TokenUsageRecord>();
   private readonly workers = new Map<string, WorkerRecord>();
@@ -620,6 +650,16 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     this.projectRepositories.delete(
       this.projectRepositoryKey(projectId, repositoryId),
     );
+    // The project's MCP servers let go of the repository too: their
+    // attachment is a fact about this project, and a repository linked back
+    // later must not find last year's servers waiting for it.
+    for (const stored of this.mcpServers.values()) {
+      if (stored.record.projectId === projectId) {
+        stored.record.repositoryIds = stored.record.repositoryIds.filter(
+          (id) => id !== repositoryId,
+        );
+      }
+    }
   }
 
   public async listProjectRepositories(
@@ -1256,6 +1296,163 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return removed;
   }
 
+  public async createMcpServer(
+    input: CreateMcpServerInput,
+  ): Promise<McpServerRecord> {
+    this.requireProject(input.projectId);
+    this.assertMcpServerNameAvailable(input.projectId, input.name);
+    const secrets = copy(input.secrets ?? {});
+    const record: McpServerRecord = {
+      id: input.id,
+      projectId: input.projectId,
+      name: input.name,
+      transport: input.transport,
+      ...(input.command === undefined ? {} : { command: input.command }),
+      args: [...(input.args ?? [])],
+      ...(input.url === undefined ? {} : { url: input.url }),
+      values: { ...(input.values ?? {}) },
+      secretNames: mcpSecretNames(secrets),
+      // Off until somebody with the standing to say otherwise does, through
+      // the one method that can; see `McpServerRecord`.
+      enabled: false,
+      scope: input.scope ?? "repository",
+      repositoryIds: normalizeMcpRepositoryIds(input.repositoryIds ?? []),
+      createdBy: input.createdBy,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+    };
+    this.mcpServers.set(record.id, { record, secrets });
+    return copy(record);
+  }
+
+  public async getMcpServer(id: string): Promise<McpServerRecord | undefined> {
+    const stored = this.mcpServers.get(id);
+    return stored === undefined ? undefined : copy(stored.record);
+  }
+
+  public async getMcpServerSecrets(
+    id: string,
+  ): Promise<McpServerSecrets | undefined> {
+    const stored = this.mcpServers.get(id);
+    return stored === undefined ? undefined : copy(stored.secrets);
+  }
+
+  public async listMcpServers(
+    projectId: string,
+    filter: { repositoryId?: string; enabledOnly?: boolean } = {},
+  ): Promise<McpServerRecord[]> {
+    const repositoryId = filter.repositoryId;
+    return copy(
+      [...this.mcpServers.values()]
+        .map((stored) => stored.record)
+        .filter((record) => record.projectId === projectId)
+        .filter((record) => filter.enabledOnly !== true || record.enabled)
+        .filter(
+          (record) =>
+            repositoryId === undefined ||
+            record.scope === "project" ||
+            record.repositoryIds.includes(repositoryId),
+        )
+        .sort(compareMcpServers),
+    );
+  }
+
+  public async updateMcpServer(
+    id: string,
+    patch: UpdateMcpServerInput,
+  ): Promise<McpServerRecord> {
+    const stored = this.requireMcpServer(id);
+    const { record } = stored;
+    if (patch.name !== undefined) {
+      this.assertMcpServerNameAvailable(record.projectId, patch.name, id);
+      record.name = patch.name;
+    }
+    if (patch.command === null) {
+      delete record.command;
+    } else if (patch.command !== undefined) {
+      record.command = patch.command;
+    }
+    if (patch.args !== undefined) {
+      record.args = [...patch.args];
+    }
+    if (patch.url === null) {
+      delete record.url;
+    } else if (patch.url !== undefined) {
+      record.url = patch.url;
+    }
+    if (patch.values !== undefined) {
+      record.values = { ...patch.values };
+    }
+    if (patch.secrets !== undefined) {
+      stored.secrets = applyMcpSecretsPatch(stored.secrets, patch.secrets);
+      record.secretNames = mcpSecretNames(stored.secrets);
+    }
+    if (patch.scope !== undefined) {
+      record.scope = patch.scope;
+    }
+    if (patch.repositoryIds !== undefined) {
+      record.repositoryIds = normalizeMcpRepositoryIds(patch.repositoryIds);
+    }
+    record.updatedAt = patch.updatedAt;
+    return copy(record);
+  }
+
+  public async setMcpServerApproval(
+    id: string,
+    approval: { enabled: boolean; approvedBy: string; approvedAt: string },
+  ): Promise<McpServerRecord> {
+    const { record } = this.requireMcpServer(id);
+    record.enabled = approval.enabled;
+    if (approval.enabled) {
+      record.approvedBy = approval.approvedBy;
+      record.approvedAt = approval.approvedAt;
+    } else {
+      // A disabled server carries no approval at all, so a later enable is
+      // a fresh decision with a fresh name on it rather than the old one
+      // quietly resumed.
+      delete record.approvedBy;
+      delete record.approvedAt;
+    }
+    record.updatedAt = approval.approvedAt;
+    return copy(record);
+  }
+
+  public async deleteMcpServer(id: string): Promise<void> {
+    this.mcpServers.delete(id);
+  }
+
+  private requireMcpServer(id: string): StoredMcpServer {
+    const stored = this.mcpServers.get(id);
+    if (stored === undefined) {
+      throw new Error(`Unknown MCP server: ${id}`);
+    }
+    return stored;
+  }
+
+  /**
+   * Case-insensitive, because the name becomes a key in a vendor's config
+   * file where `Linear` and `linear` are the same entry — the rule the SQL
+   * stores enforce with a unique index over LOWER(name).
+   */
+  private assertMcpServerNameAvailable(
+    projectId: string,
+    name: string,
+    exceptId?: string,
+  ): void {
+    const wanted = name.toLowerCase();
+    for (const { record } of this.mcpServers.values()) {
+      if (
+        record.id !== exceptId &&
+        record.projectId === projectId &&
+        record.name.toLowerCase() === wanted
+      ) {
+        throw new Error(
+          `An MCP server named ${name} already exists in project ${projectId}`,
+        );
+      }
+    }
+  }
+
   public async createAuthSession(session: AuthSessionRecord): Promise<void> {
     this.requireUser(session.userId);
     this.authSessions.set(session.id, copy(session));
@@ -1353,6 +1550,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     // comment. The refusal this used to throw surfaced in production as a raw
     // foreign-key error with no path forward, and the durable record of what
     // happened lives in the audit log, which none of this touches.
+    //
+    // An MCP server's attachment goes too. Left behind, it would re-attach
+    // the server — secrets and all — to whatever repository next took this
+    // id.
+    for (const stored of this.mcpServers.values()) {
+      stored.record.repositoryIds = stored.record.repositoryIds.filter(
+        (repositoryId) => repositoryId !== id,
+      );
+    }
     for (const [taskId, task] of [...this.submitted]) {
       if (task.repositoryId === id) {
         this.submitted.delete(taskId);
@@ -1501,6 +1707,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     };
     this.submitted.set(task.id, task);
     return copy(task);
+  }
+
+  public async getSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const task = this.submitted.get(taskId);
+    return task === undefined ? undefined : copy(task);
   }
 
   public async listSubmittedTasks(

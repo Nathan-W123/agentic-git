@@ -207,6 +207,19 @@ export interface PromptCliProfile {
    * printing.
    */
   usage?(stdout: string): PromptCliUsage | undefined;
+  /**
+   * Arguments that make the CLI load the MCP servers described in a config
+   * file the worker wrote, and only those.
+   *
+   * Optional like `resumeArgs`, and for the same reason: it describes what
+   * one concrete CLI can do. Claude Code takes a file on the command line;
+   * Cursor reads only `<workspace>/.cursor/mcp.json`, which is inside the
+   * worktree the changeset is collected from, so a profile without this hook
+   * is a vendor that cannot be given managed servers yet — and the adapter
+   * refuses at construction rather than starting the agent without its
+   * tools and letting the task report their absence as its own failure.
+   */
+  mcpArgs?(configPath: string): string[];
 }
 
 /**
@@ -483,6 +496,13 @@ export const CLAUDE_PROFILE: PromptCliProfile = {
   usage: parseClaudeUsage,
   resumeArgs: (token) => ["--resume", token],
   sessionId: parseClaudeSessionId,
+  // Strict, because without it the file is added to what Claude loads
+  // rather than replacing it: the machine owner's own user-scope servers in
+  // `~/.claude.json` and any `.mcp.json` the repository carries would start
+  // too — a worker runs with `CLAUDE_CONFIG_DIR` unset, so those are the
+  // owner's personal servers, on a task somebody else asked for. The lease
+  // names what this run may use; the flag makes that the whole of it.
+  mcpArgs: (configPath) => ["--mcp-config", configPath, "--strict-mcp-config"],
 };
 
 /**
@@ -649,6 +669,12 @@ export interface PromptCliAdapterOptions {
   planningTimeoutMs?: number;
   executionTimeoutMs?: number;
   maxOutputBytes?: number;
+  /**
+   * A vendor MCP config file the worker wrote, outside the workspace, with
+   * the servers this run may use and their secrets. Refused at construction
+   * by a profile with no `mcpArgs`; see that hook.
+   */
+  mcpConfigPath?: string;
   runner?: PromptCliProcessRunner;
 }
 
@@ -1730,9 +1756,25 @@ export class PromptCliAdapter implements AgentAdapter {
   private readonly maxOutputBytes: number;
   private readonly runner: PromptCliProcessRunner;
   private readonly profile: PromptCliProfile;
+  /**
+   * On every invocation — planning, execution and replan alike. Planning and
+   * execution run in different worktrees, and a server present for one and
+   * absent for the other is a plan made with tools the work then lacks.
+   */
+  private readonly mcpArgs: readonly string[];
 
   public constructor(private readonly options: PromptCliAdapterOptions) {
     this.profile = options.profile;
+    if (options.mcpConfigPath === undefined) {
+      this.mcpArgs = [];
+    } else if (this.profile.mcpArgs === undefined) {
+      throw new Error(
+        `${this.profile.name} cannot be given managed MCP servers yet: its ` +
+          "CLI has no way to load a server config from outside the workspace",
+      );
+    } else {
+      this.mcpArgs = this.profile.mcpArgs(options.mcpConfigPath);
+    }
     const configuredCommand =
       options.command?.trim() || this.profile.defaultCommand;
     // Cursor is started through its own interpreter when one can be found —
@@ -2157,11 +2199,14 @@ export class PromptCliAdapter implements AgentAdapter {
       const stdout = await this.run(
         record,
         context.workspacePath,
-        this.profile.planningArgs(
-          this.model,
-          this.effort,
-          this.profile.name === "claude" ? DECLARATION_JSON_SCHEMA : undefined,
-        ),
+        [
+          ...this.profile.planningArgs(
+            this.model,
+            this.effort,
+            this.profile.name === "claude" ? DECLARATION_JSON_SCHEMA : undefined,
+          ),
+          ...this.mcpArgs,
+        ],
         prompt,
         this.planningTimeoutMs,
         "planning",
@@ -2282,15 +2327,18 @@ export class PromptCliAdapter implements AgentAdapter {
       const stdout = await this.run(
         record,
         context.workspacePath,
-        this.profile.executionArgs(
-          this.model,
-          this.effort,
-          this.profile.name === "claude"
-            ? forceQuestion
-              ? FORCED_QUESTION_JSON_SCHEMA
-              : COMPLETION_JSON_SCHEMA
-            : undefined,
-        ),
+        [
+          ...this.profile.executionArgs(
+            this.model,
+            this.effort,
+            this.profile.name === "claude"
+              ? forceQuestion
+                ? FORCED_QUESTION_JSON_SCHEMA
+                : COMPLETION_JSON_SCHEMA
+              : undefined,
+          ),
+          ...this.mcpArgs,
+        ],
         forceQuestion
           ? this.forcedQuestionPrompt(record, context)
           : this.executionPrompt(record, context),
@@ -2706,11 +2754,14 @@ export class PromptCliAdapter implements AgentAdapter {
     const stdout = await this.run(
       record,
       workingDirectory,
-      this.profile.planningArgs(
-        this.model,
-        this.effort,
-        this.profile.name === "claude" ? PLAN_JSON_SCHEMA : undefined,
-      ),
+      [
+        ...this.profile.planningArgs(
+          this.model,
+          this.effort,
+          this.profile.name === "claude" ? PLAN_JSON_SCHEMA : undefined,
+        ),
+        ...this.mcpArgs,
+      ],
       prompt,
       this.planningTimeoutMs,
       "planning",

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import type { ValidationCommand } from "@coord/shared-types";
+import type { ResolvedMcpServer, ValidationCommand } from "@coord/shared-types";
 import {
   openCoordinationStore,
   type CoordinationStore,
@@ -189,6 +189,46 @@ export interface ProjectConfig {
   buildCommand?: PreviewCommand;
   /** Per-repository overrides, keyed by repository id. */
   buildCommands?: Record<string, PreviewCommand>;
+  /**
+   * Which of the MCP servers a lease offers this machine will actually run.
+   *
+   * This is the machine owner's allowlist, and it is the only one. The
+   * control plane decides what a repository *offers* — a project admin
+   * approves a server and the gateway resolves its secrets into the lease —
+   * but an MCP server is a process, and nothing else in this system lets a
+   * project admin start a process on a member's laptop. A worker runs on
+   * somebody's own computer with their own login and their own files, so the
+   * decision to run a stdio server there, or to hand an HTTP server a token
+   * from their machine, is theirs and is made here.
+   *
+   * Absent means run nothing: a project that has never been asked runs no
+   * offered server, and the worker says so on the task rather than quietly
+   * starting without its tools. `"all"` accepts whatever the control plane
+   * offers; a list accepts the named servers only, matched exactly by the
+   * name the lease carries.
+   */
+  mcp?: McpAllowlist;
+}
+
+/** See {@link ProjectConfig.mcp}. */
+/**
+ * One MCP server this machine's owner has agreed to run — by name *and* by
+ * what it was when they agreed.
+ *
+ * The name alone would let whoever administers the project change what
+ * `github` starts after the owner said yes to it, and the new program would
+ * run on their laptop with nobody asking. So the entry also carries a
+ * digest of the definition consented to (see {@link mcpServerDigest}), and a
+ * server whose definition has since changed is withheld until the owner is
+ * asked again.
+ */
+export interface McpAllowEntry {
+  name: string;
+  digest: string;
+}
+
+export interface McpAllowlist {
+  allow: "all" | McpAllowEntry[];
 }
 
 /** A {@link ValidationCommand} that may also carry the app's configuration. */
@@ -620,6 +660,149 @@ function assertSandbox(value: unknown): SandboxConfig {
   };
 }
 
+/**
+ * Checked the way an agent's `args` are: strings, non-empty, no NUL. A name
+ * here is only ever compared against the name a lease carries, so nothing
+ * crosses into a process from it — but an empty or NUL-bearing entry can
+ * match nothing and is a typo somebody would rather hear about at open than
+ * discover as a server that never starts.
+ */
+function assertMcp(value: unknown): McpAllowlist {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(`"mcp" must be an object`);
+  }
+  const allow = (value as Partial<McpAllowlist>).allow;
+  if (allow === "all") {
+    return { allow: "all" };
+  }
+  if (!Array.isArray(allow)) {
+    fail(`"mcp.allow" must be "all" or an array of { name, digest } entries`);
+  }
+  const entries: McpAllowEntry[] = [];
+  for (const entry of allow) {
+    // A bare name is how the list was written before entries carried a
+    // digest. It cannot be honoured — there is no telling what was agreed
+    // to — and it is dropped rather than refused so the worker still starts;
+    // the owner is simply asked again, which is the safe direction to err.
+    if (typeof entry === "string") {
+      continue;
+    }
+    const name = (entry as Partial<McpAllowEntry> | null)?.name;
+    const digest = (entry as Partial<McpAllowEntry> | null)?.digest;
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      typeof name !== "string" ||
+      name.trim().length === 0 ||
+      name.includes("\0") ||
+      typeof digest !== "string" ||
+      digest.trim().length === 0 ||
+      digest.includes("\0")
+    ) {
+      fail(`"mcp.allow" must be "all" or an array of { name, digest } entries`);
+    }
+    entries.push({ name, digest });
+  }
+  return { allow: entries };
+}
+
+/**
+ * What a machine owner is agreeing to when they allow a server.
+ *
+ * Everything that decides what runs and where it reaches: the name, how it
+ * is reached, the command and its arguments or the URL, and the *names* of
+ * the environment variables or headers it is given. Not their values — a
+ * rotated token is the same program with a fresh credential, and asking
+ * again for that would train people to click through. Sixteen bytes of
+ * SHA-256 is plenty for a binding whose only adversary would need a second
+ * preimage to get a different program past it.
+ */
+export function mcpServerDigest(server: ResolvedMcpServer): string {
+  const canonical = JSON.stringify({
+    name: server.name,
+    transport: server.transport,
+    command: server.command ?? null,
+    args: [...(server.args ?? [])],
+    url: server.url ?? null,
+    env: Object.keys(server.env ?? {}).sort(),
+    headers: Object.keys(server.headers ?? {})
+      .map((header) => header.toLowerCase())
+      .sort(),
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 32);
+}
+
+/**
+ * One line a person can read before deciding: what starts, or what is
+ * talked to. Secrets never appear — only their names travel in the digest,
+ * and none of them belong in a dialog.
+ */
+export function describeMcpServer(server: ResolvedMcpServer): string {
+  if (server.transport === "http") {
+    return `${server.name}: talks to ${server.url ?? "(no url)"}`;
+  }
+  return `${server.name}: runs ${[server.command ?? "(no command)", ...(server.args ?? [])].join(" ")}`;
+}
+
+/** A server the lease offered and this machine did not run, and why not. */
+export interface WithheldMcpServer {
+  name: string;
+  digest: string;
+  summary: string;
+  /** Allowed here once, under a definition that has since changed. */
+  changed: boolean;
+}
+
+/**
+ * Splits the servers a lease offers into the ones this machine will run and
+ * the names it will not, so the worker can start the former and say so about
+ * the latter.
+ *
+ * Matching is by name and digest, exactly and case-sensitively: `name` is
+ * the stable, lower-case identifier the vendor config will be keyed by, and
+ * an allowlist that matched loosely would let `GitHub` admit a server called
+ * `github` that nobody wrote down; the digest is what was agreed to, so a
+ * server redefined since is withheld as if never allowed — marked `changed`,
+ * because the owner deserves to hear that it moved rather than that it is
+ * new. The withheld servers come back so the worker can post them; a server
+ * withheld in silence looks, from the task, like one the project never
+ * offered.
+ */
+export function allowedMcpServers(
+  config: ProjectConfig,
+  servers: readonly ResolvedMcpServer[],
+): { allowed: ResolvedMcpServer[]; withheld: WithheldMcpServer[] } {
+  const allow = config.mcp?.allow;
+  if (allow === "all") {
+    return { allowed: [...servers], withheld: [] };
+  }
+  const agreed = new Set<string>();
+  const agreedNames = new Set<string>();
+  for (const entry of allow ?? []) {
+    agreed.add(`${entry.name}\0${entry.digest}`);
+    agreedNames.add(entry.name);
+  }
+  const allowed: ResolvedMcpServer[] = [];
+  const withheld: WithheldMcpServer[] = [];
+  for (const server of servers) {
+    // Computed here, from what arrived, never read off the lease: a digest
+    // the control plane supplied would be the control plane vouching for
+    // itself, which is the one thing this list exists to not rely on.
+    const digest = mcpServerDigest(server);
+    if (agreed.has(`${server.name}\0${digest}`)) {
+      allowed.push(server);
+    } else {
+      withheld.push({
+        name: server.name,
+        digest,
+        summary: describeMcpServer(server),
+        changed: agreedNames.has(server.name),
+      });
+    }
+  }
+  return { allowed, withheld };
+}
+
 export function assertProjectConfig(value: unknown): ProjectConfig {
   if (typeof value !== "object" || value === null) {
     fail("the file must contain a JSON object");
@@ -742,6 +925,12 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     ...(config.sandbox === undefined
       ? {}
       : { sandbox: assertSandbox(config.sandbox) }),
+    // Rebuilt like everything else here, and for the same reason it has to
+    // be listed at all: this object is what `save` writes back, so a field
+    // this function forgets is a field the next save silently drops — and
+    // dropping this one turns a machine that ran its tools into one that
+    // withholds them, with nothing changed that anybody did on purpose.
+    ...(config.mcp === undefined ? {} : { mcp: assertMcp(config.mcp) }),
   };
 }
 

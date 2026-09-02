@@ -20,6 +20,7 @@
     "@coord/collab": "*",
     "@coord/local-triage": "*",
     "@coord/persistence": "*",
-    "@coord/shared-types": "*"
+    "@coord/shared-types": "*",
+    "@coord/workspace-manager": "*"
   }
 }

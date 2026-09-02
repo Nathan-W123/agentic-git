@@ -13,6 +13,7 @@ import {
   type AuditEvent,
   type CanonicalVersion,
   type ChangeSet,
+  type McpServerTransport,
   type TouchedFileSample,
   type CommandResult,
   type ConflictAssessment,
@@ -65,15 +66,20 @@ import type {
   ChannelMessageCounts,
   ChannelMessageFilter,
   AppendDirectMessageInput,
+  CreateMcpServerInput,
   DirectConversation,
   DirectMessage,
   DirectMessageFilter,
   ChannelReaction,
   ChannelReply,
   CreateSubChannelInput,
+  McpServerRecord,
+  McpServerScope,
+  McpServerSecrets,
   SubChannel,
   SubChannelMember,
   SubChannelVisibility,
+  UpdateMcpServerInput,
   UpdateSubChannelInput,
   AuditArchiveResult,
   AuditEventFilter,
@@ -126,7 +132,10 @@ import type {
 } from "./store.js";
 import {
   GENERAL_SUB_CHANNEL_SLUG,
+  applyMcpSecretsPatch,
   directPairKey,
+  mcpSecretNames,
+  normalizeMcpRepositoryIds,
   parseChangedFiles,
   repositoryConflicts,
 } from "./store.js";
@@ -182,6 +191,18 @@ function parseJson<T>(row: Row, column: string): T {
 function optionalJson<T>(row: Row, column: string): T | undefined {
   const value = optionalText(row, column);
   return value === undefined ? undefined : (JSON.parse(value) as T);
+}
+
+/**
+ * A nullable text column under a patch: `null` clears it, absent keeps what
+ * the row has, a string replaces it. The column is what goes into the
+ * statement, so the result is already SQL's NULL rather than `undefined`.
+ */
+function clearable(
+  patch: string | null | undefined,
+  current: string | undefined,
+): string | null {
+  return patch === undefined ? (current ?? null) : patch;
 }
 
 /**
@@ -713,6 +734,18 @@ export class SqliteCoordinationStore implements CoordinationStore {
     projectId: string,
     repositoryId: string,
   ): Promise<void> {
+    // The project's MCP servers let go of the repository too: their
+    // attachment is a fact about this project, and a repository linked back
+    // later must not find last year's servers waiting for it.
+    this.db
+      .prepare(
+        `DELETE FROM project_mcp_server_repositories
+         WHERE repository_id = ?
+           AND server_id IN (
+             SELECT id FROM project_mcp_servers WHERE project_id = ?
+           )`,
+      )
+      .run(repositoryId, projectId);
     this.db
       .prepare(
         `DELETE FROM project_repositories
@@ -1803,6 +1836,297 @@ export class SqliteCoordinationStore implements CoordinationStore {
     };
   }
 
+  public async createMcpServer(
+    input: CreateMcpServerInput,
+  ): Promise<McpServerRecord> {
+    if ((await this.getProject(input.projectId)) === undefined) {
+      throw new Error(`Unknown project: ${input.projectId}`);
+    }
+    const owned = this.begin();
+    try {
+      this.assertMcpServerNameAvailable(input.projectId, input.name);
+      // `enabled` is not a parameter: a row is born off and only
+      // `setMcpServerApproval` turns it on. See `McpServerRecord`.
+      this.db
+        .prepare(
+          `INSERT INTO project_mcp_servers
+             (id, project_id, name, transport, command, args_json, url,
+              values_json, secrets_json, enabled, scope, created_by,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.id,
+          input.projectId,
+          input.name,
+          input.transport,
+          input.command ?? null,
+          JSON.stringify(input.args ?? []),
+          input.url ?? null,
+          JSON.stringify(input.values ?? {}),
+          JSON.stringify(input.secrets ?? {}),
+          input.scope ?? "repository",
+          input.createdBy,
+          input.createdAt,
+          input.createdAt,
+        );
+      this.attachMcpServerRepositories(
+        input.id,
+        normalizeMcpRepositoryIds(input.repositoryIds ?? []),
+      );
+      this.commit(owned);
+    } catch (error) {
+      this.rollback(owned);
+      throw error;
+    }
+    return await this.requireMcpServer(input.id);
+  }
+
+  public async getMcpServer(id: string): Promise<McpServerRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM project_mcp_servers WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined
+      ? undefined
+      : this.toMcpServer(row, this.mcpServerRepositoryIds(id));
+  }
+
+  public async getMcpServerSecrets(
+    id: string,
+  ): Promise<McpServerSecrets | undefined> {
+    const row = this.db
+      .prepare("SELECT secrets_json FROM project_mcp_servers WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined
+      ? undefined
+      : parseJson<McpServerSecrets>(row, "secrets_json");
+  }
+
+  public async listMcpServers(
+    projectId: string,
+    filter: { repositoryId?: string; enabledOnly?: boolean } = {},
+  ): Promise<McpServerRecord[]> {
+    // A project-wide server attaches everywhere; a repository-scoped one
+    // only where its join rows say. Both filters are folded into the one
+    // statement through nullable parameters so the query is the same shape
+    // whichever of them a caller passes.
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM project_mcp_servers
+          WHERE project_id = ?
+            AND (? IS NULL OR scope = 'project' OR EXISTS (
+                  SELECT 1 FROM project_mcp_server_repositories
+                   WHERE server_id = project_mcp_servers.id
+                     AND repository_id = ?))
+            AND (? = 0 OR enabled = 1)
+          ORDER BY LOWER(name), id`,
+      )
+      .all(
+        projectId,
+        filter.repositoryId ?? null,
+        filter.repositoryId ?? null,
+        filter.enabledOnly === true ? 1 : 0,
+      ) as Row[];
+    return rows.map((row) =>
+      this.toMcpServer(row, this.mcpServerRepositoryIds(text(row, "id"))),
+    );
+  }
+
+  public async updateMcpServer(
+    id: string,
+    patch: UpdateMcpServerInput,
+  ): Promise<McpServerRecord> {
+    const owned = this.begin();
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM project_mcp_servers WHERE id = ?")
+        .get(id) as Row | undefined;
+      if (row === undefined) {
+        throw new Error(`Unknown MCP server: ${id}`);
+      }
+      const existing = this.toMcpServer(row, []);
+      if (patch.name !== undefined) {
+        this.assertMcpServerNameAvailable(existing.projectId, patch.name, id);
+      }
+      const secrets = applyMcpSecretsPatch(
+        parseJson<McpServerSecrets>(row, "secrets_json"),
+        patch.secrets,
+      );
+      // `enabled`, `approved_by` and `approved_at` are deliberately absent
+      // from this statement; see `McpServerRecord`.
+      this.db
+        .prepare(
+          `UPDATE project_mcp_servers
+              SET name = ?, command = ?, args_json = ?, url = ?,
+                  values_json = ?, secrets_json = ?, scope = ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(
+          patch.name ?? existing.name,
+          clearable(patch.command, existing.command),
+          JSON.stringify(patch.args ?? existing.args),
+          clearable(patch.url, existing.url),
+          JSON.stringify(patch.values ?? existing.values),
+          JSON.stringify(secrets),
+          patch.scope ?? existing.scope,
+          patch.updatedAt,
+          id,
+        );
+      if (patch.repositoryIds !== undefined) {
+        this.replaceMcpServerRepositories(
+          id,
+          normalizeMcpRepositoryIds(patch.repositoryIds),
+        );
+      }
+      this.commit(owned);
+    } catch (error) {
+      this.rollback(owned);
+      throw error;
+    }
+    return await this.requireMcpServer(id);
+  }
+
+  public async setMcpServerApproval(
+    id: string,
+    approval: { enabled: boolean; approvedBy: string; approvedAt: string },
+  ): Promise<McpServerRecord> {
+    // Disabling clears who approved and when, so a later enable is a fresh
+    // decision with a fresh name on it rather than the old one resumed.
+    const result = this.db
+      .prepare(
+        `UPDATE project_mcp_servers
+            SET enabled = ?, approved_by = ?, approved_at = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(
+        approval.enabled ? 1 : 0,
+        approval.enabled ? approval.approvedBy : null,
+        approval.enabled ? approval.approvedAt : null,
+        approval.approvedAt,
+        id,
+      );
+    if (Number(result.changes) === 0) {
+      throw new Error(`Unknown MCP server: ${id}`);
+    }
+    return await this.requireMcpServer(id);
+  }
+
+  public async deleteMcpServer(id: string): Promise<void> {
+    // No foreign keys on the join table, so the attachments go explicitly
+    // and in the same transaction: an orphaned join row would re-attach a
+    // server later created under the same id.
+    const owned = this.begin();
+    try {
+      this.db
+        .prepare("DELETE FROM project_mcp_server_repositories WHERE server_id = ?")
+        .run(id);
+      this.db.prepare("DELETE FROM project_mcp_servers WHERE id = ?").run(id);
+      this.commit(owned);
+    } catch (error) {
+      this.rollback(owned);
+      throw error;
+    }
+  }
+
+  private async requireMcpServer(id: string): Promise<McpServerRecord> {
+    const record = await this.getMcpServer(id);
+    if (record === undefined) {
+      throw new Error(`Unknown MCP server: ${id}`);
+    }
+    return record;
+  }
+
+  private mcpServerRepositoryIds(serverId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT repository_id FROM project_mcp_server_repositories
+          WHERE server_id = ? ORDER BY repository_id`,
+      )
+      .all(serverId) as Row[];
+    return normalizeMcpRepositoryIds(
+      rows.map((row) => text(row, "repository_id")),
+    );
+  }
+
+  private replaceMcpServerRepositories(
+    serverId: string,
+    repositoryIds: string[],
+  ): void {
+    this.db
+      .prepare("DELETE FROM project_mcp_server_repositories WHERE server_id = ?")
+      .run(serverId);
+    this.attachMcpServerRepositories(serverId, repositoryIds);
+  }
+
+  /**
+   * Insert only. A create must not sweep the join table for its id first:
+   * that would quietly repair rows a delete failed to remove, and the
+   * primary key is what should say so instead.
+   */
+  private attachMcpServerRepositories(
+    serverId: string,
+    repositoryIds: string[],
+  ): void {
+    const insert = this.db.prepare(
+      `INSERT INTO project_mcp_server_repositories (server_id, repository_id)
+       VALUES (?, ?)`,
+    );
+    for (const repositoryId of repositoryIds) {
+      insert.run(serverId, repositoryId);
+    }
+  }
+
+  /**
+   * Checked before the insert so the failure is a sentence rather than a
+   * constraint code; the unique index over LOWER(name) remains the
+   * guarantee if two writers race past this.
+   */
+  private assertMcpServerNameAvailable(
+    projectId: string,
+    name: string,
+    exceptId = "",
+  ): void {
+    const existing = this.db
+      .prepare(
+        `SELECT id FROM project_mcp_servers
+          WHERE project_id = ? AND LOWER(name) = LOWER(?) AND id <> ?`,
+      )
+      .get(projectId, name, exceptId) as Row | undefined;
+    if (existing !== undefined) {
+      throw new Error(
+        `An MCP server named ${name} already exists in project ${projectId}`,
+      );
+    }
+  }
+
+  private toMcpServer(row: Row, repositoryIds: string[]): McpServerRecord {
+    const command = optionalText(row, "command");
+    const url = optionalText(row, "url");
+    const approvedBy = optionalText(row, "approved_by");
+    const approvedAt = optionalText(row, "approved_at");
+    return {
+      id: text(row, "id"),
+      projectId: text(row, "project_id"),
+      name: text(row, "name"),
+      transport: text(row, "transport") as McpServerTransport,
+      ...(command === undefined ? {} : { command }),
+      args: parseJson<string[]>(row, "args_json"),
+      ...(url === undefined ? {} : { url }),
+      values: parseJson<Record<string, string>>(row, "values_json"),
+      // Names only. The triples in `secrets_json` leave this store through
+      // `getMcpServerSecrets` and nothing else.
+      secretNames: mcpSecretNames(parseJson<McpServerSecrets>(row, "secrets_json")),
+      enabled: integer(row, "enabled") === 1,
+      scope: text(row, "scope") as McpServerScope,
+      repositoryIds,
+      ...(approvedBy === undefined ? {} : { approvedBy }),
+      ...(approvedAt === undefined ? {} : { approvedAt }),
+      createdBy: text(row, "created_by"),
+      createdAt: text(row, "created_at"),
+      updatedAt: text(row, "updated_at"),
+    };
+  }
+
   public async createAuthSession(session: AuthSessionRecord): Promise<void> {
     this.db
       .prepare(
@@ -1876,6 +2200,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
   public async removeRepository(id: string): Promise<void> {
     const owned = this.begin();
     try {
+      // An MCP server's attachment goes with the repository it was attached
+      // to. Left behind, the join row would re-attach the server — secrets
+      // and all — to whatever repository next took this id.
+      this.db
+        .prepare(
+          "DELETE FROM project_mcp_server_repositories WHERE repository_id = ?",
+        )
+        .run(id);
       this.db
         .prepare(
           `DELETE FROM channel_message_reactions
@@ -2128,6 +2460,15 @@ export class SqliteCoordinationStore implements CoordinationStore {
       throw error;
     }
     return task;
+  }
+
+  public async getSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM submitted_tasks WHERE id = ?")
+      .get(taskId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async listSubmittedTasks(

@@ -63,13 +63,27 @@ import {
   type HeartbeatReply,
   type WorkingChange,
 } from "./client.js";
-import { holdHost } from "./host-signal.js";
+import { holdHost, hostAttached, signalHost } from "./host-signal.js";
+import { stageMcpServers, type StagedMcpServers } from "./mcp-config.js";
 import type { WorkNudge } from "./nudge.js";
 import {
   shouldClaimWork,
   systemPowerSource,
   type PowerSource,
 } from "./power.js";
+
+/**
+ * The oldest control plane this worker will take work from.
+ *
+ * Distinct from `WORKER_PROTOCOL_VERSION`, which is what this worker
+ * *speaks* and announces on its lease. The two part ways whenever a version
+ * adds something optional: protocol 4 lets a lease carry MCP servers, and a
+ * control plane still on 3 simply never sends any, which is not a reason to
+ * refuse its tasks. What cannot be done without is plan admission, which
+ * arrived in 3 — an older control plane would have work done first and
+ * discarded on conflict afterwards, and that is refused.
+ */
+const MINIMUM_CONTROL_PLANE_PROTOCOL = 3;
 
 /**
  * The worker daemon.
@@ -663,13 +677,13 @@ export class Worker {
     beat.unref?.();
 
     try {
-      if ((assignment.protocolVersion ?? 1) < WORKER_PROTOCOL_VERSION) {
+      if ((assignment.protocolVersion ?? 1) < MINIMUM_CONTROL_PLANE_PROTOCOL) {
         // Executing anyway would put the old plan-blind behaviour back: work
         // would be done first and discarded on conflict afterwards.
         throw new Error(
           "Control plane speaks remote worker protocol " +
             `${assignment.protocolVersion ?? 1}, which has no plan admission ` +
-            `step; this worker requires ${WORKER_PROTOCOL_VERSION}`,
+            `step; this worker requires at least ${MINIMUM_CONTROL_PLANE_PROTOCOL}`,
         );
       }
 
@@ -1445,11 +1459,65 @@ export class Worker {
             worktrees,
           );
     const workspaces: WorkspaceManager = docker ?? worktrees;
+    // The lease's MCP servers, after this machine's allowlist. Staged under
+    // scratch — the same root the workspace has, so the `finally` that
+    // removes the run removes the config and its secrets with it — and
+    // staged before the adapter exists, because the adapter is what carries
+    // them. Both outcomes are said aloud: a room told nothing sees a run with
+    // no tools and cannot tell whether nobody offered any or this machine
+    // declined them, and those have different fixes in different places.
+    const offered = assignment.mcpServers ?? [];
+    const mcp = await stageMcpServers({
+      scratch,
+      vendor: configuredAgent.adapter ?? "generic-cli",
+      servers: offered,
+      allow: this.options.project.config.mcp,
+    });
+    if (offered.length > 0 && mcp.withheld.length > 0) {
+      const names = mcp.withheld.map((server) => server.name);
+      const changed = mcp.withheld
+        .filter((server) => server.changed)
+        .map((server) => server.name);
+      await this.options.client.progress(
+        assignment.lease.id,
+        `This project offers MCP servers ${names.join(", ")}; this machine ` +
+          "has not allowed them" +
+          (changed.length === 0
+            ? ""
+            : ` (${changed.join(", ")} changed since it was allowed here)`) +
+          (hostAttached()
+            ? ". Kumi on that machine will ask its owner."
+            : ". They run once listed under mcp.allow in the worker's " +
+              ".coordinator/config.json."),
+      );
+      // Said to the host as well as to the room, because the room cannot
+      // fix it. The allowlist belongs to whoever owns this machine, the
+      // desktop app is the one thing that can put the question in front of
+      // them, and this process read its config once at start — so the most
+      // it can do is say what was withheld, and what agreeing would mean,
+      // and let the app ask. Nowhere to send it is the ordinary case and is
+      // a no-op.
+      signalHost({
+        type: "mcp-offered",
+        servers: mcp.withheld.map(({ name, digest, summary }) => ({
+          name,
+          digest,
+          summary,
+        })),
+      });
+    }
+    if (mcp.staged.length > 0) {
+      await this.options.client.progress(
+        assignment.lease.id,
+        `Running with tools: ${mcp.staged.join(", ")}.`,
+      );
+    }
     const adapter = this.adapterFor(
       assignment,
       workspace,
       workspaces,
       agentSandbox,
+      mcp,
     );
     // Whatever conversation this request was asked inside travels with it —
     // the hosted path has the same problem the local one does: a follow-up
@@ -1858,6 +1926,7 @@ export class Worker {
     workspace: TaskWorkspace,
     workspaces: WorkspaceManager,
     sandbox: WorkspaceSandbox | undefined,
+    mcp: StagedMcpServers,
   ): AgentAdapter {
     const [agentId, agent]: [string, AgentConfig] =
       this.options.project.requireAgent(assignment.task.agentId);
@@ -1918,6 +1987,7 @@ export class Worker {
         ...(workerExecutionSandbox === undefined
           ? {}
           : { executionSandbox: workerExecutionSandbox }),
+        ...(mcp.codex === undefined ? {} : { mcpServers: mcp.codex.servers }),
         ...(agent.env === undefined ? {} : { env: { ...process.env, ...agent.env } }),
         ...(this.options.codexRunner === undefined
           ? {}
@@ -1974,6 +2044,9 @@ export class Worker {
           ? {}
           : { executionTimeoutMs: agent.executionTimeoutMs }),
         ...(promptEffort === undefined ? {} : { effort: promptEffort }),
+        ...(mcp.claude === undefined
+          ? {}
+          : { mcpConfigPath: mcp.claude.configPath }),
         ...(agent.env === undefined
           ? {}
           : { env: { ...process.env, ...agent.env } }),

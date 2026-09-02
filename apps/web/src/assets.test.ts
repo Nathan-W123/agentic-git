@@ -1060,6 +1060,146 @@ test("settings exposes theme and sound effect preferences", async () => {
   assert.match(ui, /function contextForChime\(\) \{\s*if \(!soundEffectsEnabled\(\)\)/u);
 });
 
+test("the settings module composes MCP servers into project controls", async () => {
+  const app = await publicFile("app.js");
+
+  // Beside App tokens, in the same category — a fourth block on the same
+  // page rather than a category of its own, because approving a server is a
+  // project-wide control in the same sense a token is.
+  assert.match(
+    app,
+    /function projectControlsSection\(\)[\s\S]{0,800}apiTokensCard\(\)\}\$\{mcpServersCard\(\)\}/u,
+  );
+  const card = sourceOf(app, "mcpServersCard", "projectControlsSection");
+  assert.match(card, /id: "mcp-servers"/u);
+  assert.match(card, /heading: "MCP servers"/u);
+  // A deployment with the switch off says which switch, and offers no form.
+  assert.match(card, /COORD_MCP_ENABLED/u);
+  assert.match(card, /if \(enabled === false\)/u);
+  // The list row carries the audit line, not a bare toggle, and approval and
+  // removal are two different buttons with two different weights.
+  assert.match(card, /approved by/u);
+  assert.match(card, /"not approved"/u);
+  assert.match(card, /data-act="mcp-approve"/u);
+  assert.match(card, /data-act="mcp-remove"/u);
+  assert.match(app, /async function removeMcpServerConfirmed\(id\)/u);
+  // The form the create handler reads, field by field.
+  for (const field of [
+    "data-mcp-name",
+    "data-mcp-transport",
+    "data-mcp-command",
+    "data-mcp-args",
+    "data-mcp-url",
+    "data-mcp-token",
+    "data-mcp-secrets",
+    "data-mcp-scope",
+  ]) {
+    assert.match(card, new RegExp(field, "u"), `${field} should be on the form`);
+  }
+  assert.match(card, /data-act="mcp-create"/u);
+  // An http server's secret is one bearer token, not a NAME=value list: Codex
+  // can be handed a bearer token and nothing else, so a server made here has
+  // to run on every vendor. The textarea is the stdio command's environment
+  // and goes away with the stdio fields.
+  assert.match(card, /data-mcp-secrets data-mcp-stdio-only/u);
+  const create = sourceOf(app, "createMcpServerFromForm", "focusSettingsRow");
+  assert.match(
+    create,
+    /transport === "stdio"\s*\? parseMcpSecrets\([\s\S]{0,120}\)\s*: mcpBearerHeader\(read\("\[data-mcp-token\]"\)\)/u,
+  );
+  const bearer = new Function(
+    `${sourceOf(app, "mcpBearerHeader", "createMcpServerFromForm")}\nreturn mcpBearerHeader;`,
+  )() as (token: string) => Record<string, string>;
+  assert.deepEqual(bearer("  lin_api_x=y  "), { Authorization: "Bearer lin_api_x=y" });
+  assert.deepEqual(bearer("Bearer already"), { Authorization: "Bearer already" });
+  assert.deepEqual(bearer(""), {});
+  // Loaded when Settings opens, beside the tokens, and neither one failing
+  // keeps the other off the screen.
+  assert.match(
+    app,
+    /Promise\.allSettled\(\[\s*loadApiTokens\(\),\s*ensureMcpServers\(state\.projectId\),\s*\]\)\.then\(\(\) => render\(\)\)/u,
+  );
+});
+
+test("the settings search index finds MCP servers under project controls", async () => {
+  const settings = await publicFile("screen-settings.js");
+
+  const row = settings.slice(
+    settings.indexOf('row: "mcp-servers"'),
+    settings.indexOf("];", settings.indexOf('row: "mcp-servers"')),
+  );
+  assert.notEqual(row, "", "the index should carry an mcp-servers row");
+  assert.match(row, /section: "project-controls"/u);
+  assert.match(row, /label: "MCP servers"/u);
+  for (const word of ["mcp", "tools", "linear", "sentry", "server", "approve"]) {
+    assert.match(row, new RegExp(`"${word}"`, "u"), `${word} should be a synonym`);
+  }
+});
+
+test("the MCP data functions hit the project's mcp-servers routes", async () => {
+  const data = await publicFile("data.js");
+
+  assert.match(data, /export async function ensureMcpServers\(projectId\)/u);
+  assert.match(data, /export async function createMcpServer\(projectId, input\)/u);
+  assert.match(data, /export async function approveMcpServer\(projectId, id, enabled\)/u);
+  assert.match(data, /export async function deleteMcpServer\(projectId, id\)/u);
+  assert.match(data, /state\.mcpServersEnabled = response\.enabled === true/u);
+
+  const listPath =
+    "`/projects/${encodeURIComponent(projectId)}/mcp-servers`";
+  const itemPath =
+    "`/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}`";
+  const approvalPath =
+    "`/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}/approval`";
+  const between = (from: string, to: string) =>
+    data.slice(
+      data.indexOf(`export async function ${from}`),
+      data.indexOf(`export async function ${to}`),
+    );
+  const ensure = between("ensureMcpServers", "createMcpServer");
+  assert.ok(ensure.includes(listPath), "the list is read from the list route");
+  const create = between("createMcpServer", "approveMcpServer");
+  assert.ok(create.includes(listPath), "create posts to the list route");
+  assert.match(create, /method: "POST"/u);
+  const approve = between("approveMcpServer", "deleteMcpServer");
+  assert.ok(approve.includes(approvalPath), "approval has its own route");
+  assert.match(approve, /method: "POST", body: \{ enabled \}/u);
+  const remove = data.slice(
+    data.indexOf("export async function deleteMcpServer"),
+    data.indexOf("/* ---", data.indexOf("export async function deleteMcpServer")),
+  );
+  assert.ok(remove.includes(itemPath), "delete addresses one server");
+  assert.match(remove, /method: "DELETE"/u);
+});
+
+test("MCP secrets go up as NAME=value and never as a sealed record", async () => {
+  const data = await publicFile("data.js");
+  const app = await publicFile("app.js");
+
+  // The client sends plain values and lets the server seal them. A client
+  // that sent a `ciphertext` would be a client with a sealing key, and there
+  // is exactly one place that key lives.
+  const create = sourceOf(app, "createMcpServerFromForm", "focusSettingsRow");
+  assert.doesNotMatch(create, /ciphertext/u);
+  assert.doesNotMatch(data, /ciphertext/u);
+  assert.match(create, /input\.secrets = secrets/u);
+  assert.match(create, /parseMcpSecrets\(/u);
+
+  // The textarea parser, lifted out and run: first `=` only, so a value that
+  // itself contains `=` survives.
+  const start = data.indexOf("export function parseMcpSecrets");
+  const end = data.indexOf("\nexport function", start + 1);
+  assert.notEqual(start, -1);
+  const parse = new Function(
+    `${data.slice(start, end).replace("export ", "")}\nreturn parseMcpSecrets;`,
+  )() as (text: string) => Record<string, string>;
+  assert.deepEqual(
+    parse("LINEAR_API_KEY=lin_api_abc\n\nTOKEN=a=b==\nno-equals\n =orphan\n"),
+    { LINEAR_API_KEY: "lin_api_abc", TOKEN: "a=b==" },
+  );
+  assert.deepEqual(parse(""), {});
+});
+
 test("sound effects confirm real sends and reserve interruptions for live arrivals", async () => {
   const app = await publicFile("app.js");
   const data = await publicFile("data.js");

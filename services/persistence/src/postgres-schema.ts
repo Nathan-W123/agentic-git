@@ -1208,4 +1208,42 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ADD COLUMN visibility TEXT NOT NULL DEFAULT 'personal'`,
     ],
   },
+  {
+    /**
+     * The MCP servers a project has chosen for its agents, and who said so.
+     * See the same migration in `schema.ts` for why approval is a recorded
+     * act, off by default. The flag is a real BOOLEAN here and the
+     * per-project name uniqueness a unique index over LOWER(name), as the
+     * dialect notes above prescribe.
+     */
+    version: 54,
+    name: "project-mcp-servers",
+    statements: [
+      `CREATE TABLE project_mcp_servers (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        command TEXT,
+        args_json TEXT NOT NULL DEFAULT '[]',
+        url TEXT,
+        values_json TEXT NOT NULL DEFAULT '{}',
+        secrets_json TEXT NOT NULL DEFAULT '{}',
+        enabled BOOLEAN NOT NULL DEFAULT false,
+        scope TEXT NOT NULL DEFAULT 'repository',
+        approved_by TEXT,
+        approved_at TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE UNIQUE INDEX project_mcp_servers_project_name_idx
+         ON project_mcp_servers (project_id, LOWER(name))`,
+      `CREATE TABLE project_mcp_server_repositories (
+        server_id TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        PRIMARY KEY (server_id, repository_id)
+      )`,
+    ],
+  },
 ];

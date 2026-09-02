@@ -53,6 +53,7 @@ import {
 // looked connected, and could run nothing.
 import { detectAgents } from "./agents.mjs";
 import {
+  forgetMcpServers,
   setStayAwake,
   startWorker,
   stopWorker,
@@ -317,6 +318,13 @@ function buildMenu() {
       label: "Open Worker Log",
       click: () => void shell.openPath(workerLogPath()),
     },
+    {
+      // The other half of the question the app asks when a project offers
+      // its agents a tool. A yes that could only be taken back by editing a
+      // JSON file would be a yes kept forever.
+      label: "Forget Allowed MCP Servers…",
+      click: () => void forgetAllowedMcp(),
+    },
     { type: "separator" },
     {
       // Named for what it actually does. The platform call underneath is
@@ -363,6 +371,40 @@ function buildMenu() {
  * give up to be reachable. Somebody may reasonably want to run agents all day
  * and still have their laptop sleep at night.
  */
+/**
+ * Takes back every MCP server this computer has allowed, after asking.
+ *
+ * Asked because it is not free: agents here run without those tools from
+ * the next task on, until the owner says yes again. The worker is restarted
+ * by the call so the answer takes effect now rather than at the next launch.
+ */
+async function forgetAllowedMcp() {
+  const choice = await askDialog({
+    kind: "question",
+    title: "Kumi",
+    heading: "Forget the MCP servers this computer has allowed?",
+    body:
+      "Your agents here will run without those tools until you allow them " +
+      "again. Kumi asks the next time a task offers one.",
+    buttons: ["Forget", "Keep"],
+    cancelId: 1,
+  });
+  if (choice !== 0) {
+    return;
+  }
+  try {
+    await forgetMcpServers(here, session, noteWorkerState);
+  } catch (error) {
+    await tellDialog({
+      kind: "error",
+      title: "Kumi",
+      heading: "Could not forget the allowed MCP servers.",
+      body: error instanceof Error ? error.message : String(error),
+      buttons: ["Close"],
+    });
+  }
+}
+
 async function toggleKeepAwake(wanted) {
   awakeForWork = wanted === true;
   // Said once, when the expectation is being formed. Somebody turning this on
