@@ -2517,6 +2517,48 @@ function apiTokensCard() {
  * — the row shows how many there are and never what they are, because the
  * list route never has them to give.
  */
+/**
+ * Servers worth offering by name, so adding one is a pick rather than a form.
+ *
+ * The form underneath stays for everything not on this list — it is a short
+ * list on purpose, not an attempt at a registry. What it removes is the class
+ * of mistake the form invites: a command typed slightly wrong, a package name
+ * misremembered, and above all a missing version, which means every teammate
+ * downloads whatever was published that morning and runs it under their own
+ * account. Every entry here is pinned for that reason.
+ *
+ * `secret` names the one credential the server needs, or is absent when it
+ * needs none. `note` is what a person needs to know before agreeing to run it.
+ */
+const MCP_CATALOGUE = [
+  {
+    id: "context7",
+    label: "Context7",
+    note: "Current documentation for whatever library your agents are using. No account needed.",
+    server: { name: "context7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp@1.0.14"] },
+  },
+  {
+    id: "playwright",
+    label: "Playwright",
+    note: "Drives a real browser, so an agent can check the page it just changed.",
+    server: { name: "playwright", transport: "stdio", command: "npx", args: ["-y", "@playwright/mcp@0.0.41"] },
+  },
+  {
+    id: "github",
+    label: "GitHub",
+    note: "Issues and pull requests. Needs a personal access token.",
+    secret: "a GitHub personal access token",
+    server: { name: "github", transport: "http", url: "https://api.githubcopilot.com/mcp/" },
+  },
+  {
+    id: "sentry",
+    label: "Sentry",
+    note: "The errors your users are actually hitting. Needs a Sentry auth token.",
+    secret: "a Sentry auth token",
+    server: { name: "sentry", transport: "http", url: "https://mcp.sentry.dev/mcp" },
+  },
+];
+
 function mcpServersCard() {
   const servers = state.mcpServers ?? [];
   const enabled = state.mcpServersEnabled;
@@ -2552,6 +2594,16 @@ function mcpServersCard() {
   return settingsSectionBlock({
     ...heading,
     body: `${settingRow({
+      row: "mcp-servers",
+      label: "Add a known one",
+      description:
+        "Fills the form below with a pinned version, so every teammate runs the same program rather than whatever was published this morning.",
+      stacked: true,
+      control: `<div class="st-mcp-picks">${MCP_CATALOGUE.map(
+        (entry) => `<button type="button" class="btn btn-sm" data-act="mcp-pick"
+          data-value="${esc(entry.id)}" title="${esc(entry.note)}">${esc(entry.label)}</button>`,
+      ).join("")}</div>`,
+    })}${settingRow({
       row: "mcp-servers",
       label: "New server",
       description:
@@ -8749,6 +8801,51 @@ function deviceLabel() {
   return platform;
 }
 
+/**
+ * Puts one catalogue entry into the form, and leaves it there to be read.
+ *
+ * Deliberately not "create on click". What is being agreed to is that this
+ * program starts on every teammate's computer, and a person should see the
+ * command and the version before they approve that — the form is the last
+ * place it is legible, and approval is a second, separate act after it.
+ */
+function fillMcpFormFrom(id) {
+  const entry = MCP_CATALOGUE.find((candidate) => candidate.id === id);
+  if (entry === undefined) {
+    return;
+  }
+  const set = (selector, value) => {
+    const field = document.querySelector(selector);
+    if (field) {
+      field.value = value;
+    }
+  };
+  const http = entry.server.transport === "http";
+  set("[data-mcp-name]", entry.server.name);
+  set("[data-mcp-transport]", entry.server.transport);
+  set("[data-mcp-command]", entry.server.command ?? "");
+  set("[data-mcp-args]", (entry.server.args ?? []).join(" "));
+  set("[data-mcp-url]", entry.server.url ?? "");
+  // The transport picker's own handler shows and hides the right half, and
+  // setting `value` in script does not fire it.
+  const form = document.querySelector(".st-mcp-form");
+  for (const field of form?.querySelectorAll("[data-mcp-stdio], [data-mcp-stdio-only]") ?? []) {
+    field.hidden = http;
+  }
+  const httpFields = form?.querySelector("[data-mcp-http]");
+  if (httpFields) {
+    httpFields.hidden = !http;
+  }
+  const credential = document.querySelector(http ? "[data-mcp-token]" : "[data-mcp-secrets]");
+  toast(
+    entry.secret === undefined
+      ? `${entry.label} filled in — check it, then Create.`
+      : `${entry.label} filled in — paste ${entry.secret}, then Create.`,
+    "ok",
+  );
+  credential?.focus();
+}
+
 function createMcpServerFromForm() {
   const read = (selector) =>
     (document.querySelector(selector)?.value ?? "").trim();
@@ -11820,6 +11917,9 @@ document.addEventListener("click", (event) => {
       return;
     case "mcp-create":
       createMcpServerFromForm();
+      return;
+    case "mcp-pick":
+      fillMcpFormFrom(value);
       return;
     case "editor-connect":
       void connectEditorToKumi(value);

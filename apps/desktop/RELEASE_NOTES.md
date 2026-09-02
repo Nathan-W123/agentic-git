@@ -23,6 +23,15 @@ Each editor on each machine gets its own token, named for both, so
 revoking the laptop you left somewhere does not break the desktop you are
 sitting at.
 
+The other direction got the same treatment. Adding a tool for your own
+agents meant typing a name, a command, arguments, a version and a scope,
+and any one of them being wrong failed quietly on somebody else's
+computer. Settings now offers a short list of known servers — Context7,
+Playwright, GitHub, Sentry — and picking one fills the form with a pinned
+version. It fills it rather than creating it, because what you are
+agreeing to is that program starting on every teammate's machine, and the
+command should be legible before you approve it.
+
 Also in this build: a machine now joins the organization that actually
 has a repository rather than whichever the server listed first, which is
 what left an invited teammate's agents grey with the app insisting it was
