@@ -849,7 +849,15 @@ async function serve(
         { repositories, intelligence },
       );
     },
-    ...workerOperations(project, store, { repositories, intelligence }),
+    // The same sealer the gateway seals MCP secrets with, so what one route
+    // stores the lease can open. Two stores opened on the same directory
+    // would agree on the key; passing the one object makes that a fact
+    // rather than a coincidence.
+    ...workerOperations(project, store, {
+      repositories,
+      intelligence,
+      sealer: credentials.sealer(),
+    }),
     async dockerStatus() {
       try {
         const result = await runProcess(
@@ -894,6 +902,7 @@ async function serve(
     // switch off nothing is gated on a subscription at all — so a deployment
     // runs exactly as it did before payment existed.
     paymentsEnabled: payments,
+    secretSealer: credentials.sealer(),
     ...(stripeSecretKey === undefined
       ? {}
       : { stripe: new HttpStripeClient(stripeSecretKey) }),

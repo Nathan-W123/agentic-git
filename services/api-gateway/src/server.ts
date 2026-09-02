@@ -27,6 +27,8 @@ import type {
   ChannelMessage,
   ChannelReply,
   CoordinationStore,
+  McpServerRecord,
+  McpServerScope,
   SubChannel,
   SubChannelVisibility,
   Organization,
@@ -75,15 +77,20 @@ import {
   FORCE_QUESTION_MARKER,
   KEEP_IT_SIMPLE_DIRECTIVE,
   localAgentsOnly,
+  mcpServersEnabled,
   projectBudgets,
   readsAsReportRequest,
   requestFromObjective,
   ROLE_CONTEXT_PREFIX,
+  uniqueStrings,
   withoutRoleContext,
   type ApprovalStatus,
   type FilePatchStatus,
+  type McpServerTransport,
   type SequencedAuditEvent,
+  type WorkAssignment as SharedWorkAssignment,
 } from "@coord/shared-types";
+import type { SecretSealer } from "@coord/workspace-manager";
 import {
   AuthService,
   AuthenticationError,
@@ -3976,6 +3983,12 @@ export interface ApiOperations {
     repositoryId?: string;
     /** What this worker can execute. Absent means work alone. */
     kinds?: readonly ("task" | "question")[];
+    /**
+     * The protocol version the worker announced. Read off the request
+     * rather than assumed, because the lease decides by it what the other
+     * end can be trusted to look at — see `mcpServersForLease`.
+     */
+    protocolVersion?: number;
   }): Promise<WorkAssignment | undefined>;
   leaseBundle?(
     leaseId: string,
@@ -4281,27 +4294,15 @@ export type ChatStreamEvent =
   | { type: "done"; reply: unknown }
   | { type: "error"; message: string; code: string };
 
-/** Everything a worker needs to execute one task without further lookups. */
-export interface WorkAssignment {
-  lease: WorkLease;
-  task: SubmittedTask;
-  repository: { id: string; branch: string };
-  canonicalVersion: {
-    sequence: number;
-    revision: string;
-    branch: string;
-    createdAt: string;
-  };
-  /** Fetch the workspace contents from here, then clone it. */
-  bundleUrl: string;
-  /** Branch to check out from the bundle. */
-  bundleRef: string;
-  heartbeatIntervalMs: number;
-  /** Remote worker protocol version this control plane speaks. */
-  protocolVersion: number;
-  /** Submit the agent's plan here for admission before executing. */
-  planUrl: string;
-}
+/**
+ * Everything a worker needs to execute one task without further lookups.
+ *
+ * The shared definition with this side's rows named; the control plane's
+ * `leaseWork` builds the same alias from the same definition, so what it
+ * returns and what this gateway sends are one type rather than two that
+ * happened to agree.
+ */
+export type WorkAssignment = SharedWorkAssignment<WorkLease, SubmittedTask>;
 
 export interface ApiGatewayOptions {
   store: CoordinationStore;
@@ -4339,6 +4340,16 @@ export interface ApiGatewayOptions {
    * about a missing key. Injected by tests, which must not call Stripe.
    */
   stripe?: StripeClient;
+  /**
+   * Seals the secrets a project gives its MCP servers before they are stored,
+   * and is the same sealer the lease opens them with. The hosting process
+   * passes `UserCredentialStore#sealer()`, so an MCP secret is protected by
+   * exactly the key that already protects every stored provider credential.
+   * Absent — no credential store — every route that would store or arm a
+   * server answers 501, the way billing does without Stripe: a deployment
+   * that cannot keep the secret must not accept it.
+   */
+  secretSealer?: SecretSealer;
   /**
    * Whether this deployment takes money at all.
    *
@@ -4649,6 +4660,338 @@ function objectBody(value: unknown): Record<string, unknown> {
     throw new HttpError(400, "invalid_request", "JSON body must be an object");
   }
   return value as Record<string, unknown>;
+}
+
+/**
+ * What a vendor config will call an MCP server: a bare key in Codex's TOML
+ * and in Claude's JSON, nothing that needs quoting in either. The same
+ * expression the Codex adapter applies again before writing the file, so a
+ * name this route accepts is one the adapter will not refuse later, when the
+ * person who typed it is no longer looking.
+ */
+const MCP_SERVER_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
+
+/**
+ * A stdio server's executable, in the two shapes `spawn` resolves without a
+ * shell: a bare name looked up on the worker's PATH, or an absolute path.
+ * A relative path with a directory in it is refused — it would resolve
+ * against whatever working directory the worker happened to have, which is
+ * a workspace the agent writes to.
+ */
+const MCP_BARE_EXECUTABLE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$/u;
+const MCP_ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/])/u;
+/**
+ * Nothing that means something to a shell or to cmd.exe. The worker never
+ * starts a shell, but a `.cmd` shim on Windows does — the process runner
+ * refuses the same tokens at spawn time for exactly that reason — and a
+ * command that would be refused on the machine it was meant for should be
+ * refused here, where the person configuring it can still read the answer.
+ */
+const MCP_UNSAFE_COMMAND_TOKEN = /[\0\r\n\t"'`$&|;<>^%!(){}[\]*?#~]/u;
+
+/** An environment variable or HTTP header name, as either side will take it. */
+const MCP_VALUE_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/u;
+
+const MCP_MAX_ARGS = 32;
+const MCP_MAX_ARG_LENGTH = 512;
+const MCP_MAX_VALUES = 32;
+const MCP_MAX_VALUE_LENGTH = 4_096;
+const MCP_MAX_SECRETS = 16;
+const MCP_MAX_SECRET_LENGTH = 4_096;
+const MCP_MAX_REPOSITORIES = 64;
+
+function mcpServerNameField(value: unknown): string {
+  const name = stringField(value, "name", { max: 64 }) ?? "";
+  if (!MCP_SERVER_NAME.test(name)) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      "name must be lower-case letters, digits, dash, or underscore, " +
+        "starting with a letter or digit, up to 64 characters",
+    );
+  }
+  return name;
+}
+
+function mcpTransportField(
+  value: unknown,
+  optional: boolean,
+): McpServerTransport | undefined {
+  if (value === undefined && optional) {
+    return undefined;
+  }
+  if (value !== "stdio" && value !== "http") {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      'transport must be "stdio" or "http"',
+    );
+  }
+  return value;
+}
+
+/** `null` clears the field on an edit; absent leaves it alone. */
+function mcpCommandField(value: unknown): string | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  const command = stringField(value, "command", { max: 1_024, optional: true });
+  if (command === undefined) {
+    return undefined;
+  }
+  if (
+    MCP_UNSAFE_COMMAND_TOKEN.test(command) ||
+    !(MCP_BARE_EXECUTABLE.test(command) || MCP_ABSOLUTE_PATH.test(command))
+  ) {
+    throw new HttpError(
+      400,
+      "invalid_command",
+      "command must be a bare executable name or an absolute path, with no " +
+        "quotes, spaces in a bare name, or shell control characters",
+    );
+  }
+  return command;
+}
+
+function mcpArgsField(value: unknown): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > MCP_MAX_ARGS) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `args must be an array of at most ${MCP_MAX_ARGS} strings`,
+    );
+  }
+  return value.map((entry) => {
+    if (
+      typeof entry !== "string" ||
+      entry.length > MCP_MAX_ARG_LENGTH ||
+      entry.includes("\0")
+    ) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `each arg must be a string of at most ${MCP_MAX_ARG_LENGTH} characters`,
+      );
+    }
+    return entry;
+  });
+}
+
+/**
+ * Whether a URL is Kumi's own MCP endpoint, on this deployment or another.
+ *
+ * An agent handed this deployment's MCP server could submit work to itself:
+ * a task that dispatches a task that dispatches a task, each on a teammate's
+ * laptop, each billed. The exact path is refused on every host, because a
+ * host name is not an identity — the same deployment answers on every name
+ * that resolves to it, on loopback from its own machine, and behind whatever
+ * a proxy calls it — and another Kumi's endpoint is the same loop one hop
+ * longer. The suffix is refused only on this deployment's own names, for the
+ * case where it is mounted under a path prefix.
+ */
+function mcpUrlLoopsBack(url: URL, ownHosts: readonly string[]): boolean {
+  const pathname = url.pathname.replace(/\/+$/u, "");
+  const endpoint = `${API_PREFIX}/mcp`;
+  if (pathname === endpoint) {
+    return true;
+  }
+  return (
+    pathname.endsWith(endpoint) && ownHosts.includes(url.host.toLowerCase())
+  );
+}
+
+function mcpUrlField(
+  value: unknown,
+  ownHosts: readonly string[],
+): string | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  const raw = stringField(value, "url", { max: 2_048, optional: true });
+  if (raw === undefined) {
+    return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new HttpError(400, "invalid_url", "url must be an absolute URL");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new HttpError(
+      400,
+      "invalid_url",
+      "url must not carry credentials; put them in secrets as a header",
+    );
+  }
+  // Plain HTTP only to the worker's own machine. A secret header travels on
+  // every request to this URL, and a loopback listener is the one place it
+  // cannot be read off the wire.
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
+    url.hostname.toLowerCase(),
+  );
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new HttpError(
+      400,
+      "invalid_url",
+      "url must use https, or http to localhost only",
+    );
+  }
+  if (mcpUrlLoopsBack(url, ownHosts)) {
+    throw new HttpError(
+      400,
+      "mcp_loop",
+      "url is Kumi's own MCP endpoint; an agent given it could dispatch " +
+        "work to itself",
+    );
+  }
+  return url.toString();
+}
+
+/** Plain, non-secret environment or header values. */
+function mcpValuesField(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const record = objectBody(value);
+  const entries = Object.entries(record);
+  if (entries.length > MCP_MAX_VALUES) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `values may hold at most ${MCP_MAX_VALUES} entries`,
+    );
+  }
+  const values: Record<string, string> = {};
+  for (const [name, entry] of entries) {
+    if (!MCP_VALUE_NAME.test(name)) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `${name} is not a valid environment variable or header name`,
+      );
+    }
+    if (
+      typeof entry !== "string" ||
+      entry.length > MCP_MAX_VALUE_LENGTH ||
+      /[\0\r\n]/u.test(entry)
+    ) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `values.${name} must be a single-line string of at most ` +
+          `${MCP_MAX_VALUE_LENGTH} characters`,
+      );
+    }
+    values[name] = entry;
+  }
+  return values;
+}
+
+/**
+ * Secrets as they arrive: plaintext, to be sealed before anything stores
+ * them. `null` removes one on an edit and is refused on create, where there
+ * is nothing to remove.
+ */
+function mcpSecretsField(
+  value: unknown,
+  options: { allowNull: boolean },
+): Record<string, string | null> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const record = objectBody(value);
+  const entries = Object.entries(record);
+  if (entries.length > MCP_MAX_SECRETS) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `secrets may hold at most ${MCP_MAX_SECRETS} entries`,
+    );
+  }
+  const secrets: Record<string, string | null> = {};
+  for (const [name, entry] of entries) {
+    if (!MCP_VALUE_NAME.test(name)) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `${name} is not a valid environment variable or header name`,
+      );
+    }
+    if (entry === null && options.allowNull) {
+      secrets[name] = null;
+      continue;
+    }
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > MCP_MAX_SECRET_LENGTH ||
+      /[\0\r\n]/u.test(entry)
+    ) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `secrets.${name} must be a non-empty single-line string of at most ` +
+          `${MCP_MAX_SECRET_LENGTH} characters`,
+      );
+    }
+    secrets[name] = entry;
+  }
+  return secrets;
+}
+
+function mcpScopeField(value: unknown): McpServerScope | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "project" && value !== "repository") {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      'scope must be "project" or "repository"',
+    );
+  }
+  return value;
+}
+
+function mcpRepositoryIdsField(value: unknown): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > MCP_MAX_REPOSITORIES) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `repositoryIds must be an array of at most ${MCP_MAX_REPOSITORIES} ids`,
+    );
+  }
+  return uniqueStrings(
+    value.map((entry) => stringField(entry, "repositoryIds[]", { max: 200 }) ?? ""),
+  );
+}
+
+/**
+ * The secrets in a create or edit body must not also be plain values, and
+ * the other way round. Both end up in the same environment or header set,
+ * secrets winning — so a name in both is a value that silently does nothing,
+ * and the person who set it would find out on a machine they cannot see.
+ */
+function assertMcpNamesDisjoint(
+  values: Record<string, string> | undefined,
+  secrets: Record<string, string | null> | undefined,
+): void {
+  for (const name of Object.keys(secrets ?? {})) {
+    if (values !== undefined && name in values) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `${name} cannot be both a value and a secret`,
+      );
+    }
+  }
 }
 
 /**
@@ -7210,6 +7553,18 @@ export class ApiGateway {
         (kind): kind is "task" | "question" =>
           kind === "task" || kind === "question",
       );
+      // Read, not trusted, and absent stays absent: a worker built before
+      // this was sent reports nothing, and the lease reads nothing as the
+      // oldest version rather than the newest. Anything that is not a whole
+      // positive number is treated the same way, so a malformed value can
+      // only ever narrow what the worker is handed.
+      const announced = body["protocolVersion"];
+      const protocolVersion =
+        typeof announced === "number" &&
+        Number.isInteger(announced) &&
+        announced >= 1
+          ? announced
+          : undefined;
       const leaseOperation = this.options.operations.leaseWork;
       if (leaseOperation === undefined) {
         throw new HttpError(
@@ -7224,6 +7579,7 @@ export class ApiGateway {
         actorId: principal.user.id,
         ...(repositoryId === undefined ? {} : { repositoryId }),
         ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
+        ...(protocolVersion === undefined ? {} : { protocolVersion }),
       });
       if (assignment === undefined) {
         // 204 rather than an empty 200 so a polling worker can branch on the
@@ -8582,6 +8938,312 @@ export class ApiGateway {
         this.sendJson(response, 200, { project });
         return;
       }
+    }
+
+    // A project's MCP servers: what its agents are handed as tools.
+    //
+    // Three patterns rather than one with optional groups, because matchPath
+    // decodes every group and an absent one arrives as the string
+    // "undefined". Reads need `view`; everything that changes a row needs
+    // `manage_project`, and everything that stores or arms one also needs
+    // the deployment switch and a sealer — see `requireMcpServers`.
+    const mcpServersMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/mcp-servers$`, "u"),
+    );
+    const mcpServerMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/mcp-servers/([^/]+)$`, "u"),
+    );
+    const mcpApprovalMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/mcp-servers/([^/]+)/approval$`,
+        "u",
+      ),
+    );
+    if (
+      mcpServersMatch !== undefined ||
+      mcpServerMatch !== undefined ||
+      mcpApprovalMatch !== undefined
+    ) {
+      const projectId =
+        mcpServersMatch?.[0] ?? mcpServerMatch?.[0] ?? mcpApprovalMatch?.[0] ?? "";
+      const serverId = mcpServerMatch?.[1] ?? mcpApprovalMatch?.[1];
+      const { project } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        method === "GET" ? "view" : "manage_project",
+      );
+      const audit = async (
+        action: string,
+        server: McpServerRecord,
+      ): Promise<void> => {
+        await this.options.store.appendAudit(undefined, {
+          type: "project_changed",
+          data: {
+            organizationId: project.organizationId,
+            projectId,
+            action,
+            serverId: server.id,
+            name: server.name,
+            actorId: principal.user.id,
+          },
+        });
+      };
+      // Looked up by id and then checked against the project in the path,
+      // so a server id from one project answers 404 under another rather
+      // than being edited across the boundary the path was meant to draw.
+      const existing = async (): Promise<McpServerRecord> => {
+        const server =
+          serverId === undefined
+            ? undefined
+            : await this.options.store.getMcpServer(serverId);
+        if (server === undefined || server.projectId !== projectId) {
+          throw new HttpError(404, "not_found", "MCP server was not found");
+        }
+        return server;
+      };
+      const validateRepositories = async (
+        repositoryIds: readonly string[],
+      ): Promise<void> => {
+        for (const repositoryId of repositoryIds) {
+          if (
+            !(await this.options.store.projectHasRepository(
+              projectId,
+              repositoryId,
+            ))
+          ) {
+            throw new HttpError(
+              400,
+              "unknown_repository",
+              `${repositoryId} is not a repository of this project`,
+            );
+          }
+        }
+      };
+      /** A repository-scoped server with no repositories attaches nowhere. */
+      const assertScopeAttaches = (
+        scope: McpServerScope,
+        repositoryIds: readonly string[],
+      ): void => {
+        if (scope === "repository" && repositoryIds.length === 0) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "a repository-scoped server needs at least one repositoryId",
+          );
+        }
+      };
+      const assertTransportComplete = (
+        transport: McpServerTransport,
+        command: string | undefined,
+        url: string | undefined,
+      ): void => {
+        if (transport === "stdio" && command === undefined) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "a stdio server needs a command",
+          );
+        }
+        if (transport === "http" && url === undefined) {
+          throw new HttpError(400, "invalid_request", "an http server needs a url");
+        }
+      };
+
+      if (mcpServersMatch !== undefined && method === "GET") {
+        const servers = await this.options.store.listMcpServers(projectId);
+        this.sendJson(response, 200, {
+          servers,
+          // Whether anything here will reach an agent: the switch and the
+          // sealer together, so a screen can say "configured but off" rather
+          // than let somebody approve a server that will never start.
+          enabled: this.mcpServersAvailable(),
+        });
+        return;
+      }
+      if (mcpServerMatch !== undefined && method === "GET") {
+        this.sendJson(response, 200, { server: await existing() });
+        return;
+      }
+      if (mcpServerMatch !== undefined && method === "DELETE") {
+        // Allowed with the switch off: removing a row is the one write that
+        // can only leave less armed than before.
+        const server = await existing();
+        await this.options.store.deleteMcpServer(server.id);
+        await audit("mcp_server_deleted", server);
+        response.writeHead(204).end();
+        return;
+      }
+
+      const sealer = this.requireMcpServers();
+      const ownHosts = this.ownHosts();
+
+      if (mcpServersMatch !== undefined && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const name = mcpServerNameField(body["name"]);
+        // Required on create — the field refuses an absent transport above —
+        // so the fallback only narrows the type, never a request.
+        const transport = mcpTransportField(body["transport"], false) ?? "stdio";
+        const command = mcpCommandField(body["command"]) ?? undefined;
+        const args = mcpArgsField(body["args"]);
+        const url = mcpUrlField(body["url"], ownHosts) ?? undefined;
+        const values = mcpValuesField(body["values"]);
+        const secrets = mcpSecretsField(body["secrets"], { allowNull: false });
+        const scope = mcpScopeField(body["scope"]) ?? "project";
+        const repositoryIds = mcpRepositoryIdsField(body["repositoryIds"]) ?? [];
+        assertTransportComplete(transport, command, url);
+        assertMcpNamesDisjoint(values, secrets);
+        assertScopeAttaches(scope, repositoryIds);
+        await validateRepositories(repositoryIds);
+        const sealed = Object.fromEntries(
+          Object.entries(secrets ?? {}).map(([key, plaintext]) => [
+            key,
+            sealer.seal(plaintext ?? ""),
+          ]),
+        );
+        let server: McpServerRecord;
+        try {
+          server = await this.options.store.createMcpServer({
+            id: createId("mcp"),
+            projectId,
+            name,
+            transport,
+            ...(command === undefined ? {} : { command }),
+            ...(args === undefined ? {} : { args }),
+            ...(url === undefined ? {} : { url }),
+            ...(values === undefined ? {} : { values }),
+            secrets: sealed,
+            scope,
+            repositoryIds,
+            createdBy: principal.user.id,
+            createdAt: new Date().toISOString(),
+          });
+        } catch (error) {
+          if (error instanceof Error && /already/u.test(error.message)) {
+            throw new HttpError(
+              409,
+              "name_taken",
+              `This project already has an MCP server named ${name}`,
+            );
+          }
+          throw error;
+        }
+        await audit("mcp_server_created", server);
+        this.sendJson(response, 201, { server });
+        return;
+      }
+
+      if (mcpServerMatch !== undefined && method === "PATCH") {
+        const current = await existing();
+        const body = objectBody(await this.readJson(request));
+        const name =
+          body["name"] === undefined
+            ? undefined
+            : mcpServerNameField(body["name"]);
+        const transport = mcpTransportField(body["transport"], true);
+        const command = mcpCommandField(body["command"]);
+        const args = mcpArgsField(body["args"]);
+        const url = mcpUrlField(body["url"], ownHosts);
+        const values = mcpValuesField(body["values"]);
+        const secrets = mcpSecretsField(body["secrets"], { allowNull: true });
+        const scope = mcpScopeField(body["scope"]);
+        const repositoryIds = mcpRepositoryIdsField(body["repositoryIds"]);
+        // Validated as the row will be after the edit, not as the edit alone:
+        // switching transport without supplying what the new one needs, or
+        // clearing the command a stdio server runs, leaves a row nothing can
+        // start.
+        const effectiveTransport = transport ?? current.transport;
+        const effectiveCommand =
+          command === null ? undefined : (command ?? current.command);
+        const effectiveUrl = url === null ? undefined : (url ?? current.url);
+        assertTransportComplete(
+          effectiveTransport,
+          effectiveCommand,
+          effectiveUrl,
+        );
+        assertMcpNamesDisjoint(values ?? current.values, secrets);
+        assertScopeAttaches(
+          scope ?? current.scope,
+          repositoryIds ?? current.repositoryIds,
+        );
+        if (repositoryIds !== undefined) {
+          await validateRepositories(repositoryIds);
+        }
+        const sealed =
+          secrets === undefined
+            ? undefined
+            : Object.fromEntries(
+                Object.entries(secrets).map(([key, plaintext]) => [
+                  key,
+                  plaintext === null ? null : sealer.seal(plaintext),
+                ]),
+              );
+        let server: McpServerRecord;
+        try {
+          server = await this.options.store.updateMcpServer(current.id, {
+            ...(name === undefined ? {} : { name }),
+            ...(transport === undefined ? {} : { transport }),
+            ...(command === undefined ? {} : { command }),
+            ...(args === undefined ? {} : { args }),
+            ...(url === undefined ? {} : { url }),
+            ...(values === undefined ? {} : { values }),
+            ...(sealed === undefined ? {} : { secrets: sealed }),
+            ...(scope === undefined ? {} : { scope }),
+            ...(repositoryIds === undefined ? {} : { repositoryIds }),
+            updatedAt: new Date().toISOString(),
+          });
+        } catch (error) {
+          if (error instanceof Error && /already/u.test(error.message)) {
+            throw new HttpError(
+              409,
+              "name_taken",
+              `This project already has an MCP server named ${name ?? ""}`,
+            );
+          }
+          throw error;
+        }
+        // An edit to an enabled server disarms it. What was approved is no
+        // longer what is stored, and the approval — a decision about a
+        // specific command line with specific secrets — does not carry over
+        // to a different one. Said in the response so the screen can ask
+        // for it again rather than leave the row looking approved.
+        const reapprovalRequired = current.enabled;
+        if (reapprovalRequired) {
+          server = await this.options.store.setMcpServerApproval(server.id, {
+            enabled: false,
+            approvedBy: principal.user.id,
+            approvedAt: new Date().toISOString(),
+          });
+          await audit("mcp_server_disabled", server);
+        }
+        await audit("mcp_server_updated", server);
+        this.sendJson(response, 200, { server, reapprovalRequired });
+        return;
+      }
+
+      if (mcpApprovalMatch !== undefined && method === "POST") {
+        const current = await existing();
+        const body = objectBody(await this.readJson(request));
+        const enabled = booleanField(body["enabled"], "enabled", false) ?? false;
+        const server = await this.options.store.setMcpServerApproval(
+          current.id,
+          {
+            enabled,
+            approvedBy: principal.user.id,
+            approvedAt: new Date().toISOString(),
+          },
+        );
+        await audit(
+          enabled ? "mcp_server_enabled" : "mcp_server_disabled",
+          server,
+        );
+        this.sendJson(response, 200, { server });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed");
     }
 
     const agentsMatch = matchPath(
@@ -25269,6 +25931,67 @@ export class ApiGateway {
    * only a fallback because that header is chosen by the caller: on a
    * deployment where it can be spoofed, `COORD_PUBLIC_URL` is the fix.
    */
+  /**
+   * Whether an approved MCP server will actually reach an agent here: the
+   * deployment switch and the sealer, both. What the listing reports, and
+   * what every write that could arm a server is gated on.
+   */
+  private mcpServersAvailable(): boolean {
+    return mcpServersEnabled() && this.options.secretSealer !== undefined;
+  }
+
+  /**
+   * The sealer, or a 501 naming what is missing.
+   *
+   * Storing a server while the switch is off is refused, not merely
+   * ineffective, so that turning the switch off leaves nothing armed and
+   * turning it on later arms nothing that was configured while nobody
+   * thought it could run. The message names the variable to set, and when
+   * it is the sealer that is absent, the credential store that supplies
+   * it — the same shape as the billing routes without Stripe.
+   */
+  private requireMcpServers(): SecretSealer {
+    if (!mcpServersEnabled()) {
+      throw new HttpError(
+        501,
+        "mcp_disabled",
+        "This deployment does not hand MCP servers to its agents; set " +
+          "COORD_MCP_ENABLED=1 to turn that on",
+      );
+    }
+    const sealer = this.options.secretSealer;
+    if (sealer === undefined) {
+      throw new HttpError(
+        501,
+        "mcp_disabled",
+        "This deployment has no credential store to seal MCP secrets with; " +
+          "COORD_MCP_ENABLED is set but no COORD_CREDENTIAL_KEY store was opened",
+      );
+    }
+    return sealer;
+  }
+
+  /**
+   * Every host this deployment knows itself by, lower-cased, for the loop
+   * check on an MCP server's URL. Empty when nothing is configured, in which
+   * case only the exact endpoint path can be recognised.
+   */
+  private ownHosts(): string[] {
+    const hosts: string[] = [];
+    for (const configured of [this.publicUrl, this.appBaseUrl]) {
+      if (configured === "") {
+        continue;
+      }
+      try {
+        hosts.push(new URL(configured).host.toLowerCase());
+      } catch {
+        // A malformed configured origin cannot name a host; the exact-path
+        // rule still applies.
+      }
+    }
+    return hosts;
+  }
+
   private originFor(request: IncomingMessage, secure: boolean): string {
     if (this.publicUrl !== "") {
       return this.publicUrl.replace(/\/+$/u, "");

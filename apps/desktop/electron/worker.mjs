@@ -33,7 +33,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { detectAgents, ensureProject, exists } from "./agents.mjs";
+import { askDialog } from "./dialog.mjs";
 import { treeKill } from "./installers.mjs";
+import {
+  allowMcpServers,
+  missingMcpNames,
+  readAllowedMcp,
+} from "./mcp-consent.mjs";
 
 /**
  * Backoff between restarts, and the point at which restarting is pointless.
@@ -82,6 +88,21 @@ let busy = false;
 let stayAwake = false;
 let failures = 0;
 let restartTimer;
+/**
+ * The MCP servers this process has already asked about, and whether it is
+ * asking right now.
+ *
+ * A worker runs several tasks at once and says what it withheld on every one
+ * of them, so a project with one unallowed server on a busy afternoon would
+ * put the same question up a dozen times — and a person who answered "not
+ * now" once has answered. Remembered for the process's lifetime and no
+ * longer: quitting the app is a reasonable way to be asked again, and the
+ * "yes" side is written to disk, so it is only the "no" that is forgotten.
+ */
+const askedMcp = new Set();
+let askingMcp = false;
+/** What the project is called, for the question. */
+let projectLabel = "This project";
 
 /** Where the worker keeps its own project, worktrees and scratch space. */
 function workerRoot() {
@@ -126,6 +147,7 @@ async function discoverTenancy(server, token) {
     throw new Error("This account is not a member of any organization");
   }
   let projectId;
+  let projectName;
   try {
     const projects = await getJson(
       server,
@@ -133,11 +155,12 @@ async function discoverTenancy(server, token) {
       `/api/v1/organizations/${encodeURIComponent(organizationId)}/projects`,
     );
     projectId = projects?.projects?.[0]?.id;
+    projectName = projects?.projects?.[0]?.name;
   } catch {
     // Optional: the worker falls back to the default project, which is the
     // only one most deployments have.
   }
-  return { organizationId, projectId };
+  return { organizationId, projectId, projectName };
 }
 
 function scheduleRestart(here, session, onEvent, ranForMs) {
@@ -216,6 +239,10 @@ async function startWorkerOnce(here, session, onEvent) {
     return;
   }
 
+  if (typeof tenancy.projectName === "string" && tenancy.projectName !== "") {
+    projectLabel = tenancy.projectName;
+  }
+
   const root = workerRoot();
   await mkdir(root, { recursive: true });
   await ensureProject(root, agents);
@@ -270,6 +297,10 @@ async function startWorkerOnce(here, session, onEvent) {
     } else if (message?.type === "idle") {
       busy = false;
       reconsiderAwake();
+    } else if (message?.type === "mcp-offered") {
+      // The child ran without these and has said so to the room; the one
+      // thing it cannot do is ask the person whose machine this is.
+      void offerMcpConsent(message.names, here, session, onEvent);
     }
   });
 
@@ -290,6 +321,82 @@ async function startWorkerOnce(here, session, onEvent) {
     state: "running",
     detail: `Running ${Object.keys(agents).join(", ")} on this machine.`,
   });
+}
+
+/**
+ * Asks the machine's owner whether a project's MCP servers may run here.
+ *
+ * The project has already said yes; that is why the lease carried them. But
+ * "yes" from a project is a decision about its agents, and what is being
+ * decided here is whether programs it chose start on this computer under
+ * this person's account — which is theirs alone to say. The worker reads
+ * the answer from its config once, at start, so a "yes" is followed by a
+ * restart: otherwise the person would allow the servers and watch the next
+ * ten tasks run without them anyway.
+ *
+ * Asked once per set of names, and never while a question is already up.
+ * The list on disk is consulted every time rather than cached, because the
+ * settings window can change it between two leases and asking about a
+ * server that was allowed a minute ago would be asking twice.
+ */
+async function offerMcpConsent(names, here, session, onEvent) {
+  if (askingMcp || !Array.isArray(names)) {
+    return;
+  }
+  const root = workerRoot();
+  let missing;
+  try {
+    missing = missingMcpNames(await readAllowedMcp(root), names);
+  } catch {
+    return;
+  }
+  const key = missing.join("\n");
+  if (missing.length === 0 || askedMcp.has(key)) {
+    return;
+  }
+  askedMcp.add(key);
+  askingMcp = true;
+  let allowed = false;
+  try {
+    const choice = await askDialog({
+      kind: "question",
+      title: "Kumi",
+      heading: "This project wants to run tools on this computer",
+      body:
+        `${projectLabel} has approved MCP servers for its agents: ` +
+        `${missing.join(", ")}. Allowing them starts those programs on this ` +
+        "computer, under your account, whenever one of your agents runs a " +
+        "task here. You can change this later in Kumi's settings on this " +
+        "computer.",
+      buttons: ["Allow these", "Not now"],
+      cancelId: 1,
+    });
+    allowed = choice === 0;
+  } catch {
+    // A dialog that could not be shown is a question not asked; the set is
+    // left remembered so a broken window does not become a loop.
+  } finally {
+    askingMcp = false;
+  }
+  if (!allowed) {
+    return;
+  }
+  try {
+    await allowMcpServers(root, missing);
+  } catch (error) {
+    onEvent?.({
+      state: "running",
+      detail: `Could not save the MCP allowlist: ${describe(error)}`,
+    });
+    return;
+  }
+  // `stopWorker` lets go of the stay-awake offer along with everything else,
+  // because it is what a quit calls. This is not a quit, and the person's
+  // answer to "keep this machine up for work" has not changed.
+  const keepAwake = stayAwake;
+  stopWorker();
+  await startWorker(here, session, onEvent);
+  setStayAwake(keepAwake);
 }
 
 /**

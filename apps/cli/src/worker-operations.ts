@@ -80,17 +80,19 @@ import {
   type DeferredResource,
   type IntegrationResult,
   type PlanAdmission,
-  type ResolvedMcpServer,
   type ResourceType,
   type ScopeChangeDecision,
   type ScopeChangeRequest,
   type TaskDefinition,
   type TaskId,
+  type WorkAssignment as SharedWorkAssignment,
+  mcpServersForLease,
   summariseGrants,
 } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
   GitWorktreeWorkspaceManager,
+  type SecretSealer,
   type WorkspaceManager,
 } from "@coord/workspace-manager";
 
@@ -243,28 +245,22 @@ export function configuredBlanketClaims(explicit?: boolean): boolean {
  *   on the heartbeat, and adopts a claim the control plane narrows underneath
  *   it. A version-2 worker is never granted a claim, because a claim it could
  *   not be told about is one nobody could take back.
+ * 4 carries the project's approved MCP servers in the lease. A version-3
+ *   worker is never sent them, and the thread is told, because a run that
+ *   silently lacks tools it was promised is the failure this exists to
+ *   prevent.
  */
-export const WORKER_PROTOCOL_VERSION = 3;
+export const WORKER_PROTOCOL_VERSION = 4;
 
-export interface WorkAssignment {
-  lease: WorkLease;
-  task: SubmittedTask;
-  repository: { id: string; branch: string };
-  canonicalVersion: CanonicalVersion;
-  bundleUrl: string;
-  bundleRef: string;
-  heartbeatIntervalMs: number;
-  /** Worker-side check that the control plane expects a plan first. */
-  protocolVersion: number;
-  /** Submit the agent's plan here before executing anything. */
-  planUrl: string;
-  /**
-   * Approved for this repository, secrets already opened. Absent from an
-   * older control plane and empty when nothing is approved; the worker treats
-   * both the same.
-   */
-  mcpServers?: readonly ResolvedMcpServer[];
-}
+/**
+ * The shared shape, with this package's lease and task rows filled in.
+ *
+ * Re-exported under the old name because the worker imports it from here and
+ * has no reason to know the definition moved. The gateway names the same
+ * alias from the same shared definition, so the two ends of the wire cannot
+ * disagree about a field again.
+ */
+export type WorkAssignment = SharedWorkAssignment<WorkLease, SubmittedTask>;
 
 export interface WorkResultInput {
   leaseId: string;
@@ -502,9 +498,23 @@ export async function leaseWork(
      * reason no protocol version had to move.
      */
     kinds?: readonly TaskKind[];
+    /**
+     * The protocol version the worker reported when it asked. Absent from a
+     * worker built before it was sent, which is why it is read as 1 and not
+     * as "current": the lease has to know what the other end will look for.
+     */
+    protocolVersion?: number;
   },
   repositories = new RepositoryService(),
   project?: CoordinatorProject,
+  services: {
+    /**
+     * Opens the project's sealed MCP secrets for the lease. Omitted by the
+     * bare CLI and by tests that are not about tools, and with it omitted no
+     * server is ever attached — see `mcpServersForLease`.
+     */
+    sealer?: SecretSealer;
+  } = {},
 ): Promise<WorkAssignment | undefined> {
   const worker = await store.getWorker(input.workerId);
   if (worker === undefined) {
@@ -650,6 +660,21 @@ export async function leaseWork(
       baseRevision: leased.lease.baseRevision,
       remote: true,
     });
+    // After the lease is recorded, never before: a secret is opened only for
+    // a task this worker now holds, and every gate in there answers "attach
+    // nothing" rather than throwing, so the lease just issued cannot be lost
+    // to a tool it did not need.
+    const mcpServers = await mcpServersForLease(store, {
+      opener: services.sealer,
+      projectId: input.projectId,
+      repositoryId: leased.task.repositoryId,
+      taskId: leased.task.id,
+      taskSubmittedBy: leased.task.submittedBy,
+      workerId: worker.id,
+      workerUserId: worker.userId,
+      workerProtocolVersion: input.protocolVersion,
+      leaseId: leased.lease.id,
+    });
     return {
       lease: leased.lease,
       task: leased.task,
@@ -663,6 +688,9 @@ export async function leaseWork(
       heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
       protocolVersion: WORKER_PROTOCOL_VERSION,
       planUrl: `/api/v1/workers/leases/${leased.lease.id}/plan`,
+      // Only when there is something to carry. An older worker that does not
+      // know the field never sees an empty one either.
+      ...(mcpServers === undefined ? {} : { mcpServers }),
     };
   }
   return undefined;
@@ -3667,6 +3695,13 @@ export function workerOperations(
   shared: {
     repositories?: RepositoryService;
     intelligence?: CodeIntelligenceService;
+    /**
+     * The credential store's sealer, so a lease can open the project's MCP
+     * secrets. The hosting web process passes the same one it gives the
+     * gateway that seals them; a process that passes none never attaches a
+     * server, whatever the table holds.
+     */
+    sealer?: SecretSealer;
   } = {},
 ) {
   const repositories = shared.repositories ?? new RepositoryService();
@@ -3701,7 +3736,16 @@ export function workerOperations(
       workerId: string;
       projectId: string;
       repositoryId?: string;
-    }) => await leaseWork(store, input, repositories, project),
+      kinds?: readonly TaskKind[];
+      protocolVersion?: number;
+    }) =>
+      await leaseWork(
+        store,
+        input,
+        repositories,
+        project,
+        shared.sealer === undefined ? {} : { sealer: shared.sealer },
+      ),
     leaseBundle: async (leaseId: string, have?: string) =>
       await leaseBundle(store, leaseId, repositories, have),
     claimHeartbeat: async (input: {

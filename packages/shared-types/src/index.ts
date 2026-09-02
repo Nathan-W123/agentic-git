@@ -1357,6 +1357,23 @@ export type AuditEventType =
   // written nowhere, so a run whose machine went away left its thread saying
   // it was still being worked on, indefinitely.
   | "lease_expired"
+  /**
+   * A project's approved MCP servers were not put in a lease that would
+   * otherwise have carried them. `reason` says which gate held: a worker
+   * speaking a protocol version too old to be told about them, or a task
+   * whose submitter is not the person whose machine leased it. The second
+   * should be impossible — the claim is pinned to the worker's owner — and
+   * is written precisely so that, if it ever stops being impossible, the
+   * log says so before a secret does.
+   */
+  | "mcp_servers_withheld"
+  /**
+   * One approved server's secret could not be opened with the deployment's
+   * credential key, so that server was left out of the lease. The rest still
+   * went; a run with fewer tools is better than no run, and the row that
+   * needs its secret re-entered is named here.
+   */
+  | "mcp_server_unopenable"
   /** An agent stopped on a choice that was not its to make. */
   | "question_asked"
   | "question_answered"
@@ -3024,6 +3041,264 @@ export interface ResolvedMcpServer {
   readonly url?: string;
   /** http only. Secrets included, opened. */
   readonly headers?: Readonly<Record<string, string>>;
+}
+
+/**
+ * The first remote worker protocol version that is handed MCP servers.
+ *
+ * Named here rather than read off `WORKER_PROTOCOL_VERSION`, because that
+ * number keeps moving and this one must not: it is the version at which a
+ * worker started looking for `mcpServers` in its lease, and a control plane
+ * on version 9 still has to know that a version-3 worker will never look.
+ */
+export const MCP_LEASE_PROTOCOL_VERSION = 4;
+
+/**
+ * One stored MCP server, as the lease needs to read it.
+ *
+ * A structural subset of the persistence record rather than the record
+ * itself, so this file can name what the lease reads without depending on
+ * the package that stores it. Everything a lease turns into a
+ * `ResolvedMcpServer` is here; the approval state is not, because the store
+ * is asked for enabled servers only and the lease never second-guesses that.
+ */
+export interface McpServerSource {
+  readonly id: string;
+  readonly name: string;
+  readonly transport: McpServerTransport;
+  readonly command?: string;
+  readonly args: readonly string[];
+  readonly url?: string;
+  readonly values: Readonly<Record<string, string>>;
+}
+
+/**
+ * What the lease needs from the coordination store, and nothing more.
+ *
+ * `CoordinationStore` satisfies it structurally; a test harness satisfies it
+ * with the same in-memory store. Declared as a subset so the one function
+ * that opens secrets can be read against exactly the three things it touches.
+ */
+export interface McpLeaseStore {
+  listMcpServers(
+    projectId: string,
+    filter: { repositoryId: string; enabledOnly: true },
+  ): Promise<readonly McpServerSource[]>;
+  getMcpServerSecrets(
+    id: string,
+  ): Promise<Readonly<Record<string, SealedSecret>> | undefined>;
+  appendAudit(
+    runId: undefined,
+    input: {
+      type: AuditEventType;
+      taskId: string;
+      data: Readonly<Record<string, unknown>>;
+    },
+  ): Promise<unknown>;
+}
+
+/** Opens what `UserCredentialStore` sealed. `SecretSealer` satisfies it. */
+export interface SecretOpener {
+  open(sealed: SealedSecret): string;
+}
+
+/**
+ * The project's approved MCP servers for one lease, secrets opened — or
+ * nothing, and a line in the log saying why.
+ *
+ * This is the one place a stored secret is turned back into plaintext and
+ * handed to something outside the control plane, which is why it is one
+ * function rather than a few lines wherever a lease is built: the control
+ * plane's own `leaseWork` and the gateway's test harness both hand out
+ * leases, and two copies of a security gate is one copy nobody tested. Lives
+ * beside `ResolvedMcpServer` because it is the only thing that constructs
+ * one.
+ *
+ * Every gate answers `undefined` — attach nothing — rather than throwing.
+ * The lease is already issued by the time this runs, and a run without its
+ * tools is recoverable while a lease that failed after being recorded is a
+ * task nobody is working on and nobody can take.
+ *
+ * The gates, in order:
+ *
+ * - The deployment switch and the key. `mcpServersEnabled()` is checked here
+ *   and not only by the gateway that stores servers, so turning it off
+ *   leaves nothing armed regardless of what is in the table; and with no
+ *   opener there is nothing to open with, however the caller was built.
+ * - Ownership. `taskSubmittedBy` must be `workerUserId`. Under
+ *   `COORD_LOCAL_AGENTS_ONLY` the claim is pinned to the worker's owner so
+ *   this always holds; it is asserted here regardless, because "always" is a
+ *   property of a different function and a secret must not travel on the
+ *   strength of one. A task with no submitter belongs to nobody and gets
+ *   nothing. Written to the log as `mcp_servers_withheld`, because a
+ *   mismatch here is the invariant failing and should not be silent.
+ * - The worker's protocol version. A worker below
+ *   `MCP_LEASE_PROTOCOL_VERSION` does not read `mcpServers`, so attaching
+ *   them would ship secrets to a process that ignores them. Withheld, and the
+ *   task's thread is told as an `agent_progress` line — the same line a
+ *   current worker posts when it starts with its tools — because a run that
+ *   silently lacks tools it was promised is exactly the failure that a person
+ *   reading the thread cannot diagnose.
+ * - Each secret. One that will not open with this key is skipped along with
+ *   its server and logged as `mcp_server_unopenable`; the others still go.
+ *
+ * Ownership and version are only asserted once there is something to
+ * withhold. A project with no approved servers writes nothing, so the log
+ * stays about things that happened.
+ */
+export async function mcpServersForLease(
+  store: McpLeaseStore,
+  input: {
+    readonly opener: SecretOpener | undefined;
+    readonly projectId: string;
+    readonly repositoryId: string;
+    readonly taskId: string;
+    readonly taskSubmittedBy: string | undefined;
+    readonly workerId: string;
+    readonly workerUserId: string;
+    readonly workerProtocolVersion: number | undefined;
+    readonly leaseId: string;
+  },
+): Promise<readonly ResolvedMcpServer[] | undefined> {
+  if (!mcpServersEnabled() || input.opener === undefined) {
+    return undefined;
+  }
+  const approved = await store.listMcpServers(input.projectId, {
+    repositoryId: input.repositoryId,
+    enabledOnly: true,
+  });
+  if (approved.length === 0) {
+    return undefined;
+  }
+  const names = approved.map((server) => server.name);
+  const context = {
+    projectId: input.projectId,
+    repositoryId: input.repositoryId,
+    workerId: input.workerId,
+    leaseId: input.leaseId,
+  };
+  if (
+    input.taskSubmittedBy === undefined ||
+    input.taskSubmittedBy !== input.workerUserId
+  ) {
+    await store.appendAudit(undefined, {
+      type: "mcp_servers_withheld",
+      taskId: input.taskId,
+      data: { ...context, reason: "not_owner", names },
+    });
+    return undefined;
+  }
+  const version = input.workerProtocolVersion ?? 1;
+  if (version < MCP_LEASE_PROTOCOL_VERSION) {
+    await store.appendAudit(undefined, {
+      type: "mcp_servers_withheld",
+      taskId: input.taskId,
+      data: {
+        ...context,
+        reason: "stale_worker",
+        workerProtocolVersion: version,
+        names,
+      },
+    });
+    await store.appendAudit(undefined, {
+      type: "agent_progress",
+      taskId: input.taskId,
+      data: {
+        ...context,
+        message:
+          `Running without the tools this project approved (${names.join(", ")}): ` +
+          `the worker on this machine speaks protocol version ${version}, and ` +
+          `tools need version ${MCP_LEASE_PROTOCOL_VERSION}. Update the app on ` +
+          "that machine to get them.",
+      },
+    });
+    return undefined;
+  }
+  const resolved: ResolvedMcpServer[] = [];
+  for (const server of approved) {
+    const sealed = (await store.getMcpServerSecrets(server.id)) ?? {};
+    const opened: Record<string, string> = {};
+    let unopenable: string | undefined;
+    for (const [name, secret] of Object.entries(sealed)) {
+      try {
+        opened[name] = input.opener.open(secret);
+      } catch {
+        unopenable = name;
+        break;
+      }
+    }
+    if (unopenable !== undefined) {
+      await store.appendAudit(undefined, {
+        type: "mcp_server_unopenable",
+        taskId: input.taskId,
+        data: {
+          ...context,
+          serverId: server.id,
+          name: server.name,
+          secretName: unopenable,
+        },
+      });
+      continue;
+    }
+    // Secrets last, so a secret and a plain value of the same name resolve to
+    // the secret: the one somebody went to the trouble of sealing.
+    const merged = { ...server.values, ...opened };
+    resolved.push(
+      server.transport === "stdio"
+        ? {
+            name: server.name,
+            transport: "stdio",
+            command: server.command ?? "",
+            args: [...server.args],
+            env: merged,
+          }
+        : {
+            name: server.name,
+            transport: "http",
+            url: server.url ?? "",
+            headers: merged,
+          },
+    );
+  }
+  return resolved.length === 0 ? undefined : resolved;
+}
+
+/**
+ * Everything a worker needs to execute one task without further lookups.
+ *
+ * One definition for the two sides that build and read it. The control
+ * plane's `leaseWork` constructs one and the gateway hands it over the wire;
+ * each used to declare the shape itself, and the two had already drifted —
+ * one named `canonicalVersion` by type and the other spelled the fields
+ * out — before a new field needed adding to both. Generic over the lease
+ * and task rows because those live in the persistence package, which this
+ * one cannot import; each side names its own.
+ */
+export interface WorkAssignment<Lease = unknown, Task = unknown> {
+  lease: Lease;
+  task: Task;
+  repository: { id: string; branch: string };
+  canonicalVersion: CanonicalVersion;
+  /** Fetch the workspace contents from here, then clone it. */
+  bundleUrl: string;
+  /** Branch to check out from the bundle. */
+  bundleRef: string;
+  heartbeatIntervalMs: number;
+  /**
+   * Remote worker protocol version this control plane speaks. The worker
+   * compares it against its own and refuses a control plane that lacks a
+   * step it depends on.
+   */
+  protocolVersion: number;
+  /** Submit the agent's plan here for admission before executing. */
+  planUrl: string;
+  /**
+   * Approved for this repository, secrets already opened. Absent from an
+   * older control plane, from one with the switch off, and when nothing is
+   * approved; the worker treats all three the same. See
+   * `mcpServersForLease` for the gates between a stored row and this field.
+   */
+  mcpServers?: readonly ResolvedMcpServer[];
 }
 
 /**

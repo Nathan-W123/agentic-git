@@ -352,6 +352,20 @@ export const state = {
   newApiToken: undefined,
 
   /**
+   * MCP servers this project has registered, and whether the deployment lets
+   * it register any.
+   *
+   * `mcpServersEnabled` starts undefined rather than false so the section can
+   * tell an unanswered question apart from a deployment that answered no: the
+   * first draws nothing worth acting on, the second explains the switch that
+   * is off.
+   * Secrets are never in here — the list route hands back their names and
+   * nothing else, so there is nothing a stale render could leak.
+   */
+  mcpServers: [],
+  mcpServersEnabled: undefined,
+
+  /**
    * Which colour wheel is open in Appearance, by its `data-act` prefix, or
    * `undefined` for none. One at a time: two discs on screen at once invite
    * dragging on the wrong one, and a settings card that is mostly pickers
@@ -2338,6 +2352,102 @@ export async function createApiToken(name) {
 export async function revokeApiToken(id) {
   await api(`/auth/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
   await loadApiTokens();
+}
+
+/* -------------------------------------------------------- mcp servers ---- */
+
+/**
+ * Loads the project's MCP servers and the deployment's switch for them.
+ *
+ * Always a fresh read, the way the token list is: every mutation below calls
+ * it afterwards so the list on screen is the list the server holds, and an
+ * approval somebody else recorded a moment ago shows up rather than being
+ * papered over by a cached copy. `apiOptional` because a control plane built
+ * without this feature answers 501, and a settings section that blanks the
+ * dialog over an optional capability is worse than one that says so.
+ */
+export async function ensureMcpServers(projectId) {
+  if (!projectId) {
+    state.mcpServers = [];
+    state.mcpServersEnabled = false;
+    return state.mcpServers;
+  }
+  const response = await apiOptional(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers`,
+    { servers: [], enabled: false },
+  );
+  state.mcpServers = response.servers ?? [];
+  state.mcpServersEnabled = response.enabled === true;
+  return state.mcpServers;
+}
+
+/**
+ * The secrets textarea, one `NAME=value` per line, as the object the create
+ * route takes.
+ *
+ * Split on the first `=` only: a token that itself contains `=` (base64 does,
+ * routinely) would otherwise be cut short and fail on the agent's machine
+ * with no hint why. Blank lines and lines without `=` are ignored rather than
+ * refused, so a trailing newline is not an error. Names are trimmed, values
+ * are not — a leading space in a secret is unusual but it is the person's.
+ */
+export function parseMcpSecrets(text) {
+  const secrets = {};
+  for (const line of String(text ?? "").split(/\r?\n/u)) {
+    const at = line.indexOf("=");
+    if (at <= 0) {
+      continue;
+    }
+    const name = line.slice(0, at).trim();
+    if (name === "") {
+      continue;
+    }
+    secrets[name] = line.slice(at + 1);
+  }
+  return secrets;
+}
+
+/** The args field, space-separated, as the list the command is started with. */
+export function parseMcpArgs(text) {
+  return String(text ?? "")
+    .split(/\s+/u)
+    .filter((arg) => arg.length > 0);
+}
+
+/**
+ * Registers a server. Secrets go up in plain text over the request and are
+ * sealed on arrival; nothing here holds them after the call, and the server
+ * record that comes back carries only their names.
+ */
+export async function createMcpServer(projectId, input) {
+  const response = await api(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers`,
+    { method: "POST", body: input },
+  );
+  await ensureMcpServers(projectId);
+  return response.server;
+}
+
+/**
+ * Records that this person approves (or withdraws approval for) a server
+ * running on teammates' computers. A recorded act rather than a flag flip,
+ * which is why it has its own route instead of riding on PATCH.
+ */
+export async function approveMcpServer(projectId, id, enabled) {
+  const response = await api(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}/approval`,
+    { method: "POST", body: { enabled } },
+  );
+  await ensureMcpServers(projectId);
+  return response.server;
+}
+
+export async function deleteMcpServer(projectId, id) {
+  await api(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  await ensureMcpServers(projectId);
 }
 
 /* -------------------------------------------------------- invitations ---- */

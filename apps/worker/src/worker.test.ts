@@ -1865,9 +1865,21 @@ test("a Claude worker loads the lease's MCP servers from scratch, strictly, and 
   assert.ok(progress.includes("Running with tools: github."), progress.join("\n"));
 
   // The same machine, told to run nothing: the servers are still offered,
-  // the agent runs without them, and the room hears why.
+  // the agent runs without them, and the room hears why — and so does the
+  // desktop app, by name, because the room cannot change this machine's
+  // allowlist and the app can put the question to the person who can.
   runtime.project.config.mcp = { allow: [] };
   await rm(log, { force: true });
+  const host = process as { parentPort?: unknown };
+  const hostMessages: unknown[] = [];
+  host.parentPort = {
+    postMessage(message: unknown) {
+      hostMessages.push(message);
+    },
+  };
+  t.after(() => {
+    delete host.parentPort;
+  });
   await runtime.store.submitTask({
     repositoryId: runtime.repositoryId,
     objective: "raise with claude again",
@@ -1889,5 +1901,11 @@ test("a Claude worker loads the lease's MCP servers from scratch, strictly, and 
       "This project offers MCP servers github; this machine has not allowed them (Kumi → Settings on this computer).",
     ),
     explained.join("\n"),
+  );
+  assert.deepEqual(
+    hostMessages.filter(
+      (message) => (message as { type?: string }).type === "mcp-offered",
+    ),
+    [{ type: "mcp-offered", names: ["github"] }],
   );
 });

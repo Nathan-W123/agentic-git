@@ -63,7 +63,7 @@ import {
   type HeartbeatReply,
   type WorkingChange,
 } from "./client.js";
-import { holdHost } from "./host-signal.js";
+import { holdHost, signalHost } from "./host-signal.js";
 import { stageMcpServers, type StagedMcpServers } from "./mcp-config.js";
 import type { WorkNudge } from "./nudge.js";
 import {
@@ -1466,6 +1466,13 @@ export class Worker {
         `This project offers MCP servers ${mcp.withheld.join(", ")}; this ` +
           "machine has not allowed them (Kumi → Settings on this computer).",
       );
+      // Said to the host as well as to the room, because the room cannot
+      // fix it. The allowlist belongs to whoever owns this machine, the
+      // desktop app is the one thing that can put the question in front of
+      // them, and this process read its config once at start — so the most
+      // it can do is name what was withheld and let the app ask. Nowhere to
+      // send it is the ordinary case and is a no-op.
+      signalHost({ type: "mcp-offered", names: mcp.withheld });
     }
     if (mcp.staged.length > 0) {
       await this.options.client.progress(

@@ -15583,6 +15583,23 @@ dialog.modal[open]::backdrop {
   width: 100%;
 }
 
+/* The new-server form: several fields under one stacked row. A grid rather
+   than the row's inline control strip, because five inputs side by side is a
+   form nobody can read, let alone fill in on a phone. */
+.st-mcp-form {
+  display: grid;
+  gap: 8px;
+}
+
+.st-mcp-form > div {
+  display: grid;
+  gap: 8px;
+}
+
+.st-mcp-form .input {
+  width: 100%;
+}
+
 .st-textarea {
   width: 100%;
   min-height: 88px;
