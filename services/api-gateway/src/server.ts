@@ -138,6 +138,7 @@ import {
 import {
   formatSlashHelp,
   parseSlashCommand,
+  readsAsQueuedPush,
   SLASH_COMMANDS,
   type SlashCommand,
 } from "./slash.js";
@@ -3572,6 +3573,33 @@ interface SlashCommandDispatch {
   response?: ChannelCommandResponse;
 }
 
+/**
+ * A `/queue /push`: publish this repository, but not until the work already
+ * running in it has finished.
+ *
+ * In memory only, and deliberately so. The instruction means "after the
+ * things running right now", and none of those survive a restart either — a
+ * push resurrected an hour later would publish a canonical nobody was
+ * looking at, on behalf of somebody who has long since stopped waiting.
+ */
+interface PendingChannelPush {
+  projectId: string;
+  repositoryId: string;
+  /** Who asked, and so whose GitHub connection the push is made with. */
+  actorId: string;
+  /** The room it was asked in, so the answer goes back to that room. */
+  channelId?: string;
+  /** The thread it was asked in, when it was asked inside one. */
+  messageId?: string;
+  /**
+   * In flight.
+   *
+   * The pump ticks every couple of seconds and a push takes longer than
+   * that, so without this the same instruction would publish twice.
+   */
+  running: boolean;
+}
+
 export interface ApiOperations {
   listAgents?(): Promise<
     Array<{
@@ -4988,6 +5016,15 @@ export class ApiGateway {
   }
   /** Tasks whose progress is being narrated into a channel thread. */
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
+  /**
+   * Pushes waiting for a repository to go quiet, by repository id.
+   *
+   * See {@link PendingChannelPush}. One per repository, because the
+   * instruction is about the repository rather than about whoever typed it:
+   * two people asking for the same publish while the same work runs meant one
+   * publish either way.
+   */
+  private readonly pendingChannelPushes = new Map<string, PendingChannelPush>();
   /**
    * Tasks whose thread hold has been announced and not yet released.
    *
@@ -15193,8 +15230,38 @@ export class ApiGateway {
     senderId: string;
     command: SlashCommand;
     rest: string;
+    /**
+     * The message as it was typed.
+     *
+     * `command` and `rest` are the first command word and everything else,
+     * which is all any single-command reading needs. `/queue /push` is the
+     * one instruction spelled with two of them, so it has to be read off the
+     * whole message rather than off either half.
+     */
+    content: string;
+    /** The room it was said in, so an answer goes back to that room. */
+    channelId?: string;
   }): Promise<SlashCommandDispatch> {
     const { projectId, repositoryId } = input;
+    // Read before either word's own branch: whichever was typed first is the
+    // one `parseSlashCommand` returned, and acting on that one alone is
+    // exactly what this is here to stop — a `/push` that publishes over the
+    // top of running work, or a `/queue` that complains it was given no
+    // agent and no objective.
+    if (readsAsQueuedPush(input.content)) {
+      const queued = await this.queuePushAfterRunningWork({
+        projectId,
+        repositoryId,
+        actorId: input.senderId,
+        ...(input.channelId === undefined ? {} : { channelId: input.channelId }),
+      });
+      // `/queue @Eos land the retry fix /push` is two instructions on one
+      // line — the push, and work for a named agent — so the mention still
+      // gets its ordinary turn below, held behind the push that is now
+      // pending. Dropping it would lose work somebody typed, silently, which
+      // is the one ending a command must never have.
+      return ADDRESSED_RE.test(input.rest) ? { handled: false } : queued;
+    }
     if (input.command.name === "help") {
       await this.postChannelSystemMessage(
         projectId,
@@ -15272,6 +15339,184 @@ export class ApiGateway {
       }
     }
     return { handled: false };
+  }
+
+  /** Whether a `/queue /push` is waiting on this repository's running work. */
+  private hasPendingPush(repositoryId: string): boolean {
+    return this.pendingChannelPushes.has(repositoryId);
+  }
+
+  /**
+   * Takes a `/queue /push`: publish, but after the work already running.
+   *
+   * The pending record does two jobs, which is why it exists at all rather
+   * than this simply awaiting the running tasks. It is what the dispatcher
+   * reads to hold everything asked for from now on (see `hasPendingPush` in
+   * `dispatchOneMention`), so the publish is of a canonical nobody moved
+   * underneath it — that is the whole point of asking for it this way. And it
+   * outlives this request, which has to answer the browser now rather than in
+   * twenty minutes.
+   *
+   * Nothing running is not a special case, it is simply the moment arriving
+   * at once: the same code publishes, says so, and there was never a queue to
+   * hold.
+   */
+  private async queuePushAfterRunningWork(input: {
+    projectId: string;
+    repositoryId: string;
+    actorId: string;
+    channelId?: string;
+    messageId?: string;
+  }): Promise<SlashCommandDispatch> {
+    const { repositoryId } = input;
+    const pending: PendingChannelPush = { ...input, running: false };
+    if (this.options.operations.pushRepository === undefined) {
+      await this.sayAboutPendingPush(
+        pending,
+        "This deployment cannot push repositories from the channel.",
+      );
+      return { handled: true };
+    }
+    if (this.hasPendingPush(repositoryId)) {
+      await this.sayAboutPendingPush(
+        pending,
+        "A push is already waiting for the work running here to finish — " +
+          "everything asked for since is queued behind it.",
+      );
+      return { handled: true };
+    }
+    this.pendingChannelPushes.set(repositoryId, pending);
+    // The pump is what retries this, and it only runs while a task is being
+    // watched. A push can be queued behind work this channel never dispatched
+    // — the CLI's, or a run that outlived the process that was narrating it —
+    // so it is started here too rather than left to depend on that.
+    if (this.channelProgressTimer === undefined) {
+      this.channelProgressTimer = setInterval(() => {
+        void this.pumpChannelProgress();
+      }, CHANNEL_PROGRESS_INTERVAL_MS);
+      this.channelProgressTimer.unref?.();
+    }
+    await this.runPendingPushIfIdle(repositoryId);
+    // Still pending means it could not go yet, and the standing promise is
+    // the only thing that makes the silence afterwards legible: work asked
+    // for from here on is filed and not started, and somebody has to be told
+    // that is deliberate.
+    if (this.hasPendingPush(repositoryId)) {
+      await this.sayAboutPendingPush(
+        pending,
+        "I'll publish once the work running here has finished. Anything " +
+          "asked for in the meantime is queued until then.",
+      );
+    }
+    return { handled: true };
+  }
+
+  /**
+   * Publishes a waiting push, if nothing in the repository is running.
+   *
+   * Called at both ends: the moment the instruction arrives, and again every
+   * time a watched task ends or the pump ticks. Claimed rows are the test —
+   * a queued row is work this push is holding, and waiting for that would
+   * wait forever.
+   *
+   * The outcome is said in the channel whatever it was, including a sync
+   * collision. `/push` answers that one in the browser's own dialog, and this
+   * path cannot: by the time it publishes, the request that would have
+   * carried the choice was answered twenty minutes ago. So the collision is
+   * reported as words, with the command that can offer the choice.
+   */
+  private async runPendingPushIfIdle(repositoryId: string): Promise<void> {
+    const pending = this.pendingChannelPushes.get(repositoryId);
+    if (pending === undefined || pending.running) {
+      return;
+    }
+    const operation = this.options.operations.pushRepository;
+    if (operation === undefined) {
+      this.pendingChannelPushes.delete(repositoryId);
+      return;
+    }
+    // Work only. A question is answered on its owner's machine and writes
+    // nothing to canonical, so waiting on one would hold the push for
+    // something that could never change what it publishes.
+    const claimed = await this.options.store
+      .listSubmittedTasks({ repositoryId, status: "claimed" })
+      .catch(() => []);
+    if (claimed.length > 0) {
+      return;
+    }
+    // Marked before the await rather than after it: the pump ticks again
+    // while the push itself is running, and one instruction must publish once.
+    pending.running = true;
+    let outcome: string;
+    try {
+      const result = await operation({
+        projectId: pending.projectId,
+        repositoryId,
+        actorId: pending.actorId,
+      });
+      outcome =
+        result.detail?.syncConflict === true
+          ? `${result.explanation} Nothing was published — say \`/push\` ` +
+            `here to publish it and choose how to resolve that.`
+          : result.explanation;
+    } catch (error) {
+      outcome = `I could not publish this: ${describeError(error)}`;
+    }
+    // Out of the map before anything is said, so the work held behind it is
+    // free from this moment on however the rest of this goes.
+    this.pendingChannelPushes.delete(repositoryId);
+    const held = await this.options.store
+      .listSubmittedTasks({ repositoryId, status: "submitted" })
+      .catch(() => []);
+    await this.sayAboutPendingPush(
+      pending,
+      held.length === 0
+        ? outcome
+        : `${outcome} The work queued behind it is starting now.`,
+    );
+    if (held.length === 0) {
+      return;
+    }
+    // Released even after a refusal. Work nobody can start is a worse ending
+    // than work that ran against a canonical which failed to publish — and
+    // the refusal is on the record above, so the choice stays a person's.
+    void Promise.resolve(
+      this.options.operations.runRepository({
+        projectId: pending.projectId,
+        repositoryId,
+        actorId: pending.actorId,
+      }),
+    ).catch((error: unknown) => {
+      process.stderr.write(
+        `[channel] queued run after push failed for ${repositoryId}: ${describeError(
+          error,
+        )}\n`,
+      );
+    });
+  }
+
+  /** Says something about a waiting push, where it was asked for. */
+  private async sayAboutPendingPush(
+    pending: PendingChannelPush,
+    content: string,
+  ): Promise<void> {
+    if (pending.messageId !== undefined) {
+      await this.sayThreadIsUnanswered(
+        {
+          projectId: pending.projectId,
+          repositoryId: pending.repositoryId,
+          messageId: pending.messageId,
+        },
+        content,
+      );
+      return;
+    }
+    await this.postChannelSystemMessage(
+      pending.projectId,
+      pending.repositoryId,
+      content,
+      pending.channelId,
+    );
   }
 
   /**
@@ -15429,7 +15674,15 @@ export class ApiGateway {
     // around it, mentions and all, goes on to be read exactly as it would
     // have been without one.
     const parsed = parseSlashCommand(input.content);
-    const content = parsed === undefined ? input.content : parsed.rest;
+    // Both words come out when the message spells one instruction with two of
+    // them, so an agent named in the same line is not handed "land the retry
+    // fix /push" as its objective.
+    const content =
+      parsed === undefined
+        ? input.content
+        : readsAsQueuedPush(input.content)
+          ? (parseSlashCommand(parsed.rest)?.rest ?? parsed.rest)
+          : parsed.rest;
     if (parsed !== undefined) {
       const dispatched = await this.runSlashCommand({
         projectId,
@@ -15437,6 +15690,8 @@ export class ApiGateway {
         senderId,
         command: parsed.command,
         rest: parsed.rest,
+        content: input.content,
+        ...(channelId === undefined ? {} : { channelId }),
       });
       if (dispatched.handled) {
         return dispatched.response;
@@ -15670,7 +15925,12 @@ export class ApiGateway {
           candidate,
           referencedMessageId,
           ...(parsed?.command.name === "plan" ? { planOnly: true } : {}),
-          ...(parsed?.command.name === "queue"
+          // A push waiting on this repository queues what follows it, which
+          // is the half of `/queue /push` that makes the publish worth
+          // asking for: work dispatched in the meantime would move canonical
+          // out from under the very push it is waiting for.
+          ...(parsed?.command.name === "queue" ||
+          this.hasPendingPush(repositoryId)
             ? { queueAfterCurrent: true }
             : {}),
           ...(parsed?.command.name === "ask" ? { forceQuestion: true } : {}),
@@ -16421,6 +16681,14 @@ export class ApiGateway {
           : {}),
       });
       this.notifyWorkers(projectId);
+      // A push waiting on this repository holds this task too, whether or not
+      // the queue chained it behind one of its own: `queueAfterCurrent` finds
+      // nothing to follow when this agent's owner has no unfinished work, and
+      // an unchained row is started below the moment it is filed. Held work
+      // is filed, acknowledged and left alone until `runPendingPushIfIdle`
+      // publishes and releases the queue.
+      const startsNow =
+        task.afterTaskId === undefined && !this.hasPendingPush(repositoryId);
       await this.options.store.appendAudit(undefined, {
         type: "task_submitted",
         taskId: task.id,
@@ -16444,7 +16712,7 @@ export class ApiGateway {
       // the client can retire the indicator against that task's real status
       // rather than guessing from a timeout, and this one goes to everybody
       // including the sender, who is the person most waiting to see it.
-      if (task.afterTaskId === undefined) {
+      if (startsNow) {
         this.webSockets.broadcastTransient(projectId, {
           type: "channel-agent-busy",
           projectId,
@@ -16506,9 +16774,12 @@ export class ApiGateway {
             "it is."
           : input.planOnly === true
             ? "I've taken this task and I'm working on the plan."
-            : task.afterTaskId === undefined
+            : startsNow
               ? "I've taken this task and I'm working on it."
-              : "I've taken this task and queued it behind my current work.",
+              : this.hasPendingPush(repositoryId)
+                ? "I've taken this task and queued it behind the push " +
+                  "waiting on this channel."
+                : "I've taken this task and queued it behind my current work.",
         kind: "agent",
       }).catch((error: unknown) => {
         // A channel write must not strand a task that was already accepted.
@@ -16536,7 +16807,7 @@ export class ApiGateway {
       // same agent, its own model, the code open in front of it, and a
       // document at the end worth deciding from.
       const openingPromise =
-        input.planOnly === true || task.afterTaskId !== undefined
+        input.planOnly === true || !startsNow
           ? Promise.resolve([] as string[])
           : // The same conversation the task itself carries. Without it the
             // opening line is written from the request alone, which is how an
@@ -16606,7 +16877,7 @@ export class ApiGateway {
       // events, no thinking, and an indicator that never stopped: the work
       // had been filed, not started. Kicked off without being awaited, so
       // the channel post does not wait on a whole run.
-      if (task.afterTaskId === undefined) {
+      if (startsNow) {
         void Promise.resolve(
           this.options.operations.runRepository?.({
             projectId,
@@ -17287,6 +17558,18 @@ export class ApiGateway {
         messageId: input.messageId,
         viewerId: input.viewerId,
         name: command.command.name,
+      });
+      return;
+    }
+    // `/queue` and `/push` together mean the same thing in a thread as in the
+    // room: publish, but after the work already running. Read before the bare
+    // `/push` below, which is whichever of the two words was typed first.
+    if (readsAsQueuedPush(question)) {
+      await this.queuePushAfterRunningWork({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        actorId: input.viewerId,
+        messageId: input.messageId,
       });
       return;
     }
@@ -21330,7 +21613,14 @@ export class ApiGateway {
   }
 
   private async pumpChannelProgress(): Promise<void> {
-    if (this.watchedChannelTasks.size === 0) {
+    // A waiting push keeps the pump alive on its own. Its moment arrives when
+    // the last claimed row goes terminal, which is not always something this
+    // process was watching — and stopping the timer there would leave the
+    // push waiting for a tick that never comes.
+    if (
+      this.watchedChannelTasks.size === 0 &&
+      this.pendingChannelPushes.size === 0
+    ) {
       if (this.channelProgressTimer !== undefined) {
         clearInterval(this.channelProgressTimer);
         this.channelProgressTimer = undefined;
@@ -21697,12 +21987,33 @@ export class ApiGateway {
         );
       }
     }
+    // Asked again here, as well as at the moment each watched task ends,
+    // because the row a run is narrating can still read `claimed` while its
+    // ending is being written — and a push that missed its moment there would
+    // have nothing left to try it again.
+    for (const repositoryId of [...this.pendingChannelPushes.keys()]) {
+      await this.runPendingPushIfIdle(repositoryId).catch((error: unknown) => {
+        process.stderr.write(
+          `[channel] queued push failed for ${repositoryId}: ${describeError(
+            error,
+          )}\n`,
+        );
+      });
+    }
   }
 
   /** Starts the first explicit follow-up that this finished task unblocked. */
   private async startQueuedTasksAfter(
     watched: WatchedChannelTask,
   ): Promise<void> {
+    // A push waiting on this repository goes first, and this is the moment it
+    // was waiting for. Returning defers the follow-up rather than dropping
+    // it: publishing releases the whole queue itself, and if something else
+    // here is still running the next ending asks again.
+    if (this.hasPendingPush(watched.repositoryId)) {
+      await this.runPendingPushIfIdle(watched.repositoryId);
+      return;
+    }
     const next = (
       await this.options.store.listSubmittedTasks({
         projectId: watched.projectId,

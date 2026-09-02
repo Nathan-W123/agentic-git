@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   formatSlashHelp,
   parseSlashCommand,
+  readsAsQueuedPush,
   SLASH_COMMANDS,
   slashCommandsMatching,
 } from "./slash.js";
@@ -158,6 +159,34 @@ test("/push is a direct command without an agent or objective", () => {
 
   // It is syntax only as its own slash word, like every other command.
   assert.equal(parseSlashCommand("read docs/push.md first"), undefined);
+});
+
+test("/queue and /push in one message read as a deferred push", () => {
+  // One instruction spelled with two command words. `parseSlashCommand`
+  // answers with whichever was typed first, and neither reading alone is
+  // what was asked for — which is exactly why this question exists.
+  assert.ok(readsAsQueuedPush("/queue /push"));
+  assert.equal(parseSlashCommand("/queue /push")?.command.name, "queue");
+  // Order-free: the same sentence said the other way round.
+  assert.ok(readsAsQueuedPush("/push /queue"));
+  assert.equal(parseSlashCommand("/push /queue")?.command.name, "push");
+  // And still the same instruction with words, a mention or a line break
+  // between them.
+  assert.ok(readsAsQueuedPush("/queue @Eos land the retry fix /push"));
+  assert.ok(readsAsQueuedPush("hold everything\n/queue then /push"));
+
+  // Either word on its own is what it has always been.
+  assert.equal(readsAsQueuedPush("/push"), false);
+  assert.equal(readsAsQueuedPush("/queue @Eos rework the retry loop"), false);
+  assert.equal(readsAsQueuedPush(""), false);
+  // A slash in ordinary text is not a command word here either, so a message
+  // about files cannot become a publish.
+  assert.equal(readsAsQueuedPush("/queue @Eos read docs/push.md"), false);
+
+  // The picker says the combined form exists, so nobody has to be told.
+  const queue = SLASH_COMMANDS.find((entry) => entry.name === "queue");
+  assert.match(queue?.usage ?? "", /\/queue \/push/u);
+  assert.match(formatSlashHelp(), /\/queue \/push/u);
 });
 
 test("/queue carries a follow-up objective and is discoverable", () => {

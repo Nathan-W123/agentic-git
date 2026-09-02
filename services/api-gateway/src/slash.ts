@@ -52,8 +52,13 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "queue",
-    summary: "Run this after the agent finishes its current task",
-    usage: "/queue @agent what should run next",
+    // Two things, because "after the work already running" is one idea said
+    // about two subjects: an agent's next task, or — written with `/push` —
+    // a publish that waits for the room to go quiet. See `readsAsQueuedPush`.
+    summary:
+      "Run this after the agent's current task, or with /push once all work " +
+      "here is done",
+    usage: "/queue @agent what should run next, or /queue /push",
     takesObjective: true,
   },
   {
@@ -177,6 +182,32 @@ export function parseSlashCommand(
     return { command, rest: rest.trim() };
   }
   return undefined;
+}
+
+/**
+ * Whether a message asks to publish *after* the work already running.
+ *
+ * `/queue` and `/push` in one message are a single instruction, not two
+ * commands competing for the same sentence: the queue word says when, the
+ * push word says what. `parseSlashCommand` answers with whichever was typed
+ * first, and neither reading on its own is what was asked for — `/push`
+ * alone publishes over the top of running work, and `/queue` alone wants an
+ * agent and an objective it was never given. So the channel asks this before
+ * it acts on either.
+ *
+ * Order-free on purpose. `/queue /push` and `/push /queue` are the same
+ * sentence said two ways, and so is `/queue @Eos land the retry fix /push`:
+ * somebody who wrote both words meant both of them.
+ */
+export function readsAsQueuedPush(content: string): boolean {
+  const named = new Set<string>();
+  for (const match of content.matchAll(SLASH_TOKEN_PATTERN)) {
+    const name = (match[2] ?? "").toLowerCase();
+    if (SLASH_COMMANDS.some((entry) => entry.name === name)) {
+      named.add(name);
+    }
+  }
+  return named.has("queue") && named.has("push");
 }
 
 /**
