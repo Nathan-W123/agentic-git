@@ -35,6 +35,7 @@ import path from "node:path";
 import { detectAgents, ensureProject, exists } from "./agents.mjs";
 import { askDialog } from "./dialog.mjs";
 import { treeKill } from "./installers.mjs";
+import { discoverTenancy } from "./tenancy.mjs";
 import {
   allowMcpServers,
   forgetMcpAllow,
@@ -133,37 +134,6 @@ async function getJson(server, token, route) {
   return await response.json();
 }
 
-/**
- * The organization and project this machine should poll.
- *
- * Asked of the server rather than configured, because the app already holds a
- * credential that can answer it and a person should not have to know their own
- * organization's id to run an agent. A deployment with several is served by
- * the first, which is the only one a single-tenant install has.
- */
-async function discoverTenancy(server, token) {
-  const orgs = await getJson(server, token, "/api/v1/organizations");
-  const organizationId = orgs?.organizations?.[0]?.id;
-  if (typeof organizationId !== "string" || organizationId === "") {
-    throw new Error("This account is not a member of any organization");
-  }
-  let projectId;
-  let projectName;
-  try {
-    const projects = await getJson(
-      server,
-      token,
-      `/api/v1/organizations/${encodeURIComponent(organizationId)}/projects`,
-    );
-    projectId = projects?.projects?.[0]?.id;
-    projectName = projects?.projects?.[0]?.name;
-  } catch {
-    // Optional: the worker falls back to the default project, which is the
-    // only one most deployments have.
-  }
-  return { organizationId, projectId, projectName };
-}
-
 function scheduleRestart(here, session, onEvent, ranForMs) {
   if (stopping) {
     return;
@@ -234,7 +204,7 @@ async function startWorkerOnce(here, session, onEvent) {
 
   let tenancy;
   try {
-    tenancy = await discoverTenancy(session.server, session.token);
+    tenancy = await discoverTenancy(session.server, session.token, getJson);
   } catch (error) {
     onEvent?.({ state: "stopped", detail: describe(error) });
     return;
@@ -243,6 +213,15 @@ async function startWorkerOnce(here, session, onEvent) {
   if (typeof tenancy.projectName === "string" && tenancy.projectName !== "") {
     projectLabel = tenancy.projectName;
   }
+  // Named out loud. Which tenant a machine joined decides whether its owner's
+  // agents are reachable at all, and until now nothing said it anywhere — so
+  // a worker in the wrong one looked exactly like a worker in the right one.
+  onEvent?.({
+    state: "running",
+    detail:
+      `Joined ${tenancy.projectName ?? tenancy.projectId ?? "the default project"} ` +
+      `(${tenancy.organizationId}).`,
+  });
 
   const root = workerRoot();
   await mkdir(root, { recursive: true });
