@@ -2981,6 +2981,20 @@ export function mcpServersEnabled(): boolean {
 export type McpServerTransport = "stdio" | "http";
 
 /**
+ * A secret at rest: AES-256-GCM, every field base64.
+ *
+ * The same layout `UserCredentialStore` has always written. It lives here so
+ * the persistence layer can store one without depending on the workspace
+ * manager that knows how to open it — the store only ever holds these; the
+ * key, and the code that uses it, stay where they are.
+ */
+export interface SealedSecret {
+  readonly iv: string;
+  readonly tag: string;
+  readonly ciphertext: string;
+}
+
+/**
  * One MCP server as a worker receives it in a lease — resolved, with every
  * secret already opened and every decision already made.
  *
