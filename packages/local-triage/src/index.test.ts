@@ -5,6 +5,7 @@ import {
   CHATTER_PROTOTYPES,
   createChatterFilter,
   WORK_PROTOTYPES,
+  speakerIsActor,
   type Embedder,
 } from "./index.js";
 
@@ -303,5 +304,77 @@ test("the model reads placement complaints as work and apologies as conversation
       false,
       `should not read as work: ${chatter}`,
     );
+  }
+});
+
+/**
+ * The four that actually did this, in a live channel, to real people.
+ *
+ * Each was an ordinary remark between two humans; each was dispatched to an
+ * agent that then had to be stopped by hand. They are pinned literally rather
+ * than paraphrased because the point is not that this shape of sentence is
+ * handled — it is that *these sentences* were not.
+ */
+test("a remark about what the speaker is doing is not a request", () => {
+  for (const said of [
+    "I can probably wire back api pretty easily",
+    "Claude is saying ur running old code that's why u can't connect",
+    "im working on the accel applications - but i still think another way " +
+      "of connecting it is necessary, think a nice duolingo-esque onboarding " +
+      "experience",
+    "we shipped 0.5.9 just now",
+    "I'll push a fix after this call",
+    "I already fixed that one yesterday",
+    "I've been debugging the windows runner for an hour",
+    "sounds like a caching issue on his end",
+    "he said the dialog looked the same",
+    "turns out it was the old build all along",
+    "I think the onboarding could be smoother honestly",
+  ]) {
+    assert.equal(speakerIsActor(said), true, said);
+  }
+
+  // The fourth of them, and it is not caught here — recorded rather than
+  // quietly dropped from the list. "Uninstall isnt needed just install" has
+  // no subject at all: it is an imperative, and it is grammatically identical
+  // to "remove the unused imports". What separates them is that one is about
+  // somebody's laptop and the other about the repository, and that is subject
+  // matter — the thing a word list was already removed from this path for
+  // trying to enumerate. It still reaches the embedding, which reads it as
+  // work (+0.186). Catching it needs a signal nobody has measured yet, and
+  // guessing at one here would risk the recall the test below pins.
+  assert.equal(speakerIsActor("Uninstall isnt needed just install"), false);
+});
+
+/**
+ * And it costs no requests, which is the whole reason it is allowed to run
+ * in front of the model rather than after it.
+ *
+ * A request for work does not have the person asking as its subject: it is an
+ * imperative, or it addresses somebody, or it describes the product. None of
+ * those are first person, so a rule about first person cannot reach them.
+ */
+test("a request for work is never read as the speaker acting", () => {
+  for (const asked of [
+    "please add a way to unpin a message from the pinned sidetab",
+    "can you fix the retry loop",
+    "the send button is the wrong colour",
+    "add a dark mode toggle to settings",
+    "the sidebar sections are in a strange order",
+    "look into why the windows tests hang",
+    "we should refactor the auth module",
+    "remove the unused imports in that module",
+    "my name is listed under the agents section instead of with the people",
+    "audit the codebase for unused dependencies",
+    "the login page loads far too slowly",
+    "can someone add keyboard shortcuts to the chat",
+    "migrate the sessions table to postgres",
+    "the avatars are squashed on mobile",
+    "investigate the memory leak in the worker",
+    "the pinned tab should show newest first",
+    "build a proper onboarding wizard",
+    "the dropdown closes when you click inside it",
+  ]) {
+    assert.equal(speakerIsActor(asked), false, asked);
   }
 });
