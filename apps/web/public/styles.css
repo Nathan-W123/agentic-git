@@ -13172,24 +13172,9 @@ dialog.modal[open]::backdrop {
   gap: 4px;
 }
 
-/* The mark stands over the workspace switcher, so it shares that column's
-   centre line rather than the bar's padding: the box is the rail's width,
-   pulled back across the padding to start where the rail does. Anything less
-   deliberate reads as a logo sitting near the corner instead of leading the
-   column under it. */
-.topbar-brand {
-  flex: none;
-  display: inline-grid;
-  place-items: center;
-  width: var(--rail-w);
-  margin-inline-start: -12px;
-}
-
-/* White, not the accent. Everywhere else the mark is the one piece of branding
-   that is a colour; here it leads a bar of plain ink and belongs to it. */
-.topbar-brand .brand-mark {
-  color: var(--text);
-}
+/* No mark rule here any more, and no box sized to the switcher underneath it:
+   the corner over the rail is empty on purpose, so the column of workspace
+   icons is the only identity down this side of the window. See `topbar()`. */
 
 .topbar-actions {
   justify-content: flex-end;
@@ -13285,7 +13270,30 @@ dialog.modal[open]::backdrop {
   --secondary-panel-ms: 200ms;
   padding: 0;
   padding-top: 0;
-  background: var(--bg);
+  background-color: var(--bg);
+  /* The wedge behind the navigation's rounded top-left corner, painted as
+     chrome so that the corner has chrome to be rounded away from.
+
+     That corner is cut out of an opaque panel, so what shows through it is
+     whatever is behind this shell — page background, in a notch with the
+     switcher's chrome down one side and the bar's across the top. Two chrome
+     edges meeting around a square of something else is a hard right angle, and
+     it landed on the one corner of the window the rounding was there to
+     soften. Filling it makes the L continuous and leaves the curve as the only
+     thing drawn there.
+
+     One square, the corner's own radius, parked where the navigation starts.
+     That is the only place it can ever be seen: the navigation covers it
+     everywhere else, and the conversation — opaque and square at that corner —
+     covers it whenever the navigation is folded to nothing or away in a
+     drawer, which are exactly the states that want no rounding at all. */
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--bg-panel) 88%, var(--bg)),
+    color-mix(in srgb, var(--bg-panel) 88%, var(--bg))
+  );
+  background-repeat: no-repeat;
+  background-position: var(--rail-w) 0;
+  background-size: var(--radius-xl) var(--radius-xl);
 }
 
 .chats-shell.no-banner {
@@ -13694,14 +13702,6 @@ dialog.modal[open]::backdrop {
     grid-template-columns: minmax(44px, 1fr) 44px minmax(88px, 1fr);
     height: calc(54px + var(--safe-top));
     padding: var(--safe-top) 8px 0;
-  }
-
-  /* The switcher is in the drawer here, so there is no column to stand over
-     and nothing to reach back across. The mark keeps the bar's own padding
-     rather than sitting against the edge of the screen. */
-  .topbar-brand {
-    width: auto;
-    margin-inline-start: 0;
   }
 
   .global-search {

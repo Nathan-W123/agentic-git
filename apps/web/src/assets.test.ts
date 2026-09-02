@@ -3612,12 +3612,13 @@ test("the standalone logo follows the theme without changing the wordmark or app
   // accent — so a surface that needs it to match its own ink still can.
   assert.match(css, /\.brand-mark \{\n {2}color: var\(--accent\);\n\}/u);
 
-  // The corner of the global bar is one such surface: there the mark leads a
-  // row of plain ink, so it is white with it. A literal white would be a hole
-  // on the light theme, which is why this is the theme's own text token — the
-  // point of drawing in `currentColor` in the first place.
-  assert.match(css, /\.topbar-brand \.brand-mark \{\n {2}color: var\(--text\);\n\}/u);
-  assert.match(css, /--text: #F3EFE8;/u);
+  // Not in the corner of the global bar either. It stood there in plain ink,
+  // directly above the column of workspace icons — one application logo
+  // repeated over a stack of workspaces, which read as a workspace rather than
+  // as the application. The corner is empty now, and neither the markup nor the
+  // stylesheet keeps a hook that would put a mark back into it.
+  assert.doesNotMatch(app, /class="topbar-brand"/u);
+  assert.doesNotMatch(css, /\.topbar-brand/u);
 
   assert.doesNotMatch(chats, /channel-rail-brand|brandMark/u);
   assert.doesNotMatch(css, /channel-rail-brand/u);

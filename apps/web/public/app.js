@@ -1523,18 +1523,17 @@ async function submitInviteSignIn(form) {
  */
 
 function topbar() {
-  // The upper-left corner, over the workspace switcher, which held nothing.
-  // The mark belongs to the application rather than to any one workspace, so
-  // this is where it goes — and it goes alone: the shell is still
-  // workspace-led, so the name beside it stays the crown's to say, not this
-  // bar's.
-  const brand = `<span class="topbar-brand">${brandMark(24)}</span>`;
+  // No mark in this corner. It stood over the workspace switcher, which is a
+  // column of workspace icons — one application logo repeated above a stack of
+  // them says nothing the rest of the window has not already said, and it read
+  // as a logo among the workspaces rather than above them. The column below is
+  // the identity here; the mark still leads the sign-in shell, where there is
+  // no workspace to lead instead.
   return `<header class="topbar" aria-label="Global">
     <div class="topbar-start">
-      ${brand}
       ${
         // Screens without workspace navigation keep one explicit route back to
-        // it, beside the mark.
+        // it, at the head of the bar.
         state.route === "chats"
           ? ""
           : `<button class="icon-btn" data-act="nav" data-value="chats"

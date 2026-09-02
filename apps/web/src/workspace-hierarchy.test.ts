@@ -31,10 +31,12 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(globalChrome, /class="topbar-actions"/u);
   assert.match(globalChrome, /class="icon-btn topbar-icon-btn"[\s\S]*icon\("info"\)/u);
   assert.doesNotMatch(globalChrome, /topbar-account-btn|data-act="user-menu"/u);
-  // The mark leads the bar from the corner the workspace switcher runs down.
-  // What must not come back beside it is the product's *name*: this shell is
-  // workspace-led, and the crown below is what says whose workspace this is.
-  assert.match(globalChrome, /class="topbar-brand">\$\{brandMark\(\d+\)\}/u);
+  // Nothing of the product's own in that corner — neither the mark nor the
+  // name. The switcher runs down from it, so a mark there is one logo standing
+  // over a column of workspace icons and reading as another of them; this shell
+  // is workspace-led, and the column below plus the crown beside it are what
+  // say whose workspace this is.
+  assert.doesNotMatch(globalChrome, /topbar-brand|brandMark\(/u);
   assert.doesNotMatch(globalChrome, /global-brand|>Kumi</u);
   assert.doesNotMatch(app, /const BARE = new Set\(\[[^\]]*"chats"/u);
   assert.match(chats, /<nav class="channel-rail workspace-rail" aria-label="Workspaces"/u);
@@ -69,9 +71,8 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(hierarchyCss, /grid-template-columns: minmax\(76px, 1fr\) minmax\(240px, 640px\) minmax\(76px, 1fr\);/u);
   assert.match(hierarchyCss, /\.topbar-icon-btn \{[\s\S]*?flex: 0 0 34px;[\s\S]*?width: 34px;[\s\S]*?height: 34px;/u);
   assert.doesNotMatch(hierarchyCss, /\.topbar-account-btn/u);
-  // Sized and offset to the rail rather than to the bar's padding, so the mark
-  // stands on the switcher's centre line instead of near it.
-  assert.match(hierarchyCss, /\.topbar-brand \{[\s\S]*?width: var\(--rail-w\);[\s\S]*?margin-inline-start: -12px;/u);
+  // And no box in the bar sized to the switcher underneath it, at any width.
+  assert.doesNotMatch(hierarchyCss, /\.topbar-brand/u);
   assert.match(hierarchyCss, /\.channel-rail \{[^}]*background: color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\);/u);
   // The bar and the switcher are one L of chrome: same surface, and no line
   // between them or down the switcher's far side. The seam beside it belongs
@@ -84,6 +85,14 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(
     hierarchyCss,
     /\n\.chan-sidebar \{[^}]*border-top: 1px solid var\(--border-soft\);[^}]*border-left: 1px solid var\(--border-soft\);[^}]*border-right: 1px solid var\(--border-soft\);[^}]*border-radius: var\(--radius-xl\) 0 0 0;/u,
+  );
+  // And the wedge that corner is cut out of is chrome, not page background:
+  // one square of the switcher's own surface, the size of the rounding, where
+  // the navigation starts. Without it the two chrome edges met around a notch
+  // of something else and the rounded corner read as a small hard right angle.
+  assert.match(
+    hierarchyCss,
+    /\n\.chats-shell \{[\s\S]*?background-image: linear-gradient\(\s*color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\),\s*color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\)\s*\);\s*background-repeat: no-repeat;\s*background-position: var\(--rail-w\) 0;\s*background-size: var\(--radius-xl\) var\(--radius-xl\);/u,
   );
   assert.match(hierarchyCss, /\n\.chan-main \{[^}]*border-top: 1px solid var\(--border-soft\);[^}]*border-radius: 0;/u);
   // With no switcher the navigation is against the window, where there is
