@@ -1,31 +1,28 @@
-### 0.5.13 — say which agents this machine is actually running
+### 0.5.13 — say when this machine is on battery, and which agents it found
 
-The Agents menu said "Running agents on this machine" whether it had found
-both your CLIs or one of them, and the worker log never mentioned the
-subject at all. That mattered more than it sounds. The list of CLIs this
-machine reports is exactly what the control plane uses to decide whether an
-agent is reachable — so a machine that found only one of two would take
-work for that one and, for the other, tell the room "no machine is running
-Kumi" and offer to install a CLI already sitting on the disk. Nothing
-failed, and the only two places that could have said so said nothing.
+Two silences, both of which made a working machine look like a missing one.
 
-The menu now names them. The worker log names them on every start, and if
-the list is empty — which is a worker that will never be given a single
-task, however healthy it looks — it says so outright, with both halves of
-the comparison printed so you can see which one is short.
+A worker checks the power source before it asks for work, and on battery it
+declines — a laptop that sleeps mid-task holds its lease until it expires,
+so it stays out of the way. What nothing said is that asking for work is
+also the only thing that tells the control plane this machine exists. So a
+laptop on battery did not read as a machine that was waiting. It read as no
+machine at all: agents grey, mentions answered with "nothing will pick this
+up yet", and an offer to install a CLI already sitting on the disk. The
+worker log now says it, in as many words, when the power state changes. And
+`COORD_CLAIM_ON_BATTERY=1` takes work on battery for anyone who would rather
+make that trade themselves.
+
+The second: the Agents menu said "Running agents on this machine" whether it
+had found both your CLIs or one of them, and the log never mentioned the
+subject. The list of CLIs a machine reports is exactly what decides whether
+an agent is reachable, so a machine that found one of two would take work
+for that one and report the other as having no machine anywhere. The menu
+now names them, the log names them on every start, and an empty list — a
+worker that will never be given a single task, however healthy it looks —
+says so outright with both halves of the comparison printed.
 
 Also: Claude installed natively is now Claude the app can see.
-
-An agent whose CLI this app cannot find is an agent the control plane
-draws as having no machine at all. It goes grey, a mention brings up
-"nothing will pick this up yet", and the app offers to install a CLI that
-is already on the computer.
-
-That is what happened to Claude on Windows. The app looks along PATH and
-then in the standard install directories, and the Windows list named
-Node's own folder and npm's global folder but not the one a *native*
-installer uses — `%USERPROFILE%\.local\bin`, where Claude Code now puts
-`claude.exe`. Every other platform's list had it. Windows now does too.
 
 ### 0.5.12 — your project's tools, on your say-so
 

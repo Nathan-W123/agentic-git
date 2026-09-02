@@ -70,6 +70,7 @@ import {
   shouldClaimWork,
   systemPowerSource,
   type PowerSource,
+  type PowerState,
 } from "./power.js";
 
 /**
@@ -148,6 +149,11 @@ export interface WorkerOptions {
    * have to be running on a laptop that was actually unplugged.
    */
   powerSource?: PowerSource;
+  /**
+   * Take work even on battery. Defaults to `COORD_CLAIM_ON_BATTERY`, and to
+   * off. See {@link Worker.claimOnBattery}.
+   */
+  claimOnBattery?: boolean;
   /**
    * An optional shortcut out of the idle wait.
    *
@@ -488,6 +494,11 @@ export class Worker {
   public constructor(private readonly options: WorkerOptions) {
     this.plans = options.planCache ?? new Map<string, CachedPlan>();
     this.power = options.powerSource ?? systemPowerSource();
+    this.claimOnBattery =
+      options.claimOnBattery ??
+      ["1", "true", "yes"].includes(
+        (process.env["COORD_CLAIM_ON_BATTERY"] ?? "").trim().toLowerCase(),
+      );
     this.concurrency = configuredConcurrency(options.concurrency);
     const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
     const planWaitBudget =
@@ -515,6 +526,25 @@ export class Worker {
 
   /** Set by {@link register}; see {@link advertisedAdapters}. */
   private advertised: string[] = [];
+
+  /**
+   * The power state this worker last refused work on, or `undefined` while it
+   * is taking work. Kept only so the refusal is logged when it changes rather
+   * than on every poll.
+   */
+  private declining: PowerState | undefined;
+
+  /**
+   * Whether to take work on battery anyway.
+   *
+   * Off by default, for the reason `power.ts` gives: a sleeping laptop cannot
+   * keep a lease alive, and the task it holds waits out the full expiry
+   * before anybody else can have it. But that is a trade rather than a law —
+   * a laptop somebody is sitting in front of with the lid open is perfectly
+   * capable — and until this existed the trade was made on the owner's behalf
+   * with no way to see it, and no way to decline it.
+   */
+  private readonly claimOnBattery: boolean;
 
   public async register(): Promise<string> {
     const configured = new Set(
@@ -608,8 +638,32 @@ export class Worker {
     // hold work this machine cannot promise to finish. A laptop that claims a
     // task and then sleeps keeps it for the full lease expiry while its owner
     // watches nothing happen; declining leaves it visibly queued instead.
-    if (!shouldClaimWork(await this.power.read())) {
+    const power = await this.power.read();
+    if (!this.claimOnBattery && !shouldClaimWork(power)) {
+      // Said once per change of state, not once per poll: this loop runs
+      // every few seconds and a line each time would bury the log it is in.
+      //
+      // Said at all because the silence here is the whole problem. Declining
+      // never touches the control plane, and the control plane decides a
+      // machine is present by exactly that touch — so a laptop on battery
+      // stops being a machine that is waiting and becomes, to everyone in
+      // the room, a machine that does not exist. Its owner's agents go grey,
+      // a mention raises "nothing will pick this up yet", and the app offers
+      // to install a CLI that is already there. Nothing in the product ever
+      // said "battery", and this loop was the only thing that knew.
+      if (this.declining !== power) {
+        this.declining = power;
+        console.log(
+          `[worker] on ${power} — not claiming work, because a machine that ` +
+            "can lose power cannot promise to finish what it starts. Plug " +
+            "in, or set COORD_CLAIM_ON_BATTERY=1 to take work on battery.",
+        );
+      }
       return { worked: false };
+    }
+    if (this.declining !== undefined) {
+      this.declining = undefined;
+      console.log("[worker] claiming work again");
     }
     const assignment = await this.options.client.lease(
       workerId,
