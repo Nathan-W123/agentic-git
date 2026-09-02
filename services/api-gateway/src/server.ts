@@ -6302,17 +6302,47 @@ export class ApiGateway {
           url.pathname.endsWith("/accept") &&
           invitationPath);
       if (!isPublic) {
-        const bearer = parseBearer(
+        const authorization =
           typeof request.headers.authorization === "string"
-            ? request.headers.authorization
-            : undefined,
-        );
+            ? request.headers.authorization.trim()
+            : "";
+        const bearer = parseBearer(authorization);
         if (bearer !== undefined) {
+          // The placeholder, pasted with its brackets still on. Every
+          // instruction for this writes the token as `<token>` to mean "your
+          // value here", and a person following it literally gets a token
+          // that fails for a reason no message mentioned. Named here rather
+          // than left to `authenticateToken`, whose answer is deliberately
+          // the same for every bad token and so cannot say this.
+          if (bearer.startsWith("<") && bearer.endsWith(">")) {
+            throw new AuthenticationError(
+              "The token in the Authorization header still has the angle " +
+                "brackets around it; those mark where your own token goes " +
+                "and are not part of it",
+            );
+          }
           // Headless client. No CSRF check: a browser never attaches a bearer
           // token on its own, so there is no cross-site request to forge.
           context.principal = await this.auth.authenticateToken(
             bearer,
             this.remoteAddress(request),
+          );
+        } else if (authorization !== "") {
+          // A header that is present and not `Bearer <token>` used to fall
+          // through to the cookie path and be answered "Sign in is
+          // required" — a sentence about a browser, sent to something that
+          // has no cookies and was never going to get any. What it actually
+          // means is that this header is malformed, and the two ways to
+          // malform it are worth naming: the scheme left off entirely, and a
+          // placeholder pasted with its angle brackets still around it.
+          //
+          // Safe to say out loud, because it describes the caller's own
+          // request rather than anything about an account. `authenticateToken`
+          // stays deliberately uniform below.
+          throw new AuthenticationError(
+            'The Authorization header must read "Bearer <token>" — the word ' +
+              "Bearer, one space, then the token itself with no angle " +
+              "brackets around it",
           );
         } else {
           context.principal = await this.auth.authenticate(
@@ -6331,6 +6361,23 @@ export class ApiGateway {
       }
       await this.route(context);
     } catch (error) {
+      // The challenge an MCP client is looking for.
+      //
+      // RFC 9110 says a 401 carries `WWW-Authenticate`, and MCP clients read
+      // it to tell "this server wants a token" from "this server is broken".
+      // Without it the Claude CLI reports a rejected header and leaves the
+      // person guessing which header, and why.
+      if (
+        url.pathname === `${API_PREFIX}/mcp` &&
+        (error instanceof AuthenticationError
+          ? error.statusCode
+          : error instanceof HttpError
+            ? error.status
+            : 500) === 401 &&
+        !response.headersSent
+      ) {
+        response.setHeader("WWW-Authenticate", 'Bearer realm="kumi"');
+      }
       this.sendError(response, requestId, error);
     }
   }

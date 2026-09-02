@@ -21082,6 +21082,59 @@ test("an MCP client can hand-shake and see the tools", async (t) => {
   );
 });
 
+test("a misconfigured Authorization header says which way it is wrong", async (t) => {
+  // Both of these were answered "Sign in is required" — a sentence about a
+  // browser, sent to a CLI that has no cookies and was never going to get
+  // any. Between them they are most of what goes wrong setting this up, and
+  // neither is a fact about anybody's account, so both can be said plainly.
+  const { runtime, token } = await mcpRuntime(t);
+  const send = async (authorization: string) => {
+    const response = await fetch(`${runtime.origin}/api/v1/mcp`, {
+      method: "POST",
+      headers: { Authorization: authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    });
+    return {
+      status: response.status,
+      challenge: response.headers.get("www-authenticate"),
+      message: String(
+        ((await response.json()) as { error?: { message?: string } }).error
+          ?.message ?? "",
+      ),
+    };
+  };
+
+  // The scheme left off entirely.
+  const bare = await send(token);
+  assert.equal(bare.status, 401);
+  assert.match(bare.message, /must read "Bearer <token>"/u);
+
+  // The placeholder pasted with its brackets still on.
+  const wrapped = await send(`Bearer <${token}>`);
+  assert.equal(wrapped.status, 401);
+  assert.match(wrapped.message, /angle brackets/u);
+
+  // A well-formed header carrying a token that is simply wrong stays
+  // uniform: "invalid" and nothing more, or the answer becomes an oracle.
+  const wrong = await send("Bearer coord_pat_aaaaaaaa.bbbbbbbb");
+  assert.equal(wrong.status, 401);
+  assert.match(wrong.message, /API token is invalid/u);
+
+  // Every 401 on this route carries the challenge, which is how an MCP
+  // client tells "wants a token" from "server is broken".
+  for (const answer of [bare, wrapped, wrong]) {
+    assert.match(answer.challenge ?? "", /^Bearer\b/u, "no WWW-Authenticate");
+  }
+
+  // And the working case is untouched.
+  const ok = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "ping",
+  });
+  assert.equal(ok.status, 200);
+});
+
 test("a GET is refused in a shape an MCP client can read", async (t) => {
   const { runtime, token } = await mcpRuntime(t);
   const probed = await bearer(runtime.origin, "/api/v1/mcp", token);
