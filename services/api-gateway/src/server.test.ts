@@ -21018,7 +21018,13 @@ test("an MCP client can hand-shake and see the tools", async (t) => {
   assert.equal(listed.status, 200);
   assert.deepEqual(
     (listed.data.result.tools as Array<{ name: string }>).map((tool) => tool.name),
-    ["list_repositories", "submit_task", "task_status"],
+    [
+      "list_repositories",
+      "submit_task",
+      "task_status",
+      "cancel_task",
+      "answer_question",
+    ],
   );
 });
 

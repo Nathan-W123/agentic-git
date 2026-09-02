@@ -14226,6 +14226,100 @@ export class ApiGateway {
           .map((entry) => narrateTaskEvent(entry.event.type, entry.event.data))
           .filter((line): line is string => line !== undefined);
       },
+      pendingQuestionFor: async (taskId) => {
+        for (const [requestId, pending] of this.pendingAgentQuestions) {
+          // Only the person the question was put to. A question is a decision
+          // about somebody's own request; anyone else answering it turns one
+          // person's choice into a race.
+          if (
+            pending.taskId === taskId &&
+            pending.submitterId === principal.user.id
+          ) {
+            return {
+              requestId,
+              questions: pending.questions.map((question) => ({
+                question: question.question,
+                options: [...question.options],
+                ...(question.recommended === undefined
+                  ? {}
+                  : { recommended: question.recommended }),
+              })),
+            };
+          }
+        }
+        return undefined;
+      },
+      answerQuestion: async (input) => {
+        const pending = this.pendingAgentQuestions.get(input.requestId);
+        if (pending === undefined || pending.submitterId !== principal.user.id) {
+          // The same answer for "already answered", "gave up waiting" and
+          // "not yours": from out here they are one situation, and the caller's
+          // move is the same either way.
+          return "not_waiting";
+        }
+        const answers: QuestionChoice[] = pending.questions.map(
+          (question, index) => {
+            const entry = input.answers[index] ?? {};
+            const chosen = entry.chosen;
+            const text = entry.text?.slice(0, 2_000);
+            if (
+              typeof chosen === "number" &&
+              Number.isInteger(chosen) &&
+              chosen >= 0 &&
+              chosen < question.options.length
+            ) {
+              return { chosen };
+            }
+            if (text !== undefined && text.trim().length > 0) {
+              return { text: text.trim() };
+            }
+            // Skipping is a real answer — "your call" — which is what makes
+            // several questions cheap to put to somebody.
+            return { skipped: true };
+          },
+        );
+        pending.settle(answers);
+        return "answered";
+      },
+      cancelTask: async (taskId) => {
+        const task = await this.options.store.getSubmittedTask(taskId);
+        if (task === undefined || task.projectId === undefined) {
+          return "not_found";
+        }
+        // The dashboard's cancel route authorises with `run_task`. That scope
+        // also admits `POST /workers/leases`, so a token given to an editor
+        // for stopping work would be able to register as a worker and take
+        // other people's tasks. Ownership instead, checked against the row.
+        if (task.submittedBy !== principal.user.id) {
+          return "not_yours";
+        }
+        await authorizeProject(
+          this.options.store,
+          principal,
+          task.projectId,
+          "submit_task",
+        );
+        const operation = this.options.operations.cancelTasks;
+        if (operation === undefined) {
+          await this.options.store.cancelSubmittedTask(taskId).catch(() => {
+            throw new HttpError(409, "not_cancellable", "already finished");
+          });
+          await this.options.store.appendAudit(undefined, {
+            type: "task_cancelled",
+            taskId,
+            data: { projectId: task.projectId, actorId: principal.user.id },
+          });
+          return "cancelled";
+        }
+        const { cancelled } = await operation({
+          projectId: task.projectId,
+          repositoryId: task.repositoryId,
+          taskIds: [taskId],
+          reason: "Stopped from an editor",
+          actorId: principal.user.id,
+        });
+        return cancelled.length === 0 ? "already_finished" : "cancelled";
+      },
       outcomeFor: async (taskId) => {
         const events = await this.options.store
           .listAuditEvents({

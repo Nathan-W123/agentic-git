@@ -89,6 +89,27 @@ export interface McpToolDeps {
   progressFor(taskId: string, limit: number): Promise<string[]>;
   /** How a task ended, when it has. */
   outcomeFor(taskId: string): Promise<string | undefined>;
+  /** A question this task is waiting on, if the caller is the one being asked. */
+  pendingQuestionFor(taskId: string): Promise<McpPendingQuestion | undefined>;
+  /** Answers a waiting question, or says why it could not. */
+  answerQuestion(input: {
+    requestId: string;
+    answers: ReadonlyArray<{ chosen?: number; text?: string }>;
+  }): Promise<"answered" | "not_waiting">;
+  /** Stops a task, or says why it could not. */
+  cancelTask(taskId: string): Promise<
+    "cancelled" | "not_found" | "not_yours" | "already_finished"
+  >;
+}
+
+/** A question an agent is holding a run open for. */
+export interface McpPendingQuestion {
+  readonly requestId: string;
+  readonly questions: ReadonlyArray<{
+    readonly question: string;
+    readonly options: readonly string[];
+    readonly recommended?: number;
+  }>;
 }
 
 /** The user-visible id of a repository, which is its name. */
@@ -394,9 +415,10 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
       if (task === undefined) {
         return mcpRefusal(`No task called "${taskId}".`);
       }
-      const [progress, outcome] = await Promise.all([
+      const [progress, outcome, waiting] = await Promise.all([
         deps.progressFor(task.id, 3),
         deps.outcomeFor(task.id),
+        deps.pendingQuestionFor(task.id),
       ]);
       const lines = [
         `${task.objective}`,
@@ -408,11 +430,146 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
       if (outcome !== undefined) {
         lines.push("", outcome);
       }
+      // Surfaced here because there is nowhere else it could be. A run that has
+      // asked something is stopped until somebody answers, and from an editor
+      // this is the only place that fact can appear — without it the task
+      // simply looks stuck, and `answer_question` has no request id to use.
+      if (waiting !== undefined) {
+        lines.push("", `Waiting for an answer (request ${waiting.requestId}):`);
+        waiting.questions.forEach((question, index) => {
+          lines.push(`  ${index + 1}. ${question.question}`);
+          question.options.forEach((option, choice) => {
+            const recommended =
+              question.recommended === choice ? "  (recommended)" : "";
+            lines.push(`       [${choice}] ${option}${recommended}`);
+          });
+        });
+        lines.push(
+          "",
+          "Ask the person, then call answer_question with the numbers in " +
+            "brackets — one per question, in order.",
+        );
+      }
       return mcpText(lines.join("\n"));
     },
   };
 
-  return [listRepositories, submitTask, taskStatus];
+  const cancelTask: McpTool = {
+    name: "cancel_task",
+    title: "Stop a Kumi task",
+    description:
+      "Stops a task you submitted — the queued row, the running agent and its " +
+      "lease. Only tasks you submitted yourself can be stopped this way.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "The id submit_task returned." },
+      },
+      required: ["task_id"],
+      additionalProperties: false,
+    },
+    async run(args) {
+      // Deliberately not `run_task`, which the dashboard's own cancel route
+      // uses. That scope is the same one `POST /workers/leases` requires, so a
+      // token handed to an editor for stopping work could register as a worker
+      // and lease other people's tasks. Narrower scope, plus the run has to be
+      // the caller's own.
+      deps.assertScope("submit_task");
+      const taskId = requiredString(args, "task_id", 200);
+      const outcome = await deps.cancelTask(taskId);
+      if (outcome === "cancelled") {
+        return mcpText(`Stopped ${taskId}.`);
+      }
+      if (outcome === "not_found") {
+        return mcpRefusal(`No task called "${taskId}".`);
+      }
+      if (outcome === "not_yours") {
+        return mcpRefusal(
+          `${taskId} was submitted by somebody else. Stop it from Kumi, or ask them to.`,
+        );
+      }
+      return mcpRefusal(`${taskId} has already finished.`);
+    },
+  };
+
+  const answerQuestion: McpTool = {
+    name: "answer_question",
+    title: "Answer an agent's question",
+    description:
+      "Answers a question a running Kumi agent is waiting on. Call " +
+      "task_status first to see the question, its numbered options and the " +
+      "request id. The agent resumes as soon as this lands.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: {
+          type: "string",
+          description: "The request id task_status reported.",
+        },
+        choices: {
+          type: "array",
+          items: { type: "integer" },
+          description:
+            "One option number per question, in the order task_status listed " +
+            "them. Use -1 for a question you are answering in words instead.",
+        },
+        answers: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional free text, one per question, for anything the options " +
+            "do not cover.",
+        },
+      },
+      required: ["request_id"],
+      additionalProperties: false,
+    },
+    async run(args) {
+      deps.assertScope("view");
+      const requestId = requiredString(args, "request_id", 200);
+      const chosen = args["choices"];
+      const written = args["answers"];
+      if (chosen !== undefined && !Array.isArray(chosen)) {
+        throw new McpArgumentError('"choices" must be a list of numbers');
+      }
+      if (written !== undefined && !Array.isArray(written)) {
+        throw new McpArgumentError('"answers" must be a list of strings');
+      }
+      const length = Math.max(
+        Array.isArray(chosen) ? chosen.length : 0,
+        Array.isArray(written) ? written.length : 0,
+      );
+      if (length === 0) {
+        throw new McpArgumentError(
+          "Give at least one answer — a choice number, some text, or both",
+        );
+      }
+      const answers = Array.from({ length }, (_unused, index) => {
+        const pick = Array.isArray(chosen) ? chosen[index] : undefined;
+        const say = Array.isArray(written) ? written[index] : undefined;
+        return {
+          // -1 is how a caller says "none of these, read what I wrote". The
+          // control plane already treats an out-of-range index as no choice.
+          ...(typeof pick === "number" && Number.isInteger(pick) && pick >= 0
+            ? { chosen: pick }
+            : {}),
+          ...(typeof say === "string" && say.trim().length > 0
+            ? { text: say.trim() }
+            : {}),
+        };
+      });
+      const outcome = await deps.answerQuestion({ requestId, answers });
+      return outcome === "answered"
+        ? mcpText("Answered. The agent has picked the work back up.")
+        : mcpRefusal(
+            "That question is no longer waiting for an answer — it was " +
+              "answered already, or the agent gave up waiting. Call " +
+              "task_status to see where the task got to.",
+          );
+    },
+  };
+
+  return [listRepositories, submitTask, taskStatus, cancelTask, answerQuestion];
 }
 
 /** Exported for the gateway's own use when narrowing a task to its owner. */

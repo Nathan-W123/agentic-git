@@ -47,6 +47,9 @@ function deps(overrides: Partial<McpToolDeps> = {}): {
       describeState: (status) => status,
       progressFor: async () => [],
       outcomeFor: async () => undefined,
+      pendingQuestionFor: async () => undefined,
+      answerQuestion: async () => "not_waiting",
+      cancelTask: async () => "not_found",
       ...overrides,
     },
   };
@@ -210,4 +213,106 @@ test("task_status folds progress and outcome into one answer", async () => {
   assert.match(text, /raise the retry ceiling/u);
   assert.match(text, /running now/u);
   assert.match(text, /editing src\/retry\.ts/u);
+});
+
+test("cancel_task will not stop somebody else's run", async () => {
+  // The dashboard's own cancel route authorises with `run_task`, and that
+  // scope also admits `POST /workers/leases`. A token handed to an editor for
+  // stopping work must not be able to register as a worker, so this asks for
+  // `submit_task` and the run has to be the caller's own.
+  let asked: string | undefined;
+  const { run } = tool("cancel_task", {
+    assertScope: (permission) => {
+      asked = permission;
+    },
+    cancelTask: async () => "not_yours",
+  });
+  const said = await run({ task_id: "task_1" });
+  assert.equal(asked, "submit_task");
+  assert.equal(said.isError, true);
+  assert.match(said.content[0]?.text ?? "", /submitted by somebody else/u);
+});
+
+test("cancel_task tells the difference between gone, finished and stopped", async () => {
+  for (const [outcome, expected] of [
+    ["cancelled", /Stopped task_1/u],
+    ["not_found", /No task called/u],
+    ["already_finished", /already finished/u],
+  ] as const) {
+    const { run } = tool("cancel_task", { cancelTask: async () => outcome });
+    const said = await run({ task_id: "task_1" });
+    assert.match(said.content[0]?.text ?? "", expected);
+    assert.equal(said.isError, outcome === "cancelled" ? undefined : true);
+  }
+});
+
+test("task_status shows a waiting question with numbered options", async () => {
+  // Without this the run just looks stuck: it is stopped until somebody
+  // answers, and an editor has nowhere else that fact could appear — nor any
+  // other way to learn the request id `answer_question` needs.
+  const { run } = tool("task_status", {
+    store: {
+      getSubmittedTask: async () => ({
+        id: "task_1",
+        objective: "raise the ceiling",
+        status: "claimed",
+      }),
+    } as unknown as CoordinationStore,
+    describeState: () => "running now",
+    pendingQuestionFor: async () => ({
+      requestId: "ask_7",
+      questions: [
+        {
+          question: "Retry on 5xx as well?",
+          options: ["Yes", "No"],
+          recommended: 0,
+        },
+      ],
+    }),
+  });
+  const text = (await run({ task_id: "task_1" })).content[0]?.text ?? "";
+  assert.match(text, /ask_7/u);
+  assert.match(text, /Retry on 5xx/u);
+  assert.match(text, /\[0\] Yes {2}\(recommended\)/u);
+  assert.match(text, /\[1\] No/u);
+  assert.match(text, /answer_question/u);
+});
+
+test("answer_question needs an answer, and reports a question nobody is holding", async () => {
+  const { run } = tool("answer_question");
+  await assert.rejects(
+    async () => await run({ request_id: "ask_7" }),
+    /at least one answer/u,
+  );
+  await assert.rejects(
+    async () => await run({ request_id: "ask_7", choices: "0" }),
+    /must be a list of numbers/u,
+  );
+
+  // The default double answers "not_waiting", which is what a question that
+  // has already been answered or timed out looks like from out here.
+  const stale = await run({ request_id: "ask_7", choices: [0] });
+  assert.equal(stale.isError, true);
+  assert.match(stale.content[0]?.text ?? "", /no longer waiting/u);
+});
+
+test("answer_question passes choices and words through in order", async () => {
+  let seen: unknown;
+  const { run } = tool("answer_question", {
+    answerQuestion: async (input) => {
+      seen = input;
+      return "answered";
+    },
+  });
+  const said = await run({
+    request_id: "ask_7",
+    // -1 is how a caller says "none of these, read what I wrote".
+    choices: [1, -1],
+    answers: ["", "only on the payments route"],
+  });
+  assert.equal(said.isError, undefined);
+  assert.deepEqual(seen, {
+    requestId: "ask_7",
+    answers: [{ chosen: 1 }, { text: "only on the payments route" }],
+  });
 });
