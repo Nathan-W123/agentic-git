@@ -1210,6 +1210,17 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
   if (windows.length > 0) {
     return { windows };
   }
+  // What the machine that ran it said about itself, if it said anything.
+  //
+  // The desktop prepends this when no attempt produced a window, because
+  // every reason for that lands in the same two sentences below and they
+  // need different fixes: a CLI too old to publish the event, a CLI that does
+  // not publish it in headless mode, and an account with no window at all are
+  // three different problems wearing one message. Three rounds of this card
+  // were spent guessing between them.
+  const probe = /^kumi-probe:\s*(.+)$/mu.exec(text)?.[1]?.trim();
+  const withProbe = (reason: string): string =>
+    probe === undefined ? reason : `${reason} (${probe})`;
   // Percentages exist because a *subscription* has limits to be a percentage
   // of; `/usage` opens with "You are currently using your subscription to
   // power your Claude Code usage" when it has them. An API key has no such
@@ -1255,11 +1266,12 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
       // CLI could not publish the figure at all, which is false, and was
       // arrived at by testing one account that happened to have no
       // subscription and generalising from it.
-      unavailableReason:
+      unavailableReason: withProbe(
         "That reply came from an account with no subscription window to " +
-        "report — it answered with a session summary instead. Usage is read " +
-        "on the machine that holds your CLI login; until the Kumi app there " +
-        "reports one, there is nothing here to show.",
+          "report — it answered with a session summary instead. Usage is " +
+          "read on the machine that holds your CLI login; until the Kumi app " +
+          "there reports one, there is nothing here to show.",
+      ),
     };
   }
   return {
@@ -1267,9 +1279,10 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
     // Its own words, bounded. A reader can tell a signed-out CLI from an
     // unrecognised one; this side cannot, and guessing is what produced the
     // sentence above.
-    unavailableReason:
+    unavailableReason: withProbe(
       "The claude CLI reported no usage percentage. It said: " +
-      `${text.trim().split("\n")[0]?.slice(0, 160) ?? "(nothing)"}`,
+        `${text.trim().split("\n")[0]?.slice(0, 160) ?? "(nothing)"}`,
+    ),
   };
 }
 

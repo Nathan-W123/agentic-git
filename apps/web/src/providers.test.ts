@@ -3719,3 +3719,49 @@ test("a machine reading is preferred for every vendor, not only the two we can r
   const unreported = await service.usage({ userId: "u2", provider: "cursor" });
   assert.equal(unreported.unavailableReason, "Cursor usage not reported.");
 });
+
+/**
+ * The card names the CLI that answered, when the answer was not a window.
+ *
+ * "It answered with a session summary" is the same sentence whether the CLI
+ * is too old to publish a rate limit event, does not publish one in headless
+ * mode, or published one that something here missed — three different fixes
+ * behind one message, and three rounds of a live card were spent guessing
+ * between them. The machine prepends what it saw; this is what makes sure the
+ * reader ever sees it.
+ */
+test("what the machine reported about itself reaches the card", () => {
+  const report = parseClaudeUsage(
+    [
+      "kumi-probe: 2.0.31 (Claude Code) — stream carried: system, assistant, result",
+      '{"type":"result","subtype":"success"}',
+      "Total cost: $0.0142",
+      "Total duration: 4.2s",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(report.windows, []);
+  assert.match(String(report.unavailableReason), /session summary/u);
+  // The two facts that tell the three causes apart.
+  assert.match(String(report.unavailableReason), /2\.0\.31/u);
+  assert.match(String(report.unavailableReason), /stream carried/u);
+});
+
+/**
+ * And it stays out of the way when the reading is fine.
+ *
+ * A probe line is only ever prepended when nothing answered, so a real
+ * reading must parse exactly as it did before this existed — the line is
+ * additive, not a new shape every parser has to learn.
+ */
+test("a real reading is unchanged by the probe existing", () => {
+  const report = parseClaudeUsage(
+    [
+      '{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":' +
+        '{"five_hour":{"utilization":36},"seven_day":{"utilization":71}}}}',
+    ].join("\n"),
+  );
+
+  assert.ok(report.windows.length > 0, JSON.stringify(report));
+  assert.equal(report.unavailableReason, undefined);
+});
