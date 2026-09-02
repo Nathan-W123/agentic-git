@@ -7330,6 +7330,19 @@ export class ApiGateway {
           }
         }
 
+        // Before the lease is checked, because the two facts are unrelated and
+        // conflating them is what put a live machine's light out.
+        //
+        // A request arriving here is proof the worker is running and can reach
+        // this server — that is the whole of what `lastSeenAt` records. Whether
+        // the lease it is beating for is still alive says nothing about the
+        // machine. Behind the check, a worker whose leases had expired during a
+        // network change went on beating every few seconds, was answered 409
+        // every time, and touched nothing: after three minutes of demonstrably
+        // talking to this server it read as offline, and the roster stopped
+        // offering it work. Switching networks was enough to do it, and the
+        // only recovery was restarting the app.
+        await this.options.store.touchWorker(lease.workerId, now.toISOString());
         const extended = await this.options.store.heartbeatWorkLease(
           leaseId,
           now.toISOString(),
@@ -7343,7 +7356,6 @@ export class ApiGateway {
             "This lease is no longer active; stop work and re-lease",
           );
         }
-        await this.options.store.touchWorker(lease.workerId, now.toISOString());
         this.sendJson(response, 200, {
           ...extended,
           ...(await this.claimTraffic(lease, beat)),
@@ -22496,6 +22508,30 @@ export class ApiGateway {
           },
         })
         .catch(() => undefined);
+      // And said where somebody is actually looking.
+      //
+      // The audit line above is the whole of what this used to do, which made
+      // the name of this method half true: an expiry was recorded and never
+      // announced. What a person saw was an agent that said it was thinking
+      // and then stopped — no failure, no message, nothing to retry from —
+      // because the worker treats a lost lease as somebody else's task and
+      // correctly declines to report on work it no longer owns. Nobody was
+      // left to say anything at all.
+      //
+      // A machine that changes network is the ordinary way to reach this, and
+      // "the task went back on the queue" is both true and the one thing worth
+      // knowing, so it is said plainly rather than as a fault.
+      // A lease with no project cannot be addressed to a room; the audit
+      // line above is then the whole record, as it was before.
+      if (lease.projectId !== undefined) {
+        await this.postChannelSystemMessage(
+          lease.projectId,
+          lease.repositoryId,
+          "Lost contact with the machine running this task, so it has gone " +
+            "back on the queue. It will be picked up again by whichever " +
+            "agent is next available.",
+        ).catch(() => undefined);
+      }
     }
   }
 
