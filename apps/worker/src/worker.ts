@@ -150,10 +150,10 @@ export interface WorkerOptions {
    */
   powerSource?: PowerSource;
   /**
-   * Take work even on battery. Defaults to `COORD_CLAIM_ON_BATTERY`, and to
-   * off. See {@link Worker.claimOnBattery}.
+   * Stop taking work while on battery. Defaults to `COORD_PAUSE_ON_BATTERY`,
+   * and to off — a laptop works. See {@link Worker.pauseOnBattery}.
    */
-  claimOnBattery?: boolean;
+  pauseOnBattery?: boolean;
   /**
    * An optional shortcut out of the idle wait.
    *
@@ -494,10 +494,10 @@ export class Worker {
   public constructor(private readonly options: WorkerOptions) {
     this.plans = options.planCache ?? new Map<string, CachedPlan>();
     this.power = options.powerSource ?? systemPowerSource();
-    this.claimOnBattery =
-      options.claimOnBattery ??
+    this.pauseOnBattery =
+      options.pauseOnBattery ??
       ["1", "true", "yes"].includes(
-        (process.env["COORD_CLAIM_ON_BATTERY"] ?? "").trim().toLowerCase(),
+        (process.env["COORD_PAUSE_ON_BATTERY"] ?? "").trim().toLowerCase(),
       );
     this.concurrency = configuredConcurrency(options.concurrency);
     const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
@@ -535,16 +535,29 @@ export class Worker {
   private declining: PowerState | undefined;
 
   /**
-   * Whether to take work on battery anyway.
+   * Whether to stop taking work while on battery.
    *
-   * Off by default, for the reason `power.ts` gives: a sleeping laptop cannot
-   * keep a lease alive, and the task it holds waits out the full expiry
-   * before anybody else can have it. But that is a trade rather than a law —
-   * a laptop somebody is sitting in front of with the lid open is perfectly
-   * capable — and until this existed the trade was made on the owner's behalf
-   * with no way to see it, and no way to decline it.
+   * Off by default, which is the opposite of where this started. The original
+   * reasoning was sound as far as it went — a laptop that sleeps mid-task
+   * holds its lease until the five-minute expiry, so declining up front keeps
+   * the task visibly queued instead. What it weighed was the cost of a
+   * *sleeping* machine against nothing, and the cost of the caution turned
+   * out to be much larger than the cost it was avoiding.
+   *
+   * Declining never contacts the control plane, and that contact is the only
+   * thing telling it this machine exists. So an unplugged laptop was not a
+   * machine that was waiting: three minutes later it was no machine at all.
+   * Its owner's agents went grey, mentions were answered with "nothing will
+   * pick this up yet", and the app offered to install a CLI already sitting
+   * on the disk — for the whole time somebody was sitting in front of it,
+   * lid open, perfectly able to work.
+   *
+   * Against that, a lease lost to standby costs one requeue after five
+   * minutes, and since the control plane started announcing that in the room
+   * it is not even a silent one. So a laptop works by default, and anybody
+   * running a machine that really does sleep unattended can say so.
    */
-  private readonly claimOnBattery: boolean;
+  private readonly pauseOnBattery: boolean;
 
   public async register(): Promise<string> {
     const configured = new Set(
@@ -639,7 +652,7 @@ export class Worker {
     // task and then sleeps keeps it for the full lease expiry while its owner
     // watches nothing happen; declining leaves it visibly queued instead.
     const power = await this.power.read();
-    if (!this.claimOnBattery && !shouldClaimWork(power)) {
+    if (this.pauseOnBattery && !shouldClaimWork(power)) {
       // Said once per change of state, not once per poll: this loop runs
       // every few seconds and a line each time would bury the log it is in.
       //
@@ -654,9 +667,9 @@ export class Worker {
       if (this.declining !== power) {
         this.declining = power;
         console.log(
-          `[worker] on ${power} — not claiming work, because a machine that ` +
-            "can lose power cannot promise to finish what it starts. Plug " +
-            "in, or set COORD_CLAIM_ON_BATTERY=1 to take work on battery.",
+          `[worker] on ${power} — not claiming work, because ` +
+            "COORD_PAUSE_ON_BATTERY is set on this machine. Plug in, or " +
+            "unset it to work on battery.",
         );
       }
       return { worked: false };

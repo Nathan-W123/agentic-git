@@ -245,7 +245,7 @@ Worker environment:
 | `COORD_WORKER_ROOT` | Where leased workspaces are materialized. | `.coordinator/worker` |
 | `COORD_WORKER_NAME` | Display name in the workers list. | hostname-derived |
 | `COORD_WORKER_CONCURRENCY` | How many tasks this machine runs at once. | sized from memory, at least 4 |
-| `COORD_CLAIM_ON_BATTERY` | Take work while on battery. Off by default: a laptop that sleeps mid-task holds its lease until the five-minute expiry, so it declines up front instead. Note what declining costs — a worker that is not asking for work is not telling the control plane it exists either, so after three minutes its owner's agents read as having no machine at all. Set to `1` on a laptop that is worked at rather than left alone. | off |
+| `COORD_PAUSE_ON_BATTERY` | Stop taking work while on battery. Off by default, so a laptop works whether or not it is plugged in. Set it on a machine that really does sleep unattended: a lease held by a sleeping machine is unavailable to everybody else until it expires. Know what it costs first — a worker that is not asking for work is not telling the control plane it exists either, because liveness is a side effect of the lease request, so three minutes later its owner's agents read as having no machine at all. | off |
 | `COORD_PROJECT_ID` | Only lease work for this project. | `project_local` |
 | `COORD_REPOSITORY` | Only lease work for this repository. | any |
 

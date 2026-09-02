@@ -1777,12 +1777,13 @@ const FAKE_CLAUDE = [
   "",
 ].join("\n");
 
-test("a worker on battery says so, once, and can be told to work anyway", async (t) => {
-  // Declining for power never touches the control plane, and that touch is
-  // the only thing telling it this machine exists. So a laptop on battery
-  // does not read as a machine that is waiting — it reads as no machine at
-  // all, and its owner's agents are drawn offline and offered an install of
-  // a CLI that is already there. The refusal has to say itself.
+test("a laptop works on battery unless its owner says otherwise", async (t) => {
+  // The default was the other way round, and the caution cost more than it
+  // saved. Declining never contacts the control plane, and that contact is
+  // the only thing telling it this machine exists — so an unplugged laptop
+  // was not a machine that was waiting, it was no machine at all three
+  // minutes later, while somebody sat in front of it perfectly able to work.
+  // A lease lost to standby costs one requeue, announced in the room.
   const runtime = await startRuntime(t);
   const said: string[] = [];
   const log = console.log;
@@ -1793,49 +1794,40 @@ test("a worker on battery says so, once, and can be told to work anyway", async 
     console.log = log;
   });
 
-  let state: PowerState = "battery";
-  const power = { read: async () => state };
-  const worker = makeWorker(runtime, { powerSource: power });
-  await worker.register();
-
+  const power = { read: async (): Promise<PowerState> => "battery" };
   await runtime.store.submitTask({
     repositoryId: runtime.repositoryId,
     objective: "raise the value",
     agentId: "local",
     validationCommands: [],
   });
-
-  assert.equal((await worker.runOnce()).worked, false);
-  // Once per change of state, not once per poll: this runs every few seconds.
-  assert.equal((await worker.runOnce()).worked, false);
-  const refusals = said.filter((line) => /not claiming work/u.test(line));
-  assert.equal(refusals.length, 1, said.join("\n"));
-  assert.match(refusals[0] ?? "", /battery/u);
-  assert.match(refusals[0] ?? "", /COORD_CLAIM_ON_BATTERY/u);
-
-  // Plugged in, it goes back to work and says that too.
-  state = "ac";
-  assert.equal((await worker.runOnce()).worked, true);
-  assert.ok(
-    said.some((line) => /claiming work again/u.test(line)),
-    said.join("\n"),
+  const laptop = makeWorker(runtime, { powerSource: power });
+  await laptop.register();
+  assert.equal((await laptop.runOnce()).worked, true);
+  assert.deepEqual(
+    said.filter((line) => /not claiming work/u.test(line)),
+    [],
   );
 
-  // And a machine whose owner has decided the trade is theirs to make takes
-  // work on battery without being asked twice.
-  state = "battery";
+  // And a machine that really does sleep unattended can still say so.
+  const paused = makeWorker(runtime, {
+    powerSource: power,
+    pauseOnBattery: true,
+  });
+  await paused.register();
   await runtime.store.submitTask({
     repositoryId: runtime.repositoryId,
     objective: "raise it again",
     agentId: "local",
     validationCommands: [],
   });
-  const anyway = makeWorker(runtime, {
-    powerSource: power,
-    claimOnBattery: true,
-  });
-  await anyway.register();
-  assert.equal((await anyway.runOnce()).worked, true);
+  assert.equal((await paused.runOnce()).worked, false);
+  // Once per change of state, not once per poll: this runs every few seconds.
+  assert.equal((await paused.runOnce()).worked, false);
+  const refusals = said.filter((line) => /not claiming work/u.test(line));
+  assert.equal(refusals.length, 1, said.join("\n"));
+  assert.match(refusals[0] ?? "", /battery/u);
+  assert.match(refusals[0] ?? "", /COORD_PAUSE_ON_BATTERY/u);
 });
 
 test("a worker says which adapters it advertised, and an empty list is loud", async (t) => {

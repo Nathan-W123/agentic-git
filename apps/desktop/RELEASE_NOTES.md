@@ -1,17 +1,23 @@
-### 0.5.13 — say when this machine is on battery, and which agents it found
+### 0.5.13 — an unplugged laptop is still a laptop
 
 Two silences, both of which made a working machine look like a missing one.
 
-A worker checks the power source before it asks for work, and on battery it
-declines — a laptop that sleeps mid-task holds its lease until it expires,
-so it stays out of the way. What nothing said is that asking for work is
-also the only thing that tells the control plane this machine exists. So a
-laptop on battery did not read as a machine that was waiting. It read as no
-machine at all: agents grey, mentions answered with "nothing will pick this
-up yet", and an offer to install a CLI already sitting on the disk. The
-worker log now says it, in as many words, when the power state changes. And
-`COORD_CLAIM_ON_BATTERY=1` takes work on battery for anyone who would rather
-make that trade themselves.
+An unplugged laptop did not run anything. The worker checked the power
+source before asking for work and, on battery, declined — the thinking being
+that a laptop which sleeps mid-task holds its lease until it expires.
+
+What that missed is that asking for work is also the only thing telling the
+control plane this machine exists. So an unplugged laptop did not read as a
+machine that was waiting. It read as no machine at all: agents grey, mentions
+answered with "nothing will pick this up yet", and an offer to install a CLI
+already sitting on the disk — the whole time somebody was sitting in front of
+it, lid open, perfectly able to work.
+
+Weighed properly, that is much worse than what it was avoiding. A lease lost
+to standby costs one requeue after five minutes, and the room is told. So a
+laptop now works whether or not it is plugged in. A machine that really does
+sleep unattended can still opt out with `COORD_PAUSE_ON_BATTERY=1`, and when
+it does, the log says so rather than leaving you to guess.
 
 The second: the Agents menu said "Running agents on this machine" whether it
 had found both your CLIs or one of them, and the log never mentioned the
