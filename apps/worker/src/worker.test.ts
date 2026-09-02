@@ -1777,6 +1777,50 @@ const FAKE_CLAUDE = [
   "",
 ].join("\n");
 
+test("a run that ends badly says so in the log, and where it got to", async (t) => {
+  // The success line was the only one a run could produce, so a task that
+  // died left the log identical to a task still working: a start line, then
+  // nothing, forever. Three separate evenings of this were spent asking "is
+  // it stuck or is it thinking" with no way to tell.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { command: "definitely-not-a-real-binary" },
+  };
+  await runtime.project.save();
+
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...parts: unknown[]) => {
+    said.push(parts.map(String).join(" "));
+  };
+  t.after(() => {
+    console.log = log;
+  });
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const worker = makeWorker(runtime);
+  await worker.register();
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, false);
+
+  const failure = said.find((line) => line.includes("failed after"));
+  assert.ok(failure, `no failure line among:\n${said.join("\n")}`);
+  assert.match(failure, new RegExp(task.id, "u"));
+  // Which phase it got to, which is most of the diagnosis. This fixture
+  // fetched and checked out fine and died spawning the agent, so the last
+  // phase it completed is the checkout — and "reached checkout" is the
+  // difference between looking at the network and looking at the CLI.
+  assert.match(failure, /reached checkout/u);
+  assert.match(failure, /fetch [\d.]+s/u, "and where the time went");
+  // And the reason itself, rather than a bare "failed".
+  assert.match(failure, /definitely-not-a-real-binary|ENOENT|spawn/u);
+});
+
 test("a laptop works on battery unless its owner says otherwise", async (t) => {
   // The default was the other way round, and the caution cost more than it
   // saved. Declining never contacts the control plane, and that contact is

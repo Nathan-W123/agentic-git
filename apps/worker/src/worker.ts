@@ -310,6 +310,11 @@ class Laps {
     this.last = now;
   }
 
+  /** The last phase that completed, or `nothing` if none did. */
+  public reached(): string {
+    return this.marks.at(-1)?.[0] ?? "nothing";
+  }
+
   /** Everything measured, longest phase named first among equals. */
   public summary(): string {
     const parts = this.marks
@@ -724,6 +729,8 @@ export class Worker {
     // otherwise tell the host it was idle and let the machine sleep on top of
     // three agents that were still working.
     const releaseHost = holdHost();
+    /** Set once timing starts, so a failure before it still logs. */
+    let failure: Laps | undefined;
     const scratch = workerScratchPath(
       this.options.workspaceRoot,
       assignment.lease.id,
@@ -816,6 +823,7 @@ export class Worker {
 
       const laps = new Laps();
       run.laps = laps;
+      failure = laps;
       const planned = await this.plan(run, assignment, scratch);
       laps.mark("plan");
       if (leaseLost) {
@@ -882,6 +890,22 @@ export class Worker {
       };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      // Every ending, not only the good one.
+      //
+      // The success path below logs where a task's minutes went, and until
+      // now that was the only line a run could produce. So a task that failed
+      // — the agent giving up, the plan refused, the lease lost, the control
+      // plane unreachable — left the worker log looking *exactly* like a task
+      // still working: the start line, and then nothing, forever. Somebody
+      // watching a task that had already died could not tell it from one
+      // still thinking, and the only honest answer to "is it stuck" was to
+      // wait longer. Naming the phase it got to is most of the diagnosis.
+      console.log(
+        `[worker] task ${assignment.task.id} — failed after ` +
+          `${failure?.summary() ?? "no work"} (reached ${
+            failure?.reached() ?? "nothing"
+          }): ${detail}`,
+      );
       if (error instanceof LeaseLostError) {
         // The task belongs to someone else now; reporting would be a lie.
         return { worked: true, taskId: assignment.task.id, accepted: false, reason: detail };
