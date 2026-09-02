@@ -3330,7 +3330,7 @@ svg.ui-icon {
   display: grid;
   gap: 14px;
   transform-origin: var(--popover-origin-x, calc(100% - 16px)) top;
-  animation: pop-in 130ms cubic-bezier(0.32, 0.72, 0, 1);
+  animation: pop-in 130ms var(--ease-motion);
 }
 
 .popover-above {
@@ -3356,7 +3356,7 @@ svg.ui-icon {
 }
 
 .pop-layer.pop-closing .popover {
-  animation: pop-out 100ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
+  animation: pop-out 100ms var(--ease-motion) forwards;
 }
 
 .pop-layer.pop-closing .pop-scrim {
@@ -7457,6 +7457,81 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   to {
     background-position: -150% 0;
   }
+}
+
+/* Words that are still being written: the same travelling highlight a running
+   bar and a working agent's mark carry, painted through the glyphs instead of
+   behind them. A line that says "Testing" and holds perfectly still reads
+   exactly like one that stopped saying anything an hour ago, and this is the
+   difference between the two.
+
+   Not a second rhythm on top of an existing one — this is used where the
+   alternative was three dots, and it replaces them. The room's own collapsed
+   status line still holds still beside a mark that is already sweeping; see
+   `.cmsg-thread-link .ctl-activity`. */
+.glimmer-text {
+  background-image: linear-gradient(
+    100deg,
+    var(--text-3) 0 38%,
+    var(--text) 48%,
+    var(--text-3) 58% 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: thread-activity-sweep 2.4s ease-in-out infinite;
+}
+
+/* Nothing travelling, so nothing to paint through: the words go back to being
+   words, in the colour the still version of this line would have had. Same
+   answer for a forced palette, where a transparent fill over a gradient is
+   how live copy becomes invisible. */
+@media (prefers-reduced-motion: reduce) {
+  .glimmer-text {
+    animation: none;
+    background-image: none;
+    color: var(--text-2);
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+@media (forced-colors: active) {
+  .glimmer-text {
+    background-image: none;
+    color: CanvasText;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+/* What the run is doing, standing where its handoff sentence stands when it
+   is not running — see `threadLiveStatus`. The row around it is an ordinary
+   message row, so the author, the face and the time are exactly the ones the
+   sentence had; only the words are live. */
+.thread-live-status {
+  display: block;
+  /* The size of the words it is standing in for. This is the message, not a
+     caption on it, and a status a point larger than everything an agent
+     actually said would be the loudest thing in the thread. */
+  font-size: 13.5px;
+  line-height: 1.3;
+  /* `.cmsg-text` is `pre-wrap`, because a message is whatever somebody typed
+     including the blank lines. This is markup rather than a message, so its
+     own indentation must not reach the screen as indentation. */
+  white-space: normal;
+}
+
+/* One line, clipped rather than wrapped. The phase words are two or three
+   long; an unanticipated narration line can be a sentence, and a status that
+   grows to three rows pushes the thread under it down every time the run says
+   something. `.phase-slot` reserves the height so the line appearing and
+   going never moves the transcript either. */
+.thread-live-status .tls-phase {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Words arriving, one just behind the last: each starts a little low and

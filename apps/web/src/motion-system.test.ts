@@ -143,6 +143,53 @@ test("a running task carries one signal, and a stopped one carries none", async 
   assert.doesNotMatch(history, /statusAgentFace/u);
 });
 
+test("inside the thread the live line is that one signal, not a second one", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The room's collapsed row holds still because the mark beside it is
+  // already sweeping. The thread has no such mark on the line: what stood
+  // here was three dots, which said that something was happening and never
+  // what. The line says what, and it travels — so the dots stand down for it
+  // rather than joining it. One running task, still one continuous signal.
+  const typingStart = chats.indexOf("function threadTyping(root)");
+  assert.notEqual(typingStart, -1, "a thread with no line still shows dots");
+  const typing = chats.slice(typingStart, chats.indexOf("\n/*", typingStart));
+  assert.match(
+    typing,
+    /if \(threadLiveStatus\(root\) !== undefined\) \{\n {4}return "";/u,
+  );
+
+  // The same travelling band, on the same clock, as the running bar and the
+  // working agent's mark. A fourth rhythm for the same fact is how one piece
+  // of work comes to look like three.
+  const glimmer = /\n\.glimmer-text \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(glimmer, undefined, "a live line should say it is live");
+  assert.match(
+    glimmer ?? "",
+    /animation: thread-activity-sweep 2\.4s ease-in-out infinite;/u,
+  );
+  assert.match(glimmer ?? "", /background-size: 250% 100%;/u);
+
+  // Resolved rather than turned off, like every other arrival in this file:
+  // the words are the content and only the travelling is the motion, so a
+  // reader who asked not to be moved is left with the words at full strength
+  // rather than a transparent fill over a gradient nobody is painting.
+  const still =
+    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.glimmer-text \{([\s\S]*?)\n {2}\}/u
+      .exec(css)?.[1];
+  assert.notEqual(still, undefined, "the glimmer should have a still form");
+  assert.match(still ?? "", /animation: none;/u);
+  assert.match(still ?? "", /background-image: none;/u);
+  assert.match(still ?? "", /-webkit-text-fill-color: currentColor;/u);
+
+  // And it is the transcript's own slot, not a second phase mechanism: the
+  // change is `playPhaseSlots`' single swap, and the reserved height is what
+  // keeps the line appearing and going from moving the thread under it.
+  assert.match(chats, /data-phase-slot="thread-live:\$\{esc\(root\.id\)\}"/u);
+  assert.match(chats, /class="tls-phase phase-slot glimmer-text"/u);
+});
+
 test("a phase changes in place, once, however many arrive at once", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");

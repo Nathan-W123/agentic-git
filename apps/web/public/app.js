@@ -7285,10 +7285,28 @@ const REVEAL_SKIPPED = new Set([
   "SVG",
 ]);
 
+/**
+ * Text that is not a message either: it is a running task saying where it has
+ * got to, and it will say something else in a moment.
+ *
+ * An arrival is a one-time event — a sentence landing in the room, word after
+ * word — and live status copy is the opposite of that. Wrapping its words
+ * would also cut the travelling highlight into one gradient per word, because
+ * `.glimmer-text` paints itself across the whole line. See `threadLiveStatus`
+ * in screen-chats.js for the line this is describing.
+ */
+const REVEAL_SKIPPED_CLASS = "glimmer-text";
+
 function insideSkipped(node, root) {
   let parent = node.parentNode;
   while (parent !== null && parent !== root) {
     if (REVEAL_SKIPPED.has(String(parent.nodeName).toUpperCase())) {
+      return true;
+    }
+    if (
+      parent instanceof Element &&
+      parent.classList.contains(REVEAL_SKIPPED_CLASS)
+    ) {
       return true;
     }
     parent = parent.parentNode;

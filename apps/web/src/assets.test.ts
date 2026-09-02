@@ -5953,6 +5953,55 @@ test("working thread summaries carry a concise activity that holds still", async
   assert.match(css, /@keyframes thread-activity-sweep/u);
 });
 
+test("a running thread shows the run where its handoff sentence stands", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // "I've taken this task and I'm working on it" is true for about a second
+  // and then sits at the top of the thread for the rest of the run, being the
+  // newest thing the agent said about a moment that has long since passed.
+  // While the task is live that row carries the run instead.
+  const liveStart = chats.indexOf("function threadLiveStatus(root)");
+  assert.notEqual(liveStart, -1, "a live thread should say what it is doing");
+  const live = chats.slice(liveStart, chats.indexOf("\n/**", liveStart));
+  assert.match(live, /if \(!threadIsWorking\(root\)\) \{\n {4}return undefined;/u);
+  assert.match(live, /turn\.replies\.some\(isThreadEnding\)/u);
+  assert.match(live, /turn\.replies\.find\(isThreadAcknowledgement\)/u);
+  // The same phase vocabulary the room's row and the thinking fold speak, so
+  // three surfaces describing one run cannot disagree about it.
+  assert.match(live, /threadActivityLabel\(root\)/u);
+
+  // Presentation and nothing else. The sentence is still the stored reply,
+  // still written by the gateway, and still the words the row falls back to —
+  // there is no second copy of it in the browser and nothing is deleted.
+  const rowStart = chats.indexOf("function messageRow(");
+  const row = chats.slice(rowStart, chats.indexOf("\n/**", rowStart));
+  assert.match(row, /bodyHtml = undefined,/u);
+  assert.match(row, /bodyHtml \?\?\n\s*messageFoldClip\(/u);
+  // The browser recognises the announcement by its opening clause and holds
+  // no copy of any of the four sentences that finish it. A copy edit in the
+  // gateway is then a copy edit, not a live line that silently stops
+  // appearing.
+  assert.match(
+    chats,
+    /const THREAD_ACKNOWLEDGEMENT_RE = \/\^I've taken this task\\b\/u;/u,
+  );
+
+  // One line in a reserved slot: a run starting, changing phase or ending
+  // must not move the transcript under it.
+  assert.match(chats, /class="tls-phase phase-slot glimmer-text"/u);
+  const line = /\n\.thread-live-status \.tls-phase \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(line, undefined, "the live line should be clipped to a line");
+  assert.match(line ?? "", /white-space: nowrap;/u);
+  assert.match(line ?? "", /text-overflow: ellipsis;/u);
+
+  // Live copy is not an arrival and is not taken apart word by word — that
+  // would also cut the travelling band into one gradient per word.
+  const app = await publicFile("app.js");
+  assert.match(app, /const REVEAL_SKIPPED_CLASS = "glimmer-text";/u);
+  assert.match(app, /parent\.classList\.contains\(REVEAL_SKIPPED_CLASS\)/u);
+});
+
 test("ended threads stay compact without live activity motion", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
