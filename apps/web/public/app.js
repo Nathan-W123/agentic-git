@@ -123,6 +123,7 @@ import {
   openBillingPortal,
   startCheckout,
   ensureBilling,
+  resetBilling,
   joinWaitlist,
   loadWaitlist,
   approveWaitlistEntry,
@@ -177,6 +178,30 @@ import {
   armChime,
   chime,
 } from "./ui.js";
+import {
+  abbreviateCount,
+  definitionList,
+  dirtySaveBar,
+  emptyState as settingsEmptyState,
+  errorState,
+  exactCountLabel,
+  normalizeSettingsSection,
+  providerRow,
+  searchSettings,
+  segmentedControl,
+  settingRow,
+  settingsMobileCombobox,
+  settingsPageHeader,
+  settingsSearch,
+  settingsSectionFromHash,
+  settingsSidebar,
+  settingsSectionBlock,
+  SETTINGS_SECTION_ALIASES,
+  SETTINGS_SECTIONS,
+  skeletonRows,
+  statusBadge,
+  switchControl,
+} from "./screen-settings.js";
 import {
   ensureAgentOptions,
   scrollThread,
@@ -1592,802 +1617,545 @@ function accountDestinations() {
 /* ----------------------------------------------------------- settings ---- */
 
 /**
- * Channel activity as a Wrapped-style recap — messages, replies, and tokens
- * for the open repository. Lived in the channel-info popover; Settings is
- * where a look-back belongs, not a tools tray.
+ * Channel activity as a restrained strip rather than a Wrapped-style card.
+ *
+ * Three figures, abbreviated so they can be read at a glance and carrying
+ * their exact value on the label, because "142.3M" is the readable answer and
+ * "142,318,904" is the true one and the reader is owed both.
  */
-function channelStatsCard() {
+function workspaceActivityStrip() {
   const repository = currentRepository();
   const repositoryId = repository?.id ?? "";
   const stats =
     repositoryId === "" ? undefined : state.channelStats[repositoryId];
-  const fmt = (value) => Number(value ?? 0).toLocaleString();
-  const tiles =
-    stats === undefined || stats === null
-      ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">Counting…</div></span></div>`
-      : `<div class="channel-wrapped">
-          <div class="channel-wrapped-tile">
-            <div class="channel-wrapped-value">${fmt(stats.messages)}</div>
-            <div class="channel-wrapped-label">Messages</div>
+  if (repositoryId === "") {
+    return settingsEmptyState({
+      iconName: "chart",
+      title: "No channel open",
+      description:
+        "Open a workspace channel to see how much has been said and spent in it.",
+    });
+  }
+  if (stats === undefined || stats === null) {
+    return skeletonRows(1);
+  }
+  const figures = [
+    { label: "Messages", value: stats.messages, noun: "messages" },
+    { label: "Replies", value: stats.replies, noun: "replies" },
+    {
+      label: "Tokens",
+      value: stats.tokens,
+      noun: "tokens",
+      more: stats.tokensIncomplete === true,
+    },
+  ];
+  return `<div class="st-metrics" data-settings-row="workspace-activity"
+    id="settings-row-workspace-activity" tabindex="-1">
+    ${figures
+      .map((figure) => {
+        const exact = exactCountLabel(figure.value, figure.noun);
+        const label = figure.more === true ? `at least ${exact}` : exact;
+        return `<div class="st-metric">
+          <div class="st-metric-value" title="${esc(label)}">
+            <span aria-hidden="true">${esc(abbreviateCount(figure.value))}${
+              figure.more === true ? "+" : ""
+            }</span>
+            <span class="sr-only">${esc(label)}</span>
           </div>
-          <div class="channel-wrapped-tile">
-            <div class="channel-wrapped-value">${fmt(stats.replies)}</div>
-            <div class="channel-wrapped-label">Replies</div>
-          </div>
-          <div class="channel-wrapped-tile">
-            <div class="channel-wrapped-value">${fmt(stats.tokens)}${
-              stats.tokensIncomplete ? "+" : ""
-            }</div>
-            <div class="channel-wrapped-label">Tokens</div>
-          </div>
+          <div class="st-metric-label">${esc(figure.label)}</div>
         </div>`;
-  return `<section class="card channel-stats-card">
-    <div class="panel-head"><div><h3>Channel activity</h3>
-      <p>${
-        repositoryId === ""
-          ? "Open a workspace to see how its channels have been used."
-          : `A look back at #${esc(repositoryId)} — the work this room has held.`
-      }</p></div></div>
-    ${tiles}
-  </section>`;
+      })
+      .join("")}
+  </div>`;
+}
+
+/**
+ * Which repository the control plane owns, and on which branch.
+ *
+ * Read-only by design — canonical moves through the pipeline, not through a
+ * field on a settings page — so it is a definition list rather than a stack
+ * of rows with no controls in them.
+ */
+function repositoryDefinitionList() {
+  const repository = currentRepository();
+  return definitionList([
+    { term: "Repository", value: repository?.id ?? "No repository open" },
+    { term: "Canonical branch", value: repository?.branch ?? "—", mono: true },
+    {
+      term: "Remote",
+      value: repository?.remoteUrl ?? "No remote recorded",
+      mono: repository?.remoteUrl !== undefined,
+    },
+    { term: "Publish with", value: "/push", mono: true },
+  ]);
+}
+
+/**
+ * The editable copy of the project's approval policy.
+ *
+ * Approvals are the one thing in Settings that is not somebody's own
+ * preference: raising the bar raises it for every agent every colleague runs.
+ * That is why it is edited into a draft and saved explicitly, rather than
+ * written the moment a switch moves.
+ */
+function policyDraftFrom(policy) {
+  const approvals = policy?.approvals ?? {};
+  const budgets = policy?.budgets ?? {};
+  return {
+    approvalsEnabled: approvals.enabled !== false,
+    requireSchemaReview: approvals.requireSchemaReview !== false,
+    requireChangesetReview: approvals.requireChangesetReview === true,
+    protectedPaths: (approvals.protectedPaths ?? []).join("\n"),
+    approvalTimeoutMinutes: minutesValue(approvals.approvalTimeoutMs),
+    maxTaskRuntimeMinutes: minutesValue(budgets.maxTaskRuntimeMs),
+    maxProjectRuntimeMinutesPerDay: minutesValue(
+      budgets.maxProjectRuntimeMsPerDay,
+    ),
+  };
+}
+
+/** Whether a draft still says what the project says. */
+function policyDraftIsDirty(draft, policy) {
+  if (draft === undefined) {
+    return false;
+  }
+  const saved = policyDraftFrom(policy);
+  return Object.keys(saved).some((key) => draft[key] !== saved[key]);
+}
+
+/** The draft currently being edited, created from the project on first read. */
+function currentPolicyDraft() {
+  if (state.settingsPolicyDraft === undefined) {
+    state.settingsPolicyDraft = policyDraftFrom(state.project?.policy);
+  }
+  return state.settingsPolicyDraft;
 }
 
 /**
  * The gate every plan passes before a worker is allowed to run it.
  *
- * Project-wide rather than personal — one person raising the bar raises
- * it for everybody's agents — which is why it lives behind Advanced now
- * rather than between a colour picker and a sign-out button.
+ * Every field carries its unit in the control rather than only in the
+ * sentence above it: "30" in a box is not a length of time, and the person
+ * typing it is deciding how long an unanswered request stays open.
  */
-function admissionsCard() {
-  const policy = state.project?.policy ?? {};
-  const approvals = policy.approvals ?? {};
-  const budgets = policy.budgets ?? {};
-  return `<section class="card">
-    <div class="panel-head"><div><h3>Admissions</h3>
-      <p>What must stop for a person before a plan is admitted</p></div></div>
-    <form data-act="policy-save">
-      <div class="set-row">
-        <span class="sr-body">
-          <div class="sr-title">Human approval</div>
-          <div class="sr-sub">Gate risky plans and changesets on a reviewer.</div>
-        </span>
-        <span class="sr-ctl">
-          <button type="button" class="switch${
-            approvals.enabled === false ? "" : " on"
-          }" data-act="toggle" data-field="approvalsEnabled"
-            aria-label="Human approval"></button>
-          <input type="hidden" name="approvalsEnabled"
-            value="${approvals.enabled === false ? "false" : "true"}">
-        </span>
-      </div>
-      <div class="set-row">
-        <span class="sr-body">
-          <div class="sr-title">Review schema changes</div>
-          <div class="sr-sub">Pause whenever a plan touches a schema.</div>
-        </span>
-        <span class="sr-ctl">
-          <button type="button" class="switch${
-            approvals.requireSchemaReview === false ? "" : " on"
-          }" data-act="toggle" data-field="requireSchemaReview"
-            aria-label="Review schema changes"></button>
-          <input type="hidden" name="requireSchemaReview"
-            value="${approvals.requireSchemaReview === false ? "false" : "true"}">
-        </span>
-      </div>
-      <div class="set-row">
-        <span class="sr-body">
-          <div class="sr-title">Review every changeset</div>
-          <div class="sr-sub">Pause on the diff as well as the plan, whatever
-            its risk.</div>
-        </span>
-        <span class="sr-ctl">
-          <button type="button" class="switch${
-            approvals.requireChangesetReview === true ? " on" : ""
-          }" data-act="toggle" data-field="requireChangesetReview"
-            aria-label="Review every changeset"></button>
-          <input type="hidden" name="requireChangesetReview"
-            value="${approvals.requireChangesetReview === true ? "true" : "false"}">
-        </span>
-      </div>
-      <div class="set-row">
-        <span class="sr-body">
-          <div class="sr-title">Protected paths</div>
-          <div class="sr-sub">One glob per line. Changes here always need review.</div>
-        </span>
-      </div>
-      <div class="set-field">
-        <textarea class="input" name="protectedPaths" rows="3"
-          placeholder="infrastructure/**">${esc(
-            (approvals.protectedPaths ?? []).join("\n"),
-          )}</textarea>
-      </div>
-      <div class="set-row">
-        <span class="sr-body">
-          <div class="sr-title">Approval timeout</div>
-          <div class="sr-sub">Minutes before an unanswered request expires.</div>
-        </span>
-        <span class="sr-ctl">
-          <input class="input" name="approvalTimeoutMinutes" style="width:110px"
-            value="${esc(minutesValue(approvals.approvalTimeoutMs))}"
-            placeholder="Default">
-        </span>
-      </div>
-      <div class="set-row">
-        <span class="sr-body">
-          <div class="sr-title">Task runtime budget</div>
-          <div class="sr-sub">Minutes one task may run before it is stopped.</div>
-        </span>
-        <span class="sr-ctl">
-          <input class="input" name="maxTaskRuntimeMinutes" style="width:110px"
-            value="${esc(minutesValue(budgets.maxTaskRuntimeMs))}"
-            placeholder="Unlimited">
-        </span>
-      </div>
-      <div class="set-row">
-        <span class="sr-body">
-          <div class="sr-title">Daily runtime budget</div>
-          <div class="sr-sub">Minutes every task in this project may run
-            between one midnight and the next.</div>
-        </span>
-        <span class="sr-ctl">
-          <input class="input" name="maxProjectRuntimeMinutesPerDay"
-            style="width:110px"
-            value="${esc(minutesValue(budgets.maxProjectRuntimeMsPerDay))}"
-            placeholder="Unlimited">
-        </span>
-      </div>
-      <div class="set-row">
-        <span class="sr-ctl"><button class="btn btn-primary" type="submit">
-          Save policy</button></span>
-      </div>
-    </form>
-  </section>`;
+function approvalPolicySection() {
+  const draft = currentPolicyDraft();
+  const minuteField = (row, name, label, description, placeholder) =>
+    settingRow({
+      row,
+      label,
+      description,
+      control: `<span class="st-unit-field">
+        <input class="input input-sm st-minutes" type="number" min="0" step="1"
+          inputmode="numeric" name="${esc(name)}"
+          data-act="policy-field" data-field="${esc(name)}"
+          value="${esc(draft[name])}" placeholder="${esc(placeholder)}"
+          aria-label="${esc(label)} in minutes">
+        <span class="st-unit" aria-hidden="true">min</span>
+      </span>`,
+    });
+  return settingsSectionBlock({
+    id: "approval-policy",
+    heading: "Approval policy",
+    description:
+      "What must stop for a person before a plan is admitted. Applies to " +
+      "everybody's agents in this project.",
+    body: `${settingRow({
+      row: "approvals-enabled",
+      label: "Human approval",
+      description: "Gate risky plans and changesets on a reviewer.",
+      control: switchControl({
+        act: "policy-toggle",
+        field: "approvalsEnabled",
+        label: "Human approval",
+        on: draft.approvalsEnabled,
+      }),
+    })}${settingRow({
+      row: "approvals-schema",
+      label: "Review schema changes",
+      description: "Pause whenever a plan touches a schema.",
+      control: switchControl({
+        act: "policy-toggle",
+        field: "requireSchemaReview",
+        label: "Review schema changes",
+        on: draft.requireSchemaReview,
+      }),
+    })}${settingRow({
+      row: "approvals-changeset",
+      label: "Review every changeset",
+      description:
+        "Pause on the diff as well as the plan, whatever its risk.",
+      control: switchControl({
+        act: "policy-toggle",
+        field: "requireChangesetReview",
+        label: "Review every changeset",
+        on: draft.requireChangesetReview,
+      }),
+    })}${settingRow({
+      row: "protected-paths",
+      label: "Protected paths",
+      description: "One glob per line. Changes here always need review.",
+      stacked: true,
+      control: `<textarea class="input st-textarea" rows="3" name="protectedPaths"
+        data-act="policy-field" data-field="protectedPaths"
+        aria-label="Protected paths, one glob per line"
+        placeholder="infrastructure/**">${esc(draft.protectedPaths)}</textarea>`,
+    })}${minuteField(
+      "approval-timeout",
+      "approvalTimeoutMinutes",
+      "Approval timeout",
+      "Minutes before an unanswered request expires.",
+      "Default",
+    )}${minuteField(
+      "task-runtime",
+      "maxTaskRuntimeMinutes",
+      "Task runtime budget",
+      "Minutes one task may run before it is stopped.",
+      "Unlimited",
+    )}${minuteField(
+      "daily-runtime",
+      "maxProjectRuntimeMinutesPerDay",
+      "Daily runtime budget",
+      "Minutes every task in this project may run between one midnight and the next.",
+      "Unlimited",
+    )}`,
+  });
+}
+
+/** Who you are here, in one row. */
+function profileRow() {
+  return settingRow({
+    row: "profile",
+    label: currentUserName(),
+    description: esc(state.principal?.user?.email ?? ""),
+    media: avatar(currentUserName(), 40, currentUserName(), myAvatar()),
+    control: `<span class="avatar-pick">
+      <label class="btn btn-sm">
+        Change picture
+        <input type="file" accept="image/*" data-act="avatar-pick" hidden>
+      </label>
+      ${
+        myAvatar() === undefined
+          ? ""
+          : `<button type="button" class="btn btn-sm" data-act="avatar-clear">Remove</button>`
+      }
+    </span>`,
+  });
 }
 
 /**
- * Which repository the control plane owns, and on which branch. Read-only
- * by design: canonical moves through the pipeline, not through a field on
- * a settings page.
+ * Signing out, on its own.
+ *
+ * It used to sit on the same row as the name and the email, which put the one
+ * irreversible control in General beside the two facts people open General to
+ * read.
  */
-function repositoryCard() {
-  const repository = currentRepository();
-  return `<section class="card">
-    <div class="panel-head"><div><h3>Repository</h3>
-      <p>Canonical state is owned by the control plane</p></div></div>
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">${esc(repository?.id ?? "No repository open")}</div>
-        <div class="sr-sub">${esc(
-          repository?.remoteUrl ?? "No remote recorded",
-        )}. Publishing canonical to a remote branch is <code>/push</code> in
-        the channel; the CLI does the same thing from outside the product.
-        </div>
-      </span>
-      <span class="sr-ctl">
-        <code class="hint-code">/push</code>
-      </span>
-    </div>
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Canonical branch</div>
-        <div class="sr-sub">Git commits remain in Repository History; there is no
-          direct branch or reset access outside the pipeline.</div>
-      </span>
-      <span class="sr-ctl">${esc(repository?.branch ?? "—")}</span>
-    </div>
-  </section>`;
+function sessionSection() {
+  return settingsSectionBlock({
+    id: "session",
+    heading: "Session",
+    description: "This browser's sign-in.",
+    body: settingRow({
+      row: "sign-out",
+      label: "Sign out",
+      description: "Ends this session here. Your work and history stay.",
+      control: `<button type="button" class="btn btn-sm" data-act="logout">
+        ${icon("logout")} Sign out</button>`,
+    }),
+  });
 }
 
-const SETTINGS_SECTIONS = [
-  {
-    id: "general",
-    label: "General",
-    iconName: "gear",
-    description: "Your account, theme, colours, and everyday preferences.",
-  },
-  {
-    id: "agents",
-    label: "Agents",
-    iconName: "robot",
-    description: "Connect and name the coding agents that belong to you.",
-  },
-  {
-    id: "connections",
-    label: "Connections",
-    iconName: "link",
-    description: "External accounts Kumi can use on your behalf.",
-  },
-  {
-    id: "workspace",
-    label: "Workspace",
-    iconName: "users",
-    description: "People and activity in the workspace you have open.",
-  },
-  {
-    id: "billing",
-    label: "Billing",
-    iconName: "chart",
-    description: "Your plan, what it covers, and who is counted as a seat.",
-  },
-  {
-    id: "deployment",
-    label: "Deployment",
-    iconName: "database",
-    description: "How this control plane is doing, for whoever runs it.",
-    adminOnly: true,
-  },
-  {
-    id: "advanced",
-    label: "Advanced",
-    iconName: "sliders",
-    description: "Project-wide repository and admission controls.",
-  },
-];
-
-function accountCard() {
-  return `<section class="card settings-account-card">
-    <div class="panel-head"><div><h3>Account</h3>
-      <p>The identity you use across this Kumi workspace</p></div></div>
-    <div class="set-row">
-      <span class="settings-account-avatar">
-        ${avatar(currentUserName(), 42, currentUserName(), myAvatar())}
-      </span>
-      <span class="sr-body">
-        <div class="sr-title">${esc(currentUserName())}</div>
-        <div class="sr-sub">${esc(state.principal?.user?.email ?? "")}</div>
-      </span>
-      <span class="sr-ctl">
-        <button class="btn btn-sm" data-act="logout">${icon("logout")} Sign out</button>
-      </span>
-    </div>
-  </section>`;
+/**
+ * Three colours behind one row.
+ *
+ * They used to be three rows with three swatches, three buttons and — once a
+ * wheel was open — a disc and a slider each. They are one decision about how
+ * you look, so they are one row with three labelled swatches and one editor
+ * behind them. Reset lives inside that editor, where the colours are.
+ */
+function profileColoursRow() {
+  const fields = [
+    { act: "set-accent", label: "Primary", value: myAccent() },
+    {
+      act: "set-accent-secondary",
+      label: "Secondary",
+      value: myAccentSecondary(),
+    },
+    { act: "set-agent-color", label: "Agents", value: myAgentColor() },
+  ];
+  const open = fields.some((field) => field.act === state.openWheel);
+  const active =
+    fields.find((field) => field.act === state.openWheel) ?? fields[0];
+  const agentColor = myAgentColor();
+  return `${settingRow({
+    row: "profile-colours",
+    label: "Profile colours",
+    description:
+      "Your interface accent, its partner, and the colour every one of your agents wears for colleagues.",
+    control: `<span class="st-swatches">
+      ${fields
+        .map(
+          (field) => `<span class="st-swatch">
+            <span class="st-swatch-dot" style="background:${esc(field.value)}"
+              aria-hidden="true"></span>
+            <span class="st-swatch-label">${esc(field.label)}</span>
+            <span class="sr-only">${esc(field.label)} colour ${esc(field.value)}</span>
+          </span>`,
+        )
+        .join("")}
+      <button type="button" class="btn btn-sm" data-act="wheel-open"
+        data-value="${esc(open ? active.act : "set-accent")}"
+        aria-expanded="${open}" aria-controls="settings-colour-editor">
+        ${open ? "Done" : "Edit"}</button>
+    </span>`,
+  })}${
+    open
+      ? `<div class="st-colour-editor" id="settings-colour-editor">
+          <div class="st-colour-tabs" role="tablist" aria-label="Which colour to edit">
+            ${fields
+              .map(
+                (field) => `<button type="button" role="tab" class="st-colour-tab${
+                  field.act === active.act ? " is-active" : ""
+                }" aria-selected="${field.act === active.act}"
+                  data-act="wheel-select" data-value="${esc(field.act)}">
+                  <span class="st-swatch-dot" style="background:${esc(field.value)}"
+                    aria-hidden="true"></span>${esc(field.label)}</button>`,
+              )
+              .join("")}
+            <button type="button" class="btn btn-sm st-colour-reset"
+              data-act="colours-reset">Reset to defaults</button>
+          </div>
+          ${colorWheel(active.act, active.value)}
+          ${
+            active.act === "set-agent-color"
+              ? `<div class="doodle-preview" style="color:${esc(agentColor)}">
+                  ${[
+                    "anthropic",
+                    "cursor",
+                    "copilot",
+                    "kiro",
+                    "openai",
+                    "google",
+                    "xai",
+                    "deepseek",
+                  ]
+                    .map(
+                      (kind) => `<span class="doodle-chip">
+                        <span class="doodle">${vendorMark(kind)}</span>
+                        <b>${esc(agentLabelOf(kind))}</b>
+                      </span>`,
+                    )
+                    .join("")}
+                </div>`
+              : ""
+          }
+        </div>`
+      : ""
+  }`;
 }
 
+/** How Kumi looks to you, and how your agents look to everybody else. */
+function appearanceCard() {
+  const theme = myThemePreference();
+  return settingsSectionBlock({
+    id: "appearance",
+    heading: "Appearance",
+    description: "How Kumi looks to you, and how your agents look to everyone.",
+    body: `${settingRow({
+      row: "theme",
+      label: "Theme",
+      description: "Follow your device, or keep Kumi light or dark.",
+      control: segmentedControl({
+        act: "settings-theme",
+        label: "Theme",
+        value: theme,
+        options: [
+          { value: "system", label: "System", iconName: "display" },
+          { value: "light", label: "Light", iconName: "sun" },
+          { value: "dark", label: "Dark", iconName: "moon" },
+        ],
+      }),
+    })}${profileColoursRow()}`,
+  });
+}
+
+/** Behaviours that live on this device and nowhere else. */
 function preferencesCard() {
   const sounds = window.localStorage.getItem("ag.messageSounds") !== "false";
-  return `<section class="card">
-    <div class="panel-head"><div><h3>Preferences</h3>
-      <p>Small behaviours that apply only in this browser</p></div></div>
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Sound effects</div>
-        <div class="sr-sub">Quiet cues for sent and incoming messages, completed work, and items that need attention.</div>
-      </span>
-      <span class="sr-ctl">
-        <button type="button" class="switch${sounds ? " on" : ""}"
-          data-act="settings-sounds" aria-pressed="${sounds}"
-          aria-label="Sound effects"></button>
-      </span>
-    </div>
-  </section>`;
+  return settingsSectionBlock({
+    id: "preferences",
+    heading: "Preferences",
+    description: "Small behaviours that apply only on this device.",
+    body: settingRow({
+      row: "sounds",
+      label: "Sound effects",
+      description:
+        'Quiet cues for sent and incoming messages, completed work, and items that need attention. <span class="st-tag">Saved on this device</span>',
+      control: switchControl({
+        act: "settings-sounds",
+        label: "Sound effects",
+        on: sounds,
+      }),
+    }),
+  });
+}
+
+function generalSection() {
+  return `${settingsSectionBlock({
+    id: "profile",
+    heading: "Profile",
+    description: "The identity you use across this Kumi workspace.",
+    body: profileRow(),
+  })}${appearanceCard()}${preferencesCard()}${sessionSection()}`;
 }
 
 /**
- * Tokens for signing in a client that has no browser to hold a cookie.
- *
- * The endpoints have existed since headless workers did; nothing in the UI
- * ever reached them, so the only way to get one was to call the API by hand.
- * That is fine for a CLI and useless for a desktop app, where the person
- * signing in is the one who needs the token.
- */
-function apiTokensCard() {
-  // Revoked tokens stay in the list the server returns, as the record that
-  // they existed. They are not something anybody can act on, and offering
-  // "Revoke" beside one already revoked reads as a button that does nothing —
-  // the same reason the invitations card above shows only what is pending.
-  const tokens = (state.apiTokens ?? []).filter(
-    (token) => token.active !== false,
-  );
-  const minted = state.newApiToken;
-  return `<section class="card">
-    <div class="panel-head">
-      <div><h3>App tokens</h3>
-      <p>Sign in a Kumi app on your machine. It reads the room and starts
-        work, the same as this browser does.</p></div>
-    </div>
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Kumi for desktop</div>
-        <div class="sr-sub">Mac, Windows and Linux. It signs itself in through
-          your browser, so it needs none of the tokens below.</div>
-      </span>
-      <span class="sr-ctl">
-        <a class="btn btn-sm" href="/download" target="_blank"
-          rel="noopener">Download</a>
-      </span>
-    </div>
-    ${
-      minted === undefined
-        ? ""
-        : `<div class="set-row"><span class="sr-body">
-            <div class="sr-title">Copy this now</div>
-            <div class="sr-sub">It is shown once. Kumi keeps only a
-              fingerprint, so nobody — including us — can read it back.</div>
-            <code class="token-secret">${esc(minted)}</code>
-          </span><span class="sr-ctl">
-            <button class="btn btn-sm" data-act="token-copy">Copy</button>
-            <button class="btn btn-sm" data-act="token-dismiss">Done</button>
-          </span></div>`
-    }
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">New token</div>
-        <div class="sr-sub">Name it after the machine you will use it on, so
-          revoking the right one later is obvious.</div>
-      </span>
-      <span class="sr-ctl">
-        <input class="input input-sm" data-token-name placeholder="My laptop"
-          aria-label="Token name">
-        <button class="btn btn-sm btn-primary" data-act="token-create">Create</button>
-      </span>
-    </div>
-    ${
-      tokens.length === 0
-        ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">
-            No tokens yet.</div></span></div>`
-        : tokens
-            .map(
-              (token) => `<div class="set-row">
-                <span class="sr-body">
-                  <div class="sr-title">${esc(token.name ?? "Unnamed")}</div>
-                  <div class="sr-sub">created ${esc(
-                    relativeTime(token.createdAt),
-                  )}${
-                    token.lastUsedAt === undefined
-                      ? " · never used"
-                      : ` · last used ${esc(relativeTime(token.lastUsedAt))}`
-                  }</div>
-                </span>
-                <span class="sr-ctl">
-                  <button class="btn btn-sm" data-act="token-revoke"
-                    data-value="${esc(token.id)}">Revoke</button>
-                </span>
-              </div>`,
-            )
-            .join("")
-    }
-  </section>`;
-}
-
-function settingsSectionMarkup(section) {
-  switch (section) {
-    case "agents":
-      return agentsCard();
-    case "connections":
-      return (
-        githubCard() ||
-        `<section class="card"><div class="set-row"><span class="sr-body">
-          <div class="sr-title">No connections available</div>
-          <div class="sr-sub">This deployment does not offer any external
-            account connections.</div></span></div></section>`
-      );
-    case "workspace":
-      return `${invitationsCard()}${channelStatsCard()}`;
-    case "billing":
-      return billingCard();
-    case "deployment":
-      return `${waitlistCard()}${deploymentCard()}`;
-    case "advanced":
-      return `${repositoryCard()}${admissionsCard()}${apiTokensCard()}`;
-    default:
-      return `${accountCard()}${appearanceCard()}${preferencesCard()}`;
-  }
-}
-
-/**
- * The rail's second level.
- *
- * Seven flat categories was a list you had to read end to end to find
- * anything in, because nothing on it said which ones were about you and
- * which were about the deployment. Grouping them puts a two-word answer
- * above each run of rows, which is what lets somebody skip four of them
- * without reading a word — and it is why the rows themselves can then be
- * smaller, not larger.
- *
- * Membership is by id, so a section stays defined in one place. Anything
- * this list forgets is still drawn, unlabelled, at the foot of the rail:
- * a category that exists and cannot be reached is the worse failure.
- */
-const SETTINGS_GROUPS = [
-  {
-    id: "account",
-    label: "Account",
-    sections: ["general", "agents", "connections"],
-  },
-  { id: "team", label: "Team", sections: ["workspace", "billing"] },
-  { id: "system", label: "System", sections: ["deployment", "advanced"] },
-];
-
-/** One category in the rail. */
-function settingsRow(item, selected) {
-  const active = item.id === selected;
-  return `<button type="button" class="settings-nav-item${
-    active ? " active" : ""
-  }" data-act="settings-section" data-value="${esc(item.id)}"
-    aria-current="${active ? "page" : "false"}">
-    ${icon(item.iconName)}<span>${esc(item.label)}</span></button>`;
-}
-
-/**
- * One labelled run of categories. Drawn only when something in it survived
- * the admin filter, so a deployment nobody administers does not show a
- * "System" heading over an empty space.
- */
-function settingsGroup(label, items, selected) {
-  if (items.length === 0) {
-    return "";
-  }
-  const id = `settings-group-${esc(label.toLowerCase().replace(/\s+/gu, "-"))}`;
-  return `<div class="settings-nav-group" role="group" aria-labelledby="${id}">
-    <div class="settings-nav-label" id="${id}">${esc(label)}</div>
-    ${items.map((item) => settingsRow(item, selected)).join("")}
-  </div>`;
-}
-
-/** The whole rail, grouped, with anything ungrouped kept at the foot of it. */
-function settingsRail(sections, selected) {
-  const grouped = new Set(SETTINGS_GROUPS.flatMap((group) => group.sections));
-  const groups = SETTINGS_GROUPS.map((group) =>
-    settingsGroup(
-      group.label,
-      sections.filter((section) => group.sections.includes(section.id)),
-      selected,
-    ),
-  ).join("");
-  const rest = sections.filter((section) => !grouped.has(section.id));
-  return `<nav class="settings-nav" aria-label="Settings categories">
-    ${groups}${
-      rest.length === 0
-        ? ""
-        : `<div class="settings-nav-group">${rest
-            .map((item) => settingsRow(item, selected))
-            .join("")}</div>`
-    }
-  </nav>`;
-}
-
-/**
- * Settings is a large dialog over the conversation, with one stable category
- * rail and a single, focused content pane. It deliberately does not become a
- * router screen: closing it returns to the exact channel and scroll position
- * that were visible underneath.
- *
- * The two halves are quiet in opposite ways. The rail is dense — small rows
- * under small headings, one soft pill on the row you are on — because it is
- * a place you pass through, not a place you read. The pane loses the card
- * chrome the rows used to sit in: a border around every setting and a rule
- * under every line drew nine boxes on a surface that holds one subject, and
- * a rule now appears only where one group of settings ends and the next
- * begins.
- */
-function settingsDialog() {
-  // A section nobody may open is not offered. `adminOnly` is read here rather
-  // than inside each card so the rail, the default selection and the deep link
-  // all agree about what exists.
-  const sections = SETTINGS_SECTIONS.filter(
-    (section) => section.adminOnly !== true || iAmSystemAdmin(),
-  );
-  const selected = sections.some(
-    (section) => section.id === state.settingsSection,
-  )
-    ? state.settingsSection
-    : "general";
-  const section =
-    SETTINGS_SECTIONS.find((candidate) => candidate.id === selected) ??
-    SETTINGS_SECTIONS[0];
-  return `<div class="settings-layer" data-act="settings-backdrop">
-  <style id="settings-dialog-styles">
-    .settings-layer{position:fixed;inset:0;z-index:84;display:grid;place-items:center;padding:24px;background:rgba(4,5,9,.58);backdrop-filter:blur(3px)}
-    .settings-dialog{width:min(940px,calc(100vw - 48px));height:min(700px,calc(100dvh - 48px));min-height:min(520px,calc(100dvh - 48px));display:grid;grid-template-columns:206px minmax(0,1fr);overflow:hidden;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:18px;box-shadow:var(--shadow-pop);color:var(--text)}
-    .settings-layer.settings-entering{animation:scrim-in var(--motion-scrim) ease}
-    .settings-layer.settings-entering .settings-dialog{animation:settings-in var(--motion-pop) var(--ease-motion)}
-    .settings-layer.settings-leaving{animation:scrim-out var(--motion-scrim) ease forwards;pointer-events:none}
-    .settings-layer.settings-leaving .settings-dialog{animation:settings-out var(--motion-pop) var(--ease-motion) forwards}
-    @keyframes settings-in{from{opacity:0;transform:translateY(6px) scale(.99)}}
-    @keyframes settings-out{to{opacity:0;transform:translateY(6px) scale(.99)}}
-    /* The two halves arrive a beat apart, on the same curve every panel in
-       the product uses. Qualified by the entering class rather than left on
-       the bare one, for the reason the dialog itself is: these nodes are
-       rebuilt by every render, and an unqualified animation would replay the
-       entrance each time somebody flipped a switch. */
-    @keyframes settings-rise{from{opacity:0;transform:translateY(5px)}}
-    .settings-layer.settings-entering .settings-rail{animation:settings-rise var(--motion-panel) var(--ease-motion) backwards}
-    .settings-layer.settings-entering .settings-content-inner{animation:settings-rise var(--motion-panel) var(--ease-motion) 50ms backwards}
-    .settings-rail{min-width:0;display:flex;flex-direction:column;padding:16px 10px 12px;background:var(--bg-panel);border-right:1px solid var(--border-soft)}
-    .settings-brand{display:flex;align-items:center;gap:8px;padding:2px 8px 14px;font-size:14px;font-weight:650;letter-spacing:-.01em}.settings-brand .ui-icon{width:16px;height:16px;color:var(--text-3)}
-    .settings-nav{min-height:0;display:grid;align-content:start;gap:14px;overflow:auto;scrollbar-width:none}.settings-nav::-webkit-scrollbar{display:none}
-    .settings-nav-group{display:grid;gap:1px}
-    .settings-nav-label{padding:0 9px 4px;font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-4)}
-    .settings-nav-item{width:100%;min-height:31px;display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:8px;color:var(--text-2);font-size:12.5px;line-height:1.2;text-align:left;transition:background var(--motion-pop) var(--ease-motion),color var(--motion-pop) var(--ease-motion)}
-    .settings-nav-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .settings-nav-item:hover{background:var(--bg-hover);color:var(--text)}
-    .settings-nav-item.active{background:var(--bg-active);color:var(--text);font-weight:550}
-    .settings-nav-item .ui-icon{width:15px;height:15px;flex:none;color:var(--text-4)}.settings-nav-item:hover .ui-icon,.settings-nav-item.active .ui-icon{color:var(--text)}
-    .settings-rail-account{display:flex;align-items:center;gap:9px;margin-top:auto;padding:12px 8px 0;border-top:1px solid var(--border-soft);min-width:0}.settings-rail-account-copy{min-width:0}.settings-rail-account-name,.settings-rail-account-email{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.settings-rail-account-name{font-size:12px;font-weight:550}.settings-rail-account-email{font-size:10.5px;color:var(--text-4);margin-top:1px}
-    .settings-main{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg-card)}
-    .settings-main-head{display:flex;align-items:flex-start;gap:18px;padding:20px 28px 15px;border-bottom:1px solid var(--border-soft)}.settings-main-title{min-width:0}.settings-main-title h2{font-size:19px;line-height:1.25;letter-spacing:-.025em}.settings-main-title p{margin-top:4px;color:var(--text-3);font-size:12px}.settings-close{margin-left:auto;flex:none}
-    .token-secret{display:block;margin-top:8px;padding:8px 10px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:8px;font-size:12px;word-break:break-all;user-select:all}
-    .settings-content.scroll{min-height:0;padding:4px 28px 34px}.settings-content-inner{max-width:640px;margin:0 auto}
-    /* The card chrome comes off in here. A settings pane holds one subject,
-       and a border around every group of it — plus a rule under every line
-       inside those borders — draws a dozen boxes nobody asked about. What is
-       left is one surface with a heading over each run of rows, and a single
-       rule where one run ends and the next starts. */
-    .settings-content .card{background:none;border:0;border-radius:0;box-shadow:none;padding:18px 0}
-    .settings-content .card+.card{border-top:1px solid var(--border-soft)}
-    .settings-content .panel-head{padding:0 0 2px}.settings-content .panel-head h3{font-size:13px}.settings-content .panel-head p{margin-top:2px;font-size:11.5px}
-    .settings-content .set-row{gap:14px;padding:10px 0;border-bottom:0}
-    .settings-content .set-field{padding:2px 0 8px}
-    .settings-content .wheel-drop{padding:2px 0 12px;border-bottom:0}
-    .settings-content .channel-wrapped{padding:8px 0 2px}
-    .settings-content .dep-stats{gap:8px;background:none;border-top:0;padding:8px 0 2px}.settings-content .dep-stat{background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:var(--radius)}
-    .settings-account-avatar{flex:none}
-    .settings-choice{display:inline-flex;gap:3px;padding:3px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:9px}.settings-choice button{padding:5px 10px;border-radius:6px;color:var(--text-3);font-size:12px;transition:background var(--motion-pop) var(--ease-motion),color var(--motion-pop) var(--ease-motion)}.settings-choice button:hover{color:var(--text)}.settings-choice button.active{background:var(--bg-active);color:var(--text);box-shadow:0 1px 2px rgb(0 0 0 / 18%)}
-    @media(max-width:700px){.settings-layer{padding:0}.settings-dialog{width:100vw;height:100dvh;min-height:0;border:0;border-radius:0;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.settings-rail{padding:calc(10px + var(--safe-top)) 12px 10px;border-right:0;border-bottom:1px solid var(--border-soft)}.settings-brand{padding:0 4px 10px}.settings-nav{display:flex;gap:4px;overflow-x:auto}.settings-nav-group{display:flex;gap:4px}.settings-nav-label{display:none}.settings-nav-item{width:auto;min-height:32px;flex:none;padding:7px 10px}.settings-rail-account{display:none}.settings-main-head{padding:14px 18px 12px}.settings-main-title p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.settings-content.scroll{padding:2px 16px calc(24px + var(--safe-bottom))}.settings-content .set-row{align-items:flex-start;flex-wrap:wrap}.settings-content .set-row .sr-ctl{margin-left:auto}.settings-choice button{padding:6px 9px}}
-  </style>
-    <section class="settings-dialog" data-act="settings-dialog" role="dialog"
-      aria-modal="true" aria-labelledby="settings-title">
-      <aside class="settings-rail">
-        <div class="settings-brand">${icon("gear")}<span>Settings</span></div>
-        ${settingsRail(sections, selected)}
-        <div class="settings-rail-account">
-          ${avatar(currentUserName(), 28, currentUserName(), myAvatar())}
-          <span class="settings-rail-account-copy">
-            <div class="settings-rail-account-name">${esc(currentUserName())}</div>
-            <div class="settings-rail-account-email">${esc(
-              state.principal?.user?.email ?? "",
-            )}</div>
-          </span>
-        </div>
-      </aside>
-      <div class="settings-main">
-        <header class="settings-main-head">
-          <div class="settings-main-title"><h2 id="settings-title">${esc(
-            section.label,
-          )}</h2><p>${esc(section.description)}</p></div>
-          <button type="button" class="icon-btn settings-close"
-            data-act="settings-close" aria-label="Close settings"
-            title="Close settings">${icon("close")}</button>
-        </header>
-        <div class="settings-content scroll" data-scroll-key="settings">
-          <div class="settings-content-inner">
-            ${settingsSectionMarkup(selected)}
-          </div>
-        </div>
-      </div>
-    </section>
-  </div>`;
-}
-
-/**
- * The user's own GitHub connection, beside their agents because it is the
- * same kind of thing: a personal identity a task of theirs spends. When an
- * agent is asked to push, the push authenticates as this token — as this
- * person, reaching only what they can reach — and until one is connected an
- * asked-for push is refused by name. There is deliberately no
- * deployment-wide token behind it.
- */
-function githubCard() {
-  const github = state.github;
-  if (github === null) {
-    // The deployment answered that it offers no GitHub connections; a card
-    // for a thing that cannot be done here would only invite a dead click.
-    return "";
-  }
-  const broken = github?.credential?.unusableReason;
-  const connected = github?.connected === true;
-  const canConnect = !connected || broken !== undefined;
-  const connecting =
-    canConnect && state.providerConnecting?.has("github") === true;
-  const githubLabel = connecting
-    ? "Connecting…"
-    : broken
-      ? "Reconnect"
-      : connected
-        ? "Disconnect"
-        : "Connect";
-  return `<section class="card">
-    <div class="panel-head"><div><h3>GitHub</h3></div></div>
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">${
-          connected
-            ? `Connected as ${esc(github.login ?? "you")}`
-            : "Not connected"
-        }</div>
-      </span>
-      <span class="sr-ctl">
-        <button class="btn btn-sm${connecting ? " connecting" : ""}" data-act="${
-          connected && !broken ? "github-disconnect" : "github-connect"
-        }"${connecting ? ' disabled aria-busy="true" title="Connecting…" aria-label="Connecting…"' : ""}>
-          ${githubLabel}
-        </button>
-      </span>
-    </div>
-  </section>`;
-}
-
-/**
- * Colour choices.
- *
- * Two separate decisions that happen to share a picker. The interface accent
- * is a personal preference and changes nothing for anyone else. The agent
- * colour is an identity: it is stored on the account, travels with every one
- * of that person's agents, and is what colleagues read on the coordinator's
- * shared views — so the copy has to say so, or people will assume it is
- * decoration and pick the same colour as everyone else.
- */
-/**
- * Connecting agents, in Settings rather than on a screen of its own.
+ * The agents connected to this account, one provider row each.
  *
  * A connection belongs to the account, not to a repository: the credential is
  * stored against the user (`/chat/providers/{id}/credential` names no project
  * or repository), and putting an agent into a particular channel is a separate
- * act done from that channel. Keeping the two apart here is the point — sign
- * in once, then tick the agent into whichever channels want it, rather than
- * connecting the same vendor over and over.
+ * act done from that channel. Sign in once here; tick the agent into whichever
+ * channels want it there.
  */
-function agentsCard() {
+function agentsSection() {
   const agents = myAgents();
-  return `<section class="card">
-    <div class="panel-head"><div><h3>Agents</h3></div></div>
-    ${
-      agents.length === 0
-        ? `<div class="set-row"><span class="sr-body">
-             <div class="sr-sub">No agent providers are configured on this
-               deployment.</div></span></div>`
-        : agents
-            .map((agent) => {
-              // The row title is the vendor people say ("Claude"), not the
-              // call sign. The call sign belongs on the status line below —
-              // "Connected as Hera" — so both facts stay visible at once
-              // instead of the name swallowing the provider.
-              // Rename still edits the call sign: the owner suffix is dropped
-              // from a vendor-label fallback ("Claude (Nathan)" → "Claude")
-              // but never from a name somebody chose — an agent called
-              // "Athena (night shift)" keeps every word of it.
-              const callSign =
-                agent.hasName === true
-                  ? agent.name
-                  : agent.name.replace(/\s*\(.*\)$/u, "");
-              const renaming = state.settingsRenamingId === agent.id;
-              // Three states, not two: a credential that has stopped
-              // authenticating is stored but useless, and saying "connected"
-              // about it is what let every task it was given fail in silence.
-              // Four states, because the merged card has to keep the
-              // distinction the second card existed for: a provider the
-              // deployment offers, one this machine's account is signed in to,
-              // one *you* are signed in to, and a stored credential that has
-              // stopped authenticating. Saying "connected" about the second or
-              // the fourth is what let every task an agent was given fail
-              // without the screen ever admitting anything was wrong.
-              // The one question the whole row turns on, asked once so the
-              // status line and the buttons cannot answer it differently.
-              // An agent used to *be* a stored credential, so "is a
-              // credential stored" and "is there an agent" were one question
-              // with one answer. Local execution split them: the CLI runs
-              // under this machine's own vendor login, so the agent it runs
-              // has no credential here and never will. Every control below
-              // was still asking the credential question — which is why an
-              // agent somebody had just finished connecting read "Not
-              // connected" and offered to connect it again.
-              const localAgent =
-                state.localAgentsOnly === true &&
-                agent.exists === true &&
-                !agent.mine;
-              const state_ = agent.needsReconnect
-                ? { text: "Sign-in expired", cls: " sr-warn" }
-                : agent.mine
-                  ? {
-                      text:
-                        agent.hasName === true
-                          ? `Connected as ${agent.name}`
-                          : "Connected as you",
-                      cls: "",
-                    }
-                  : localAgent
-                    ? {
-                        // Named, because the name is the thing that just
-                        // happened: the sign was dealt when the agent was
-                        // created, and this row is where somebody reads it.
-                        text: `Connected as ${callSign} — runs on this machine`,
-                        cls: "",
-                      }
-                    : agent.hostAccount
-                      ? {
-                          text: "Available on this deployment — using this machine's account",
-                          cls: "",
-                        }
-                      : { text: "Not connected", cls: "" };
-              return `<div class="set-row">
-                <span class="sr-body">
-                  ${
-                    renaming
-                      ? `<form class="agent-rename" data-act="agent-rename-form"
-                          data-value="${esc(agent.id)}">
-                          <input class="input" data-act="settings-rename-input"
-                            data-value="${esc(agent.id)}" maxlength="40"
-                            aria-label="Agent name" value="${esc(callSign)}">
-                          <button class="btn btn-sm btn-primary" type="submit">Save</button>
-                        </form>`
-                      : `<div class="sr-title">${esc(agentLabelOf(agent.id))}</div>`
-                  }
-                  <div class="sr-sub${state_.cls}">${esc(state_.text)}${
-                    agent.detail ? ` — ${esc(agent.detail)}` : ""
-                  }</div>
-                </span>
-                <span class="sr-ctl">
-                  ${
-                    // A name belongs to a connection: there is nothing to
-                    // rename on a vendor this account has never connected,
-                    // and the server says so rather than guessing. An expired
-                    // sign-in still has one, so it can still be renamed.
-                    // A local agent has a call sign in the same durable
-                    // table a connected one does, so it renames the same way.
-                    renaming ||
-                    !(agent.mine || agent.needsReconnect || localAgent)
-                      ? ""
-                      : `<button type="button" class="btn btn-sm"
-                          data-act="agent-rename-toggle"
-                          data-value="${esc(agent.id)}"
-                          title="Rename this agent everywhere">Rename</button>`
-                  }
-                  ${
-                    // The control follows this account's own credential, not
-                    // the machine's. Offering "Disconnect" on a host-account
-                    // row hid the connect flow behind a button that did the
-                    // opposite, and there was no way to attach your own
-                    // account at all.
-                    agent.mine && !agent.needsReconnect
-                      ? `<button type="button" class="btn btn-sm"
-                          data-act="agent-disconnect"
-                          data-value="${esc(agent.id)}">Disconnect</button>`
-                      : localAgent
-                        ? // The agent already exists — it was created without a
-                          // credential, which is all a local deployment needs.
-                          // No vendor sign-in is offered here any more: the
-                          // usage figure was the last thing it bought, and
-                          // that now comes from this machine's own CLI, which
-                          // is signed in already. A button that reads like
-                          // connecting, on a row that is connected, is what
-                          // sent the first person who tried it to a second
-                          // vendor sign-in they never needed.
-                          `<button type="button" class="btn btn-sm"
-                          data-act="agent-check-cli"
-                          data-value="${esc(agent.id)}"
-                          title="Check that this agent's CLI is installed and signed in on this machine"
-                          >Check the CLI</button>
-                          <button type="button" class="btn btn-sm"
-                          data-act="agent-disconnect"
-                          data-value="${esc(agent.id)}">Disconnect</button>`
-                      : (() => {
-                          const connecting =
-                            state.providerConnecting?.has(agent.id) === true;
-                          const connectLabel = connecting
-                            ? "Connecting…"
-                            : agent.needsReconnect
-                              ? "Reconnect"
-                              : agent.hostAccount
-                                ? "Connect yours"
-                                : "Connect";
-                          return `<button type="button" class="btn btn-sm btn-primary${
-                            connecting ? " connecting" : ""
-                          }"
-                            data-act="agent-connect"
-                            data-value="${esc(agent.id)}"${
-                            connecting
-                              ? ' disabled aria-busy="true" title="Connecting…" aria-label="Connecting…"'
-                              : ""
-                          }>${connectLabel}</button>`;
-                        })()
-                  }
-                </span>
-              </div>`;
-            })
-            .join("")
-    }
-  </section>`;
+  if (state.settingsAgentsLoading === true && agents.length === 0) {
+    return settingsSectionBlock({
+      id: "agents",
+      heading: "Agents",
+      description: "Connect and name the coding agents that belong to you.",
+      body: skeletonRows(3),
+    });
+  }
+  const body =
+    agents.length === 0
+      ? settingsEmptyState({
+          iconName: "robot",
+          title: "No agent providers on this deployment",
+          description:
+            "Whoever runs this control plane decides which coding agents it offers. None are configured yet.",
+        })
+      : agents.map((agent) => agentProviderRow(agent)).join("");
+  return settingsSectionBlock({
+    id: "agents",
+    heading: "Agents",
+    description: "Connect and name the coding agents that belong to you.",
+    body,
+  });
+}
+
+/**
+ * One agent vendor, in every state it can be in.
+ *
+ * Four states rather than two, because the distinctions matter and hiding
+ * them is what let a task fail in silence: a provider the deployment offers,
+ * one this machine's account is signed in to, one *you* are signed in to, and
+ * a stored credential that has stopped authenticating. Only the last two are
+ * "connected", and only one of them is yours.
+ */
+function agentProviderRow(agent) {
+  // The row title is the vendor people say ("Claude"), not the call sign. The
+  // call sign belongs on the status line below — "Connected as Hera" — so both
+  // facts stay visible at once instead of the name swallowing the provider.
+  const callSign =
+    agent.hasName === true ? agent.name : agent.name.replace(/\s*\(.*\)$/u, "");
+  const renaming = state.settingsRenamingId === agent.id;
+  const managing = state.settingsManagingId === agent.id;
+  const checking = state.settingsCheckingId === agent.id;
+  // An agent used to *be* a stored credential, so "is a credential stored" and
+  // "is there an agent" were one question. Local execution split them: the CLI
+  // runs under this machine's own vendor login, so the agent it runs has no
+  // credential here and never will.
+  const localAgent =
+    state.localAgentsOnly === true && agent.exists === true && !agent.mine;
+  const connecting = state.providerConnecting?.has(agent.id) === true;
+  const status = agent.needsReconnect
+    ? statusBadge("warn", "Sign-in expired", { iconName: "alert" })
+    : agent.mine
+      ? statusBadge("ok", "Connected", { iconName: "checkCircle" })
+      : localAgent
+        ? statusBadge("ok", "Connected", { iconName: "checkCircle" })
+        : agent.hostAccount
+          ? statusBadge("info", "Available", { iconName: "info" })
+          : statusBadge("idle", "Not connected", { iconName: "minusCircle" });
+  const detail = agent.needsReconnect
+    ? "Sign in again — every task given to this agent will fail until you do."
+    : agent.mine
+      ? agent.hasName === true
+        ? `as ${callSign}`
+        : "as you"
+      : localAgent
+        ? `as ${callSign} — runs on this machine`
+        : agent.hostAccount
+          ? "using this machine's account"
+          : "";
+  const canRename = agent.mine || agent.needsReconnect || localAgent;
+  const isConnected = (agent.mine && !agent.needsReconnect) || localAgent;
+  const controls = renaming
+    ? ""
+    : isConnected
+      ? `<button type="button" class="btn btn-sm" data-act="agent-manage"
+          data-value="${esc(agent.id)}" aria-expanded="${managing}"
+          aria-haspopup="menu"
+          aria-controls="settings-agent-menu-${esc(agent.id)}">Manage</button>`
+      : `<button type="button" class="btn btn-sm btn-primary${
+          connecting ? " connecting" : ""
+        }" data-act="agent-connect" data-value="${esc(agent.id)}"${
+          connecting
+            ? ' disabled aria-busy="true" title="Connecting…" aria-label="Connecting…"'
+            : ""
+        }>${
+          connecting
+            ? "Connecting…"
+            : agent.needsReconnect
+              ? "Reconnect"
+              : agent.hostAccount
+                ? "Connect yours"
+                : "Connect"
+        }</button>`;
+  const menu = !managing
+    ? ""
+    : `<div class="st-menu" id="settings-agent-menu-${esc(agent.id)}" role="menu"
+        aria-label="Manage ${esc(agentLabelOf(agent.id))}">
+        ${
+          canRename
+            ? `<button type="button" role="menuitem" class="st-menu-item"
+                data-act="agent-rename-toggle" data-value="${esc(agent.id)}">
+                ${icon("pencil")} Rename</button>`
+            : ""
+        }
+        ${
+          localAgent
+            ? `<button type="button" role="menuitem" class="st-menu-item"
+                data-act="agent-check-cli" data-value="${esc(agent.id)}"${
+                  checking ? ' aria-busy="true" disabled' : ""
+                }>${icon("terminal")} ${checking ? "Checking…" : "Check CLI"}</button>`
+            : ""
+        }
+        <button type="button" role="menuitem" class="st-menu-item st-menu-danger"
+          data-act="agent-disconnect" data-value="${esc(agent.id)}">
+          ${icon("closeCircle")} Disconnect</button>
+      </div>`;
+  const rename = !renaming
+    ? ""
+    : `<form class="agent-rename st-rename" data-act="agent-rename-form"
+        data-value="${esc(agent.id)}">
+        <input class="input input-sm" data-act="settings-rename-input"
+          data-value="${esc(agent.id)}" maxlength="40"
+          aria-label="Agent name" value="${esc(callSign)}">
+        <button class="btn btn-sm btn-primary" type="submit">Save</button>
+        <button type="button" class="btn btn-sm" data-act="agent-rename-cancel">Cancel</button>
+      </form>`;
+  return `${providerRow({
+    row: `agent-${agent.id}`,
+    mark: vendorMark(agent.id),
+    name: agentLabelOf(agent.id),
+    status,
+    detail,
+    controls,
+    busy: connecting,
+  })}${menu}${rename}`;
 }
 
 /**
@@ -2400,138 +2168,453 @@ function agentsCard() {
  */
 function commitAgentRename(providerId, name) {
   state.settingsRenamingId = undefined;
+  state.settingsManagingId = undefined;
   render();
   void renameAgent(providerId, name).then(() => render());
 }
 
-function appearanceCard() {
-  const accent = myAccent();
-  const agentColor = myAgentColor();
-  const theme = myThemePreference();
-  return `<section class="card">
-    <div class="panel-head"><div><h3>Appearance</h3>
-      <p>How Kumi looks to you, and how your agents look to everyone</p></div></div>
-
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Theme</div>
-        <div class="sr-sub">Follow your device, or keep Kumi light or dark.</div>
-      </span>
-      <span class="sr-ctl settings-choice" role="group" aria-label="Theme">
-        ${[
-          ["system", "System"],
-          ["light", "Light"],
-          ["dark", "Dark"],
-        ]
-          .map(
-            ([value, label]) => `<button type="button" class="${
-              theme === value ? "active" : ""
-            }" data-act="settings-theme" data-value="${value}"
-              aria-pressed="${theme === value}">${label}</button>`,
-          )
-          .join("")}
-      </span>
-    </div>
-
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Profile picture</div>
-      </span>
-      <span class="sr-action avatar-pick">
-        ${avatar(currentUserName(), 40, currentUserName(), myAvatar())}
-        <label class="btn btn-quiet">
-          Choose…
-          <input type="file" accept="image/*" data-act="avatar-pick" hidden>
-        </label>
-        ${
-          myAvatar() === undefined
-            ? ""
-            : `<button type="button" class="btn btn-quiet" data-act="avatar-clear">Remove</button>`
-        }
-      </span>
-    </div>
-
-    ${colourRow(
-      "set-accent",
-      "Primary colour",
-      accent,
-    )}
-
-    ${colourRow(
-      "set-accent-secondary",
-      "Secondary colour",
-      myAccentSecondary(),
-    )}
-
-    ${colourRow(
-      "set-agent-color",
-      "Your agents' colour",
-      agentColor,
-      `<div class="doodle-preview" style="color:${esc(agentColor)}">
-        ${[
-          "anthropic",
-          "cursor",
-          "copilot",
-          "kiro",
-          "openai",
-          "google",
-          "xai",
-          "deepseek",
-        ]
-          .map(
-            (kind) => `<span class="doodle-chip">
-              <span class="doodle">${vendorMark(kind)}</span>
-              <b>${esc(agentLabelOf(kind))}</b>
-            </span>`,
-          )
-          .join("")}
-      </div>`,
-    )}
-
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Default colours</div>
-      </span>
-      <span class="sr-ctl">
-        <button type="button" class="btn btn-quiet" data-act="colours-reset">
-          Reset colours
-        </button>
-      </span>
-    </div>
-  </section>`;
+/**
+ * External accounts Kumi can spend on your behalf.
+ *
+ * GitHub is the only one today, and it is drawn as a complete provider row —
+ * mark, name, what it is for, status, control — rather than as a lone button
+ * floating on an otherwise empty page. The list is a list because the next
+ * one will join it here; nothing is added by pretending there are two.
+ */
+function integrationsSection() {
+  const github = state.github;
+  if (github === null) {
+    // The deployment answered that it offers no GitHub connections; a row for
+    // a thing that cannot be done here would only invite a dead click.
+    return settingsSectionBlock({
+      id: "integrations",
+      heading: "Integrations",
+      description: "External accounts Kumi can use on your behalf.",
+      body: settingsEmptyState({
+        iconName: "link",
+        title: "No integrations on this deployment",
+        description:
+          "Whoever runs this control plane decides which external accounts it can connect to. None are offered yet.",
+      }),
+    });
+  }
+  const broken = github?.credential?.unusableReason;
+  const connected = github?.connected === true;
+  const connecting = state.providerConnecting?.has("github") === true;
+  const status = broken
+    ? statusBadge("warn", "Needs reconnecting", { iconName: "alert" })
+    : connected
+      ? statusBadge("ok", "Connected", { iconName: "checkCircle" })
+      : statusBadge("idle", "Not connected", { iconName: "minusCircle" });
+  return settingsSectionBlock({
+    id: "integrations",
+    heading: "Integrations",
+    description: "External accounts Kumi can use on your behalf.",
+    body: providerRow({
+      row: "github",
+      mark: icon("github"),
+      name: "GitHub",
+      description:
+        "Pushes and pulls authenticate as you, so an agent reaches only what you can reach.",
+      status,
+      detail: connected && !broken ? `as ${github.login ?? "you"}` : "",
+      busy: connecting,
+      controls: `<button type="button" class="btn btn-sm${
+        connecting ? " connecting" : ""
+      }${connected && !broken ? "" : " btn-primary"}" data-act="${
+        connected && !broken ? "github-disconnect" : "github-connect"
+      }"${
+        connecting
+          ? ' disabled aria-busy="true" title="Connecting…" aria-label="Connecting…"'
+          : ""
+      }>${
+        connecting
+          ? "Connecting…"
+          : broken
+            ? "Reconnect"
+            : connected
+              ? "Disconnect"
+              : "Connect"
+      }</button>`,
+    }),
+  });
 }
 
 /**
- * One colour: a swatch, and a button that opens the wheel.
+ * Pending invitations into this workspace.
  *
- * The wheel used to sit open under every colour, which meant three discs and
- * three sliders in a card whose other rows are one line each — the settings
- * were the small part of the settings screen. A swatch already answers "what
- * colour is this"; the wheel is only wanted by somebody who came to change it,
- * so it waits behind the press that says so.
- *
- * `state.openWheel` holds one act at a time, so opening a second wheel closes
- * the first rather than stacking them.
+ * Accepted, revoked and expired offers are historical records rather than
+ * people still waiting to join, so only what can still be acted on is here.
+ * There is no invite button: an invitation names one channel, and the channel
+ * header — where somebody already knows which — is where it is started.
  */
-function colourRow(act, title, current, extra = "") {
-  const open = state.openWheel === act;
-  return `<div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">${title}</div>
-      </span>
-      <span class="sr-ctl colour-pick">
-        <span class="colour-dot" style="background:${esc(current)}"></span>
-        <button type="button" class="btn btn-quiet" data-act="wheel-open"
-          data-value="${esc(act)}" aria-expanded="${open}">
-          ${open ? "Done" : "Change colour"}
-        </button>
-      </span>
-    </div>
-    ${
-      open
-        ? `<div class="wheel-drop">${colorWheel(act, current)}${extra}</div>`
-        : ""
-    }`;
+function invitationsCard() {
+  const rows = (state.invitations ?? []).filter(
+    (invitation) => invitation.status === "pending",
+  );
+  return settingsSectionBlock({
+    id: "invitations",
+    heading: "Invitations",
+    description: "People invited into this workspace who have not joined yet.",
+    body:
+      rows.length === 0
+        ? `<div class="st-inline-empty" data-settings-row="invitations"
+            id="settings-row-invitations" tabindex="-1">
+            ${icon("users")}<span>No pending invitations. An invitation grants one
+            channel by default, so sharing something does not hand over everything.</span>
+          </div>`
+        : `<div data-settings-row="invitations" id="settings-row-invitations" tabindex="-1">${rows
+            .map((invite) =>
+              settingRow({
+                label: invite.email,
+                description: `${esc(invite.role)} on ${esc(
+                  invite.repositoryId ?? "every channel",
+                )} · invited ${esc(relativeTime(invite.createdAt))}`,
+                control: `${badge(invite.status)}
+                  <button type="button" class="btn btn-sm" data-act="invite-revoke"
+                    data-value="${esc(invite.id)}">Revoke</button>`,
+              }),
+            )
+            .join("")}</div>`,
+  });
+}
+
+/**
+ * The workspace: what it is, who is still being waited on, and what has
+ * happened in it. Identity first, because it is the answer to "which of
+ * these am I changing".
+ */
+function workspaceSection() {
+  const repository = currentRepository();
+  return `${settingsSectionBlock({
+    id: "workspace-identity",
+    heading: "Workspace",
+    description: "Which workspace these settings belong to.",
+    body: `<div data-settings-row="workspace-identity"
+      id="settings-row-workspace-identity" tabindex="-1">${definitionList([
+        { term: "Project", value: state.project?.name ?? "This project" },
+        { term: "Channel open", value: repository?.id ?? "None" },
+        {
+          term: "People",
+          value: exactCountLabel(
+            (state.members ?? []).length,
+            (state.members ?? []).length === 1 ? "member" : "members",
+          ),
+        },
+      ])}</div>`,
+  })}${invitationsCard()}${settingsSectionBlock({
+    id: "workspace-activity",
+    heading: "Activity",
+    description: "A look back at the channel you have open.",
+    body: workspaceActivityStrip(),
+  })}`;
+}
+
+/**
+ * The plan, what it covers, and what it costs.
+ *
+ * Seats are stated rather than implied, because "why is my bill that number"
+ * is the question this page exists to answer, and the rule is not obvious:
+ * viewers are free, so a team of ten can be a bill for four.
+ *
+ * Nothing here can wait forever. `loadBilling` carries its own abort, and
+ * every outcome it can reach — an answer, no billing on this deployment, a
+ * failure, a timeout — has a state drawn for it below.
+ */
+function billingCard() {
+  void ensureBilling(render);
+  const billing = state.billing;
+  const status = state.billingStatus;
+  const wrap = (body) =>
+    settingsSectionBlock({
+      id: "billing",
+      heading: "Plan",
+      description: "What this team is subscribed to.",
+      body,
+    });
+  if (status === undefined || status === "loading") {
+    return wrap(skeletonRows(3));
+  }
+  if (status === "error") {
+    return wrap(
+      errorState({
+        title: "Billing could not be loaded",
+        description:
+          state.billingError ??
+          "The control plane did not answer. Nothing has changed.",
+        retryAct: "billing-retry",
+        retryLabel: "Retry",
+      }),
+    );
+  }
+  if (status === "unavailable" || billing === undefined || billing === null) {
+    return wrap(
+      settingsEmptyState({
+        iconName: "chart",
+        title: "Billing is not available here",
+        description:
+          "This deployment does not report a plan. Nothing is billed and nothing expires.",
+      }),
+    );
+  }
+  if (billing.payments !== true) {
+    // Switched off, not missing. Said as a decision rather than as a gap,
+    // because it is one.
+    return wrap(
+      settingsEmptyState({
+        iconName: "checkCircle",
+        title: "Kumi is not charging right now",
+        description:
+          "Payments are switched off on this deployment. Nothing is billed, nothing expires, and every seat has full use of the channels it can reach.",
+      }),
+    );
+  }
+  if (billing.configured !== true) {
+    return wrap(
+      settingsEmptyState({
+        iconName: "info",
+        title: "Billing is not set up on this deployment",
+        description:
+          "This Kumi is running without payment configured, which is a supported way to run it. Nothing here is chargeable.",
+      }),
+    );
+  }
+  const plan = BILLING_STATUS[billing.status] ?? BILLING_STATUS.trialing;
+  const trialDays = daysUntil(billing.trialEndsAt);
+  const detail =
+    billing.status === "trialing"
+      ? trialDays === undefined
+        ? "Your trial is running."
+        : trialDays === 0
+          ? "Your trial ends today."
+          : `${String(trialDays)} day${trialDays === 1 ? "" : "s"} left on your trial.`
+      : plan.detail;
+  const canManage = canManageOrganization();
+  const tone =
+    billing.status === "past_due" || billing.status === "canceled"
+      ? "warn"
+      : "ok";
+  const action =
+    // A comped team is offered nothing: `manageable` is false for them, and a
+    // Subscribe button beside "Nothing to do" is how a permanent comp gets
+    // spent.
+    billing.status === "comped" || !canManage
+      ? ""
+      : billing.manageable === true
+        ? `<button type="button" class="btn btn-sm" data-act="billing-portal">
+             ${icon("external")} Manage billing</button>`
+        : `<button type="button" class="btn btn-sm btn-primary" data-act="billing-checkout">
+             ${icon("bolt")} Subscribe</button>`;
+  return wrap(
+    `${settingRow({
+      row: "billing-plan",
+      label: plan.title,
+      description: esc(detail),
+      control: `${statusBadge(tone, plan.title)}${action}`,
+    })}${settingRow({
+      row: "billing-seats",
+      label: `${String(billing.seats)} paid seat${billing.seats === 1 ? "" : "s"}`,
+      description:
+        "Everyone who can start work counts as a seat. Viewers, and anyone invited on a free link, do not.",
+    })}${
+      billing.currentPeriodEnd === undefined
+        ? ""
+        : settingRow({
+            row: "billing-renews",
+            label: `Renews ${formatDate(billing.currentPeriodEnd, { short: false })}`,
+            description:
+              "Seats added partway through a month are charged for the part of the month they are used.",
+          })
+    }`,
+  );
+}
+
+/** The Billing category: one section, whatever state billing is in. */
+function billingSection() {
+  return billingCard();
+}
+
+/**
+ * Tokens for signing in a client that has no browser to hold a cookie.
+ *
+ * A minted secret is shown once and never again: Kumi keeps a fingerprint, so
+ * nothing in this list can be read back — and nothing here tries to.
+ */
+function apiTokensCard() {
+  // Revoked tokens stay in the list the server returns, as the record that
+  // they existed. Offering "Revoke" beside one already revoked reads as a
+  // button that does nothing.
+  const tokens = (state.apiTokens ?? []).filter(
+    (token) => token.active !== false,
+  );
+  const minted = state.newApiToken;
+  return settingsSectionBlock({
+    id: "app-tokens",
+    heading: "App tokens",
+    description:
+      "Sign a Kumi app on your machine into this account. It reads the room and starts work, the same as this browser does.",
+    body: `${
+      minted === undefined
+        ? ""
+        : `<div class="st-token-secret" role="status">
+            <div class="st-row-label">Copy this now</div>
+            <p class="st-row-help">It is shown once. Kumi keeps only a
+              fingerprint, so nobody — including us — can read it back.</p>
+            <code class="token-secret">${esc(minted)}</code>
+            <span class="st-token-secret-actions">
+              <button type="button" class="btn btn-sm" data-act="token-copy">Copy</button>
+              <button type="button" class="btn btn-sm" data-act="token-dismiss">Done</button>
+            </span>
+          </div>`
+    }${settingRow({
+      row: "app-tokens",
+      label: "New token",
+      description:
+        "Name it after the machine you will use it on, so revoking the right one later is obvious.",
+      control: `<input class="input input-sm" data-token-name placeholder="My laptop"
+          aria-label="Token name">
+        <button type="button" class="btn btn-sm btn-primary" data-act="token-create">Create</button>`,
+    })}${settingRow({
+      label: "Kumi for desktop",
+      description:
+        "Mac, Windows and Linux. It signs itself in through your browser, so it needs none of the tokens below.",
+      control: `<a class="btn btn-sm" href="/download" target="_blank" rel="noopener">Download</a>`,
+    })}${
+      tokens.length === 0
+        ? `<div class="st-inline-empty">${icon("lock")}<span>No tokens yet.</span></div>`
+        : tokens
+            .map((token) =>
+              settingRow({
+                label: token.name ?? "Unnamed",
+                description: `created ${esc(relativeTime(token.createdAt))}${
+                  token.lastUsedAt === undefined
+                    ? " · never used"
+                    : ` · last used ${esc(relativeTime(token.lastUsedAt))}`
+                }`,
+                control: `<button type="button" class="btn btn-sm btn-danger"
+                  data-act="token-revoke" data-value="${esc(token.id)}">Revoke</button>`,
+              }),
+            )
+            .join("")
+    }`,
+  });
+}
+
+/** Repository, approval policy and app tokens — the project-wide controls. */
+function projectControlsSection() {
+  return `${settingsSectionBlock({
+    id: "repository",
+    heading: "Repository",
+    description:
+      "Canonical state is owned by the control plane. Publishing it to a remote branch is /push in the channel.",
+    body: `<div data-settings-row="repository" id="settings-row-repository"
+      tabindex="-1">${repositoryDefinitionList()}</div>`,
+  })}${approvalPolicySection()}${apiTokensCard()}`;
+}
+
+/** Everything the person who runs this deployment looks after. */
+function deploymentSection() {
+  return `${waitlistCard()}${deploymentCard()}`;
+}
+
+function settingsSectionMarkup(section) {
+  switch (section) {
+    case "agents":
+      return agentsSection();
+    case "integrations":
+      return integrationsSection();
+    case "workspace":
+      return workspaceSection();
+    case "billing":
+      return billingSection();
+    case "deployment":
+      return deploymentSection();
+    case "project-controls":
+      return projectControlsSection();
+    default:
+      return generalSection();
+  }
+}
+
+/**
+ * The categories this account may actually open.
+ *
+ * `adminOnly` is read here rather than inside each section so the sidebar,
+ * the default selection, the search index and the deep link all agree about
+ * what exists.
+ */
+function visibleSettingsSections() {
+  return SETTINGS_SECTIONS.filter(
+    (section) => section.adminOnly !== true || iAmSystemAdmin(),
+  );
+}
+
+/** The category currently selected, with anything unknown sent to General. */
+function selectedSettingsSection() {
+  return normalizeSettingsSection(
+    state.settingsSection,
+    visibleSettingsSections().map((section) => section.id),
+  );
+}
+
+/**
+ * Settings is a dialog over the conversation, with a fixed category sidebar
+ * and a content pane that scrolls on its own. It deliberately does not become
+ * a router screen: closing it returns to the exact channel and scroll position
+ * that were visible underneath.
+ *
+ * Below 760px the two panes become one column — a sticky header carrying the
+ * search field and a category combobox, then the content — because a 208px
+ * sidebar on a 390px phone leaves 182px for the settings themselves.
+ */
+function settingsDialog() {
+  const sections = visibleSettingsSections();
+  const selected = selectedSettingsSection();
+  const section =
+    sections.find((candidate) => candidate.id === selected) ?? sections[0];
+  const query = state.settingsQuery ?? "";
+  const results = searchSettings(query, {
+    sections: sections.map((candidate) => candidate.id),
+  });
+  const activeIndex = Math.min(
+    Math.max(0, state.settingsSearchIndex ?? 0),
+    Math.max(0, results.length - 1),
+  );
+  const search = settingsSearch({ query, results, activeIndex });
+  return `<div class="settings-layer" data-act="settings-backdrop">
+    <section class="settings-dialog" data-act="settings-dialog" role="dialog"
+      aria-modal="true" aria-labelledby="settings-title">
+      <aside class="st-sidebar">
+        <div class="st-sidebar-search">${search}</div>
+        ${settingsSidebar({ sections, selected })}
+      </aside>
+      <div class="st-main">
+        ${settingsPageHeader({
+          title: section.label,
+          description: section.description,
+        })}
+        <div class="st-mobile-bar">
+          ${settingsMobileCombobox({ sections, selected })}
+        </div>
+        <div class="st-content scroll" data-scroll-key="settings">
+          <div class="st-content-inner">
+            ${settingsSectionMarkup(selected)}
+          </div>
+        </div>
+        ${
+          selected === "project-controls" &&
+          policyDraftIsDirty(state.settingsPolicyDraft, state.project?.policy)
+            ? dirtySaveBar({
+                message: "Unsaved approval policy changes",
+                saveAct: "policy-save",
+                discardAct: "policy-discard",
+                saving: state.settingsPolicySaving === true,
+              })
+            : ""
+        }
+      </div>
+    </section>
+  </div>`;
 }
 
 /**
@@ -2569,12 +2652,42 @@ function currentWheelColor(field) {
   return (WHEEL_VALUE[field] ?? myAccent)();
 }
 
+/**
+ * A colour, applied at once and taken back if the server refuses.
+ *
+ * Waiting for a round trip before a swatch changes makes a colour picker feel
+ * broken, so the choice lands locally first. If the PATCH fails the previous
+ * values come back and the row says why, rather than leaving somebody looking
+ * at a colour their colleagues will never see.
+ */
 async function saveAppearanceChoice(patch) {
+  const user = state.principal?.user;
+  const previous = Object.fromEntries(
+    Object.keys(patch).map((key) => [key, user?.[key]]),
+  );
+  if (user !== undefined) {
+    state.principal = {
+      ...state.principal,
+      user: { ...user, ...patch },
+    };
+  }
+  state.settingsAppearanceError = undefined;
+  render();
   try {
     await saveAppearance(patch);
+    state.settingsAppearanceError = undefined;
     render();
   } catch (error) {
-    toast(error.message, "error");
+    if (user !== undefined) {
+      state.principal = {
+        ...state.principal,
+        user: { ...state.principal.user, ...previous },
+      };
+    }
+    state.settingsAppearanceError =
+      error.message ?? "That colour could not be saved.";
+    toast(state.settingsAppearanceError, "error");
+    render();
   }
 }
 
@@ -3234,7 +3347,8 @@ state.previewsStarting = previewsStarting;
  * dead weight for the seconds a sign-in start can take.
  *
  * Shared through `state`, because the buttons that have to look busy are
- * drawn in `agentsCard`, `githubCard`, and `chatComposer`, which cannot
+ * drawn in `agentProviderRow`, `integrationsSection` and `chatComposer`,
+ * which cannot
  * import this file back.
  */
 const providerConnecting = new Set();
@@ -4106,95 +4220,6 @@ function daysUntil(iso) {
 }
 
 /**
- * The plan, what it covers, and what it costs — for the Settings screen.
- *
- * Seats are stated rather than implied, because "why is my bill that number"
- * is the question this screen exists to answer, and the rule is not obvious:
- * viewers are free, so a team of ten can be a bill for four.
- */
-function billingCard() {
-  void ensureBilling(render);
-  const billing = state.billing;
-  if (billing === undefined || billing === null) {
-    return `<section class="card"><div class="set-row"><span class="sr-body">
-      <div class="sr-title">Billing</div>
-      <div class="sr-sub">Loading…</div></span></div></section>`;
-  }
-  if (billing.payments !== true) {
-    // Switched off, not missing. Said as a decision rather than as a gap,
-    // because it is one — and because "not set up" reads as something an
-    // operator should go and fix.
-    return `<section class="card"><div class="set-row"><span class="sr-body">
-      <div class="sr-title">Kumi is not charging right now</div>
-      <div class="sr-sub">Payments are switched off on this deployment.
-        Nothing is billed, nothing expires, and every seat has full use of
-        the repositories it can reach.</div>
-    </span></div></section>`;
-  }
-  if (billing.configured !== true) {
-    return `<section class="card"><div class="set-row"><span class="sr-body">
-      <div class="sr-title">Billing is not set up on this deployment</div>
-      <div class="sr-sub">This Kumi is running without payment configured,
-        which is a supported way to run it. Nothing here is chargeable.</div>
-    </span></div></section>`;
-  }
-  const status = BILLING_STATUS[billing.status] ?? BILLING_STATUS.trialing;
-  const trialDays = daysUntil(billing.trialEndsAt);
-  const detail =
-    billing.status === "trialing"
-      ? trialDays === undefined
-        ? "Your trial is running."
-        : trialDays === 0
-          ? "Your trial ends today."
-          : `${String(trialDays)} day${trialDays === 1 ? "" : "s"} left on your trial.`
-      : status.detail;
-  const canManage = canManageOrganization();
-  return `<section class="card">
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">${esc(status.title)}</div>
-        <div class="sr-sub">${esc(detail)}</div>
-      </span>
-      ${
-        // A comped team is offered nothing. `manageable` is false for them —
-        // they have no Stripe customer — so the ternary below used to route
-        // every one of them to Subscribe, rendered directly beside "Nothing to
-        // do", and a click on it is how a permanent comp gets spent.
-        billing.status === "comped"
-          ? ""
-          : canManage
-          ? billing.manageable === true
-            ? `<button type="button" class="btn btn-sm" data-act="billing-portal">
-                 ${icon("external")} Manage billing</button>`
-            : `<button type="button" class="btn btn-sm btn-primary" data-act="billing-checkout">
-                 ${icon("bolt")} Subscribe</button>`
-          : ""
-      }
-    </div>
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">${String(billing.seats)} paid seat${
-          billing.seats === 1 ? "" : "s"
-        }</div>
-        <!-- The rule stated outright. It is the whole explanation for a bill
-             that does not match the size of the team. -->
-        <div class="sr-sub">Everyone who can start work counts as a seat.
-          Viewers, and anyone invited on a free link, do not.</div>
-      </span>
-    </div>
-    ${
-      billing.currentPeriodEnd === undefined
-        ? ""
-        : `<div class="set-row"><span class="sr-body">
-             <div class="sr-title">Renews ${esc(formatDate(billing.currentPeriodEnd, { short: false }))}</div>
-             <div class="sr-sub">Seats added partway through a month are
-               charged for the part of the month they are used.</div>
-           </span></div>`
-    }
-  </section>`;
-}
-
-/**
  * Sends somebody to Stripe, in the browser.
  *
  * `window.open` rather than a redirect: the desktop shell is not a browser
@@ -4208,7 +4233,7 @@ async function billingAction(kind) {
     // Reloaded on return rather than assumed: the webhook is what actually
     // records a payment, and it may land before or after the person gets
     // back here.
-    state.billing = undefined;
+    resetBilling();
     window.open(url, "_blank", "noopener");
   } catch (error) {
     toast(error.message ?? "Billing could not be opened.", "error");
@@ -4295,88 +4320,59 @@ function waitlistCard() {
   </section>`;
 }
 
-/** Pending invitations, for the Settings screen. */
-function invitationsCard() {
-  // Accepted, revoked, and expired offers are historical records rather than
-  // people still waiting to join. Keep this surface focused on invitations
-  // that can still be acted on.
-  const rows = (state.invitations ?? []).filter(
-    (invitation) => invitation.status === "pending",
-  );
-  return `<section class="card">
-    <div class="panel-head">
-      <div><h3>People</h3><p>Invitations into ${esc(
-        state.project?.name ?? "this project",
-      )}</p></div>
-      <!-- No invite button here. An invitation names one repository, so
-           starting one from a project-wide screen meant being asked which
-           repository first — and the channel header, where somebody already
-           knows the answer, is where the button belongs. This card is the
-           record of what has been sent, which is a different question. -->
-    </div>
-    ${
-      rows.length === 0
-        ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">
-            No pending invitations. An invitation grants one repository by
-            default, so sharing something does not hand over everything.
-            </div></span></div>`
-        : rows
-            .map(
-              (invite) => `<div class="set-row">
-                <span class="sr-body">
-                  <div class="sr-title">${esc(invite.email)}</div>
-                  <div class="sr-sub">${esc(invite.role)} on ${esc(
-                    invite.repositoryId ?? "every repository",
-                  )} · invited ${esc(relativeTime(invite.createdAt))}</div>
-                </span>
-                <span class="sr-ctl">
-                  ${badge(invite.status)}
-                  ${
-                    invite.status === "pending"
-                      ? `<button class="btn btn-sm" data-act="invite-revoke"
-                          data-value="${esc(invite.id)}">Revoke</button>`
-                      : ""
-                  }
-                </span>
-              </div>`,
-            )
-            .join("")
-    }
-  </section>`;
-}
-
-async function savePolicy(form) {
-  const data = new FormData(form);
+/**
+ * Writes the approval-policy draft to the project.
+ *
+ * Explicit, and the only explicit save in Settings: everything else here is a
+ * personal preference that takes effect the moment it is chosen. A policy is
+ * not personal — it decides what every colleague's agents have to stop for —
+ * so it is reviewed as a set and sent as a set.
+ */
+async function savePolicy() {
+  const draft = state.settingsPolicyDraft;
+  if (draft === undefined || state.settingsPolicySaving === true) {
+    return;
+  }
+  state.settingsPolicySaving = true;
+  render();
   try {
     const body = policyPayload({
-      approvalsEnabled: data.get("approvalsEnabled") === "true",
-      requireSchemaReview: data.get("requireSchemaReview") === "true",
-      requireChangesetReview: data.get("requireChangesetReview") === "true",
-      protectedPaths: String(data.get("protectedPaths") ?? ""),
-      approvalTimeoutMinutes: String(data.get("approvalTimeoutMinutes") ?? ""),
-      maxTaskRuntimeMinutes: String(data.get("maxTaskRuntimeMinutes") ?? ""),
+      approvalsEnabled: draft.approvalsEnabled === true,
+      requireSchemaReview: draft.requireSchemaReview === true,
+      requireChangesetReview: draft.requireChangesetReview === true,
+      protectedPaths: String(draft.protectedPaths ?? ""),
+      approvalTimeoutMinutes: String(draft.approvalTimeoutMinutes ?? ""),
+      maxTaskRuntimeMinutes: String(draft.maxTaskRuntimeMinutes ?? ""),
       maxProjectRuntimeMinutesPerDay: String(
-        data.get("maxProjectRuntimeMinutesPerDay") ?? "",
+        draft.maxProjectRuntimeMinutesPerDay ?? "",
       ),
     });
     // The project itself. There has never been a `/policy` sub-route — every
-    // project sub-pattern in the gateway is anchored, so this PATCH fell
-    // through to "Route was not found" and the whole card silently saved
-    // nothing: human approval, schema review, protected paths, the approval
-    // timeout and the runtime cap, which are the controls a team sets before
-    // letting agents write to their repository. `policyPayload` already
-    // returns `{ policy }`, which is exactly what `PATCH /projects/:id`
-    // takes.
+    // project sub-pattern in the gateway is anchored — and `policyPayload`
+    // already returns `{ policy }`, which is exactly what `PATCH
+    // /projects/:id` takes.
     await api(`/projects/${encodeURIComponent(state.projectId)}`, {
       method: "PATCH",
       body,
     });
-    toast("Policy saved", "ok");
+    toast("Approval policy saved", "ok");
     await loadContext();
-    render();
+    state.settingsPolicyDraft = undefined;
   } catch (error) {
     toast(error.message, "error");
+  } finally {
+    state.settingsPolicySaving = false;
+    render();
   }
+}
+
+/** Puts the approval policy back to what the project says it is. */
+function discardPolicyDraft() {
+  if (!confirmDiscardSettings()) {
+    return;
+  }
+  state.settingsPolicyDraft = undefined;
+  render();
 }
 
 /* -------------------------------------------------------------- theme ---- */
@@ -6192,7 +6188,7 @@ function openReadyPlan(repositoryId) {
 }
 
 /** Keep keyboard focus inside the settings surface while it is modal. */
-document.addEventListener("keydown", (event) => {
+function trapSettingsFocus(event) {
   if (event.key !== "Tab" || state.settingsOpen !== true) {
     return;
   }
@@ -6214,7 +6210,154 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     first.focus();
   }
+}
+document.addEventListener("keydown", trapSettingsFocus);
+
+/**
+ * The search field's own keys.
+ *
+ * Arrow keys move through the results without leaving the field, Enter opens
+ * the highlighted one, and Escape clears the query before it is allowed to
+ * mean "close the dialog" — one press to abandon a search, a second to leave.
+ */
+document.addEventListener("keydown", (event) => {
+  if (state.settingsOpen !== true) {
+    return;
+  }
+  const field = event.target;
+  if (!(field instanceof Element) || field.dataset?.act !== "settings-search-input") {
+    return;
+  }
+  const results = currentSettingsResults();
+  if (event.key === "Escape") {
+    if ((state.settingsQuery ?? "") === "") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    state.settingsQuery = "";
+    state.settingsSearchIndex = 0;
+    field.value = "";
+    paintSettingsResults();
+    return;
+  }
+  if (results.length === 0) {
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    const next =
+      (((state.settingsSearchIndex ?? 0) + step) % results.length +
+        results.length) %
+      results.length;
+    state.settingsSearchIndex = next;
+    paintSettingsResults();
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const chosen = results[state.settingsSearchIndex ?? 0];
+    if (chosen !== undefined) {
+      openSettingsSearchResult(chosen.section, chosen.row);
+    }
+  }
 });
+
+/**
+ * Repaints the results list without rebuilding the dialog.
+ *
+ * Every other control in here can afford a whole-screen render; a field being
+ * typed into cannot, because the swap takes the caret with it.
+ */
+function paintSettingsResults() {
+  const host = document.querySelector("[data-settings-search]");
+  if (host === null) {
+    return;
+  }
+  const results = currentSettingsResults();
+  const activeIndex = Math.min(
+    Math.max(0, state.settingsSearchIndex ?? 0),
+    Math.max(0, results.length - 1),
+  );
+  const value = host.querySelector(".st-search-input")?.value ?? "";
+  const next = document.createElement("div");
+  next.innerHTML = settingsSearch({
+    query: state.settingsQuery ?? "",
+    results,
+    activeIndex,
+  });
+  const fresh = next.firstElementChild;
+  const list = fresh?.querySelector("#settings-search-results");
+  const existing = host.querySelector("#settings-search-results");
+  if (list !== null && list !== undefined && existing !== null) {
+    existing.replaceWith(list);
+  }
+  const status = fresh?.querySelector('[role="status"]');
+  const currentStatus = host.querySelector('[role="status"]');
+  if (status !== null && status !== undefined && currentStatus !== null) {
+    currentStatus.textContent = status.textContent;
+  }
+  const clear = host.querySelector(".st-search-clear");
+  if (value === "" && clear !== null) {
+    clear.remove();
+  } else if (value !== "" && clear === null) {
+    const freshClear = fresh?.querySelector(".st-search-clear");
+    if (freshClear !== null && freshClear !== undefined) {
+      host.querySelector(".st-search-field")?.append(freshClear);
+    }
+  }
+  const input = host.querySelector(".st-search-input");
+  if (input !== null) {
+    if (results.length > 0 && (state.settingsQuery ?? "") !== "") {
+      input.setAttribute(
+        "aria-activedescendant",
+        `settings-search-option-${String(activeIndex)}`,
+      );
+    } else {
+      input.removeAttribute("aria-activedescendant");
+    }
+  }
+  host
+    .querySelector(".st-search-field")
+    ?.setAttribute("aria-expanded", String((state.settingsQuery ?? "") !== ""));
+}
+
+/**
+ * Shows or hides the unsaved-changes bar without a render.
+ *
+ * Same reason as the results above: the bar appears while somebody is still
+ * typing into the field that made it appear.
+ */
+function paintSettingsDirtyBar() {
+  const main = document.querySelector(".st-main");
+  if (main === null) {
+    return;
+  }
+  const dirty = policyDraftIsDirty(
+    state.settingsPolicyDraft,
+    state.project?.policy,
+  );
+  const existing = main.querySelector("[data-settings-dirty]");
+  if (!dirty) {
+    existing?.remove();
+    return;
+  }
+  if (existing !== null) {
+    return;
+  }
+  const next = document.createElement("div");
+  next.innerHTML = dirtySaveBar({
+    message: "Unsaved approval policy changes",
+    saveAct: "policy-save",
+    discardAct: "policy-discard",
+    saving: state.settingsPolicySaving === true,
+  });
+  const bar = next.firstElementChild;
+  if (bar !== null) {
+    main.append(bar);
+  }
+}
 
 /**
  * Escape closes whatever is stacked over the conversation, one layer a press.
@@ -6238,7 +6381,7 @@ document.addEventListener("keydown", (event) => {
   }
   if (state.settingsOpen === true) {
     event.preventDefault();
-    closeSettings();
+    closeSettings({ viaEscape: true });
     return;
   }
   if (state.route !== "chats") {
@@ -8101,54 +8244,315 @@ function loadOpenedDirectMessage(userId) {
   });
 }
 
-function openSettings(section = "general") {
+/**
+ * The settings value in the current fragment, written or removed.
+ *
+ * Settings rides alongside the route it was opened over rather than
+ * replacing it — `#chats/LATTICE/main?channel=…&settings=general` — so the
+ * conversation underneath survives the whole visit, and closing gives back
+ * exactly the URL that was there before.
+ */
+function writeSettingsLocation(section, { replace = true } = {}) {
+  const raw = window.location.hash.replace(/^#/u, "");
+  const [path, query = ""] = raw.split("?");
+  const params = new URLSearchParams(query);
+  if (section === undefined) {
+    params.delete("settings");
+  } else {
+    params.set("settings", section);
+  }
+  // The two bare legacy hashes are not routes to come back to: they were
+  // Settings itself. Anything that leaves one lands on the current screen.
+  const base =
+    path === "" || path === "settings" || path === "advanced"
+      ? state.route === "chats"
+        ? `chats/${encodeURIComponent(activeChannelId())}/main`
+        : state.route
+      : path;
+  const next = `#${base}${params.size === 0 ? "" : `?${String(params)}`}`;
+  if (window.location.hash === next) {
+    return;
+  }
+  if (replace) {
+    window.history.replaceState(null, "", next);
+  } else {
+    window.history.pushState(null, "", next);
+  }
+}
+
+/**
+ * Puts the dialog on a category, or takes it away when the URL names none.
+ *
+ * Returns whether anything changed, so a hash that only moved the channel
+ * does not redraw Settings for no reason.
+ */
+function applySettingsSection(section) {
+  if (section === undefined) {
+    if (state.settingsOpen !== true) {
+      return false;
+    }
+    state.settingsOpen = false;
+    resetSettingsTransientState();
+    return true;
+  }
+  const resolved = normalizeSettingsSection(
+    section,
+    visibleSettingsSections().map((candidate) => candidate.id),
+  );
+  const changed =
+    state.settingsOpen !== true || state.settingsSection !== resolved;
   state.settingsOpen = true;
-  state.settingsSection = SETTINGS_SECTIONS.some(
-    (candidate) => candidate.id === section,
-  )
-    ? section
-    : "general";
+  state.settingsSection = resolved;
+  return changed;
+}
+
+/** Everything Settings holds that belongs to one visit and not the next. */
+function resetSettingsTransientState() {
   state.settingsRenamingId = undefined;
+  state.settingsManagingId = undefined;
+  state.settingsCheckingId = undefined;
+  state.settingsQuery = "";
+  state.settingsSearchIndex = 0;
+  state.settingsPolicyDraft = undefined;
+  state.settingsPolicySaving = false;
   state.openWheel = undefined;
-  // A secret from a previous visit is not still on screen when the dialog is
-  // reopened: it was shown to be copied once, and it has been.
-  state.newApiToken = undefined;
-  // Fetched on open rather than at boot: nobody who never opens settings
-  // needs their token list, and the card renders empty until it arrives.
-  void loadApiTokens()
-    .then(() => render())
-    .catch(() => undefined);
-  closePopover();
-  render();
-  window.queueMicrotask(() =>
-    document.querySelector("[data-act='settings-close']")?.focus(),
+}
+
+/** What a category change throws away. The policy draft is not on this list. */
+function resetSettingsPageState() {
+  state.settingsRenamingId = undefined;
+  state.settingsManagingId = undefined;
+  state.settingsCheckingId = undefined;
+  state.openWheel = undefined;
+}
+
+/** Whether it is safe to leave an approval-policy edit behind. */
+function confirmDiscardSettings() {
+  if (!policyDraftIsDirty(state.settingsPolicyDraft, state.project?.policy)) {
+    return true;
+  }
+  return window.confirm(
+    "Discard your unsaved approval policy changes?",
   );
 }
 
-function closeSettings() {
+/**
+ * A yes/no about something that will not come back, drawn as one.
+ *
+ * Red on the button rather than only in the sentence: the press is the
+ * irreversible act, so the press is what has to look like one.
+ */
+async function confirmDestructive({
+  title,
+  subtitle = "",
+  body = "",
+  confirm = "Remove",
+  cancel = "Cancel",
+}) {
+  const answer = await showModal({
+    title,
+    subtitle,
+    body,
+    confirm,
+    cancel,
+    danger: true,
+  });
+  return answer !== undefined;
+}
+
+/** Disconnecting an agent from its own row, after its own confirmation. */
+function disconnectAgentConfirmed(providerId) {
+  state.settingsManagingId = undefined;
+  void disconnectAgent(providerId, render);
+}
+
+/** Revoking an app token, which no app signed in with it survives. */
+async function revokeApiTokenConfirmed(id) {
+  const token = (state.apiTokens ?? []).find((entry) => entry.id === id);
+  const confirmed = await confirmDestructive({
+    title: `Revoke ${token?.name ?? "this token"}?`,
+    subtitle:
+      "Any app signed in with this token stops working immediately. " +
+      "Nothing else about your account changes.",
+    confirm: "Revoke token",
+    cancel: "Keep it",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await revokeApiToken(id);
+    toast("Token revoked", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Scrolls a row into view and puts focus on it.
+ *
+ * Focus lands on the row, not on the control inside it: the person searched
+ * for a name, and being dropped onto the switch beside a label they never
+ * saw is how a search result reads as the wrong result.
+ */
+function focusSettingsRow(row) {
+  if (typeof row !== "string" || row === "") {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    const node = document.querySelector(
+      `[data-settings-row="${row.replaceAll('"', "")}"]`,
+    );
+    if (node === null) {
+      return;
+    }
+    node.scrollIntoView({ block: "center" });
+    node.classList.add("is-found");
+    node.focus({ preventScroll: true });
+  });
+}
+
+/** Puts focus back where Settings was opened from. */
+function restoreFocusToProfileTrigger() {
+  const saved = state.settingsReturnFocus;
+  state.settingsReturnFocus = undefined;
+  window.queueMicrotask(() => {
+    if (saved instanceof HTMLElement && saved.isConnected) {
+      saved.focus();
+      return;
+    }
+    // The menu that held the Settings entry has closed with it, so the
+    // fallback is the control that opens that menu: the profile at the foot
+    // of the channel sidebar.
+    const trigger =
+      document.querySelector('[data-act="nav"][data-value="settings"]') ??
+      document.querySelector('[data-act="account-menu"]') ??
+      document.querySelector("[data-profile-trigger]");
+    trigger?.focus();
+  });
+}
+
+function openSettings(section = "general") {
+  const already = state.settingsOpen === true;
+  if (!already) {
+    state.settingsReturnFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : undefined;
+    resetSettingsTransientState();
+  }
+  applySettingsSection(section);
+  // A secret from a previous visit is not still on screen when the dialog is
+  // reopened: it was shown to be copied once, and it has been.
+  state.newApiToken = undefined;
+  // Opening is one history entry; moving between categories is none. Back
+  // from anywhere inside Settings therefore lands on the conversation, not on
+  // whichever six categories were looked at on the way.
+  writeSettingsLocation(state.settingsSection, { replace: already });
+  if (!already) {
+    state.settingsPushedEntry = true;
+  }
+  // Fetched on open rather than at boot: nobody who never opens settings
+  // needs their token list, and the section renders its skeleton until it
+  // arrives.
+  void loadApiTokens()
+    .then(() => render())
+    .catch(() => undefined);
+  state.settingsAgentsLoading = state.providers.length === 0;
+  void loadProviders()
+    .catch(() => undefined)
+    .finally(() => {
+      state.settingsAgentsLoading = false;
+      if (state.settingsOpen === true) {
+        render();
+      }
+    });
+  closePopover();
+  render();
+  // Search first. It is the fastest way to anything in here, and it is the
+  // only control whose whole purpose is to be typed into.
+  window.queueMicrotask(() =>
+    document.querySelector("[data-act='settings-search-input']")?.focus(),
+  );
+}
+
+/**
+ * @param viaEscape Escape stands down while an explicit-save form has
+ *   unsaved values in it: a key pressed by reflex must not be able to throw
+ *   away a policy change somebody typed on purpose.
+ */
+function closeSettings({ viaEscape = false } = {}) {
   if (state.settingsOpen !== true) {
     return;
   }
+  const dirty = policyDraftIsDirty(
+    state.settingsPolicyDraft,
+    state.project?.policy,
+  );
+  if (dirty && viaEscape) {
+    toast("Save or discard your approval policy changes first", "info");
+    return;
+  }
+  if (!confirmDiscardSettings()) {
+    return;
+  }
   state.settingsOpen = false;
-  state.settingsRenamingId = undefined;
-  state.openWheel = undefined;
-  if (/^#(?:settings|advanced)$/u.test(window.location.hash)) {
-    window.history.replaceState(null, "", `#${state.route}`);
+  resetSettingsTransientState();
+  if (state.settingsPushedEntry === true) {
+    state.settingsPushedEntry = false;
+    // The entry Settings added, given back. Only that one: the conversation
+    // behind it was never navigated away from.
+    window.history.back();
+  } else {
+    writeSettingsLocation(undefined);
   }
   render();
-  window.queueMicrotask(() =>
-    document
-      .querySelector('[data-act="nav"][data-value="settings"]')
-      ?.focus(),
-  );
+  restoreFocusToProfileTrigger();
+}
+
+/** Moving between categories, which replaces rather than stacks history. */
+function selectSettingsSection(section) {
+  if (!confirmDiscardSettings()) {
+    return;
+  }
+  state.settingsPolicyDraft = undefined;
+  resetSettingsPageState();
+  applySettingsSection(section);
+  writeSettingsLocation(state.settingsSection, { replace: true });
+  render();
+  document.querySelector('[data-scroll-key="settings"]')?.scrollTo(0, 0);
+}
+
+/** A search result, opened: the section, then the row inside it. */
+function openSettingsSearchResult(section, row) {
+  if (!confirmDiscardSettings()) {
+    return;
+  }
+  state.settingsPolicyDraft = undefined;
+  resetSettingsPageState();
+  state.settingsQuery = "";
+  state.settingsSearchIndex = 0;
+  applySettingsSection(section);
+  writeSettingsLocation(state.settingsSection, { replace: true });
+  render();
+  focusSettingsRow(row);
+}
+
+/** The results the search field is currently offering. */
+function currentSettingsResults() {
+  return searchSettings(state.settingsQuery ?? "", {
+    sections: visibleSettingsSections().map((section) => section.id),
+  });
 }
 
 function navigate(route) {
   // Settings categories are a dialog over the current conversation, not
-  // destinations that replace it. Keep accepting the historical "advanced"
-  // value so an old bookmark opens the right category in the new surface.
-  if (route === "settings" || route === "advanced") {
-    openSettings(route === "advanced" ? "advanced" : "general");
+  // destinations that replace it. The historical ids are still accepted —
+  // `SETTINGS_SECTION_ALIASES` translates them — so an old bookmark or a
+  // stored route opens the category it always meant.
+  if (route === "settings" || route === "advanced" || route in SETTINGS_SECTION_ALIASES) {
+    openSettings(route === "settings" ? "general" : route);
     return;
   }
   // A link or a stored route from before Code and Coordinator were folded into
@@ -8160,7 +8564,7 @@ function navigate(route) {
   state.route = route;
   // An open rename field belongs to the screen it was opened on; leaving and
   // coming back to Settings should not find it still open on an old value.
-  state.settingsRenamingId = undefined;
+  resetSettingsTransientState();
   closePopover();
   if (route === "chats") {
     writeChatLocation();
@@ -8329,9 +8733,20 @@ function applyHash() {
     void signOutForAuthLink(linked);
     return;
   }
+  const settingsSection = settingsSectionFromHash();
   const chatLocation = parseChatLocation();
   if (chatLocation !== undefined) {
-    state.settingsOpen = false;
+    // Only the settings value moved: the conversation underneath is already
+    // the one this URL names, and rebuilding it would throw away the reader's
+    // place in it for a dialog opening over the top.
+    if (state.route === "chats" && state.chatHashApplied === window.location.hash.split("?")[0]) {
+      if (applySettingsSection(settingsSection)) {
+        render();
+      }
+      return;
+    }
+    state.chatHashApplied = window.location.hash.split("?")[0];
+    applySettingsSection(settingsSection);
     state.route = "chats";
     if (chatLocation.workspaceId !== "") {
       state.repositoryId = chatLocation.workspaceId;
@@ -8365,10 +8780,9 @@ function applyHash() {
     }
     return;
   }
-  const route = window.location.hash.replace(/^#/u, "") || "chats";
+  const route = (window.location.hash.replace(/^#/u, "") || "chats").split("?")[0];
   if (route === "settings" || route === "advanced") {
-    state.settingsOpen = true;
-    state.settingsSection = route === "advanced" ? "advanced" : "general";
+    applySettingsSection(route);
     render();
     return;
   }
@@ -8376,8 +8790,10 @@ function applyHash() {
     ROUTES.has(route) &&
     (route !== state.route || state.settingsOpen === true)
   ) {
-    state.settingsOpen = false;
+    applySettingsSection(settingsSection);
     state.route = route;
+    render();
+  } else if (applySettingsSection(settingsSection)) {
     render();
   }
   if (route === "chats") {
@@ -8843,14 +9259,54 @@ document.addEventListener("click", (event) => {
       if (!SETTINGS_SECTIONS.some((section) => section.id === value)) {
         return;
       }
-      state.settingsSection = value;
-      state.settingsRenamingId = undefined;
-      state.openWheel = undefined;
+      selectSettingsSection(value);
+      return;
+    case "settings-search-clear":
+      state.settingsQuery = "";
+      state.settingsSearchIndex = 0;
       render();
-      document.querySelector('[data-scroll-key="settings"]')?.scrollTo(0, 0);
+      window.queueMicrotask(() =>
+        document.querySelector("[data-act='settings-search-input']")?.focus(),
+      );
+      return;
+    case "settings-search-go":
+      openSettingsSearchResult(value, node.dataset.row);
       return;
     case "settings-theme":
+      // Local to this device and instant: nothing is sent, so there is
+      // nothing to roll back and no reason to make anybody wait.
       setMyTheme(value);
+      render();
+      return;
+    case "wheel-select":
+      state.openWheel = value;
+      render();
+      return;
+    case "agent-manage":
+      state.settingsManagingId =
+        state.settingsManagingId === value ? undefined : value;
+      state.settingsRenamingId = undefined;
+      render();
+      return;
+    case "agent-rename-cancel":
+      state.settingsRenamingId = undefined;
+      render();
+      return;
+    case "policy-toggle": {
+      const draft = currentPolicyDraft();
+      const field = node.dataset.field;
+      draft[field] = !(draft[field] === true);
+      render();
+      return;
+    }
+    case "policy-save":
+      void savePolicy();
+      return;
+    case "policy-discard":
+      discardPolicyDraft();
+      return;
+    case "billing-retry":
+      resetBilling();
       render();
       return;
     case "settings-sounds": {
@@ -10084,6 +10540,7 @@ document.addEventListener("click", (event) => {
     case "agent-rename-toggle":
       state.settingsRenamingId =
         state.settingsRenamingId === value ? undefined : value;
+      state.settingsManagingId = undefined;
       render();
       if (state.settingsRenamingId === value) {
         const input = $("[data-act='settings-rename-input']");
@@ -10370,7 +10827,13 @@ document.addEventListener("click", (event) => {
       // The machine half of an agent, on demand. Connecting used to be the
       // only thing that ran it, which left an agent whose CLI was missing or
       // signed out with no way to reach the installer at all.
-      void checkLocalCli(value, render);
+      state.settingsCheckingId = value;
+      render();
+      void checkLocalCli(value, render).finally(() => {
+        state.settingsCheckingId = undefined;
+        state.settingsManagingId = undefined;
+        render();
+      });
       return;
     case "github-connect":
       void connectGitHubAccount(render);
@@ -10392,7 +10855,7 @@ document.addEventListener("click", (event) => {
       // secret. Both are `disconnectAgent`'s job — this used to fire the
       // DELETE straight off a click, on a button whose meaning had quietly
       // changed underneath it.
-      void disconnectAgent(value, render);
+      disconnectAgentConfirmed(value);
       return;
     case "agent-switch": {
       const agent = myAgents().find((entry) => entry.id === value);
@@ -10927,12 +11390,7 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "token-revoke":
-      void revokeApiToken(value)
-        .then(() => {
-          toast("Token revoked", "ok");
-          render();
-        })
-        .catch((error) => toast(error.message, "error"));
+      void revokeApiTokenConfirmed(value);
       return;
     case "invite-revoke":
       void revokeInvitation(value)
@@ -11043,7 +11501,7 @@ document.addEventListener("submit", (event) => {
       void submitSignupComplete(form);
       return;
     case "policy-save":
-      void savePolicy(form);
+      void savePolicy();
       return;
     case "invite-accept":
       void submitInviteAccept(form);
@@ -11256,6 +11714,12 @@ async function pickChannelPictureFile(repositoryId, file) {
 
 document.addEventListener("change", (event) => {
   const picker = event.target;
+  // The phone's category control. A select answers `change` and never the
+  // delegated click, so picking with the keyboard would otherwise do nothing.
+  if (picker?.dataset?.act === "settings-section-select") {
+    selectSettingsSection(picker.value);
+    return;
+  }
   // A select answers `change`, never the delegated click above — picking with
   // the keyboard fires no click at all.
   if (picker?.dataset?.act === "offline-target") {
@@ -11431,6 +11895,21 @@ document.addEventListener("input", (event) => {
       answers[current.step] = { text: typed };
     }
     state.questionAnswers[current.pending.requestId] = answers;
+    return;
+  }
+  if (act === "settings-search-input") {
+    // No render from here: the field is the one control being typed into,
+    // and rebuilding the dialog under a caret loses it. The list below is
+    // repainted in place instead.
+    state.settingsQuery = node.value;
+    state.settingsSearchIndex = 0;
+    paintSettingsResults();
+    return;
+  }
+  if (act === "policy-field") {
+    const draft = currentPolicyDraft();
+    draft[node.dataset.field] = node.value;
+    paintSettingsDirtyBar();
     return;
   }
   if (act === "repo-search") {
@@ -12278,7 +12757,7 @@ async function boot() {
       billingReturn === "done" ? "ok" : "info",
     );
     if (billingReturn === "done") {
-      state.billing = undefined;
+      resetBilling();
       void loadBilling().then(() => render());
     }
   }

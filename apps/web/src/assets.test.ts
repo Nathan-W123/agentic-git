@@ -69,6 +69,7 @@ test("loads every control-room asset with an explicit content type", async () =>
     "/screen-chats.js",
     "/screen-agents.js",
     "/screen-notifications.js",
+    "/screen-settings.js",
   ]) {
     assert.equal(
       assets.get(module)?.contentType,
@@ -132,7 +133,14 @@ test("every dashboard file also has a name that carries its own digest", async (
   const digested = [...assets.keys()].filter((url) =>
     /^\/[a-z-]+\.[0-9a-f]{12}\.(?:js|css)$/u.test(url),
   );
-  for (const name of ["app", "data", "ui", "screen-chats", "boot-plan"]) {
+  for (const name of [
+    "app",
+    "data",
+    "ui",
+    "screen-chats",
+    "screen-settings",
+    "boot-plan",
+  ]) {
     assert.equal(
       digested.some((url) => url.startsWith(`/${name}.`)),
       true,
@@ -824,18 +832,26 @@ test("the admissions form saves to a route that exists, with every field on it",
     "the policy goes to the project route itself; no sub-route exists",
   );
 
-  // Every field the save reads has to be a field the form renders, or it is
-  // submitted as its empty value however the person set it.
-  const card = sourceOf(source, "admissionsCard", "repositoryCard");
-  const read = [...save.matchAll(/data\.get\("([^"]+)"\)/gu)].map(
+  // Every field the save reads has to be a field the section actually edits,
+  // or it is submitted as its empty value however the person set it. The
+  // draft is now the single list of them: `policyDraftFrom` builds it from
+  // the project and the controls write into it by name.
+  const draft = sourceOf(source, "policyDraftFrom", "policyDraftIsDirty");
+  const section = sourceOf(source, "approvalPolicySection", "profileRow");
+  const read = [...save.matchAll(/draft\.([A-Za-z]+)/gu)].map(
     (match) => match[1],
   );
-  assert.ok(read.length >= 7, `expected the whole form, saw ${String(read.length)}`);
+  assert.ok(read.length >= 7, `expected the whole policy, saw ${String(read.length)}`);
   for (const field of read) {
     assert.match(
-      card,
-      new RegExp(`name="${String(field)}"`, "u"),
-      `savePolicy reads ${String(field)}, which the form never renders`,
+      draft,
+      new RegExp(`\\b${String(field)}:`, "u"),
+      `savePolicy reads ${String(field)}, which the draft never holds`,
+    );
+    assert.match(
+      section,
+      new RegExp(`"${String(field)}"`, "u"),
+      `savePolicy reads ${String(field)}, which no control edits`,
     );
   }
 });
@@ -1883,17 +1899,17 @@ test("an agent roster is personal, not a project-wide list", async () => {
 
 test("Settings Agents rows show the provider, then Connected as the call sign", async () => {
   const app = await publicFile("app.js");
-  const start = app.indexOf("function agentsCard()");
+  const start = app.indexOf("function agentProviderRow(agent)");
   assert.notEqual(start, -1);
   const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
   // Title is the vendor label (Claude), not the kumi name that used to sit
   // there and hide which provider the row was for.
-  assert.match(body, /sr-title.*\$\{esc\(agentLabelOf\(agent\.id\)\)\}/u);
+  assert.match(body, /name: agentLabelOf\(agent\.id\)/u);
   // A named connection says who it is connected as — the call sign — rather
   // than the opaque "you".
   assert.match(
     body,
-    /agent\.hasName === true\s*\?\s*`Connected as \$\{agent\.name\}`\s*:\s*"Connected as you"/u,
+    /agent\.hasName === true\s*\n?\s*\?\s*`as \$\{callSign\}`\s*\n?\s*:\s*"as you"/u,
   );
 });
 
@@ -1908,7 +1924,7 @@ test("Settings Agents rows show the provider, then Connected as the call sign", 
 test("Settings Agents rows ask whether the agent exists, not whether a secret is stored", async () => {
   const app = await publicFile("app.js");
   const data = await publicFile("data.js");
-  const start = app.indexOf("function agentsCard()");
+  const start = app.indexOf("function agentProviderRow(agent)");
   const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
 
   // Computed once, so the status line and the buttons cannot drift.
@@ -1946,7 +1962,7 @@ test("Settings Agents rows ask whether the agent exists, not whether a secret is
 test("an agent can be disconnected, including one with no credential", async () => {
   const app = await publicFile("app.js");
   const agents = await publicFile("screen-agents.js");
-  const start = app.indexOf("function agentsCard()");
+  const start = app.indexOf("function agentProviderRow(agent)");
   const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
 
   // Offered on the local-agent row, beside the CLI check it sits with.
@@ -1959,7 +1975,8 @@ test("an agent can be disconnected, including one with no credential", async () 
 
   // The click goes through the flow, not straight at the route. The bare
   // fetch it replaced asked nothing and removed only the secret.
-  assert.match(app, /void disconnectAgent\(value, render\)/u);
+  assert.match(app, /void disconnectAgent\(providerId, render\)/u);
+  assert.match(app, /disconnectAgentConfirmed\(value\);/u);
   assert.doesNotMatch(
     app,
     /case "agent-disconnect":\s*\n\s*void api\(/u,
@@ -2167,7 +2184,7 @@ test("usage is read from this machine whenever the card is about to be shown", a
 test("a connected agent can have its CLI checked without disconnecting", async () => {
   const app = await publicFile("app.js");
   const agents = await publicFile("screen-agents.js");
-  const start = app.indexOf("function agentsCard()");
+  const start = app.indexOf("function agentProviderRow(agent)");
   const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
 
   // On the connected row, before the disconnect — the row that has no Connect.
@@ -2175,6 +2192,8 @@ test("a connected agent can have its CLI checked without disconnecting", async (
   assert.notEqual(check, -1);
   assert.ok(body.indexOf('data-act="agent-disconnect"', check) > check);
   assert.match(app, /void checkLocalCli\(value, render\)/u);
+  // And it says it is checking while it does, on the row it was asked from.
+  assert.match(app, /state\.settingsCheckingId = value;/u);
 
   // The same setup connecting runs, not a second copy of it.
   assert.match(agents, /export async function checkLocalCli/u);
@@ -2329,7 +2348,7 @@ test("connect buttons show a busy state until the server answers or a modal open
   assert.match(agents, /providerConnecting\?\.delete\("github"\)/u);
 
   const agentsCard = app.slice(
-    app.indexOf("function agentsCard()"),
+    app.indexOf("function agentProviderRow(agent)"),
     app.indexOf("function commitAgentRename"),
   );
   assert.match(agentsCard, /providerConnecting\?\.has\(agent\.id\)/u);
@@ -2338,8 +2357,8 @@ test("connect buttons show a busy state until the server answers or a modal open
   assert.match(agentsCard, /aria-busy="true"/u);
 
   const githubCard = app.slice(
-    app.indexOf("function githubCard()"),
-    app.indexOf("function agentsCard()"),
+    app.indexOf("function integrationsSection()"),
+    app.indexOf("function invitationsCard()"),
   );
   assert.match(githubCard, /providerConnecting\?\.has\("github"\)/u);
   assert.match(githubCard, /connecting/u);
@@ -5155,7 +5174,7 @@ test("a signed-in returning member can accept an invitation directly", async () 
 test("settings only lists invitations that are still pending", async () => {
   const app = await browserSource();
   const start = app.indexOf("function invitationsCard");
-  const body = app.slice(start, app.indexOf("\nasync function savePolicy", start));
+  const body = app.slice(start, app.indexOf("\nfunction workspaceSection", start));
   assert.match(body, /\.filter\(\s*\(invitation\) => invitation\.status === "pending"/u);
   assert.match(body, /No pending invitations/u);
 });
@@ -7637,10 +7656,10 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
   assert.doesNotMatch(info, /coOwnerPanelHtml\(/u);
   assert.doesNotMatch(info, /channel-grant-promote/u);
 
-  assert.match(app, /function channelStatsCard\(/u);
-  assert.match(app, /\$\{channelStatsCard\(\)\}/u);
-  assert.match(app, /class="channel-wrapped"/u);
-  assert.match(css, /\n\.channel-wrapped \{/u);
+  assert.match(app, /function workspaceActivityStrip\(/u);
+  assert.match(app, /body: workspaceActivityStrip\(\),/u);
+  assert.match(app, /class="st-metrics"/u);
+  assert.match(css, /\n\.st-metrics \{/u);
   assert.match(app, /loadChannelStats\(repositoryId\)/u);
 
   const person = chats.slice(
@@ -8100,4 +8119,23 @@ test("the transcript reads in a column rather than across the window", async () 
   // The phone tier keeps its own tighter padding rather than inheriting a
   // desktop measure.
   assert.match(css, /\.chan-messages \{\s*padding: 6px 12px 14px;/u);
+});
+
+test("the settings module is a browser module built from the shared parts", async () => {
+  const settings = await publicFile("screen-settings.js");
+
+  // Served to a browser, so nothing in it may reach for Node. One `node:`
+  // import takes down every module that imports this one, which by now is the
+  // whole dashboard.
+  assert.doesNotMatch(settings, /from "node:/u);
+  // The glyphs come from the one icon set rather than from a second one
+  // standing beside it.
+  assert.match(settings, /import { esc, icon } from "./ui.js";/u);
+  assert.doesNotMatch(settings, /<svg(?![^>]*data-icon)/u);
+
+  // It is pure: no live state, no network, no router. That is what lets the
+  // shape of a settings row be asserted without a browser.
+  assert.doesNotMatch(settings, /fetch(/u);
+  assert.doesNotMatch(settings, /from "./data.js"/u);
+  assert.doesNotMatch(settings, /window.location/u);
 });

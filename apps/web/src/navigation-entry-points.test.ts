@@ -346,44 +346,30 @@ test("direct messages are offered with people and with nobody else", async () =>
 
 test("settings dialog enter animation only plays when the dialog opens", async () => {
   const app = await publicFile("app.js");
-  const dialog = slice(
-    app,
-    "function settingsDialog() {",
-    "\n/**\n * The user's own GitHub",
-  );
+  const css = await publicFile("styles.css");
 
   // The overlay is a new node on every render, so an animation on the bare
   // class would replay from opacity 0 whenever a settings control called
   // render — the panel going away and coming back while it was still open.
-  // Anchored to the start of a rule. `.settings-layer.settings-entering
-  // .settings-dialog{` contains `.settings-dialog{` as a substring, so an
-  // unanchored negative fires on the very scoped rule the positives below
-  // demand — it would fail whether or not the bare rule carried an animation,
-  // which is to say it was never testing anything.
-  assert.doesNotMatch(
-    dialog,
-    /\n\s*\.settings-layer\{[^}]*animation:scrim-in/u,
-  );
-  assert.doesNotMatch(
-    dialog,
-    /\n\s*\.settings-dialog\{[^}]*animation:settings-in/u,
+  // Anchored to the start of a rule, because the scoped selector contains the
+  // bare one as a substring and an unanchored negative would fire on it.
+  assert.doesNotMatch(css, /\n\.settings-layer \{[^}]*animation: scrim-in/u);
+  assert.doesNotMatch(css, /\n\.settings-dialog \{[^}]*animation: settings-in/u);
+  assert.match(
+    css,
+    /\.settings-layer\.settings-entering \{[^}]*animation: scrim-in/u,
   );
   assert.match(
-    dialog,
-    /\.settings-layer\.settings-entering\{[^}]*animation:scrim-in/u,
-  );
-  assert.match(
-    dialog,
-    /\.settings-layer\.settings-entering \.settings-dialog\{[^}]*animation:settings-in/u,
+    css,
+    /\.settings-layer\.settings-entering \.settings-dialog \{[^}]*animation: settings-in/u,
   );
 
-  // Closing motion temporarily reattaches only the overlay node after the
-  // render has removed Settings. Its scoped styles therefore have to travel
-  // inside that node or the unstyled brand gear flashes at its natural size.
-  assert.match(
-    dialog,
-    /<div class="settings-layer" data-act="settings-backdrop">\s*<style id="settings-dialog-styles">/u,
-  );
+  // The styles moved into the served stylesheet, which the document loads
+  // once. Closing motion reattaches only the overlay node, and a global sheet
+  // keeps styling it — the inline <style> block that used to travel inside
+  // the markup is no longer needed, and no longer there.
+  assert.doesNotMatch(app, /<style id="settings-dialog-styles">/u);
+  assert.match(app, /<div class="settings-layer" data-act="settings-backdrop">/u);
 
   const motion = slice(app, "const MOTION_SURFACES = [", "const surfaceNodes");
   assert.match(motion, /selector:\s*"\.settings-layer"/u);
@@ -391,23 +377,43 @@ test("settings dialog enter animation only plays when the dialog opens", async (
   assert.match(motion, /leave:\s*"settings-leaving"/u);
 });
 
-test("Advanced is a category in the settings dialog", async () => {
+test("the renamed categories keep their old ids working", async () => {
   const app = await publicFile("app.js");
+  const settings = await publicFile("screen-settings.js");
 
-  const dialog = slice(app, "const SETTINGS_SECTIONS = [", "\n/**\n * The user's own GitHub");
-  assert.match(dialog, /id: "advanced"/u);
-  // The API tokens card was added beside the other things a person configures
-  // once; the two original cards are still there and still in this section.
+  // Connections became Integrations and Advanced became Project controls.
+  // Both old ids remain addressable, because links and stored state written
+  // before the rename still name a real category.
+  assert.match(settings, /id: "integrations"/u);
+  assert.match(settings, /id: "project-controls"/u);
+  assert.match(settings, /connections: "integrations"/u);
+  assert.match(settings, /advanced: "project-controls"/u);
+  assert.doesNotMatch(settings, /id: "connections"/u);
+  assert.doesNotMatch(settings, /id: "advanced"/u);
+
+  // Project controls is where the repository, the approval policy and the app
+  // tokens live — three separate subjects, drawn as three sections.
   assert.match(
-    dialog,
-    /case "advanced":\s*\n\s*return `\$\{repositoryCard\(\)\}\$\{admissionsCard\(\)\}\$\{apiTokensCard\(\)\}`/u,
+    app,
+    /case "project-controls":\s*\n\s*return projectControlsSection\(\);/u,
   );
-  assert.match(dialog, /data-act="settings-close"/u);
-  assert.match(dialog, /data-act="settings-section"/u);
+  assert.match(
+    app,
+    /function projectControlsSection\(\)[\s\S]{0,400}id: "repository"/u,
+  );
+  assert.match(app, /function approvalPolicySection\(\)/u);
+  assert.match(app, /function apiTokensCard\(\)/u);
+
+  // The markup moved into the settings module; the handlers that answer it
+  // stayed with the router.
+  assert.match(settings, /data-act="settings-close"/u);
+  assert.match(settings, /data-act="settings-section"/u);
+  assert.match(app, /case "settings-close":/u);
+  assert.match(app, /case "settings-section":/u);
   assert.doesNotMatch(app, /function advancedScreen|function settingsScreen/u);
   assert.match(
     app,
-    /if \(route === "settings" \|\| route === "advanced"\)[\s\S]{0,220}openSettings/u,
+    /if \(route === "settings" \|\| route === "advanced"[\s\S]{0,220}openSettings/u,
   );
 });
 

@@ -491,6 +491,10 @@ export const state = {
   repositoryGrants: {},
   /** Entitlement and seat count — see `ensureBilling`. */
   billing: undefined,
+  /** undefined | "loading" | "ready" | "unavailable" | "error". */
+  billingStatus: undefined,
+  /** Why the billing read failed, when it did. */
+  billingError: undefined,
   /**
    * The rooms inside each repository, keyed by repository id.
    *
@@ -772,6 +776,28 @@ export const state = {
    * be open at once and neither should close the other.
    */
   settingsRenamingId: undefined,
+  /** The agent whose Manage menu is open in Settings, if any. */
+  settingsManagingId: undefined,
+  /** The agent whose CLI is being checked right now, if any. */
+  settingsCheckingId: undefined,
+  /** What is typed in the settings search field. */
+  settingsQuery: "",
+  /** Which search result the arrow keys are on. */
+  settingsSearchIndex: 0,
+  /** The unsaved approval policy, once somebody has edited one. */
+  settingsPolicyDraft: undefined,
+  /** Whether that policy is in flight. */
+  settingsPolicySaving: false,
+  /** Why the last appearance write failed, if it did. */
+  settingsAppearanceError: undefined,
+  /** Whether the agent list is still being fetched for Settings. */
+  settingsAgentsLoading: false,
+  /** Where focus was when Settings opened, so it can be given back. */
+  settingsReturnFocus: undefined,
+  /** Whether opening Settings added the history entry that closing gives back. */
+  settingsPushedEntry: false,
+  /** The chat part of the hash already applied, so a settings-only change is cheap. */
+  chatHashApplied: undefined,
   chatDraft: "",
   /**
    * What is half-typed to each of this account's own agents, keyed by agent
@@ -1023,6 +1049,10 @@ export async function api(path, options = {}) {
     // allowed to outlive the page. Kept opt-in because ordinary requests are
     // easier for the browser to cancel when their screen has gone away.
     ...(options.keepalive === true ? { keepalive: true } : {}),
+    // A caller that can time itself out brings its own signal. Billing is the
+    // one read whose absence of an answer is itself an answer: a settings page
+    // that waits forever is worse than one that says it could not ask.
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.body === undefined
       ? {}
       : { body: raw ? options.body : JSON.stringify(options.body) }),
@@ -6609,29 +6639,69 @@ export async function updateMemberRole(userId, role) {
  * disagree with what the server will actually allow.
  */
 /**
- * What this organization is entitled to, and what it is being charged for.
+ * How long billing may take before the screen stops waiting on it.
  *
- * Cached like the other settings reads: the numbers change when somebody pays
- * or a seat moves, neither of which happens while a dialog is open.
+ * Ten seconds is well past a healthy answer and well short of a person
+ * deciding the product is broken. Whatever happens at the end of it, the
+ * settings page shows something it can explain — which is the property the
+ * bare “Loading…” line never had.
  */
+export const BILLING_LOAD_TIMEOUT_MS = 10_000;
+
 export async function loadBilling() {
   if (!state.organizationId) {
+    state.billingStatus = "unavailable";
+    state.billing = null;
+    state.billingError = undefined;
     return undefined;
   }
-  const response = await apiOptional(
-    `/organizations/${encodeURIComponent(state.organizationId)}/billing`,
-    undefined,
-  );
-  state.billing = response?.billing;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BILLING_LOAD_TIMEOUT_MS);
+  try {
+    const response = await api(
+      `/organizations/${encodeURIComponent(state.organizationId)}/billing`,
+      { signal: controller.signal },
+    );
+    const billing = response?.billing;
+    state.billing = billing ?? null;
+    state.billingStatus = billing === undefined || billing === null ? "unavailable" : "ready";
+    state.billingError = undefined;
+  } catch (error) {
+    state.billing = null;
+    // A deployment that simply does not offer billing is not a failure, and
+    // must not be offered a Retry button that will refuse in the same way
+    // every time. Everything else — including the abort above — is.
+    if ([403, 404, 501].includes(error?.status)) {
+      state.billingStatus = "unavailable";
+      state.billingError = undefined;
+    } else {
+      state.billingStatus = "error";
+      state.billingError =
+        error?.name === "AbortError"
+          ? "Billing did not answer in time."
+          : (error?.message ?? "Billing could not be loaded.");
+    }
+  } finally {
+    clearTimeout(timer);
+  }
   return state.billing;
 }
 
+/** Forget what billing said, so the next render asks again. */
+export function resetBilling() {
+  state.billing = undefined;
+  state.billingStatus = undefined;
+  state.billingError = undefined;
+}
+
 export async function ensureBilling(rerender) {
-  if (state.billing !== undefined) {
+  // The status is the claim, not the value: an answer of "there is no billing
+  // here" is a real answer, and re-asking for it on every render is how a
+  // settings page ends up loading forever.
+  if (state.billingStatus !== undefined) {
     return;
   }
-  // Claimed before the request so a second render in the same tick does not
-  // fire it again — the same guard `ensureRepositoryGrants` uses.
+  state.billingStatus = "loading";
   state.billing = null;
   await loadBilling();
   rerender();

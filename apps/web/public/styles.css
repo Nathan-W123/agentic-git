@@ -158,6 +158,22 @@
   --motion-emphasis: 0.3s;
   --motion-scrim: 0.18s;
 
+  /* Settings. Its own grounds, a step warmer and darker than the app chrome
+     behind it, so a dialog laid over the conversation reads as a surface of
+     its own rather than as more of the same room. The ramp is the one the
+     rest of this sheet uses; these names exist so the two panes, the rows
+     inside them and the lines between cannot drift apart. */
+  --settings-modal-bg: #1C1A18;
+  --settings-sidebar-bg: #171613;
+  --settings-surface: #22201D;
+  --settings-text: #F3EFE8;
+  --settings-border: rgba(243, 239, 232, 0.12);
+  --settings-shell-radius: 12px;
+  --settings-control-radius: 8px;
+  --settings-nav-radius: 6px;
+  /* Nothing anybody has to hit is smaller than this. */
+  --settings-row-min-h: 36px;
+
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   --mono: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas,
@@ -12910,6 +12926,15 @@ dialog.modal[open]::backdrop {
 
   --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
   --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
+
+  /* The same four grounds, flipped. Warm rather than white: the peach accent
+     beside a pure #fff reads as clinical, and off-white is easier to sit in
+     front of for a long session. */
+  --settings-modal-bg: #FAF9F6;
+  --settings-sidebar-bg: #F2F0EA;
+  --settings-surface: #FFFFFF;
+  --settings-text: #1F1C19;
+  --settings-border: rgba(31, 28, 25, 0.12);
 }
 :root[data-theme="light"] .agent-face {
   background: #f3efe8;
@@ -15009,4 +15034,1237 @@ dialog.modal[open]::backdrop {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ----------------------------------------------------------- settings ---- */
+
+/*
+ * Settings is a two-pane dialog over the conversation: a fixed 208px sidebar
+ * and a content pane that scrolls on its own under a sticky header.
+ *
+ * The whole surface is spacing and hairlines. A settings page holds one
+ * subject, and a border around every group of it — plus a rule under every
+ * line inside those borders — draws a dozen boxes nobody asked about. What is
+ * left is one surface, a heading over each run of rows, and a single line
+ * where one run ends and the next starts.
+ *
+ * Four sizes, and no others: 20/24 for the page title, 15/20 for a section
+ * heading, 14/20 for body and every control, 12.5/18 for the supporting line
+ * under a label. Everything sits on an 8px grid.
+ */
+
+.settings-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 84;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(4 5 9 / 52%);
+  backdrop-filter: blur(3px);
+}
+
+.settings-dialog {
+  width: min(960px, calc(100vw - 32px));
+  height: min(720px, calc(100dvh - 32px));
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--settings-modal-bg);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-shell-radius);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 28%);
+  color: var(--settings-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* The overlay is a new node on every render, so an animation on the bare
+   class would replay from opacity 0 whenever a settings control called
+   render — the panel going away and coming back while it was still open. */
+.settings-layer.settings-entering {
+  animation: scrim-in var(--motion-scrim) ease;
+}
+
+.settings-layer.settings-entering .settings-dialog {
+  animation: settings-in var(--motion-pop) var(--ease-motion);
+}
+
+.settings-layer.settings-leaving {
+  animation: scrim-out var(--motion-scrim) ease forwards;
+  pointer-events: none;
+}
+
+.settings-layer.settings-leaving .settings-dialog {
+  animation: settings-out var(--motion-pop) var(--ease-motion) forwards;
+}
+
+@keyframes settings-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+}
+
+@keyframes settings-out {
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+}
+
+/* -- sidebar -- */
+
+.st-sidebar {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 12px;
+  background: var(--settings-sidebar-bg);
+  border-right: 1px solid var(--settings-border);
+}
+
+.st-nav {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.st-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.st-nav-group {
+  display: grid;
+  gap: 2px;
+}
+
+.st-nav-label {
+  padding: 0 8px 4px;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+
+.st-nav-item {
+  width: 100%;
+  min-height: var(--settings-row-min-h);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--settings-nav-radius);
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+  transition:
+    background var(--motion-pop) var(--ease-motion),
+    color var(--motion-pop) var(--ease-motion);
+}
+
+.st-nav-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-nav-item .ui-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--text-4);
+}
+
+.st-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--settings-text);
+}
+
+.st-nav-item:hover .ui-icon,
+.st-nav-item.is-active .ui-icon {
+  color: var(--settings-text);
+}
+
+.st-nav-item.is-active {
+  background: var(--bg-active);
+  color: var(--settings-text);
+  font-weight: 550;
+}
+
+/* -- search -- */
+
+.st-search {
+  position: relative;
+}
+
+.st-search-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--settings-row-min-h);
+  padding: 0 8px;
+  background: var(--settings-modal-bg);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-control-radius);
+}
+
+.st-search-field:focus-within {
+  border-color: var(--accent);
+}
+
+.st-search-mark .ui-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--text-4);
+  display: block;
+}
+
+.st-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: var(--settings-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  padding: 8px 0;
+  outline: none;
+}
+
+.st-search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.st-search-clear {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--settings-nav-radius);
+  color: var(--text-3);
+}
+
+.st-search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--settings-text);
+}
+
+.st-search-clear .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.st-results {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.st-results[hidden] {
+  display: none;
+}
+
+.st-result {
+  width: 100%;
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  min-height: var(--settings-row-min-h);
+  border-radius: var(--settings-nav-radius);
+  text-align: left;
+  color: var(--settings-text);
+}
+
+.st-result:hover,
+.st-result.is-active {
+  background: var(--bg-active);
+}
+
+.st-result-path {
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+.st-result-name {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 550;
+}
+
+.st-results-empty {
+  padding: 8px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+/* -- content pane -- */
+
+.st-main {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--settings-modal-bg);
+}
+
+.st-page-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 24px 24px 16px;
+  background: var(--settings-modal-bg);
+  border-bottom: 1px solid var(--settings-border);
+}
+
+.st-page-title {
+  min-width: 0;
+}
+
+.st-page-title h2 {
+  font-size: 20px;
+  line-height: 24px;
+  letter-spacing: -0.02em;
+}
+
+.st-page-title p {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.st-close {
+  margin-left: auto;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: var(--settings-row-min-h);
+  height: var(--settings-row-min-h);
+  border-radius: var(--settings-control-radius);
+  color: var(--text-2);
+}
+
+.st-close:hover {
+  background: var(--bg-hover);
+  color: var(--settings-text);
+}
+
+.st-close .ui-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.st-mobile-bar {
+  display: none;
+}
+
+.st-content.scroll {
+  min-height: 0;
+  flex: 1;
+  padding: 0 24px 32px;
+}
+
+.st-content-inner {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+/* -- section -- */
+
+.st-section {
+  padding: 24px 0;
+}
+
+.st-section + .st-section {
+  border-top: 1px solid var(--settings-border);
+}
+
+.st-section-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 8px;
+}
+
+.st-section-title {
+  min-width: 0;
+}
+
+.st-section-title h3 {
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.st-section-title p {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.st-section-action {
+  margin-left: auto;
+  flex: none;
+}
+
+/* -- row -- */
+
+.st-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: var(--settings-row-min-h);
+  padding: 12px 0;
+}
+
+.st-row + .st-row {
+  border-top: 1px solid var(--settings-border);
+}
+
+.st-row:focus-visible,
+.st-provider:focus-visible,
+.st-metrics:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--settings-control-radius);
+}
+
+/* A row a search result has just landed on. Held for a beat so the eye can
+   find it, then let go — a highlight that never fades is a selection. */
+.st-row.is-found,
+.st-provider.is-found,
+.st-metrics.is-found {
+  animation: st-found 1.6s var(--ease-motion);
+}
+
+@keyframes st-found {
+  from {
+    background: var(--accent-wash);
+  }
+}
+
+.st-row-media {
+  flex: none;
+}
+
+.st-row-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.st-row-label {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 550;
+}
+
+.st-row-help {
+  margin-top: 2px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.st-row-control {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Below the description rather than beside it, whenever the control is wider
+   than a button: a textarea in a right-hand column is a textarea nobody can
+   type a path into. */
+.st-row-stacked {
+  display: block;
+}
+
+.st-row-stacked .st-row-control {
+  margin: 8px 0 0;
+  display: block;
+  width: 100%;
+}
+
+.st-textarea {
+  width: 100%;
+  min-height: 88px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.st-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--settings-border);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.st-unit-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.st-minutes {
+  width: 88px;
+  text-align: right;
+}
+
+.st-unit {
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-3);
+}
+
+/* -- segmented control -- */
+
+.st-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-inset);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-control-radius);
+}
+
+.st-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: var(--settings-nav-radius);
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 20px;
+  transition:
+    background var(--motion-pop) var(--ease-motion),
+    color var(--motion-pop) var(--ease-motion);
+}
+
+.st-segment .ui-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.st-segment:hover {
+  color: var(--settings-text);
+}
+
+/* Dark ink on the peach, never white: the accent is a mid-tone, and white
+   text on it fails contrast at every size this interface uses. */
+.st-segment.is-active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 550;
+}
+
+/* -- switch -- */
+
+.settings-dialog .st-switch {
+  width: 38px;
+  height: 22px;
+}
+
+.settings-dialog .switch.on::after {
+  background: var(--accent-ink);
+}
+
+/* -- status badge -- */
+
+.st-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--settings-border);
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.st-status .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.st-status-ok {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 34%, transparent);
+  background: var(--green-wash);
+}
+
+.st-status-warn {
+  color: var(--orange);
+  border-color: color-mix(in srgb, var(--orange) 34%, transparent);
+  background: var(--orange-wash);
+}
+
+.st-status-info {
+  color: var(--text-2);
+}
+
+.st-status-idle {
+  color: var(--text-3);
+}
+
+/* -- provider row -- */
+
+.st-provider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 12px 0;
+}
+
+.st-provider + .st-provider,
+.st-row + .st-provider,
+.st-provider + .st-row {
+  border-top: 1px solid var(--settings-border);
+}
+
+.st-provider.is-busy {
+  opacity: 0.72;
+}
+
+.st-provider-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--settings-control-radius);
+  background: var(--settings-surface);
+  border: 1px solid var(--settings-border);
+}
+
+.st-provider-mark .ui-icon,
+.st-provider-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
+.st-provider-body {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.st-provider-name {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 550;
+}
+
+.st-provider-desc,
+.st-provider-detail {
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.st-provider-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.st-provider-controls {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* -- overflow menu on a provider row -- */
+
+.st-menu {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 12px auto;
+  padding: 4px;
+  width: max-content;
+  min-width: 176px;
+  background: var(--settings-surface);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-control-radius);
+  box-shadow: var(--shadow-card);
+}
+
+.st-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--settings-row-min-h);
+  padding: 8px;
+  border-radius: var(--settings-nav-radius);
+  color: var(--settings-text);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+}
+
+.st-menu-item .ui-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--text-3);
+}
+
+.st-menu-item:hover {
+  background: var(--bg-hover);
+}
+
+.st-menu-danger,
+.st-menu-danger .ui-icon {
+  color: var(--red);
+}
+
+.st-rename {
+  margin: 0 0 12px;
+}
+
+/* -- states -- */
+
+.st-skeleton {
+  display: grid;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.st-skeleton-row {
+  display: grid;
+  gap: 8px;
+}
+
+.st-skeleton-bar {
+  display: block;
+  height: 12px;
+  border-radius: var(--settings-nav-radius);
+  background: linear-gradient(
+    90deg,
+    var(--settings-surface) 0%,
+    var(--bg-hover) 50%,
+    var(--settings-surface) 100%
+  );
+  background-size: 200% 100%;
+  animation: st-shimmer 1.4s linear infinite;
+}
+
+.st-skeleton-title {
+  width: 38%;
+}
+
+.st-skeleton-sub {
+  width: 72%;
+  height: 10px;
+}
+
+@keyframes st-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.st-empty,
+.st-error,
+.st-inline-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  background: var(--settings-surface);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-control-radius);
+}
+
+.st-inline-empty {
+  align-items: center;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.st-inline-empty .ui-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--text-4);
+}
+
+.st-empty-mark,
+.st-error-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-3);
+}
+
+.st-error-mark {
+  color: var(--orange);
+}
+
+.st-empty-mark .ui-icon,
+.st-error-mark .ui-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.st-empty-copy,
+.st-error-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.st-empty-title,
+.st-error-title {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 550;
+}
+
+.st-empty-copy p,
+.st-error-copy p {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.st-empty-action,
+.st-error [data-act] {
+  flex: none;
+  align-self: center;
+}
+
+/* -- dirty save bar -- */
+
+.st-dirty {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 24px;
+  background: var(--settings-surface);
+  border-top: 1px solid var(--settings-border);
+  box-shadow: 0 -8px 24px rgb(0 0 0 / 14%);
+}
+
+.st-dirty-copy {
+  min-width: 0;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.st-dirty-actions {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* -- definition list -- */
+
+.st-deflist {
+  display: grid;
+  margin: 0;
+}
+
+.st-deflist-row {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 12px 0;
+  min-height: var(--settings-row-min-h);
+}
+
+.st-deflist-row + .st-deflist-row {
+  border-top: 1px solid var(--settings-border);
+}
+
+.st-deflist dt {
+  flex: none;
+  width: 160px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.st-deflist dd {
+  margin: 0;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.st-deflist-mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+/* -- workspace activity -- */
+
+.st-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.st-metric {
+  padding: 12px 16px;
+  background: var(--settings-surface);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-control-radius);
+}
+
+.st-metric-value {
+  font-size: 20px;
+  line-height: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.st-metric-label {
+  margin-top: 2px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+/* -- profile colours -- */
+
+.st-swatches {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.st-swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--text-2);
+}
+
+.st-swatch-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid var(--settings-border);
+  flex: none;
+}
+
+.st-colour-editor {
+  padding: 16px;
+  margin-bottom: 8px;
+  background: var(--settings-surface);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-control-radius);
+}
+
+.st-colour-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 16px;
+}
+
+.st-colour-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: var(--settings-nav-radius);
+  border: 1px solid transparent;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.st-colour-tab.is-active {
+  border-color: var(--settings-border);
+  background: var(--bg-active);
+  color: var(--settings-text);
+}
+
+.st-colour-reset {
+  margin-left: auto;
+}
+
+/* -- token secret -- */
+
+.st-token-secret {
+  padding: 16px;
+  margin-bottom: 8px;
+  background: var(--settings-surface);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--settings-control-radius);
+}
+
+.st-token-secret-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.token-secret {
+  display: block;
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-control-radius);
+  font-size: 12.5px;
+  line-height: 18px;
+  word-break: break-all;
+  user-select: all;
+}
+
+/* -- phone, and any window under 760px: one column, sticky header, and a
+      category combobox where the sidebar was -- */
+
+@media (max-width: 760px) {
+  .settings-layer {
+    padding: 0;
+  }
+
+  .settings-dialog {
+    width: 100vw;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .st-sidebar {
+    display: none;
+  }
+
+  .st-page-head {
+    padding: calc(16px + var(--safe-top)) 16px 12px;
+  }
+
+  .st-mobile-bar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: grid;
+    gap: 8px;
+    padding: 12px 16px;
+    background: var(--settings-modal-bg);
+    border-bottom: 1px solid var(--settings-border);
+  }
+
+  .st-mobile-nav {
+    position: relative;
+  }
+
+  .st-mobile-select {
+    width: 100%;
+    min-height: var(--settings-row-min-h);
+    padding: 8px 32px 8px 8px;
+    appearance: none;
+    background: var(--settings-surface);
+    border: 1px solid var(--settings-border);
+    border-radius: var(--settings-control-radius);
+    color: var(--settings-text);
+    font: inherit;
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  .st-mobile-caret {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+    color: var(--text-3);
+  }
+
+  .st-mobile-caret .ui-icon {
+    width: 16px;
+    height: 16px;
+    display: block;
+  }
+
+  .st-content.scroll {
+    padding: 0 16px calc(24px + var(--safe-bottom));
+  }
+
+  /* The control goes under the words it belongs to rather than beside them:
+     there is no room for both, and a button squeezed into a right-hand
+     column at 390px wraps its own label. */
+  .st-row {
+    display: block;
+  }
+
+  .st-row-control {
+    margin: 8px 0 0;
+    flex-wrap: wrap;
+  }
+
+  .st-provider {
+    flex-wrap: wrap;
+  }
+
+  .st-provider-body {
+    flex: 1 1 160px;
+  }
+
+  .st-provider-controls {
+    margin: 8px 0 0;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .st-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .st-deflist-row {
+    display: grid;
+    gap: 2px;
+  }
+
+  .st-deflist dt {
+    width: auto;
+  }
+
+  .st-dirty {
+    padding: 12px 16px calc(12px + var(--safe-bottom));
+    flex-wrap: wrap;
+  }
+
+  .st-menu {
+    width: 100%;
+  }
+}
+
+/* A short window — a laptop at 200% zoom is one — gives the sections back
+   some of their vertical padding rather than letting the first heading fall
+   off the bottom of a pane that cannot scroll to it. */
+@media (max-height: 560px) {
+  .st-section {
+    padding: 16px 0;
+  }
+
+  .st-page-head {
+    padding: 16px 24px 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-layer,
+  .settings-layer .settings-dialog,
+  .st-skeleton-bar,
+  .st-row.is-found,
+  .st-provider.is-found,
+  .st-metrics.is-found {
+    animation: none !important;
+  }
+}
+
+/* The admin-only Deployment section still draws the product cards it always
+   did. Inside Settings they lose their chrome, for the same reason nothing
+   else in here has any: one surface, one subject, a rule between runs. */
+.st-content-inner .card {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 24px 0;
+}
+
+.st-content-inner .card + .card {
+  border-top: 1px solid var(--settings-border);
+}
+
+.st-content-inner .panel-head {
+  padding: 0 0 8px;
+}
+
+.st-content-inner .panel-head h3 {
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.st-content-inner .panel-head p {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.st-content-inner .set-row {
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 0;
+}
+
+.st-content-inner .set-row + .set-row {
+  border-top: 1px solid var(--settings-border);
+}
+
+.st-content-inner .dep-stats {
+  gap: 8px;
+  background: none;
+  border-top: 0;
+  padding: 8px 0;
+}
+
+.st-content-inner .dep-stat {
+  background: var(--settings-surface);
+  border: 1px solid var(--settings-border);
+  border-radius: var(--settings-control-radius);
 }
