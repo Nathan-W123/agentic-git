@@ -42,6 +42,7 @@ import {
   previewBaseHref,
   previewProxyHeaders,
   readsAsEchoOfRequest,
+  readsAsQuestion,
   reportedFreshTokens,
   requestFromObjective,
   rewritePreviewHtml,
@@ -53,10 +54,10 @@ import {
   summariseThreadTitle,
   textOverlap,
   truncateToTokens,
-  withRoleContext,
   type ApiOperations,
   type ChannelMemoThread,
   type StaticAsset,
+  withRoleContext,
 } from "./server.js";
 import { hashPassword, hashSecret } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
@@ -6751,6 +6752,32 @@ test("a request that names no verb this list knows is still work when an agent i
  * "this is a greenfield project… can you get started" is a request to get
  * started, and the first clause is background.
  */
+test("a polite request is work unless it actually asks whether", () => {
+  // "can you …" opens an instruction as often as a question. The verb list
+  // cannot settle it — the verbs people use for interface work (condense,
+  // tailor, tidy) are open-ended — so the question mark does: asking whether
+  // something is possible gets one, telling an agent what to do does not.
+  for (const request of [
+    "@Cronus can you take reference from slack to vertically condense the top bar",
+    "could you tidy the settings page so it reads like Linear's",
+    "please can you reword the empty state on the runs screen",
+    "Would you tailor the top bar for the chat experience",
+  ]) {
+    assert.equal(readsAsQuestion(request), false, request);
+  }
+  for (const question of [
+    "can you see the payments repo?",
+    "could you explain how the queue works?",
+    "what are you working on",
+    "is the release checklist done",
+    "@Cronus summarise the codebase",
+  ]) {
+    assert.equal(readsAsQuestion(question), true, question);
+  }
+  // A real task verb still wins with or without the question mark.
+  assert.equal(readsAsQuestion("can we make a chess game?"), false);
+});
+
 test("an opening line summarises the request rather than repeating it", () => {
   assert.equal(
     summariseObjective("please create the initial skeleton for a browser chess game"),
@@ -21053,6 +21080,59 @@ test("an MCP client can hand-shake and see the tools", async (t) => {
       "answer_question",
     ],
   );
+});
+
+test("a misconfigured Authorization header says which way it is wrong", async (t) => {
+  // Both of these were answered "Sign in is required" — a sentence about a
+  // browser, sent to a CLI that has no cookies and was never going to get
+  // any. Between them they are most of what goes wrong setting this up, and
+  // neither is a fact about anybody's account, so both can be said plainly.
+  const { runtime, token } = await mcpRuntime(t);
+  const send = async (authorization: string) => {
+    const response = await fetch(`${runtime.origin}/api/v1/mcp`, {
+      method: "POST",
+      headers: { Authorization: authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    });
+    return {
+      status: response.status,
+      challenge: response.headers.get("www-authenticate"),
+      message: String(
+        ((await response.json()) as { error?: { message?: string } }).error
+          ?.message ?? "",
+      ),
+    };
+  };
+
+  // The scheme left off entirely.
+  const bare = await send(token);
+  assert.equal(bare.status, 401);
+  assert.match(bare.message, /must read "Bearer <token>"/u);
+
+  // The placeholder pasted with its brackets still on.
+  const wrapped = await send(`Bearer <${token}>`);
+  assert.equal(wrapped.status, 401);
+  assert.match(wrapped.message, /angle brackets/u);
+
+  // A well-formed header carrying a token that is simply wrong stays
+  // uniform: "invalid" and nothing more, or the answer becomes an oracle.
+  const wrong = await send("Bearer coord_pat_aaaaaaaa.bbbbbbbb");
+  assert.equal(wrong.status, 401);
+  assert.match(wrong.message, /API token is invalid/u);
+
+  // Every 401 on this route carries the challenge, which is how an MCP
+  // client tells "wants a token" from "server is broken".
+  for (const answer of [bare, wrapped, wrong]) {
+    assert.match(answer.challenge ?? "", /^Bearer\b/u, "no WWW-Authenticate");
+  }
+
+  // And the working case is untouched.
+  const ok = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "ping",
+  });
+  assert.equal(ok.status, 200);
 });
 
 test("a GET is refused in a shape an MCP client can read", async (t) => {

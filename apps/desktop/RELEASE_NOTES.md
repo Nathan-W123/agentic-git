@@ -1,3 +1,16 @@
+### 0.5.13 — Claude installed natively is Claude the app can see
+
+An agent whose CLI this app cannot find is an agent the control plane
+draws as having no machine at all. It goes grey, a mention brings up
+"nothing will pick this up yet", and the app offers to install a CLI that
+is already on the computer.
+
+That is what happened to Claude on Windows. The app looks along PATH and
+then in the standard install directories, and the Windows list named
+Node's own folder and npm's global folder but not the one a *native*
+installer uses — `%USERPROFILE%\.local\bin`, where Claude Code now puts
+`claude.exe`. Every other platform's list had it. Windows now does too.
+
 ### 0.5.12 — your project's tools, on your say-so
 
 A project can now give its agents MCP servers — a Linear server, a Sentry
@@ -17,6 +30,12 @@ Nothing about this runs on the server. The control plane keeps the server's
 definition and its sealed secrets, and hands them only to the machine of the
 person who submitted the task; the program itself starts on that machine, as
 the agent always has.
+
+Also in this build: a message that opens with "can you" and does not end in a
+question mark is treated as an instruction, not a question, so it gets a
+thread and starts at once instead of being answered in the channel minutes
+later. Questions your machine answers now show in the worker log, answered or
+failed, so a quiet channel is no longer a mystery.
 
 Two things to know. Codex can be handed a bearer token and nothing else, so an
 http server that needs some other header runs only under Claude. And this app

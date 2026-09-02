@@ -688,7 +688,27 @@ export class Worker {
       }
 
       if (assignment.task.kind === "question") {
-        const answer = await this.answerQuestion(run, assignment, scratch);
+        // Logged like a task, because it costs like one — a planning run and
+        // an execution run on this machine — and because a question that
+        // fails leaves nothing else behind: no thread, no changeset, and
+        // until this line, no trace in the log that it was ever here.
+        const startedAt = Date.now();
+        let answer: string;
+        try {
+          answer = await this.answerQuestion(run, assignment, scratch);
+        } catch (error) {
+          console.log(
+            `[worker] question ${assignment.task.id} — failed after ` +
+              `${((Date.now() - startedAt) / 1000).toFixed(1)}s: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+          );
+          throw error;
+        }
+        console.log(
+          `[worker] question ${assignment.task.id} — answered in ` +
+            `${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+        );
         if (leaseLost) {
           throw new LeaseLostError(assignment.lease.id);
         }

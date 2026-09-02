@@ -2582,6 +2582,23 @@ const INTERROGATIVE_RE =
   /^(what|why|how|when|who|where|which|is|are|was|were|do|does|did|can|could|would|will|should|have|has|any)\b/iu;
 
 /**
+ * A polite request: "can you condense the top bar" is an instruction with
+ * manners, not a question about whether the agent is able to.
+ *
+ * Openers alone cannot tell the two apart — "can you" starts both — and the
+ * task-verb list cannot either, because the verbs people reach for
+ * (condense, tailor, tidy, reword) are open-ended. What separates them is
+ * the question mark: a person asking whether something is possible writes
+ * one, and a person telling an agent what to do does not. So a message that
+ * opens this way and does not end in "?" is work. "Can you take reference
+ * from Slack to condense the top bar" was being answered in the channel,
+ * three minutes later, by an agent describing what it would do instead of
+ * doing it — and when that answer failed, by nothing at all.
+ */
+const POLITE_REQUEST_RE =
+  /^(?:please\s+)?(?:can|could|would|will)\s+(?:you|u|ya)\b/iu;
+
+/**
  * Terse requests whose answer is the deliverable, even though they are not
  * phrased as questions.
  *
@@ -2610,12 +2627,15 @@ const ANSWER_REQUEST_RE =
  * A question containing a real task verb ("can we make a chess game?") is
  * still work; the question mark is grammar, not intent.
  */
-function readsAsQuestion(content: string): boolean {
+export function readsAsQuestion(content: string): boolean {
   const text = withoutMentions(content);
   if (text.length === 0) {
     return false;
   }
   if (TASK_VERB_RE.test(text)) {
+    return false;
+  }
+  if (POLITE_REQUEST_RE.test(text) && !text.endsWith("?")) {
     return false;
   }
   return (
@@ -6282,17 +6302,47 @@ export class ApiGateway {
           url.pathname.endsWith("/accept") &&
           invitationPath);
       if (!isPublic) {
-        const bearer = parseBearer(
+        const authorization =
           typeof request.headers.authorization === "string"
-            ? request.headers.authorization
-            : undefined,
-        );
+            ? request.headers.authorization.trim()
+            : "";
+        const bearer = parseBearer(authorization);
         if (bearer !== undefined) {
+          // The placeholder, pasted with its brackets still on. Every
+          // instruction for this writes the token as `<token>` to mean "your
+          // value here", and a person following it literally gets a token
+          // that fails for a reason no message mentioned. Named here rather
+          // than left to `authenticateToken`, whose answer is deliberately
+          // the same for every bad token and so cannot say this.
+          if (bearer.startsWith("<") && bearer.endsWith(">")) {
+            throw new AuthenticationError(
+              "The token in the Authorization header still has the angle " +
+                "brackets around it; those mark where your own token goes " +
+                "and are not part of it",
+            );
+          }
           // Headless client. No CSRF check: a browser never attaches a bearer
           // token on its own, so there is no cross-site request to forge.
           context.principal = await this.auth.authenticateToken(
             bearer,
             this.remoteAddress(request),
+          );
+        } else if (authorization !== "") {
+          // A header that is present and not `Bearer <token>` used to fall
+          // through to the cookie path and be answered "Sign in is
+          // required" — a sentence about a browser, sent to something that
+          // has no cookies and was never going to get any. What it actually
+          // means is that this header is malformed, and the two ways to
+          // malform it are worth naming: the scheme left off entirely, and a
+          // placeholder pasted with its angle brackets still around it.
+          //
+          // Safe to say out loud, because it describes the caller's own
+          // request rather than anything about an account. `authenticateToken`
+          // stays deliberately uniform below.
+          throw new AuthenticationError(
+            'The Authorization header must read "Bearer <token>" — the word ' +
+              "Bearer, one space, then the token itself with no angle " +
+              "brackets around it",
           );
         } else {
           context.principal = await this.auth.authenticate(
@@ -6311,6 +6361,23 @@ export class ApiGateway {
       }
       await this.route(context);
     } catch (error) {
+      // The challenge an MCP client is looking for.
+      //
+      // RFC 9110 says a 401 carries `WWW-Authenticate`, and MCP clients read
+      // it to tell "this server wants a token" from "this server is broken".
+      // Without it the Claude CLI reports a rejected header and leaves the
+      // person guessing which header, and why.
+      if (
+        url.pathname === `${API_PREFIX}/mcp` &&
+        (error instanceof AuthenticationError
+          ? error.statusCode
+          : error instanceof HttpError
+            ? error.status
+            : 500) === 401 &&
+        !response.headersSent
+      ) {
+        response.setHeader("WWW-Authenticate", 'Bearer realm="kumi"');
+      }
       this.sendError(response, requestId, error);
     }
   }
@@ -17520,16 +17587,39 @@ export class ApiGateway {
       input.trigger !== "answer_followup" &&
       readsAsQuestion(content)
     ) {
-      const taskObjective = await this.answerInChannel(
-        candidate,
-        content,
-        projectId,
-        repositoryId,
-        input.referencedMessageId,
-        withAnswerDirective(
-          input.brief === true ? KEEP_IT_SIMPLE_DIRECTIVE : undefined,
-        ),
-      );
+      let taskObjective: string | undefined;
+      try {
+        taskObjective = await this.answerInChannel(
+          candidate,
+          content,
+          projectId,
+          repositoryId,
+          input.referencedMessageId,
+          withAnswerDirective(
+            input.brief === true ? KEEP_IT_SIMPLE_DIRECTIVE : undefined,
+          ),
+        );
+      } catch (error) {
+        // Said in the room before it is logged. The answer path has no
+        // thread of its own, so a failure here used to leave exactly what
+        // the person saw: dots for a minute, then nothing — no entry, no
+        // task, no way to tell a slow answer from a dead one. The log line
+        // the caller writes is still written; this is the half a person can
+        // see.
+        await this.appendChannelEntry({
+          projectId,
+          repositoryId,
+          kind: "agent",
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content: `I could not answer this: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          ...(input.referencedMessageId === undefined
+            ? {}
+            : { referencedMessageId: input.referencedMessageId }),
+        }).catch(() => undefined);
+        throw error;
+      }
       if (taskObjective !== undefined) {
         await this.dispatchOneMention({
           projectId,
