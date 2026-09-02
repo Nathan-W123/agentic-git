@@ -953,10 +953,52 @@ export class AuthService {
     }
     this.loginFailures.delete(attempted);
     return await this.issueSession(
-      user,
+      await this.promoteNamedAdmin(user),
       input.ipAddress,
       input.userAgent,
       input.secure,
+    );
+  }
+
+  /**
+   * Grants system administration to the addresses the operator named.
+   *
+   * There was no way to become one. `bootstrap` sets the flag on the very
+   * first account and nothing else ever sets it; the only route afterwards is
+   * `PATCH /admin/users/:id`, which requires already being one. A deployment
+   * whose first account was created some other way — a seed, a signup before
+   * anybody bootstrapped, an admin since disabled — therefore had no
+   * administrator and no way to appoint one, and its owner met that as a
+   * refusal to chat on their own deployment's login.
+   *
+   * `COORD_SYSTEM_ADMINS` is the way out, and it is the right shape for one:
+   * the only person who can set it is whoever controls the deployment's
+   * environment, which is the definition of its operator. Applied at sign-in
+   * and written down, so the admin screen and the last-administrator guard
+   * both see the same truth as everything else rather than a flag computed
+   * per request.
+   *
+   * Addresses are compared lower-cased and trimmed. Naming somebody who is
+   * already an administrator does nothing, and removing a name does not
+   * demote anybody — that is `PATCH /admin/users/:id`, deliberately, because
+   * an environment variable edited in a hurry should not be able to lock
+   * every administrator out of a running deployment.
+   */
+  private async promoteNamedAdmin(user: UserAccount): Promise<UserAccount> {
+    if (user.systemAdmin) {
+      return user;
+    }
+    const named = (process.env["COORD_SYSTEM_ADMINS"] ?? "")
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0);
+    if (!named.includes(user.email.trim().toLowerCase())) {
+      return user;
+    }
+    return (
+      (await this.store
+        .updateUser(user.id, { systemAdmin: true })
+        .catch(() => undefined)) ?? user
     );
   }
 

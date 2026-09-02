@@ -2244,6 +2244,17 @@ export async function streamProcess(
 }
 
 export interface ProviderChatServiceOptions {
+  /**
+   * Whether this deployment has said its own vendor logins may be spent on
+   * behalf of somebody who has connected no account of their own.
+   *
+   * The same decision `COORD_CREDENTIAL_POLICY` already makes for tasks,
+   * asked here for chat. Splitting them made a deployment that had answered
+   * the question once answer it differently in the two places a person
+   * actually meets it: work ran on the host's login, and a question about
+   * that work was refused as an administrator-only act.
+   */
+  hostLogin?: boolean;
   runner?: ProcessRunner;
   /** Feeds CLI stdout lines out as they arrive, for streaming replies. */
   streamRunner?: StreamRunner;
@@ -2685,11 +2696,15 @@ export class ProviderChatService {
   private readonly callSignStore: AgentCallSignStore | undefined;
   private readonly workspaceManager: Pick<WorkspaceManager, "create" | "destroy">;
 
+  /** See {@link ProviderChatServiceOptions.hostLogin}. */
+  private readonly hostLogin: boolean;
+
   public constructor(
     private readonly project: CoordinatorProject,
     options: ProviderChatServiceOptions = {},
   ) {
     this.callSignStore = options.callSigns;
+    this.hostLogin = options.hostLogin ?? false;
     this.workspaceManager =
       options.workspaceManager ?? new GitWorktreeWorkspaceManager();
     this.runner = options.runner ?? runProcess;
@@ -5667,6 +5682,14 @@ export class ProviderChatService {
    * the case where one person's account funds another person's prompt. A user
    * running on their own credential is spending their own money and needs no
    * elevated rights.
+   *
+   * And it is skipped entirely where the deployment has already said that
+   * spending its own login on other people's behalf is fine —
+   * `COORD_CREDENTIAL_POLICY=host-login`, the same answer to the same
+   * question that tasks ask. Asking it separately here meant a single-operator
+   * deployment could set that policy, watch its tasks run on the host login
+   * exactly as intended, and still be told that asking those agents a
+   * question was an administrator-only act.
    */
   private async prepareCompletion(input: {
     userId: string;
@@ -5691,13 +5714,14 @@ export class ProviderChatService {
         `Connect ${PROVIDER_NAMES[input.provider]} before chatting`,
       );
     }
-    if (credential === undefined && !input.systemAdmin) {
+    if (credential === undefined && !input.systemAdmin && !this.hostLogin) {
       throw new ProviderChatError(
         403,
         "admin_required",
         `Chatting on this deployment's shared ${PROVIDER_NAMES[input.provider]} ` +
           "login is restricted to system administrators — connect your own " +
-          "account instead",
+          "account instead, or set COORD_CREDENTIAL_POLICY=host-login on this " +
+          "deployment to let everyone use its own login",
       );
     }
     const latest = messages.at(-1);
