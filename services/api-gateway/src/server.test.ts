@@ -9440,6 +9440,140 @@ test("/push reports refusals and unsupported deployments in the channel", async 
   assert.equal(limitedRuntime.submittedTasks.length, 0);
 });
 
+test("/queue /push publishes immediately when nothing is running", async (t) => {
+  // "After the running work" with no running work is not a special case — it
+  // is the same instruction whose moment has already arrived. Nothing is
+  // filed, nothing is held, and the outcome is said in the room.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "queued-push-idle");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/queue /push" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.deepEqual(runtime.pushCalls, [
+    {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      actorId: bootstrapped.user.id,
+    },
+  ]);
+  assert.equal(
+    runtime.submittedTasks.length,
+    0,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  // Nothing was queued, so nothing had to be released either.
+  assert.equal(runtime.runCalls.length, 0);
+  const listed = await owner.request(`${base}/messages`);
+  const said = (listed.data.messages as any[])
+    .map((message) => String(message.content))
+    .join("\n");
+  assert.match(said, /Pushed canonical to coord\/export-test on GitHub/u);
+  assert.doesNotMatch(said, /I'll publish once/u);
+});
+
+test("/queue /push queues what follows and publishes once running work finishes", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "queued-push-waits");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) handle current work" },
+  });
+  const current = (await runtime.store.listSubmittedTasks({ repositoryId }))[0];
+  assert.ok(current !== undefined);
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  assert.equal(runtime.runCalls.length, 1);
+
+  const asked = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/queue /push" },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+  // Nothing is published while that task is still claimed, and the promise to
+  // publish later is said out loud — the silence after it is deliberate, and
+  // only this line makes that legible.
+  assert.deepEqual(runtime.pushCalls, []);
+  const waiting = await owner.request(`${base}/messages`);
+  assert.match(
+    (waiting.data.messages as any[])
+      .map((message) => String(message.content))
+      .join("\n"),
+    /I'll publish once the work running here has finished/u,
+  );
+
+  // Work asked for after that message is filed and held rather than started:
+  // running it would move canonical out from under the very push it is
+  // waiting for.
+  const queued = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) rework the retry loop" },
+  });
+  assert.equal(queued.status, 201, JSON.stringify(queued.data));
+  assert.equal(runtime.submittedTasks.length, 2);
+  assert.equal(runtime.submittedTasks[1]?.queueAfterCurrent, true);
+  assert.equal(runtime.runCalls.length, 1);
+  const follower = (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+    (task) => task.objective.includes("rework the retry loop"),
+  );
+  assert.equal(follower?.status, "submitted");
+  assert.deepEqual(
+    await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID),
+    [],
+  );
+
+  await runtime.store.completeSubmittedTask(current.id, "integrated");
+  await runtime.store.appendAudit(undefined, {
+    type: "task_reported",
+    taskId: current.id,
+    data: { explanation: "Current work finished." },
+  });
+  await waitFor(
+    async () => runtime.pushCalls.length === 1,
+    "the queued push did not publish once the running work finished",
+  );
+  assert.deepEqual(runtime.pushCalls, [
+    {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      actorId: ownerId,
+    },
+  ]);
+  const published = await owner.request(`${base}/messages`);
+  const outcome = (published.data.messages as any[])
+    .map((message) => String(message.content))
+    .join("\n");
+  assert.match(outcome, /Pushed canonical to coord\/export-test on GitHub/u);
+  assert.match(outcome, /The work queued behind it is starting now/u);
+
+  // And the held queue is let go, so nothing is stranded behind a push that
+  // has already happened.
+  await waitFor(
+    async () => runtime.runCalls.length === 2,
+    "the work held behind the push was never released",
+  );
+  const [claimed] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(claimed?.id, follower?.id);
+  assert.equal(runtime.pushCalls.length, 1);
+});
+
 test("a held run keeps its waiting status inside the task thread", async (t) => {
   // Workflow state belongs to the task's story. The thread and task status
   // make the hold visible without interrupting the repository-wide transcript
