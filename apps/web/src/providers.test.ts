@@ -3800,3 +3800,44 @@ test("an empty claude reading says what the stream actually carried", () => {
   assert.match(String(plain.unavailableReason), /session summary/u);
   assert.doesNotMatch(String(plain.unavailableReason), /\(/u);
 });
+
+/**
+ * A running page can tell it has been outlived.
+ *
+ * The dashboard never re-fetches its own script, and a phone restores a frozen
+ * tab rather than reloading it — so a correct deploy was live, served
+ * `no-cache`, and still invisible, because nothing ever asked. The build
+ * travels on replies the page is already making; these pin the two halves that
+ * make that work.
+ */
+test("the client notices a redeploy and offers a reload", async () => {
+  const app = await readFile(
+    new URL("../public/app.js", import.meta.url),
+    "utf8",
+  );
+  const data = await readFile(
+    new URL("../public/data.js", import.meta.url),
+    "utf8",
+  );
+
+  // Read off an ordinary reply, so noticing costs no request of its own.
+  assert.match(data, /headers\.get\("X-Kumi-Build"\)/u);
+  // The first reply is what the page was loaded against, not a change.
+  assert.match(data, /loadedBuild = build;/u);
+  assert.match(data, /state\.updateAvailable = true;/u);
+
+  // Offered, never taken automatically: a reload discards a half-typed
+  // message, and an unrelated deploy is not a reason to do that to somebody.
+  assert.match(app, /data-act="reload-app"/u);
+  assert.match(app, /case "reload-app":/u);
+  // Scoped to the function itself: `data.js` reloads elsewhere for an
+  // unrelated reason (a real change of signed-in account), and asserting over
+  // the whole file would have been testing that instead.
+  const notice = /function noticeBuild\([\s\S]*?\n\}/u.exec(data)?.[0] ?? "";
+  assert.ok(notice.includes("state.updateAvailable"), "noticeBuild not found");
+  assert.doesNotMatch(
+    notice,
+    /reload/u,
+    "the reload belongs to the button, not to noticing",
+  );
+});

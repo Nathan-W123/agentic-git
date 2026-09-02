@@ -4671,10 +4671,37 @@ function billingBanner() {
       started.</span>${upgrade}</div>`;
 }
 
+/**
+ * Kumi has been redeployed under a page that is still running.
+ *
+ * Offered rather than done. A reload throws away whatever is on the screen —
+ * a half-typed message, an open thread, a scroll position — and doing that to
+ * somebody mid-sentence because an unrelated deploy landed is worse than
+ * showing them yesterday's build for another minute. The one case where the
+ * old page is genuinely broken is a shape this cannot detect anyway.
+ *
+ * Placed under the billing lines because those describe work that has stopped
+ * and this describes work that is merely dated.
+ */
+function updateBanner() {
+  if (state.updateAvailable !== true) {
+    return "";
+  }
+  return `<div class="banner" role="status">${icon("refresh")}
+    <span>A new version of Kumi is available.</span>
+    <span class="spacer"></span>
+    <button class="btn btn-sm btn-primary" data-act="reload-app">
+      Reload</button></div>`;
+}
+
 function banner() {
   const billingLine = billingBanner();
   if (billingLine !== "") {
     return billingLine;
+  }
+  const updateLine = updateBanner();
+  if (updateLine !== "") {
+    return updateLine;
   }
   if (state.refreshing === true && state.loadError === undefined) {
     return `<div class="banner banner-busy" role="status">
@@ -10913,6 +10940,16 @@ document.addEventListener("click", (event) => {
     // that said "no session has recorded rate limits yet" would otherwise go
     // on saying it for the rest of the session, including after the run that
     // produced some.
+    /**
+     * Take the new build.
+     *
+     * `location.reload()` and nothing else: every asset is already served
+     * `no-cache` with an ETag, so an ordinary reload revalidates and picks up
+     * the new script. The cache was never the problem — see `noticeBuild`.
+     */
+    case "reload-app":
+      location.reload();
+      return;
     case "agent-usage-refresh":
       // The owner rides on the button, because the roster shows other
       // people's agents too and a refresh must ask about the same account the

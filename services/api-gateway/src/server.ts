@@ -2356,6 +2356,26 @@ export function resolveChannelAgentPresentation(
  * saves. A word list that refuses tasks has to be much more certain than one
  * that merely routes them.
  */
+/**
+ * What this process was built from, decided once.
+ *
+ * Sent on every JSON reply so a page that is already running can notice it has
+ * been outlived. The dashboard is a single-page app: once loaded it never
+ * fetches its own script again, and a phone does not reload it either — iOS
+ * freezes a tab or a home-screen app and restores it, so returning to Kumi
+ * resumes the same JavaScript that was loaded days ago. Every asset is served
+ * `no-cache` with an ETag and would fetch correctly, but nothing was ever
+ * asking. A deploy landed, was live and correct, and could not be seen.
+ *
+ * `startedAt` is the fallback for the same reason the health route gives: a
+ * redeploy moves the process start whether or not the container was told
+ * which commit it was built from, so a restart is visible on its own.
+ */
+export const BUILD_IDENTITY =
+  process.env["COORD_BUILD_SHA"] ??
+  process.env["RAILWAY_GIT_COMMIT_SHA"] ??
+  `started-${new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString()}`;
+
 const SYSTEM_PACKAGE_INSTALL_RE =
   /\b(?:apt(?:-get)?|apk|yum|dnf|pacman|brew|choco)\s+(?:-\w+\s+)*install\b|\bsudo\s+(?:apt|apt-get|yum|dnf|apk)\b/iu;
 
@@ -25174,6 +25194,10 @@ export class ApiGateway {
     response.setHeader("Content-Type", "application/json; charset=utf-8");
     response.setHeader("Content-Length", String(body.length));
     response.setHeader("Cache-Control", "no-store");
+    // Carried on replies the page is already making, rather than on a poll of
+    // its own: the client asks this server something every few seconds, so
+    // noticing a deploy costs no request at all. See {@link BUILD_IDENTITY}.
+    response.setHeader("X-Kumi-Build", BUILD_IDENTITY);
     response.writeHead(status);
     response.end(body);
   }
