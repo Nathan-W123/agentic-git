@@ -244,11 +244,26 @@ Worker environment:
 | `COORD_PROJECT_ROOT` | Directory with the worker's `.coordinator/config.json` (agents, sandbox). | working directory |
 | `COORD_WORKER_ROOT` | Where leased workspaces are materialized. | `.coordinator/worker` |
 | `COORD_WORKER_NAME` | Display name in the workers list. | hostname-derived |
+| `COORD_WORKER_CONCURRENCY` | How many tasks this machine runs at once. | sized from memory, at least 4 |
 | `COORD_PROJECT_ID` | Only lease work for this project. | `project_local` |
 | `COORD_REPOSITORY` | Only lease work for this repository. | any |
 
-A worker that shuts down cleanly releases its lease immediately; one that
-dies simply stops heartbeating and the lease expires, so its task returns to
+A worker holds several leases at once and runs their agents together, the way
+a control-plane run leases a whole wave rather than one task. The default is
+the same memory-derived figure `COORD_REPOSITORY_PARALLELISM` uses, so a
+machine offers what it can hold; `COORD_WORKER_CONCURRENCY=1` makes it take
+one task at a time. The repository's own parallelism bound still applies on
+top and is the one that governs: a worker that asks for more than a repository
+admits is simply not granted the extra leases.
+
+This matters most with `COORD_LOCAL_AGENTS_ONLY=1`, where the control plane
+executes nothing and every task waits for somebody's machine. A fleet of
+one-task workers there is a queue that runs one agent at a time no matter how
+much work is submitted, which looks from the outside like a coordinator that
+has stopped rather than a fleet that is full.
+
+A worker that shuts down cleanly releases its leases immediately; one that
+dies simply stops heartbeating and the leases expire, so its tasks return to
 the queue either way.
 
 ## Project policy and budgets

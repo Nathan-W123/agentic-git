@@ -479,11 +479,23 @@ environment:
 | `COORD_ORGANIZATION` | Organization this worker registers into |
 | `COORD_PROJECT_ROOT` | Project supplying agent definitions |
 | `COORD_WORKER_NAME` | Reported to the fleet listing |
+| `COORD_WORKER_CONCURRENCY` | How many tasks this machine runs at once |
 | `COORD_REPOSITORY` | Restrict this worker to one repository |
 
 Each iteration leases a task, fetches the bundle, clones it, has the agent
 plan, gets that plan admitted, runs the agent, returns a changeset, and deletes
 the workspace. It owns nothing durable.
+
+Iterations run together rather than one after another. The daemon takes one
+lease at a time — the repository's parallelism bound is counted across active
+leases, so asking for a batch would ignore it — but starts looking for the
+next as soon as the previous one *has* its lease, rather than when it has
+finished with it. Everything a run owns while it holds a lease is its own: its
+agent session, its blanket claim, its admission wait and the plan it finally
+reports. The one thing runs share is this machine's cache of the repository,
+and work on that is serialised per repository, because concurrent fetches into
+one bare repository lose a ref lock and the loser's recovery is to delete the
+cache the winner is still reading.
 
 Splitting planning from execution costs the worker nothing to arrange: all
 shipped adapters separate them. `requestPlan` returns the agent's intent

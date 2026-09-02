@@ -1,3 +1,19 @@
+### 0.5.11 — your machine runs four agents, not one
+
+Send three requests and one of them ran. The other two sat in the queue until
+you stopped the first by hand, which reads as a coordinator that has stopped
+rather than as a machine that is full.
+
+It was neither. A run on the server takes as many tasks as a repository allows
+and works them together; this app took one, waited for it, and only then looked
+for the next. Moving the agents onto your own machine — which is what keeps
+your work and your logins on it — quietly took that back down to one task at a
+time, and nothing said so.
+
+Your machine now holds as many as it has memory for, and never fewer than four.
+There is nothing to turn on. `COORD_WORKER_CONCURRENCY` sets a different
+number if you want one; `1` is what this app did before.
+
 ### 0.5.0 — one sign-in
 
 Connecting an agent used to sign you into the vendor twice. Once to give this

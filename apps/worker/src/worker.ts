@@ -23,6 +23,7 @@ import type {
 } from "@coord/agent-protocol";
 import {
   WORKER_PROTOCOL_VERSION,
+  derivedRepositoryParallelism,
   type WorkAssignment,
 } from "@coord/cli/worker-operations";
 import {
@@ -62,7 +63,7 @@ import {
   type HeartbeatReply,
   type WorkingChange,
 } from "./client.js";
-import { signalHost } from "./host-signal.js";
+import { holdHost } from "./host-signal.js";
 import type { WorkNudge } from "./nudge.js";
 import {
   shouldClaimWork,
@@ -163,6 +164,27 @@ export interface WorkerOptions {
    * workers are separate processes.
    */
   planCache?: Map<string, CachedPlan>;
+  /**
+   * How many tasks this machine will run at once.
+   *
+   * A worker used to hold one lease and await it, which is what a machine
+   * running one agent needs and nothing more. It is not what the control
+   * plane does: a server-side run leases up to the repository's parallelism
+   * bound and executes the whole wave together, so moving execution onto
+   * people's own machines quietly took a four-wide fleet down to one — the
+   * queue was doing exactly what it was told, one task at a time, and looked
+   * for all the world like a stuck coordinator.
+   *
+   * Defaults to {@link derivedRepositoryParallelism}, the same memory-derived
+   * figure the control plane sizes a repository by, so a machine offers what
+   * it can actually hold rather than a number somebody picked. Deployments
+   * set `COORD_WORKER_CONCURRENCY`; `1` is the old behaviour exactly.
+   *
+   * The repository's own bound still applies on top and is the one that
+   * matters for correctness: a worker that asks for more than a repository
+   * admits is simply not granted the extra leases.
+   */
+  concurrency?: number;
   /** Idle wait between polls when the queue is empty. */
   pollIntervalMs?: number;
   /**
@@ -210,6 +232,35 @@ export interface IterationResult {
 }
 
 const DEFAULT_POLL_MS = 5_000;
+
+/**
+ * How many tasks this machine will hold at once.
+ *
+ * Deliberately the control plane's own sizing rather than a second formula:
+ * "how many agents fit on this box" is one question, and this repository has
+ * answered it once already, in memory rather than in cores. A worker with its
+ * own guess would drift from the bound its leases are granted against, which
+ * is the shape of bug that keeps being found here.
+ */
+function configuredConcurrency(explicit?: number): number {
+  if (explicit !== undefined) {
+    if (!Number.isSafeInteger(explicit) || explicit < 1) {
+      throw new RangeError("concurrency must be a positive integer");
+    }
+    return explicit;
+  }
+  const raw = process.env["COORD_WORKER_CONCURRENCY"]?.trim() ?? "";
+  if (raw === "") {
+    return derivedRepositoryParallelism();
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new RangeError(
+      "COORD_WORKER_CONCURRENCY must be a positive integer",
+    );
+  }
+  return parsed;
+}
 
 /**
  * Where a task's minutes went, said once when it ends.
@@ -322,6 +373,62 @@ function readsAsCompletionNotice(said: string, objective: string): boolean {
   return said.trim().endsWith(`completed ${request}`);
 }
 
+/**
+ * Everything one leased task owns while it is running.
+ *
+ * This was eight fields on the worker itself, which was right for exactly as
+ * long as a worker ran one task at a time. A machine holding four leases has
+ * four sessions to cancel, four claims to report writes under and four
+ * admission waits to abort; on one set of fields the second run's session
+ * overwrites the first's, and from then on the worker cancels the wrong agent
+ * and reports the wrong plan. Nothing in here is shared between runs, which is
+ * the property that makes the wave safe.
+ */
+class Run {
+  /** The agent turn in flight, if one is. Undefined between phases. */
+  public session: { adapter: AgentAdapter; sessionId: string } | undefined;
+  /** The cancel already issued, so a second request joins it. */
+  public cancellation: Promise<void> | undefined;
+  public cancellationRequested = false;
+  /** Aborted to cut short a wait between admission retries. */
+  public readonly admissionWait = new AbortController();
+  /**
+   * The stretch timings for the task in hand, so the phases inside `plan` can
+   * be named by the code that runs them rather than measured from outside.
+   */
+  public laps: Laps | undefined;
+  /**
+   * The plan the control plane narrowed this run's claim to, if it did.
+   *
+   * Reported instead of the claim at the end. The result is checked against
+   * the contract on the lease, and after a narrowing that contract is the
+   * frozen plan — a run that reported the blanket claim it started with would
+   * be claiming resources the admitted plan no longer covers, and refused for
+   * it. What the worker reports has to be what the control plane last decided.
+   */
+  public adoptedPlan: AgentPlan | undefined;
+  /**
+   * The repository claim this run is currently holding, if it is.
+   *
+   * Kept because both halves of a claim's life happen outside the call that
+   * granted it: the heartbeat reports what has been written under it, and the
+   * heartbeat's reply is where it learns the claim has been narrowed. Cleared
+   * the moment it stops being blanket, which is what stops a narrowed holder
+   * going on reporting as though it still had the repository.
+   */
+  public claim:
+    | {
+        adapter: AgentAdapter;
+        sessionId: string;
+        plan: AgentPlan;
+        workspace: TaskWorkspace;
+        workspaces: WorkspaceManager;
+      }
+    | undefined;
+
+  public constructor(public readonly leaseId: string) {}
+}
+
 export class Worker {
   private identity: { id: string } | undefined;
   /** See {@link WorkerOptions.planCache}. Per-worker unless one is injected. */
@@ -331,20 +438,43 @@ export class Worker {
   /** Plans amended from a previous one rather than written from nothing. */
   public planAmendCount = 0;
   private stopping = false;
-  private activeLease: string | undefined;
-  private activeSession:
-    | { adapter: AgentAdapter; sessionId: string }
-    | undefined;
-  private activeCancellation: Promise<void> | undefined;
-  private cancellationRequested = false;
-  private admissionWait: AbortController | undefined;
-  private iterationInProgress = false;
+  /**
+   * Every task this machine is holding a lease for right now.
+   *
+   * The set is what {@link stop} cancels and what {@link concurrency} is
+   * measured against; a run adds itself the moment it has a lease and removes
+   * itself in the `finally` that releases it, so a slot is never held by a run
+   * that has ended.
+   */
+  private readonly runs = new Set<Run>();
+  /**
+   * Serialises work on the shared repository cache, one chain per repository.
+   *
+   * The cache is one bare repository per repository id and every run fetches
+   * into it. Concurrently that is not merely slow: git takes a ref lock, the
+   * loser's fetch fails, and the failure path deletes the cache — out from
+   * under the run that is still using it, which then rebuilds it, which fails
+   * the next one. The whole hazard is inside `updateCache`, so the chain is
+   * held for exactly that call and dropped before the checkout, which is the
+   * long part and touches only the run's own workspace.
+   */
+  private readonly cacheChains = new Map<string, Promise<unknown>>();
   /** See {@link WorkerOptions.powerSource}. */
   private readonly power: PowerSource;
+
+  /**
+   * See {@link WorkerOptions.concurrency}.
+   *
+   * Read once. The environment does not change under a running daemon, and a
+   * bad value should stop the worker starting rather than throw from inside
+   * its poll loop, where a daemon is built to survive throwing.
+   */
+  private readonly concurrency: number;
 
   public constructor(private readonly options: WorkerOptions) {
     this.plans = options.planCache ?? new Map<string, CachedPlan>();
     this.power = options.powerSource ?? systemPowerSource();
+    this.concurrency = configuredConcurrency(options.concurrency);
     const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
     const planWaitBudget =
       options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
@@ -399,65 +529,47 @@ export class Worker {
     return identity.id;
   }
 
+  /** How many tasks this machine will hold at once. */
+  public get concurrencyLimit(): number {
+    return this.concurrency;
+  }
+
+  /** How many tasks it is holding right now. */
+  public get activeRunCount(): number {
+    return this.runs.size;
+  }
+
   /**
    * Performs at most one unit of work.
    *
    * Separated from {@link run} so the whole cycle can be driven directly by a
    * test without an infinite loop.
-   */
-  /**
-   * The stretch timings for the task in hand, so the phases inside `plan` can
-   * be named by the code that runs them rather than measured from outside.
-   * Undefined between tasks.
-   */
-  private laps: Laps | undefined;
-
-  /**
-   * The repository claim this machine is currently holding, if it is.
    *
-   * Kept because both halves of a claim's life happen outside the call that
-   * granted it: the heartbeat reports what has been written under it, and the
-   * heartbeat's reply is where it learns the claim has been narrowed. Cleared
-   * the moment it stops being blanket, which is what stops a narrowed holder
-   * going on reporting as though it still had the repository.
+   * `onLeased` fires the moment this call is holding a lease, which is how
+   * {@link run} knows a slot has actually been taken without waiting for the
+   * agent to finish using it. A call that finds nothing queued never fires it.
    */
-  /**
-   * The plan the control plane narrowed this run's claim to, if it did.
-   *
-   * Reported instead of the claim at the end. The result is checked against
-   * the contract on the lease, and after a narrowing that contract is the
-   * frozen plan — a run that reported the blanket claim it started with would
-   * be claiming resources the admitted plan no longer covers, and refused for
-   * it. What the worker reports has to be what the control plane last decided.
-   */
-  private adoptedPlan: AgentPlan | undefined;
-
-  private activeClaim:
-    | {
-        adapter: AgentAdapter;
-        sessionId: string;
-        plan: AgentPlan;
-        workspace: TaskWorkspace;
-        workspaces: WorkspaceManager;
-      }
-    | undefined;
-
-  public async runOnce(): Promise<IterationResult> {
+  public async runOnce(hooks?: {
+    readonly onLeased?: () => void;
+  }): Promise<IterationResult> {
     if (this.stopping) {
       return { worked: false };
     }
-    if (this.iterationInProgress) {
-      throw new Error("A worker iteration is already in progress");
+    // The bound this machine placed on itself, checked here rather than only
+    // in `run` so that a caller driving iterations directly cannot walk past
+    // it. `run` awaits `onLeased` before starting the next iteration, so the
+    // count this reads is never stale by a lease.
+    if (this.runs.size >= this.concurrency) {
+      throw new Error(
+        `This worker is already running ${this.runs.size} tasks, which is its limit`,
+      );
     }
-    this.iterationInProgress = true;
-    try {
-      return await this.performIteration();
-    } finally {
-      this.iterationInProgress = false;
-    }
+    return await this.performIteration(hooks?.onLeased);
   }
 
-  private async performIteration(): Promise<IterationResult> {
+  private async performIteration(
+    onLeased?: () => void,
+  ): Promise<IterationResult> {
     const workerId = this.identity?.id ?? (await this.register());
     // Asked before the lease and not after it, because the point is to never
     // hold work this machine cannot promise to finish. A laptop that claims a
@@ -502,15 +614,16 @@ export class Worker {
       };
     }
 
-    this.activeLease = assignment.lease.id;
+    const run = new Run(assignment.lease.id);
+    this.runs.add(run);
+    onLeased?.();
     // The busy window is exactly the lease's lifetime. The desktop app holds
     // the machine awake for this and nothing longer, so that volunteering a
-    // laptop does not mean it never sleeps again.
-    signalHost("busy");
-    this.activeSession = undefined;
-    this.activeCancellation = undefined;
-    this.cancellationRequested = false;
-    this.admissionWait = new AbortController();
+    // laptop does not mean it never sleeps again. Counted rather than
+    // switched: with several runs in flight the first one to finish would
+    // otherwise tell the host it was idle and let the machine sleep on top of
+    // three agents that were still working.
+    const releaseHost = holdHost();
     const scratch = workerScratchPath(
       this.options.workspaceRoot,
       assignment.lease.id,
@@ -529,18 +642,18 @@ export class Worker {
         // Only while a claim is held. A run that planned its own scope has
         // nothing to report and nothing that could be narrowed, so its
         // heartbeat stays the call it always was.
-        const changes = await this.claimedWorkingChanges();
+        const changes = await this.claimedWorkingChanges(run);
         const reply = await this.options.client.heartbeat(
           assignment.lease.id,
-          this.spentSoFar(),
+          this.spentSoFar(run),
           changes,
         );
-        await this.answerClaimTraffic(assignment, reply);
+        await this.answerClaimTraffic(run, assignment, reply);
       })()
         .catch(async (error) => {
           if (error instanceof LeaseLostError) {
             leaseLost = true;
-            await this.cancelActiveSession();
+            await this.cancelSession(run);
           }
         })
         .finally(() => {
@@ -561,7 +674,7 @@ export class Worker {
       }
 
       if (assignment.task.kind === "question") {
-        const answer = await this.answerQuestion(assignment, scratch);
+        const answer = await this.answerQuestion(run, assignment, scratch);
         if (leaseLost) {
           throw new LeaseLostError(assignment.lease.id);
         }
@@ -571,7 +684,7 @@ export class Worker {
           // nothing to integrate. The control plane's question branch returns
           // before it looks for either.
           { status: "completed", plan: null, changeSet: null, answer },
-          this.spentSoFar(),
+          this.spentSoFar(run),
         );
         return {
           worked: true,
@@ -582,13 +695,13 @@ export class Worker {
       }
 
       const laps = new Laps();
-      this.laps = laps;
-      const planned = await this.plan(assignment, scratch);
+      run.laps = laps;
+      const planned = await this.plan(run, assignment, scratch);
       laps.mark("plan");
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
-      const admission = await this.awaitAdmission(assignment, planned.plan);
+      const admission = await this.awaitAdmission(run, assignment, planned.plan);
       laps.mark("admission");
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
@@ -614,7 +727,7 @@ export class Worker {
         return await this.defer(assignment, planned, admission);
       }
 
-      const result = await this.execute(assignment, planned, admission);
+      const result = await this.execute(run, assignment, planned, admission);
       laps.mark("execute");
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
@@ -627,10 +740,10 @@ export class Worker {
           // not always what it started with: a claim narrowed mid-run leaves
           // the frozen plan as the contract, and reporting the wider one is
           // reporting resources nobody granted.
-          plan: this.adoptedPlan ?? result.plan,
+          plan: run.adoptedPlan ?? result.plan,
           changeSet: result.changeSet,
         },
-        this.spentSoFar(),
+        this.spentSoFar(run),
       );
       laps.mark("report");
       // One line, on the worker's own output, which the desktop app keeps.
@@ -680,15 +793,17 @@ export class Worker {
       return { worked: true, taskId: assignment.task.id, accepted: false, reason: detail };
     } finally {
       clearInterval(beat);
-      signalHost("idle");
+      // Removed before the host is told, so a `stop` racing this cannot try to
+      // cancel a run that has already released its lease, and so the slot is
+      // free for the next task the moment this one is genuinely over.
+      this.runs.delete(run);
+      releaseHost();
       await heartbeat?.catch(() => undefined);
-      await this.cancelActiveSession();
-      this.activeLease = undefined;
-      this.activeClaim = undefined;
-      this.adoptedPlan = undefined;
-      this.activeSession = undefined;
-      this.activeCancellation = undefined;
-      this.admissionWait = undefined;
+      await this.cancelSession(run);
+      run.claim = undefined;
+      run.adoptedPlan = undefined;
+      run.session = undefined;
+      run.cancellation = undefined;
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -709,11 +824,12 @@ export class Worker {
    * the point of the whole method.
    */
   private async answerQuestion(
+    run: Run,
     assignment: WorkAssignment,
     scratch: string,
   ): Promise<string> {
-    const planned = await this.plan(assignment, scratch);
-    const result = await this.execute(assignment, planned, {
+    const planned = await this.plan(run, assignment, scratch);
+    const result = await this.execute(run, assignment, planned, {
       status: "approved",
       taskId: assignment.task.id,
       planRevision: 1,
@@ -750,6 +866,7 @@ export class Worker {
    * is a bare HTTP call — the agent sits idle, burning nothing.
    */
   private async awaitAdmission(
+    run: Run,
     assignment: WorkAssignment,
     plan: AgentPlan,
   ): Promise<PlanAdmission> {
@@ -778,7 +895,7 @@ export class Worker {
       // again, so waiting would be pointless.
       admission.requeue !== true &&
       !this.stopping &&
-      !this.cancellationRequested &&
+      !run.cancellationRequested &&
       Date.now() < deadline
     ) {
       const remaining = deadline - Date.now();
@@ -794,8 +911,8 @@ export class Worker {
         remaining,
         Math.max(MIN_PLAN_RETRY_MS, requested),
       );
-      await this.waitForAdmissionRetry(wait);
-      if (this.stopping || this.cancellationRequested) {
+      await this.waitForAdmissionRetry(run, wait);
+      if (this.stopping || run.cancellationRequested) {
         break;
       }
       admission = await this.options.client.submitPlan(
@@ -807,20 +924,23 @@ export class Worker {
     return admission;
   }
 
-  private async waitForAdmissionRetry(milliseconds: number): Promise<void> {
-    const signal = this.admissionWait?.signal;
+  private async waitForAdmissionRetry(
+    run: Run,
+    milliseconds: number,
+  ): Promise<void> {
+    const signal = run.admissionWait.signal;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(finish, milliseconds);
       timer.unref?.();
       function finish(): void {
-        signal?.removeEventListener("abort", finish);
+        signal.removeEventListener("abort", finish);
         clearTimeout(timer);
         resolve();
       }
-      if (signal?.aborted === true) {
+      if (signal.aborted) {
         finish();
       } else {
-        signal?.addEventListener("abort", finish, { once: true });
+        signal.addEventListener("abort", finish, { once: true });
       }
     });
   }
@@ -850,6 +970,37 @@ export class Worker {
       deferred: true,
       reason: `${admission.status}: ${admission.explanation}`,
     };
+  }
+
+  /**
+   * Runs `work` with nothing else running against the same repository.
+   *
+   * A chain rather than a lock, because the thing being protected is a
+   * sequence of git commands rather than a variable, and because a chain
+   * cannot be forgotten: the link is installed before anything awaits and the
+   * entry is dropped when nothing is queued behind it, so a worker does not
+   * accumulate a promise per repository it has ever seen. A failing link is
+   * caught before the next one runs — one run's broken cache must not stop
+   * every later task in that repository.
+   */
+  private async serialisedByRepository<T>(
+    repositoryId: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.cacheChains.get(repositoryId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => await work());
+    const guard = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.cacheChains.set(repositoryId, guard);
+    try {
+      return await next;
+    } finally {
+      if (this.cacheChains.get(repositoryId) === guard) {
+        this.cacheChains.delete(repositoryId);
+      }
+    }
   }
 
   /**
@@ -1072,10 +1223,10 @@ export class Worker {
    * holder that reports nothing is one an arrival cannot freeze — so it waits
    * a retry instead, which is exactly what happens today.
    */
-  private async claimedWorkingChanges(): Promise<
-    readonly WorkingChange[] | undefined
-  > {
-    const held = this.activeClaim;
+  private async claimedWorkingChanges(
+    run: Run,
+  ): Promise<readonly WorkingChange[] | undefined> {
+    const held = run.claim;
     if (held === undefined) {
       return undefined;
     }
@@ -1117,16 +1268,17 @@ export class Worker {
    * around.
    */
   private async answerClaimTraffic(
+    run: Run,
     assignment: WorkAssignment,
     reply: HeartbeatReply,
   ): Promise<void> {
-    const held = this.activeClaim;
+    const held = run.claim;
     if (held === undefined) {
       return;
     }
     if (reply.narrowedPlan !== undefined) {
-      this.activeClaim = undefined;
-      this.adoptedPlan = reply.narrowedPlan;
+      run.claim = undefined;
+      run.adoptedPlan = reply.narrowedPlan;
       await held.adapter
         .acceptBlanketClaim?.(held.sessionId, reply.narrowedPlan)
         .catch(() => undefined);
@@ -1162,7 +1314,7 @@ export class Worker {
         assignment.lease.id,
         askId,
         undefined,
-        (await this.claimedWorkingChanges()) ?? [],
+        (await this.claimedWorkingChanges(run)) ?? [],
       );
       return;
     }
@@ -1199,12 +1351,13 @@ export class Worker {
       assignment.lease.id,
       askId,
       declaration,
-      (await this.claimedWorkingChanges()) ?? [],
+      (await this.claimedWorkingChanges(run)) ?? [],
     );
   }
 
   /** Materialises the workspace and gets the agent's plan — no editing yet. */
   private async plan(
+    run: Run,
     assignment: WorkAssignment,
     scratch: string,
   ): Promise<PlannedWork> {
@@ -1218,25 +1371,36 @@ export class Worker {
     // That is the cost a server-side run never had: the coordinator reads a
     // canonical clone off its own disk. This puts the same thing on the
     // machine that does the work.
-    const cache = await this.repositoryCache(
-      git,
+    //
+    // One run at a time per repository, and only for as long as the cache is
+    // being written. Every run fetches into the same bare repository, and
+    // concurrently that is not merely slow: git takes a ref lock, the loser's
+    // fetch fails, and `updateCache` answers a failed fetch by deleting the
+    // cache — out from under the run still reading it. The checkout below is
+    // the long part and touches only this run's own workspace, so it is
+    // deliberately outside the guard.
+    const { cache, source } = await this.serialisedByRepository(
       assignment.repository.id,
-    );
-    const source = await this.updateCache(
-      git,
-      cache,
-      assignment,
-      scratch,
+      async () => {
+        const built = await this.repositoryCache(
+          git,
+          assignment.repository.id,
+        );
+        return {
+          cache: built,
+          source: await this.updateCache(git, built, assignment, scratch),
+        };
+      },
     );
     // The two halves are timed apart because they fail for opposite reasons: a
     // slow fetch is the network or a cache that keeps being rebuilt, and a slow
     // checkout is the disk — which on Windows usually means a virus scanner
     // reading every file git writes.
-    this.laps?.mark("fetch");
+    run.laps?.mark("fetch");
 
     const workspacePath = path.join(scratch, "workspace");
     await this.materialise(git, source, source === cache, assignment, workspacePath);
-    this.laps?.mark("checkout");
+    run.laps?.mark("checkout");
 
     const workspace: TaskWorkspace = {
       id: assignment.lease.id,
@@ -1324,7 +1488,7 @@ export class Worker {
       repositoryId: assignment.repository.id,
       ...(context === "" ? {} : { priorContext: context }),
     });
-    this.activeSession = { adapter, sessionId: session.id };
+    run.session = { adapter, sessionId: session.id };
     // Listening starts here, not at execution.
     //
     // The full handler in `execute` is attached once a plan has been admitted,
@@ -1350,8 +1514,8 @@ export class Worker {
       // An adapter that cannot stream still plans and still works. This is
       // the room's view of the run, never the run itself.
       .catch(() => undefined);
-    if (this.cancellationRequested) {
-      await this.cancelActiveSession();
+    if (run.cancellationRequested) {
+      await this.cancelSession(run);
       throw new LeaseLostError(assignment.lease.id);
     }
     // The adapter separates planning from editing: requestPlan returns the
@@ -1388,10 +1552,10 @@ export class Worker {
     const claimed = prepared.plan;
     if (claimed !== undefined && acceptClaim !== undefined) {
       await acceptClaim(session.id, claimed);
-      this.laps?.mark("claim");
+      run.laps?.mark("claim");
       // Published to the heartbeat, which is the only thing that can report
       // this holder's writes or hear that its claim has been taken back.
-      this.activeClaim = {
+      run.claim = {
         adapter,
         sessionId: session.id,
         plan: claimed,
@@ -1483,6 +1647,7 @@ export class Worker {
    * never has to make an agent obey a mid-session scope change.
    */
   private async execute(
+    run: Run,
     assignment: WorkAssignment,
     planned: PlannedWork,
     admission: PlanAdmission,
@@ -1566,7 +1731,7 @@ export class Worker {
           }
           await adapter.resolveScopeChange(
             sessionId,
-            await this.arbitrateScope(assignment, plan, event),
+            await this.arbitrateScope(run, assignment, plan, event),
           );
         })
         .catch((error: unknown) => {
@@ -1619,6 +1784,7 @@ export class Worker {
    * changeset to.
    */
   private async arbitrateScope(
+    run: Run,
     assignment: WorkAssignment,
     plan: AgentPlan,
     event: Extract<AgentEvent, { event: "scope_change_requested" }>,
@@ -1648,7 +1814,7 @@ export class Worker {
         if (
           decision.decision === "deferred" &&
           !this.stopping &&
-          !this.cancellationRequested
+          !run.cancellationRequested
         ) {
           const requested =
             Number.isSafeInteger(decision.retryAfterMs) &&
@@ -1656,13 +1822,14 @@ export class Worker {
               ? decision.retryAfterMs!
               : MIN_PLAN_RETRY_MS;
           await this.waitForAdmissionRetry(
+            run,
             Math.max(1, Math.min(MIN_PLAN_RETRY_MS, requested)),
           );
         }
       } while (
         decision.decision === "deferred" &&
         !this.stopping &&
-        !this.cancellationRequested
+        !run.cancellationRequested
       );
       return decision;
     } catch (error) {
@@ -1835,37 +2002,102 @@ export class Worker {
     });
   }
 
-  /** Polls until stopped. */
+  /**
+   * Polls until stopped, keeping as many tasks in flight as this machine said
+   * it can hold.
+   *
+   * The loop takes one lease at a time and starts the next attempt as soon as
+   * the previous one *has* a lease rather than when it has finished with it —
+   * which is the whole difference from what this used to be. Leases are taken
+   * singly and not in a batch on purpose: the repository's parallelism bound
+   * is counted across active leases, so asking for four at once would ignore
+   * it, and the control plane's own drain takes them one at a time for
+   * exactly this reason.
+   */
   public async run(): Promise<void> {
     await this.register();
     // Connected after registering, so a nudge can never arrive for a worker
     // the control plane does not yet know about.
     this.options.nudge?.start();
     const idle = this.options.pollIntervalMs ?? DEFAULT_POLL_MS;
+    /** One entry per task in flight; `done` is what prunes it. */
+    const slots: Array<{ done: boolean; settled: Promise<void> }> = [];
+    // Set by a run the control plane refused rather than executed. A deferred
+    // task goes straight back on the queue and this worker is usually the one
+    // to pick it up again, so taking it again at once buys the same refusal
+    // and a second planning round trip. Read and cleared by the loop.
+    let refused = false;
     while (!this.stopping) {
-      let result: IterationResult;
-      try {
-        result = await this.runOnce();
-      } catch (error) {
-        // A control-plane outage must not kill the daemon; back off and retry.
-        process.stderr.write(
-          `[worker] poll failed: ${
-            error instanceof Error ? error.message : String(error)
-          }\n`,
-        );
-        result = { worked: false };
+      for (let index = slots.length - 1; index >= 0; index -= 1) {
+        if (slots[index]?.done === true) {
+          slots.splice(index, 1);
+        }
       }
-      // A deferred task goes straight back to the queue, and this worker is
-      // usually the one that picks it up again. Polling immediately would
-      // replan it into the same refusal, so back off as if the queue were
-      // empty — which, for work this worker can do, it effectively is.
-      if ((!result.worked || result.deferred === true) && !this.stopping) {
-        // The nudge only ever shortens this. With none supplied, or one that
-        // never hears anything, it is the same fixed backoff it always was.
-        await (this.options.nudge?.wait(idle) ??
-          new Promise((resolve) => setTimeout(resolve, idle)));
+      if (slots.length >= this.concurrency) {
+        // Woken by whichever finishes first, so a freed slot is refilled at
+        // once rather than at the next tick of the idle timer.
+        await Promise.race(slots.map((slot) => slot.settled));
+        continue;
+      }
+      if (refused) {
+        refused = false;
+        await this.idleWait(idle);
+        continue;
+      }
+      // Resolved with `true` once the attempt holds a lease, and with `false`
+      // if it ended without taking one. Waiting on this rather than on the
+      // whole attempt is what lets the next lease be taken while this task
+      // runs, and waiting on it at all is what stops the loop spinning
+      // through lease calls against an empty queue.
+      let announce: (leased: boolean) => void = () => undefined;
+      const leased = new Promise<boolean>((resolve) => {
+        announce = resolve;
+      });
+      const slot: { done: boolean; settled: Promise<void> } = {
+        done: false,
+        settled: Promise.resolve(),
+      };
+      slot.settled = (async () => {
+        try {
+          const result = await this.runOnce({
+            onLeased: () => announce(true),
+          });
+          if (result.deferred === true) {
+            refused = true;
+          }
+        } catch (error) {
+          // A control-plane outage must not kill the daemon, and must not
+          // take the tasks running beside this one down with it either.
+          process.stderr.write(
+            `[worker] poll failed: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          );
+        } finally {
+          // A no-op once the lease already announced itself; what it covers
+          // is the attempt that never got one.
+          announce(false);
+          slot.done = true;
+        }
+      })();
+      slots.push(slot);
+      if (!(await leased) && !this.stopping) {
+        // Nothing queued that this machine can take. The nudge only ever
+        // shortens this; with none supplied it is the same fixed backoff the
+        // single-task loop always had.
+        await this.idleWait(idle);
       }
     }
+    // Nothing is abandoned on the way out. `stop` cancels the agents and
+    // hands the leases back, and this is what waits for that to finish, so a
+    // caller that awaits `run` knows the machine is genuinely quiet.
+    await Promise.allSettled(slots.map((slot) => slot.settled));
+  }
+
+  /** The wait between polls, cut short by a nudge where one is supplied. */
+  private async idleWait(milliseconds: number): Promise<void> {
+    await (this.options.nudge?.wait(milliseconds) ??
+      new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
   /**
@@ -1879,13 +2111,16 @@ export class Worker {
     // Released first: it holds a socket and may have a caller parked in
     // `wait`, and neither should outlive the decision to shut down.
     this.options.nudge?.stop();
-    const lease = this.activeLease;
-    await Promise.all([
-      this.cancelActiveSession(),
-      lease === undefined
-        ? Promise.resolve()
-        : this.options.client.release(lease).catch(() => undefined),
-    ]);
+    // Every one of them, and copied first: `performIteration` removes a run
+    // from the set as it ends, and iterating the live set while that happens
+    // would skip a task that was still holding a lease.
+    const running = [...this.runs];
+    await Promise.all(
+      running.flatMap((run) => [
+        this.cancelSession(run),
+        this.options.client.release(run.leaseId).catch(() => undefined),
+      ]),
+    );
   }
 
   /**
@@ -1896,8 +2131,8 @@ export class Worker {
    * nothing rather than inventing a figure a budget would then be enforced
    * against.
    */
-  private spentSoFar(): AgentTokenUsage[] {
-    const active = this.activeSession;
+  private spentSoFar(run: Run): AgentTokenUsage[] {
+    const active = run.session;
     if (active === undefined) {
       return [];
     }
@@ -1909,16 +2144,16 @@ export class Worker {
     }
   }
 
-  private cancelActiveSession(): Promise<void> {
-    this.cancellationRequested = true;
-    this.admissionWait?.abort();
-    const active = this.activeSession;
+  private cancelSession(run: Run): Promise<void> {
+    run.cancellationRequested = true;
+    run.admissionWait.abort();
+    const active = run.session;
     if (active === undefined) {
       return Promise.resolve();
     }
-    this.activeCancellation ??= active.adapter
+    run.cancellation ??= active.adapter
       .cancel(active.sessionId)
       .catch(() => undefined);
-    return this.activeCancellation;
+    return run.cancellation;
   }
 }
