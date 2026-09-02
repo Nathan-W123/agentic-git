@@ -2130,6 +2130,15 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return task;
   }
 
+  public async getSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM submitted_tasks WHERE id = ?")
+      .get(taskId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubmittedTask(row);
+  }
+
   public async listSubmittedTasks(
     filter: SubmittedTaskFilter = {},
   ): Promise<SubmittedTask[]> {

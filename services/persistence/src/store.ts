@@ -1920,6 +1920,22 @@ export interface CoordinationStore {
   getRepository(id: string): Promise<StoredRepository | undefined>;
 
   submitTask(input: SubmitTaskInput): Promise<SubmittedTask>;
+  /**
+   * One task by id.
+   *
+   * Deliberately unlike {@link listSubmittedTasks}, which defaults to
+   * `kind: "task"` and so hides questions from every caller that has not asked
+   * for them. An id names exactly one row and the caller already has it, so
+   * there is nothing to protect them from: a question asked for by id is
+   * returned.
+   *
+   * Added because the alternative was in the code and being used — the gateway
+   * read a single task by listing every task on the deployment and filtering
+   * in memory. That is defensible once on a dashboard load and indefensible on
+   * something polled, which is what a task's status becomes the moment it can
+   * be asked for from outside.
+   */
+  getSubmittedTask(taskId: TaskId): Promise<SubmittedTask | undefined>;
   listSubmittedTasks(filter?: SubmittedTaskFilter): Promise<SubmittedTask[]>;
   /**
    * Atomically claims submitted work for one repository.

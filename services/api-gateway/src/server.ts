@@ -3588,6 +3588,21 @@ interface ChannelCommandResponse {
   result: RepositoryPushResult;
 }
 
+/**
+ * What posting one message into a channel actually started.
+ *
+ * `taskIds` exists for callers that are not looking at the room. A person who
+ * posts in the channel watches the thread appear and needs nothing back; a
+ * client dispatching from somebody's editor has no thread to watch, and
+ * without an id it can only tell them "sent" and hope. The ids were always in
+ * hand here — `dispatchOneMention` holds each task it submits — and were
+ * simply dropped on the floor.
+ */
+interface ChannelDispatch {
+  response?: ChannelCommandResponse;
+  taskIds: readonly string[];
+}
+
 interface SlashCommandDispatch {
   handled: boolean;
   response?: ChannelCommandResponse;
@@ -11126,75 +11141,16 @@ export class ApiGateway {
           stringField(body["content"], "content", {
             max: CHANNEL_MESSAGE_MAX_CHARS,
           }) ?? "";
-        const channel = await this.authorizeSubChannel({
+        const posted = await this.postChannelMessageAndDispatch({
           projectId,
           repositoryId,
           channelId: this.requestedChannelId(url, body),
+          content,
           principal,
         });
-        // Reading and posting come apart in an open room: anybody in the
-        // project can follow it, only its members can speak in it. 403 here
-        // rather than 404 — the caller can already see this room, so there
-        // is nothing left to conceal by pretending it is absent.
-        if (
-          !(await this.canPostInSubChannel(
-            channel,
-            principal.user.id,
-            await this.isRepositoryAdmin(principal, projectId, repositoryId),
-          ))
-        ) {
-          throw new HttpError(
-            403,
-            "not_a_member",
-            "You are not a member of this channel",
-          );
-        }
-        const message = await this.options.store.appendChannelMessage({
-          repositoryId,
-          channelId: channel.id,
-          projectId,
-          kind: "user",
-          authorId: principal.user.id,
-          content,
-        });
-        await this.options.store.appendAudit(undefined, {
-          type: "channel_message_posted",
-          data: {
-            projectId,
-            repositoryId,
-            channelId: channel.id,
-            messageId: message.id,
-          },
-        });
-        // Best-effort and after the user's own message is durably posted: a
-        // mention that fails to dispatch must not un-send what they typed.
-        // Errors from an individual mention are already turned into a system
-        // message inside `dispatchChannelMentions`; nothing should escape it,
-        // but a broad catch here keeps a bug in that path from 500ing what is
-        // otherwise a successful post.
-        let command: ChannelCommandResponse | undefined;
-        try {
-          command = await this.dispatchChannelMentions({
-            projectId,
-            repositoryId,
-            channelId: channel.id,
-            content,
-            senderId: principal.user.id,
-            referencedMessageId: message.id,
-          });
-        } catch (error) {
-          // Still swallowed for the response — a mention that fails to
-          // dispatch must not un-send what the user typed — but no longer
-          // silent. A bare catch here meant every failure in the dispatch
-          // path presented as "nothing happened", which is the hardest
-          // possible symptom to diagnose and the one this feature actually
-          // shipped with.
-          process.stderr.write(
-            `[channel] dispatch failed for ${repositoryId}: ${
-              error instanceof Error ? (error.stack ?? error.message) : String(error)
-            }\n`,
-          );
-        }
+        const channel = posted.channel;
+        const message = posted.message;
+        const command = posted.response;
         const [mentionAgents, mentionPeople] = await Promise.all([
           this.resolveChannelMentionCandidates(
             projectId,
@@ -15669,6 +15625,119 @@ export class ApiGateway {
     );
   }
 
+  /**
+   * Posts one message into a channel as this principal, and dispatches
+   * whatever it mentions.
+   *
+   * Lifted out of the channel POST route so a second caller can reach it. The
+   * second caller is the MCP endpoint: a task asked for from somebody's editor
+   * has to arrive the same way one asked for in the room does, or it gets a
+   * different thread, a different owner's credential and a different set of
+   * directives — four things reimplemented slightly wrong rather than reused.
+   *
+   * Everything here was already the route's body and is unchanged, including
+   * the two decisions worth restating. Reading and posting come apart in an
+   * open room, so membership is checked separately from access. And a mention
+   * that fails to dispatch must not un-send what was typed, so the dispatch is
+   * caught — loudly, on stderr, because a bare catch here once made every
+   * failure in that path present as "nothing happened".
+   */
+  private async postChannelMessageAndDispatch(input: {
+    projectId: string;
+    repositoryId: string;
+    /** Absent means the repository's default room. */
+    channelId: string | undefined;
+    content: string;
+    principal: AuthenticatedPrincipal;
+    /**
+     * Whether a dispatch failure should reach the caller.
+     *
+     * False for the room, where the rule is that a mention which fails to
+     * dispatch must not un-send what was typed: the message is already posted
+     * and the person is looking at the thread, where the failure will show.
+     *
+     * True for a caller that is not looking at the thread. An MCP client has
+     * only this return value to go on, and reporting "sent" for work that
+     * threw on its way to being started is the one answer it must never give.
+     */
+    rethrowDispatchErrors?: boolean;
+  }): Promise<{
+    channel: SubChannel;
+    message: ChannelMessage;
+    response: ChannelCommandResponse | undefined;
+    /** The tasks this message started, in the order they were dispatched. */
+    taskIds: readonly string[];
+  }> {
+    const { projectId, repositoryId, content, principal } = input;
+    const channel = await this.authorizeSubChannel({
+      projectId,
+      repositoryId,
+      channelId: input.channelId,
+      principal,
+    });
+    if (
+      !(await this.canPostInSubChannel(
+        channel,
+        principal.user.id,
+        await this.isRepositoryAdmin(principal, projectId, repositoryId),
+      ))
+    ) {
+      throw new HttpError(
+        403,
+        "not_a_member",
+        `You are not a member of #${channel.slug}`,
+      );
+    }
+    const message = await this.options.store.appendChannelMessage({
+      repositoryId,
+      channelId: channel.id,
+      projectId,
+      kind: "user",
+      authorId: principal.user.id,
+      content,
+    });
+    await this.options.store.appendAudit(undefined, {
+      type: "channel_message_posted",
+      data: {
+        projectId,
+        repositoryId,
+        channelId: channel.id,
+        messageId: message.id,
+      },
+    });
+    let dispatched: ChannelDispatch = { taskIds: [] };
+    try {
+      dispatched = await this.dispatchChannelMentions({
+        projectId,
+        repositoryId,
+        channelId: channel.id,
+        content,
+        senderId: principal.user.id,
+        referencedMessageId: message.id,
+      });
+    } catch (error) {
+      // Loud either way. A bare catch here once made every failure in the
+      // dispatch path present as "nothing happened", which is the hardest
+      // possible symptom to diagnose.
+      process.stderr.write(
+        `[channel] dispatch failed for ${repositoryId}: ${
+          error instanceof Error ? (error.stack ?? error.message) : String(error)
+        }\n`,
+      );
+      if (input.rethrowDispatchErrors === true) {
+        throw error;
+      }
+    }
+    return {
+      channel,
+      message,
+      ...(dispatched.response === undefined
+        ? { response: undefined }
+        : { response: dispatched.response }),
+      taskIds: dispatched.taskIds,
+    };
+  }
+
   private async dispatchChannelMentions(input: {
     projectId: string;
     repositoryId: string;
@@ -15685,7 +15754,7 @@ export class ApiGateway {
     senderId: string;
     /** The stored channel root that caused this dispatch. */
     referencedMessageId: string;
-  }): Promise<ChannelCommandResponse | undefined> {
+  }): Promise<ChannelDispatch> {
     const { projectId, repositoryId, channelId, senderId, referencedMessageId } =
       input;
     // A command says *how* to treat the request; an "@" says who it is for.
@@ -15714,7 +15783,12 @@ export class ApiGateway {
         ...(channelId === undefined ? {} : { channelId }),
       });
       if (dispatched.handled) {
-        return dispatched.response;
+        return {
+          ...(dispatched.response === undefined
+            ? {}
+            : { response: dispatched.response }),
+          taskIds: [],
+        };
       }
     }
     const [candidates, people] = await Promise.all([
@@ -15749,7 +15823,7 @@ export class ApiGateway {
               "their owners to make theirs org-wide.",
             channelId,
           );
-          return;
+          return { taskIds: [] };
         }
         if (parsed?.command.name === "ask") {
           await this.postChannelSystemMessage(
@@ -15759,7 +15833,7 @@ export class ApiGateway {
               "should ask the questions.",
             channelId,
           );
-          return;
+          return { taskIds: [] };
         }
         // "status report" reads as a task to the verb detector — "report" is
         // work vocabulary — and it is the whole reason this feature exists,
@@ -15785,7 +15859,7 @@ export class ApiGateway {
               "job once per agent. Mention one agent to dispatch work.",
             channelId,
           );
-          return;
+          return { taskIds: [] };
         }
         await Promise.all(
           reachable.map((candidate) =>
@@ -15810,7 +15884,7 @@ export class ApiGateway {
             ).catch(() => undefined),
           ),
         );
-        return;
+        return { taskIds: [] };
       }
       const mentioned = candidates.filter((candidate) =>
         textMentionsName(content, candidate.name),
@@ -15837,7 +15911,7 @@ export class ApiGateway {
             "should ask the questions.",
             channelId,
           );
-        return;
+        return { taskIds: [] };
       }
       if (parsed?.command.name === "queue" && mentioned.length !== 1) {
         await this.postChannelSystemMessage(
@@ -15853,7 +15927,7 @@ export class ApiGateway {
                     .join(", ")}.`,
             channelId,
           );
-        return;
+        return { taskIds: [] };
       }
       if (
         parsed?.command.name === "queue" &&
@@ -15865,7 +15939,7 @@ export class ApiGateway {
           "`/queue` needs a task to run later — use `/queue @agent what should run next`.",
             channelId,
           );
-        return;
+        return { taskIds: [] };
       }
       if (
         mentioned.length === 0 &&
@@ -15902,8 +15976,9 @@ export class ApiGateway {
                 `${candidates.map((candidate) => `@${candidate.name}`).join(", ")}.`,
             channelId,
           );
-        return;
+        return { taskIds: [] };
       }
+      const started: string[] = [];
       for (const candidate of mentioned) {
         // `/dnc` stays on the direct, read-only answer path. `/ask` is
         // deliberately different: it is coordinated work whose first round
@@ -15937,7 +16012,7 @@ export class ApiGateway {
           );
           continue;
         }
-        await this.dispatchOneMention({
+        const startedId = await this.dispatchOneMention({
           projectId,
           repositoryId,
           content,
@@ -15959,8 +16034,11 @@ export class ApiGateway {
           // what the sender actually typed.
           ...(parsed?.command.name === "simple" ? { brief: true } : {}),
         });
+        if (startedId !== undefined) {
+          started.push(startedId);
+        }
       }
-      return;
+      return { taskIds: started };
     }
     // Both commands require an explicit agent: `/ask` needs one task owner
     // for its forced question round, while `/dnc` needs one direct answerer.
@@ -15975,7 +16053,7 @@ export class ApiGateway {
           : `\`/dnc\` answers without starting work — mention the agent you are asking: \`${parsed.command.usage}\`.`,
             channelId,
           );
-      return;
+      return { taskIds: [] };
     }
     // "Yes" answers the offer below before it is read as anything else — an
     // approval is a short sentence with no work verb in it, so nothing would
@@ -15989,7 +16067,7 @@ export class ApiGateway {
         candidates,
       })
     ) {
-      return;
+      return { taskIds: [] };
     }
     await this.maybeAutoClaimTask({
       projectId,
@@ -15999,6 +16077,11 @@ export class ApiGateway {
       candidates,
       referencedMessageId,
     });
+    // Empty on purpose. Auto-claim decides with a model call that is
+    // deliberately not awaited — see `maybeAutoClaimTask` — so at this point
+    // there is no task and may never be one. A caller that needs an id back
+    // has to name an agent, which is what puts it on the mention path above.
+    return { taskIds: [] };
   }
 
   /**
@@ -16325,7 +16408,16 @@ export class ApiGateway {
      * actually receives — the answer prompt or the task objective.
      */
     brief?: boolean;
-  }): Promise<void> {
+    /**
+     * The task this mention started, when it started one.
+     *
+     * Undefined from every path that refuses, answers directly, or files
+     * a question instead — a caller must not read "no id" as failure. It
+     * is also undefined when submission threw, which is reported into the
+     * thread below rather than raised, because a mention that cannot be
+     * dispatched must not un-send the message that carried it.
+     */
+  }): Promise<string | undefined> {
     const {
       projectId,
       repositoryId,
@@ -17000,6 +17092,7 @@ export class ApiGateway {
           watched?.pending.unshift(...(contextualized ? [] : thoughts));
         })
         .catch(() => undefined);
+      return task.id;
     } catch (error) {
       await this.appendChannelThreadReply({
         repositoryId,

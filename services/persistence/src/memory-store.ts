@@ -1503,6 +1503,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return copy(task);
   }
 
+  public async getSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const task = this.submitted.get(taskId);
+    return task === undefined ? undefined : copy(task);
+  }
+
   public async listSubmittedTasks(
     filter: SubmittedTaskFilter = {},
   ): Promise<SubmittedTask[]> {

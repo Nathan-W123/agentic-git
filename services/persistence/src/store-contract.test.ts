@@ -920,6 +920,68 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a task reads back by id, including a question`, async () => {
+    // Reading one task used to mean listing every task on the deployment and
+    // filtering in memory — defensible once on a dashboard load, indefensible
+    // on anything polled, which is what a task's status becomes once it can be
+    // asked for from outside the app.
+    //
+    // The question half is the part worth pinning. `listSubmittedTasks`
+    // defaults to `kind: "task"` and hides questions from callers that have
+    // not asked, because those callers feed coding paths. A caller holding an
+    // id is not one of them: it already names the row, so the kind filter
+    // would only make the answer wrong.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const work = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "fix the retry loop",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const question = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "what does the retry loop do?",
+        agentId: "codex",
+        validationCommands: [],
+        kind: "question",
+        answerTo: "msg_root",
+      });
+
+      const read = await store.getSubmittedTask(work.id);
+      assert.equal(read?.id, work.id);
+      assert.equal(read?.objective, "fix the retry loop");
+      assert.equal(read?.status, "submitted");
+      assert.equal(read?.kind, "task");
+
+      const asked = await store.getSubmittedTask(question.id);
+      assert.equal(asked?.id, question.id);
+      assert.equal(asked?.kind, "question");
+      assert.equal(asked?.answerTo, "msg_root");
+
+      // An id nobody issued is absent rather than an error, so a caller
+      // polling a task somebody else cancelled gets an answer.
+      assert.equal(await store.getSubmittedTask("task_nonexistent"), undefined);
+
+      // Detached, like every other read here: editing what came back must not
+      // reach into the store's own copy.
+      const mutable = await store.getSubmittedTask(work.id);
+      assert.ok(mutable);
+      mutable.objective = "something else entirely";
+      assert.equal(
+        (await store.getSubmittedTask(work.id))?.objective,
+        "fix the retry loop",
+      );
+
+      // It follows the row rather than snapshotting it.
+      await store.cancelSubmittedTask(work.id);
+      assert.equal((await store.getSubmittedTask(work.id))?.status, "cancelled");
+    } finally {
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a question is invisible to everything that runs work`, async () => {
     // The whole safety argument for putting questions in the same queue.
     //
