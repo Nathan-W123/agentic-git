@@ -2957,6 +2957,62 @@ export function localAgentsOnly(): boolean {
 }
 
 /**
+ * Whether this deployment ships project-configured MCP servers to the
+ * machines that run its agents.
+ *
+ * Off by default, and deliberately a separate switch from everything else
+ * about execution. An approved MCP server is an arbitrary process, chosen by
+ * a project admin, started on a teammate's own laptop under that teammate's
+ * account. `COORD_LOCAL_AGENTS_ONLY` guarantees nothing runs on the control
+ * plane; it guarantees nothing about whose laptop. A deployment turns this on
+ * knowing that, by the documented value and nothing that merely looks
+ * affirmative — the same rule `localAgentsOnly` follows, for the same reason.
+ *
+ * Consulted in two places. The gateway, which refuses to store or approve a
+ * server while this is off so that turning it off later leaves nothing armed;
+ * and the lease, which attaches nothing while it is off regardless of what is
+ * stored, so the switch is a fence and not a suggestion.
+ */
+export function mcpServersEnabled(): boolean {
+  return process.env["COORD_MCP_ENABLED"] === "1";
+}
+
+/** How a worker reaches an MCP server: a child process, or a URL. */
+export type McpServerTransport = "stdio" | "http";
+
+/**
+ * One MCP server as a worker receives it in a lease — resolved, with every
+ * secret already opened and every decision already made.
+ *
+ * Shared between the gateway that builds it, the worker that writes it into a
+ * vendor's config, and the adapters that carry it on the command line, so the
+ * three cannot disagree about its shape. Nothing in here is a database row:
+ * the stored record keeps its secrets sealed and its approval state, and
+ * neither belongs on a machine that only needs to start the thing.
+ *
+ * `env` is where a stdio server's secrets travel and `headers` where an HTTP
+ * server's do. Both are plaintext by the time they are here, which is why a
+ * lease is the only place this type ever appears on the wire: it goes to one
+ * worker, owned by the person whose task it is, over the authenticated
+ * channel that worker already holds.
+ */
+export interface ResolvedMcpServer {
+  /** Stable, lower-case, what the vendor config will call it. */
+  readonly name: string;
+  readonly transport: McpServerTransport;
+  /** stdio only. A bare executable name or an absolute path; never a shell. */
+  readonly command?: string;
+  /** stdio only. */
+  readonly args?: readonly string[];
+  /** stdio only. Secrets included, opened. */
+  readonly env?: Readonly<Record<string, string>>;
+  /** http only. */
+  readonly url?: string;
+  /** http only. Secrets included, opened. */
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
+/**
  * Names an agent can be dealt, so it is somebody rather than a vendor label.
  *
  * Here rather than in the web app because both ends assign one now: the app
