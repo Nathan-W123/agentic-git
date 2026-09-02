@@ -105,6 +105,83 @@ test("settings rides alongside the chat route rather than replacing it", async (
   assert.equal(settingsSectionFromHash(""), undefined);
 });
 
+test("a link to deployment opens general for anybody who does not run it", async () => {
+  const {
+    SETTINGS_SECTIONS,
+    normalizeSettingsSection,
+    settingsSectionFromHash,
+  } = await settingsModule();
+  const app = await publicFile("app.js");
+
+  const chat = "#chats/LATTICE/main?channel=subchan_33e89208";
+  // The fragment still names a real category. It is read before anybody knows
+  // whose browser it is, and deciding is not its job.
+  assert.equal(
+    settingsSectionFromHash(`${chat}&settings=deployment`),
+    "deployment",
+  );
+
+  // Deciding is the allow-list's job, and for anybody who does not run this
+  // deployment the list does not have it in.
+  const mine = SETTINGS_SECTIONS.filter(
+    (section) => section.adminOnly !== true,
+  ).map((section) => section.id);
+  assert.equal(mine.includes("deployment"), false);
+  assert.equal(normalizeSettingsSection("deployment", mine), "general");
+  assert.equal(
+    normalizeSettingsSection(
+      "deployment",
+      SETTINGS_SECTIONS.map((section) => section.id),
+    ),
+    "deployment",
+  );
+
+  // And the hash is put through that list on its way in, so following such a
+  // link lands on General rather than on a category that is not on offer.
+  assert.match(
+    app,
+    /function applySettingsSection\(section\)[\s\S]{0,700}normalizeSettingsSection\(\s*\n\s*section,\s*\n\s*visibleSettingsSections\(\)\.map\(\(candidate\) => candidate\.id\),/u,
+  );
+});
+
+test("a category this account may not open is on none of its lists", async () => {
+  const app = await publicFile("app.js");
+
+  // One filter, read in one place, so the sidebar, the default selection, the
+  // search index and the deep link cannot disagree about what exists.
+  assert.match(
+    app,
+    /function visibleSettingsSections\(\) \{\s*\n\s*return SETTINGS_SECTIONS\.filter\(\s*\n\s*\(section\) => section\.adminOnly !== true \|\| iAmSystemAdmin\(\),/u,
+  );
+
+  // Everything the dialog is built from comes out of it — the sidebar, the
+  // phone's combobox, the selected category and the rows search may offer —
+  // and nothing in there reaches past it to the unfiltered list.
+  const dialog = app.slice(
+    app.indexOf("function settingsDialog() {"),
+    app.indexOf("function wheelColorAt(node, event, current) {"),
+  );
+  assert.match(dialog, /const sections = visibleSettingsSections\(\);/u);
+  assert.match(
+    dialog,
+    /searchSettings\(query, \{\s*\n\s*sections: sections\.map\(\(candidate\) => candidate\.id\),/u,
+  );
+  assert.match(dialog, /settingsSidebar\(\{ sections, selected \}\)/u);
+  assert.match(dialog, /settingsMobileCombobox\(\{ sections, selected \}\)/u);
+  assert.doesNotMatch(dialog, /SETTINGS_SECTIONS/u);
+
+  // As do the two readers outside the dialog: the category it settles on, and
+  // the results the search field is offering as it is typed into.
+  assert.match(
+    app,
+    /function selectedSettingsSection\(\)[\s\S]{0,300}visibleSettingsSections\(\)\.map\(\(section\) => section\.id\)/u,
+  );
+  assert.match(
+    app,
+    /function currentSettingsResults\(\)[\s\S]{0,300}visibleSettingsSections\(\)\.map\(\(section\) => section\.id\)/u,
+  );
+});
+
 test("opening pushes one entry and moving between categories pushes none", async () => {
   const app = await publicFile("app.js");
 

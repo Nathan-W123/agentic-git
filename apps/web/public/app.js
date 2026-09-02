@@ -2528,7 +2528,14 @@ function settingsSectionMarkup(section) {
     case "billing":
       return billingSection();
     case "deployment":
-      return deploymentSection();
+      // Asked again here, and not only where the sidebar is built. This is
+      // the one category that is not everybody's, and the only one whose
+      // markup fetches as it renders — drawing it is what puts the waitlist,
+      // every address that ever asked for an account, on screen. A stored
+      // `settingsSection` read back before the principal arrives must not be
+      // able to reach it, so the render path carries the same gate the
+      // navigation does.
+      return iAmSystemAdmin() ? deploymentSection() : generalSection();
     case "project-controls":
       return projectControlsSection();
     default:

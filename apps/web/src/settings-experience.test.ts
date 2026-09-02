@@ -171,6 +171,59 @@ test("the phone gets a labelled category combobox instead of the sidebar", async
   assert.match(phone, /\.st-mobile-bar \{[\s\S]{0,200}position: sticky;/u);
 });
 
+test("System is not a heading somebody who has no System category reads", async () => {
+  const {
+    SETTINGS_GROUPS,
+    SETTINGS_SECTIONS,
+    settingsSidebar,
+    settingsMobileCombobox,
+  } = await settingsModule();
+
+  // Deployment is the whole of the System group, so an account that may not
+  // open it must not be told the group exists — an empty heading over nothing
+  // is how a reader learns there is a room they are not allowed into.
+  assert.deepEqual(
+    SETTINGS_GROUPS.find((group) => group.id === "system")?.sections,
+    ["deployment"],
+  );
+
+  const mine = SETTINGS_SECTIONS.filter(
+    (section) => section.adminOnly !== true,
+  );
+  const rail = settingsSidebar({ sections: mine, selected: "general" });
+  assert.doesNotMatch(rail, />System</u);
+  assert.doesNotMatch(rail, /data-value="deployment"/u);
+  assert.doesNotMatch(rail, />Deployment</u);
+  // And no orphan row at the foot either: the sidebar draws anything the
+  // groups forget, and a filtered-out category is not forgotten.
+  assert.equal(
+    rail.match(/data-act="settings-section"/gu)?.length,
+    mine.length,
+  );
+
+  const combobox = settingsMobileCombobox({
+    sections: mine,
+    selected: "general",
+  });
+  assert.doesNotMatch(combobox, /<optgroup label="System">/u);
+  assert.doesNotMatch(combobox, /value="deployment"/u);
+
+  // Whoever does run the deployment still gets both.
+  const admin = settingsSidebar({
+    sections: SETTINGS_SECTIONS,
+    selected: "deployment",
+  });
+  assert.match(admin, />System</u);
+  assert.match(admin, /data-value="deployment"/u);
+  assert.match(
+    settingsMobileCombobox({
+      sections: SETTINGS_SECTIONS,
+      selected: "deployment",
+    }),
+    /<optgroup label="System">/u,
+  );
+});
+
 /* ---------------------------------------------------------------- shell */
 
 test("the shell is sized, cornered and bordered to the spec", async () => {
@@ -609,6 +662,43 @@ test("project controls separates repository, policy and tokens", async () => {
   // Only the freshly minted secret is ever shown, and it is shown once.
   assert.match(tokens, /const minted = state\.newApiToken;/u);
   assert.doesNotMatch(tokens, /token\.secret|token\.token\b/u);
+});
+
+test("deployment is drawn only for whoever runs the deployment", async () => {
+  const app = await publicFile("app.js");
+
+  // Drawing this category is what fires the two requests behind it:
+  // `deploymentCard` asks for the health of the whole control plane, and
+  // `waitlistCard` for every address that ever asked for an account. So the
+  // gate sits in front of the markup, not only in front of the sidebar row —
+  // a stored category read back before the principal has arrived reaches the
+  // render path and nothing else.
+  const markup = app.slice(
+    app.indexOf("function deploymentSection() {"),
+    app.indexOf("function visibleSettingsSections() {"),
+  );
+  assert.match(
+    markup,
+    /case "deployment":[\s\S]{0,700}iAmSystemAdmin\(\) \? deploymentSection\(\) : generalSection\(\)/u,
+  );
+
+  // That branch is the only caller: twice in the file is the definition and
+  // the guarded call, and the same for the two cards it is made of. Neither
+  // can be reached without passing the gate.
+  assert.equal(app.match(/\bdeploymentSection\(\)/gu)?.length, 2);
+  assert.equal(app.match(/\bwaitlistCard\(\)/gu)?.length, 2);
+  assert.equal(app.match(/\bdeploymentCard\(\)/gu)?.length, 2);
+
+  // Both fetch as they render, which is the reason nothing may call them on
+  // the chance that the answer will be allowed.
+  assert.match(
+    app,
+    /function deploymentCard\(\) \{\s*\n\s*void ensureDeployment\(render\);/u,
+  );
+  assert.match(
+    app,
+    /function waitlistCard\(\)[\s\S]{0,400}void loadWaitlist\(\)/u,
+  );
 });
 
 /* -------------------------------------------------------- accessibility */
