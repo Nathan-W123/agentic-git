@@ -73,6 +73,19 @@ import {
 } from "./power.js";
 
 /**
+ * The oldest control plane this worker will take work from.
+ *
+ * Distinct from `WORKER_PROTOCOL_VERSION`, which is what this worker
+ * *speaks* and announces on its lease. The two part ways whenever a version
+ * adds something optional: protocol 4 lets a lease carry MCP servers, and a
+ * control plane still on 3 simply never sends any, which is not a reason to
+ * refuse its tasks. What cannot be done without is plan admission, which
+ * arrived in 3 — an older control plane would have work done first and
+ * discarded on conflict afterwards, and that is refused.
+ */
+const MINIMUM_CONTROL_PLANE_PROTOCOL = 3;
+
+/**
  * The worker daemon.
  *
  * It owns nothing durable. Each iteration leases one task, rebuilds the
@@ -664,13 +677,13 @@ export class Worker {
     beat.unref?.();
 
     try {
-      if ((assignment.protocolVersion ?? 1) < WORKER_PROTOCOL_VERSION) {
+      if ((assignment.protocolVersion ?? 1) < MINIMUM_CONTROL_PLANE_PROTOCOL) {
         // Executing anyway would put the old plan-blind behaviour back: work
         // would be done first and discarded on conflict afterwards.
         throw new Error(
           "Control plane speaks remote worker protocol " +
             `${assignment.protocolVersion ?? 1}, which has no plan admission ` +
-            `step; this worker requires ${WORKER_PROTOCOL_VERSION}`,
+            `step; this worker requires at least ${MINIMUM_CONTROL_PLANE_PROTOCOL}`,
         );
       }
 

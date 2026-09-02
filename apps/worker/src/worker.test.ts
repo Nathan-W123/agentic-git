@@ -1779,6 +1779,54 @@ const FAKE_CLAUDE = [
   "",
 ].join("\n");
 
+test("a worker takes work from a control plane one protocol behind it, and refuses one two behind", async (t) => {
+  // Protocol 4 added MCP servers to the lease, which are optional: a control
+  // plane still on 3 never sends any, and the task it hands over is as good
+  // as ever. Refusing it would strand every desktop that updated before the
+  // server did. Protocol 3 is the floor because that is where plan admission
+  // arrived, and a control plane without it would have work done first and
+  // thrown away on conflict afterwards.
+  const runtime = await startRuntime(t);
+  let announced = 3;
+  class OlderControlPlane extends WorkerClient {
+    public override async lease(
+      ...args: Parameters<WorkerClient["lease"]>
+    ): ReturnType<WorkerClient["lease"]> {
+      const assignment = await super.lease(...args);
+      return assignment === undefined
+        ? undefined
+        : { ...assignment, protocolVersion: announced };
+    }
+  }
+  const worker = makeWorker(runtime, {
+    client: new OlderControlPlane({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+  });
+  await worker.register();
+
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const behindByOne = await worker.runOnce();
+  assert.equal(behindByOne.accepted, true, behindByOne.reason);
+
+  announced = 2;
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise it again",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const behindByTwo = await worker.runOnce();
+  assert.equal(behindByTwo.accepted, false);
+  assert.match(String(behindByTwo.reason ?? ""), /plan admission/u);
+});
+
 test("a Claude worker loads the lease's MCP servers from scratch, strictly, and commits none of it", async (t) => {
   if (process.platform === "win32") {
     t.skip("the stand-in CLI is a shebang script");
