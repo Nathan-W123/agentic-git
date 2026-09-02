@@ -2571,11 +2571,14 @@ function mcpServersCard() {
             aria-label="Arguments, space-separated">
         </div>
         <div data-mcp-http hidden>
-          <input class="input input-sm" data-mcp-url placeholder="https://mcp.example.com/sse"
+          <input class="input input-sm" data-mcp-url placeholder="https://mcp.example.com/mcp"
             aria-label="Server URL">
+          <input class="input input-sm" data-mcp-token type="password" autocomplete="off"
+            placeholder="Bearer token, if the server needs one" aria-label="Bearer token">
         </div>
-        <textarea class="input st-textarea" rows="3" data-mcp-secrets
-          placeholder="LINEAR_API_KEY=lin_api_…" aria-label="Secrets, one per line as NAME=value"></textarea>
+        <textarea class="input st-textarea" rows="3" data-mcp-secrets data-mcp-stdio-only
+          placeholder="LINEAR_API_KEY=lin_api_…"
+          aria-label="Environment for the command, one per line as NAME=value"></textarea>
         <select class="input input-sm" data-mcp-scope aria-label="Scope">
           <option value="repository">This repository</option>
           <option value="project">Every repository</option>
@@ -8581,6 +8584,23 @@ async function removeMcpServerConfirmed(id) {
  * taken, a deployment with the feature off, a server that points back at
  * this control plane.
  */
+/**
+ * The one header an http MCP server can be given from the form.
+ *
+ * "Bearer " is prepended here so the person pastes the token as their
+ * provider showed it; a token already carrying the prefix is left alone
+ * rather than doubled.
+ */
+function mcpBearerHeader(token) {
+  const trimmed = String(token ?? "").trim();
+  if (trimmed === "") {
+    return {};
+  }
+  return {
+    Authorization: /^Bearer\s/iu.test(trimmed) ? trimmed : `Bearer ${trimmed}`,
+  };
+}
+
 function createMcpServerFromForm() {
   const read = (selector) =>
     (document.querySelector(selector)?.value ?? "").trim();
@@ -8612,9 +8632,16 @@ function createMcpServerFromForm() {
     }
     input.url = url;
   }
-  const secrets = parseMcpSecrets(
-    document.querySelector("[data-mcp-secrets]")?.value ?? "",
-  );
+  // A stdio server's secrets are its environment, typed as NAME=value. An
+  // http server's are its headers, and the only header shape every vendor's
+  // CLI can be handed is one bearer token — Codex reads nothing else — so the
+  // form asks for the token alone and builds the header itself. A server
+  // that needs some other header is created through the API, and runs only
+  // on a Claude agent.
+  const secrets =
+    transport === "stdio"
+      ? parseMcpSecrets(document.querySelector("[data-mcp-secrets]")?.value ?? "")
+      : mcpBearerHeader(read("[data-mcp-token]"));
   if (Object.keys(secrets).length > 0) {
     input.secrets = secrets;
   }
@@ -11999,11 +12026,12 @@ document.addEventListener("change", (event) => {
   if (picker?.dataset?.act === "mcp-transport") {
     const http = picker.value === "http";
     const form = picker.closest(".st-mcp-form");
-    const stdioFields = form?.querySelector("[data-mcp-stdio]");
-    const httpFields = form?.querySelector("[data-mcp-http]");
-    if (stdioFields) {
-      stdioFields.hidden = http;
+    for (const stdioField of form?.querySelectorAll(
+      "[data-mcp-stdio], [data-mcp-stdio-only]",
+    ) ?? []) {
+      stdioField.hidden = http;
     }
+    const httpFields = form?.querySelector("[data-mcp-http]");
     if (httpFields) {
       httpFields.hidden = !http;
     }

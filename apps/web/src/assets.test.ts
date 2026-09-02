@@ -1090,12 +1090,29 @@ test("the settings module composes MCP servers into project controls", async () 
     "data-mcp-command",
     "data-mcp-args",
     "data-mcp-url",
+    "data-mcp-token",
     "data-mcp-secrets",
     "data-mcp-scope",
   ]) {
     assert.match(card, new RegExp(field, "u"), `${field} should be on the form`);
   }
   assert.match(card, /data-act="mcp-create"/u);
+  // An http server's secret is one bearer token, not a NAME=value list: Codex
+  // can be handed a bearer token and nothing else, so a server made here has
+  // to run on every vendor. The textarea is the stdio command's environment
+  // and goes away with the stdio fields.
+  assert.match(card, /data-mcp-secrets data-mcp-stdio-only/u);
+  const create = sourceOf(app, "createMcpServerFromForm", "focusSettingsRow");
+  assert.match(
+    create,
+    /transport === "stdio"\s*\? parseMcpSecrets\([\s\S]{0,120}\)\s*: mcpBearerHeader\(read\("\[data-mcp-token\]"\)\)/u,
+  );
+  const bearer = new Function(
+    `${sourceOf(app, "mcpBearerHeader", "createMcpServerFromForm")}\nreturn mcpBearerHeader;`,
+  )() as (token: string) => Record<string, string>;
+  assert.deepEqual(bearer("  lin_api_x=y  "), { Authorization: "Bearer lin_api_x=y" });
+  assert.deepEqual(bearer("Bearer already"), { Authorization: "Bearer already" });
+  assert.deepEqual(bearer(""), {});
   // Loaded when Settings opens, beside the tokens, and neither one failing
   // keeps the other off the screen.
   assert.match(
