@@ -101,6 +101,61 @@ test("registration retains digests and creates the account only after the mailed
   );
 });
 
+test("an operator can name system administrators when nobody is one", async (t) => {
+  // There was no way to become one. `bootstrap` sets the flag on the first
+  // account ever created and nothing else sets it; the only route afterwards
+  // needs the flag you are trying to get. A deployment whose first account
+  // arrived some other way had no administrator and no way to appoint one,
+  // and its owner met that as being refused on their own deployment.
+  const store = new InMemoryCoordinationStore();
+  const auth = new AuthService(store);
+  const password = "OperatorPassword123!";
+  const user = await auth.registerUnconfirmed({
+    email: "Owner@Example.com",
+    displayName: "Owner",
+    password,
+    organizationName: "Owner team",
+  });
+  assert.equal(user.systemAdmin, false);
+
+  const signIn = async () =>
+    await auth.login({
+      email: "owner@example.com",
+      password,
+      ipAddress: "127.0.0.1",
+      userAgent: "test",
+    });
+
+  // Nobody named: nothing changes, which is every deployment that has not
+  // asked for this.
+  await signIn();
+  assert.equal((await store.getUser(user.id))?.systemAdmin, false);
+
+  // Named — matched case-insensitively and around whitespace, because this is
+  // typed into a hosting dashboard by hand.
+  process.env["COORD_SYSTEM_ADMINS"] = " other@example.com , OWNER@Example.com ";
+  t.after(() => {
+    delete process.env["COORD_SYSTEM_ADMINS"];
+  });
+  const session = await signIn();
+  assert.equal(
+    session.principal.user.systemAdmin,
+    true,
+    "the session carries the grant",
+  );
+  assert.equal(
+    (await store.getUser(user.id))?.systemAdmin,
+    true,
+    "and it is written down, so the admin screen and the last-admin guard agree",
+  );
+
+  // Taking the name back out does not demote anybody: an environment variable
+  // edited in a hurry must not be able to lock every administrator out.
+  delete process.env["COORD_SYSTEM_ADMINS"];
+  await signIn();
+  assert.equal((await store.getUser(user.id))?.systemAdmin, true);
+});
+
 test("unconfirmed registration creates the account, its team and its project at once", async () => {
   const store = new InMemoryCoordinationStore();
   const sent: MailMessage[] = [];
