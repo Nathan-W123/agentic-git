@@ -174,6 +174,7 @@ import {
   badge,
   relativeTime,
   showModal,
+  VENDOR_LABEL,
   toast,
   armChime,
   chime,
@@ -232,6 +233,7 @@ import {
   cancelTask,
   checkLocalCli,
   connectAgent,
+  connectEditorToKumi,
   disconnectAgent,
   installVendorCli,
   connectGitHubAccount,
@@ -261,7 +263,6 @@ import {
   createApiToken,
   loadApiTokens,
   approveMcpServer,
-  createEditorToken,
   createMcpServer,
   deleteMcpServer,
   ensureMcpServers,
@@ -2698,13 +2699,6 @@ async function loadMachineAgents() {
   }
   state.machineAgents = await bridge.detected().catch(() => undefined);
 }
-
-/** What people call each vendor's editor, which is not its adapter id. */
-const VENDOR_LABEL = {
-  claude: "Claude Code",
-  codex: "Codex",
-  cursor: "Cursor",
-};
 
 function editorMcpCard() {
   const bridge = typeof window === "undefined" ? undefined : window.KUMI_INSTALL;
@@ -8739,69 +8733,6 @@ function mcpBearerHeader(token) {
 }
 
 /**
- * Connects one editor on this machine, end to end.
- *
- * Three steps that used to be a person's job: mint a token scoped to filing
- * work and nothing else, have the app write that editor's own config file,
- * and say what is left. The token is never shown, because nobody has to
- * carry it anywhere — which is also why it cannot be pasted with its angle
- * brackets on, or without the word Bearer, or into the wrong scope.
- *
- * Failures land in the row rather than in a toast that scrolls away, since
- * the row is where somebody will look next time they wonder whether it
- * worked.
- */
-async function connectEditorToKumi(vendor) {
-  const bridge = window.KUMI_INSTALL;
-  if (bridge?.connectEditor === undefined) {
-    return;
-  }
-  const label = VENDOR_LABEL[vendor] ?? vendor;
-  state.editorConnected = { ...state.editorConnected, [vendor]: "Connecting…" };
-  render();
-  try {
-    // Named for the editor and the machine, so the tokens list is something a
-    // person can actually revoke from rather than a column of identical rows.
-    const token = await createEditorToken(`${label} on ${deviceLabel()}`);
-    const written = await bridge.connectEditor(vendor, token);
-    if (written?.ok !== true) {
-      state.editorConnected = {
-        ...state.editorConnected,
-        [vendor]: `Could not connect: ${written?.detail ?? "unknown error"}`,
-      };
-      render();
-      return;
-    }
-    state.editorConnected = {
-      ...state.editorConnected,
-      [vendor]:
-        written.manual === undefined
-          ? `Connected. Restart ${label} and ask it to have Kumi do something.`
-          : // Codex off Windows: the file is written and the variable is not,
-            // because a shell profile is the person's own file. Saying so beats
-            // reporting a job that is only half done.
-            `Config written. Add this to your shell, then restart ${label}: ${written.manual}`,
-    };
-  } catch (error) {
-    state.editorConnected = {
-      ...state.editorConnected,
-      [vendor]: `Could not connect: ${error.message}`,
-    };
-  }
-  render();
-}
-
-/** This computer, as the tokens list should name it. */
-function deviceLabel() {
-  const platform = /win/iu.test(navigator.platform ?? "")
-    ? "Windows"
-    : /mac/iu.test(navigator.platform ?? "")
-      ? "Mac"
-      : "this computer";
-  return platform;
-}
-
-/**
  * Puts one catalogue entry into the form, and leaves it there to be read.
  *
  * Deliberately not "create on click". What is being agreed to is that this
@@ -11922,7 +11853,7 @@ document.addEventListener("click", (event) => {
       fillMcpFormFrom(value);
       return;
     case "editor-connect":
-      void connectEditorToKumi(value);
+      void connectEditorToKumi(value, render);
       return;
     case "mcp-approve": {
       const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
