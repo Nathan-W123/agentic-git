@@ -18,6 +18,12 @@ definition and its sealed secrets, and hands them only to the machine of the
 person who submitted the task; the program itself starts on that machine, as
 the agent always has.
 
+Also in this build: a message that opens with "can you" and does not end in a
+question mark is treated as an instruction, not a question, so it gets a
+thread and starts at once instead of being answered in the channel minutes
+later. Questions your machine answers now show in the worker log, answered or
+failed, so a quiet channel is no longer a mystery.
+
 Two things to know. Codex can be handed a bearer token and nothing else, so an
 http server that needs some other header runs only under Claude. And this app
 now speaks worker protocol 4: it still works against a control plane on 3, it

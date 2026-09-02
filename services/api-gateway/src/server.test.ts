@@ -42,6 +42,7 @@ import {
   previewBaseHref,
   previewProxyHeaders,
   readsAsEchoOfRequest,
+  readsAsQuestion,
   reportedFreshTokens,
   requestFromObjective,
   rewritePreviewHtml,
@@ -53,10 +54,10 @@ import {
   summariseThreadTitle,
   textOverlap,
   truncateToTokens,
-  withRoleContext,
   type ApiOperations,
   type ChannelMemoThread,
   type StaticAsset,
+  withRoleContext,
 } from "./server.js";
 import { hashPassword, hashSecret } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
@@ -6751,6 +6752,32 @@ test("a request that names no verb this list knows is still work when an agent i
  * "this is a greenfield project… can you get started" is a request to get
  * started, and the first clause is background.
  */
+test("a polite request is work unless it actually asks whether", () => {
+  // "can you …" opens an instruction as often as a question. The verb list
+  // cannot settle it — the verbs people use for interface work (condense,
+  // tailor, tidy) are open-ended — so the question mark does: asking whether
+  // something is possible gets one, telling an agent what to do does not.
+  for (const request of [
+    "@Cronus can you take reference from slack to vertically condense the top bar",
+    "could you tidy the settings page so it reads like Linear's",
+    "please can you reword the empty state on the runs screen",
+    "Would you tailor the top bar for the chat experience",
+  ]) {
+    assert.equal(readsAsQuestion(request), false, request);
+  }
+  for (const question of [
+    "can you see the payments repo?",
+    "could you explain how the queue works?",
+    "what are you working on",
+    "is the release checklist done",
+    "@Cronus summarise the codebase",
+  ]) {
+    assert.equal(readsAsQuestion(question), true, question);
+  }
+  // A real task verb still wins with or without the question mark.
+  assert.equal(readsAsQuestion("can we make a chess game?"), false);
+});
+
 test("an opening line summarises the request rather than repeating it", () => {
   assert.equal(
     summariseObjective("please create the initial skeleton for a browser chess game"),
