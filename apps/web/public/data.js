@@ -1029,6 +1029,44 @@ export async function resolveAttachmentImages(root = document) {
   );
 }
 
+/**
+ * The build this page was loaded against, learned from the first reply.
+ *
+ * Not baked into the page at build time on purpose: the page is served from
+ * whatever container answers, and what matters is not which commit produced
+ * this script but whether the server has moved on since it started running.
+ */
+let loadedBuild;
+
+/**
+ * Notices that the server has been redeployed under a page that is still
+ * running.
+ *
+ * This is the gap that made a correct deploy invisible. The dashboard is a
+ * single-page app — it never re-fetches its own script — and a phone does not
+ * reload it either: iOS freezes and restores a tab or home-screen app, so
+ * coming back to Kumi resumes the JavaScript that was loaded days ago. The
+ * assets were always served `no-cache` and would have fetched the new build
+ * correctly. Nothing ever asked.
+ *
+ * Read off replies the page is already making, so this costs no request. A
+ * server too old to send the header leaves this permanently undefined, which
+ * is exactly the behaviour there was before.
+ */
+function noticeBuild(response) {
+  const build = response.headers.get("X-Kumi-Build");
+  if (!build) {
+    return;
+  }
+  if (loadedBuild === undefined) {
+    loadedBuild = build;
+    return;
+  }
+  if (build !== loadedBuild) {
+    state.updateAvailable = true;
+  }
+}
+
 export async function api(path, options = {}) {
   const method = options.method ?? "GET";
   const headers = new Headers(options.headers ?? {});
@@ -1057,6 +1095,7 @@ export async function api(path, options = {}) {
       ? {}
       : { body: raw ? options.body : JSON.stringify(options.body) }),
   });
+  noticeBuild(response);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(

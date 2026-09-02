@@ -8186,5 +8186,5 @@ test("the settings module is a browser module built from the shared parts", asyn
   // shape of a settings row be asserted without a browser.
   assert.doesNotMatch(settings, /\bfetch\(/u);
   assert.doesNotMatch(settings, /from "\.\/data\.js"/u);
-  assert.doesNotMatch(settings, /window\.location/u);
+  assert.doesNotMatch(settings, /window.location/u);
 });
