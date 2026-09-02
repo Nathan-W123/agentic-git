@@ -1283,6 +1283,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       token.revokedAt = at;
       token.revokedReason = reason;
     }
+    // And everything it minted, which is what makes minting safe at all: a
+    // credential that could outlive the one that created it would put
+    // revocation out of reach. One level, because a minted token may not mint.
+    for (const child of this.apiTokens.values()) {
+      if (child.createdByToken === id && child.revokedAt === undefined) {
+        child.revokedAt = at;
+        child.revokedReason = `${reason} (minted by a revoked token)`;
+      }
+    }
   }
 
   public async deleteExpiredApiTokens(now: string): Promise<number> {

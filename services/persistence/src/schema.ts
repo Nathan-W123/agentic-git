@@ -1619,6 +1619,18 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    // The desktop app authenticates with a token, not a session, so it could
+    // not mint the narrow one an editor needs — and the rule it ran into is
+    // worth keeping: a token that mints tokens makes revocation meaningless.
+    // Recording the parent restores that, because revoking it takes the
+    // children with it.
+    version: 55,
+    name: "api-token-parent",
+    statements: [
+      `ALTER TABLE api_tokens ADD COLUMN created_by_token TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

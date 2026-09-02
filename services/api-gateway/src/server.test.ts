@@ -1953,6 +1953,63 @@ async function bearer(
   };
 }
 
+test("a token may mint a narrower one, which dies with it", async (t) => {
+  // The desktop app authenticates with a token, so the rule that only a
+  // session may mint left it unable to create the narrow credential an editor
+  // needs — from the one place that can actually write that editor's config.
+  // The rule was right, though: a token refreshing itself forever would put
+  // revocation out of reach. So the exception keeps the invariant instead of
+  // trading it away.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const desktop = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "desktop", scopes: ["view", "run_task", "submit_task"] },
+  });
+  assert.equal(desktop.status, 201);
+  const parentId = desktop.data.id as string;
+  const parentToken = desktop.data.token as string;
+
+  // Narrower: allowed, and it works.
+  const minted = await bearer(runtime.origin, "/api/v1/auth/tokens", parentToken, {
+    method: "POST",
+    body: { name: "Claude Code on Windows", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(minted.status, 201, JSON.stringify(minted.data));
+  const child = minted.data.token as string;
+  assert.equal(
+    (await bearer(runtime.origin, "/api/v1/auth/tokens", child)).status,
+    200,
+    "the minted token should authenticate",
+  );
+
+  // Wider than the token doing the minting: refused, even though the *person*
+  // holds the scope — this account is a system administrator and could have
+  // asked for it from a session. A credential must not escalate itself just
+  // because its owner could have asked for more.
+  const wider = await bearer(runtime.origin, "/api/v1/auth/tokens", parentToken, {
+    method: "POST",
+    body: { name: "greedy", scopes: ["view", "manage_organization"] },
+  });
+  assert.equal(wider.status, 403);
+  assert.equal(wider.data.error.code, "scope_exceeds_token");
+
+  // And the invariant the original rule protected: revoking the parent takes
+  // the child with it, so revocation still reaches everything.
+  const revoked = await client.request(
+    `/api/v1/auth/tokens/${encodeURIComponent(parentId)}`,
+    { method: "DELETE" },
+  );
+  assert.equal(revoked.status, 200);
+  assert.equal(
+    (await bearer(runtime.origin, "/api/v1/auth/tokens", child)).status,
+    401,
+    "a token outlived the one that minted it",
+  );
+});
+
 test("api tokens authenticate headless clients without cookies or CSRF", async (t) => {
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
@@ -2082,7 +2139,13 @@ test("a token cannot be granted more than its owner's role allows", async (t) =>
   assert.equal(elsewhere.status, 403);
 });
 
-test("a token cannot mint another token", async (t) => {
+test("a minted token cannot mint further, so the chain stays one link long", async (t) => {
+  // A token may now mint one narrower token, because the desktop app needs to
+  // and it authenticates with a token. What keeps that from becoming "a
+  // leaked credential refreshes itself forever" is the cascade — revoking the
+  // parent revokes the child — and the cascade is one level deep. So the
+  // chain has to be one link long, or its tail would outlive revoking its
+  // head.
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
   await bootstrap(client);
@@ -2093,14 +2156,20 @@ test("a token cannot mint another token", async (t) => {
   });
   const token = created.data.token as string;
 
-  // Otherwise a leaked credential could refresh itself forever and revocation
-  // would mean nothing.
-  const minted = await bearer(runtime.origin, "/api/v1/auth/tokens", token, {
+  const child = await bearer(runtime.origin, "/api/v1/auth/tokens", token, {
     method: "POST",
     body: { name: "child", scopes: ["view"] },
   });
-  assert.equal(minted.status, 403);
-  assert.equal(minted.data.error.code, "session_required");
+  assert.equal(child.status, 201);
+
+  const grandchild = await bearer(
+    runtime.origin,
+    "/api/v1/auth/tokens",
+    child.data.token as string,
+    { method: "POST", body: { name: "grandchild", scopes: ["view"] } },
+  );
+  assert.equal(grandchild.status, 403);
+  assert.equal(grandchild.data.error.code, "session_required");
 });
 
 test("revoking a token stops it immediately", async (t) => {

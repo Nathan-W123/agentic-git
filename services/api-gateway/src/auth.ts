@@ -1239,6 +1239,12 @@ export class AuthService {
     organizationId?: string;
     expiresInDays?: number;
     createdBySession?: string;
+    /**
+     * The token that minted this one, where a token was allowed to.
+     *
+     * Recorded so revocation cascades. See `ApiTokenRecord.createdByToken`.
+     */
+    createdByToken?: string;
   }): Promise<IssuedApiToken> {
     const name = input.name.trim();
     if (name.length === 0 || name.length > 120) {
@@ -1283,6 +1289,7 @@ export class AuthService {
       scopes,
       createdAt: now.toISOString(),
       createdBySession: input.createdBySession,
+      createdByToken: input.createdByToken,
       expiresAt,
       lastUsedAt: undefined,
       lastUsedIp: undefined,
