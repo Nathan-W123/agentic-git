@@ -1210,15 +1210,23 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
   if (windows.length > 0) {
     return { windows };
   }
-  // What the machine that ran it said about itself, if it said anything.
+  // What the machine that ran it said about itself.
   //
-  // The desktop prepends this when no attempt produced a window, because
-  // every reason for that lands in the same two sentences below and they
-  // need different fixes: a CLI too old to publish the event, a CLI that does
-  // not publish it in headless mode, and an account with no window at all are
-  // three different problems wearing one message. Three rounds of this card
-  // were spent guessing between them.
-  const probe = /^kumi-probe:\s*(.+)$/mu.exec(text)?.[1]?.trim();
+  // Every reason for a missing window lands in the same two sentences below,
+  // and they need different fixes: a CLI too old to publish the event, one
+  // that does not publish it in headless mode, an account with no window at
+  // all, and an event that arrived and was misread are four problems wearing
+  // one message. Three rounds of this card were spent guessing between them.
+  //
+  // Read out of the reading itself rather than requiring anything new from
+  // the machine. A desktop already sends the whole `stream-json` transcript —
+  // the event types are in it, and so is the answer — so this needs no new
+  // field, no route change, and no version of the app that anybody has to go
+  // and install. Newer builds prepend their own line and it is preferred when
+  // present, because it can also name the CLI's version, which the stream
+  // cannot.
+  const probe =
+    /^kumi-probe:\s*(.+)$/mu.exec(text)?.[1]?.trim() ?? streamSummary(text);
   const withProbe = (reason: string): string =>
     probe === undefined ? reason : `${reason} (${probe})`;
   // Percentages exist because a *subscription* has limits to be a percentage
@@ -1284,6 +1292,48 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
         `${text.trim().split("\n")[0]?.slice(0, 160) ?? "(nothing)"}`,
     ),
   };
+}
+
+/**
+ * What a `stream-json` transcript carried, in one phrase.
+ *
+ * The whole question behind an empty Claude card is whether the CLI ever
+ * published a `rate_limit_event`, and a transcript answers it directly: the
+ * event types are right there, one per line. Nothing needs to be asked of the
+ * machine again, which is what makes this readable on a build that is already
+ * installed.
+ *
+ * Three answers, and they are different problems:
+ *
+ *  - no typed events at all — this is not a stream at all, so the CLI ignored
+ *    `--output-format stream-json` and is too old for it;
+ *  - types, but no `rate_limit_event` — the CLI streams and does not publish
+ *    the window here, which is a question about headless mode or the account;
+ *  - the event present — then it arrived and something on this side misread
+ *    it, which is the only one of the three that is a bug in Kumi.
+ *
+ * Undefined when the reading is not a stream at all, so an ordinary `json`
+ * reply from an older app is described by the sentences it already had rather
+ * than by an empty parenthesis.
+ */
+export function streamSummary(text: string): string | undefined {
+  const kinds = new Set<string>();
+  for (const line of text.split("\n")) {
+    const type = /"type"\s*:\s*"([\w.-]+)"/u.exec(line)?.[1];
+    if (type !== undefined) {
+      kinds.add(type);
+    }
+  }
+  if (kinds.size === 0) {
+    return undefined;
+  }
+  if (kinds.has("rate_limit_event")) {
+    // Said plainly, because this one is ours to fix and nobody should be sent
+    // to check their CLI version over it.
+    return "the CLI did publish a rate_limit_event and it was not read here — " +
+      "this is a Kumi bug, not your account";
+  }
+  return `stream carried: ${[...kinds].sort().join(", ")} — no rate_limit_event`;
 }
 
 /**
@@ -3339,10 +3389,19 @@ export class ProviderChatService {
         login.exitCode !== 0 ||
         saysSignedOut(`${login.stdout}\n${login.stderr}`)
       ) {
+        // Named for the machine it was actually asked of.
+        //
+        // This probe runs where Kumi's server runs. On a deployment where
+        // everybody signs in on their own machine that is nobody's login, so
+        // "this account is not signed in" was a confident sentence about a
+        // computer the reader has never seen — and it is the sentence they
+        // get whenever their own machine has not managed to report, which
+        // sends them to re-authorise a connection that was never the problem.
         return (
-          "The Codex CLI is installed but this account is not signed in to " +
-          "it, so it has no quota to report. Signing in again from the " +
-          "connection above is what fills this."
+          "No Codex reading has arrived from your machine, and the Codex CLI " +
+          "where Kumi's server runs is not signed in — so there is nothing " +
+          "here to show. Usage is read by the Kumi app on the machine that " +
+          "holds your Codex login; open it there and refresh this card."
         );
       }
     } catch {

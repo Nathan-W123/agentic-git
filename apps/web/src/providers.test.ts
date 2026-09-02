@@ -3765,3 +3765,38 @@ test("a real reading is unchanged by the probe existing", () => {
   assert.ok(report.windows.length > 0, JSON.stringify(report));
   assert.equal(report.unavailableReason, undefined);
 });
+
+/**
+ * The three reasons an empty Claude card can be empty, told apart.
+ *
+ * Read out of the transcript a machine already sends, so this works on an app
+ * that is already installed — the whole point of deriving it here rather than
+ * asking the desktop for one more field.
+ */
+test("an empty claude reading says what the stream actually carried", () => {
+  // Streamed, and never published the window.
+  const streamed = parseClaudeUsage(
+    [
+      '{"type":"system","subtype":"init"}',
+      '{"type":"assistant","message":{}}',
+      '{"type":"result","subtype":"success"}',
+      "Total cost: $0.01",
+    ].join("\n"),
+  );
+  assert.match(String(streamed.unavailableReason), /no rate_limit_event/u);
+  assert.match(String(streamed.unavailableReason), /assistant, result, system/u);
+
+  // Published it, and this side failed to read it — the one case that is ours.
+  const missed = parseClaudeUsage(
+    ['{"type":"rate_limit_event","rate_limit_info":{}}', "Total cost: $0.01"].join(
+      "\n",
+    ),
+  );
+  assert.match(String(missed.unavailableReason), /Kumi bug, not your account/u);
+
+  // Not a stream at all: described by the sentence it always had, with no
+  // empty parenthesis bolted on.
+  const plain = parseClaudeUsage("Total cost: $0.01\nTotal duration: 4s");
+  assert.match(String(plain.unavailableReason), /session summary/u);
+  assert.doesNotMatch(String(plain.unavailableReason), /\(/u);
+});
