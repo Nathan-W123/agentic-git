@@ -385,6 +385,15 @@ export interface ApiTokenRecord {
   createdAt: string;
   /** Session that minted it, so a compromised session's tokens can be traced. */
   createdBySession: string | undefined;
+  /**
+   * Token that minted it, for the one case where a credential may mint
+   * another: the desktop app, connecting an editor on the machine it runs on.
+   *
+   * Set means this token dies when that one is revoked. That is what keeps
+   * revocation meaningful — the rule a token minting tokens would otherwise
+   * break — and it is why only a token with none of its own may mint.
+   */
+  createdByToken: string | undefined;
   expiresAt: string | undefined;
   lastUsedAt: string | undefined;
   lastUsedIp: string | undefined;
@@ -2013,6 +2022,12 @@ export interface CoordinationStore {
   /** Newest first. Revoked tokens are included so history stays auditable. */
   listApiTokens(userId: UserId): Promise<ApiTokenRecord[]>;
   touchApiToken(id: string, at: string, ipAddress: string): Promise<void>;
+  /**
+   * Revokes a token and everything it minted.
+   *
+   * The cascade is the whole reason a token is allowed to mint at all. One
+   * level deep, because a minted token may not mint.
+   */
   revokeApiToken(id: string, at: string, reason: string): Promise<void>;
   /** Removes tokens that expired before `now`; returns how many were deleted. */
   deleteExpiredApiTokens(now: string): Promise<number>;

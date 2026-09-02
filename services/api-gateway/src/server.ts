@@ -8205,10 +8205,21 @@ export class ApiGateway {
     }
 
     if (path === `${API_PREFIX}/auth/tokens` && method === "POST") {
-      // A token may only be minted from an interactive session. Allowing a
-      // token to mint another would make revocation meaningless: a leaked
-      // credential could silently refresh itself forever.
-      if (principal.credential !== "session") {
+      // A token minting another would make revocation meaningless — a leaked
+      // credential could silently refresh itself forever — so ordinarily only
+      // an interactive session may mint.
+      //
+      // The desktop app is the exception, and it had to be: it authenticates
+      // with a token, so connecting an editor on the machine it runs on was
+      // impossible from the one place that can actually write that editor's
+      // config. What makes it safe is that the exception does not touch the
+      // invariant. A minted token carries strictly fewer scopes than the one
+      // that minted it, so nothing escalates; it is recorded against its
+      // parent and revoked with it, so revocation still reaches everything;
+      // and it may not mint in turn, so the chain is one link long.
+      const parent =
+        principal.credential === "api_token" ? principal.token : undefined;
+      if (principal.credential !== "session" && parent === undefined) {
         throw new HttpError(
           403,
           "session_required",
@@ -8265,6 +8276,34 @@ export class ApiGateway {
           `Your role does not grant: ${exceeded.join(", ")}`,
         );
       }
+      if (parent !== undefined) {
+        // One link, and one only. A minted token that could mint would grow a
+        // chain whose tail survives revoking the head — the cascade below is
+        // a single level, deliberately, because a recursive one is a loop
+        // over attacker-controlled depth. Refusing here is what keeps the two
+        // in step.
+        const holder = await this.options.store.getApiToken(parent.id);
+        if (holder?.createdByToken !== undefined) {
+          throw new HttpError(
+            403,
+            "session_required",
+            "This token was itself minted by another, and cannot mint further",
+          );
+        }
+        // Narrower than the token doing the minting, always. Bounding by the
+        // person's role alone would let a token that carries `view` mint one
+        // that carries everything its owner could — an escalation from a
+        // credential rather than from a person, which is the whole thing this
+        // exception must not become.
+        const beyond = requested.filter((scope) => !parent.scopes.includes(scope));
+        if (beyond.length > 0) {
+          throw new HttpError(
+            403,
+            "scope_exceeds_token",
+            `This token cannot grant what it does not hold: ${beyond.join(", ")}`,
+          );
+        }
+      }
 
       const expiresInDays = body["expiresInDays"];
       if (
@@ -8291,6 +8330,9 @@ export class ApiGateway {
         ...(principal.sessionId === undefined
           ? {}
           : { createdBySession: principal.sessionId }),
+        // Recorded so revoking the parent revokes this too, which is the
+        // whole of what makes minting from a token safe.
+        ...(parent === undefined ? {} : { createdByToken: parent.id }),
       });
       await this.options.store.appendAudit(undefined, {
         type: "api_token_issued",

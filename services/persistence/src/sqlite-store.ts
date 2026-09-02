@@ -1746,8 +1746,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `INSERT INTO api_tokens
            (id, user_id, organization_id, name, secret_hash, scopes_json,
-            created_at, created_by_session, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            created_at, created_by_session, created_by_token, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         token.id,
@@ -1758,6 +1758,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         JSON.stringify(token.scopes),
         token.createdAt,
         token.createdBySession ?? null,
+        token.createdByToken ?? null,
         token.expiresAt ?? null,
       );
   }
@@ -1797,12 +1798,29 @@ export class SqliteCoordinationStore implements CoordinationStore {
   ): Promise<void> {
     // Revocation is recorded rather than deleted so the audit trail keeps a
     // record that the credential existed.
-    this.db
-      .prepare(
-        `UPDATE api_tokens SET revoked_at = ?, revoked_reason = ?
-         WHERE id = ? AND revoked_at IS NULL`,
-      )
-      .run(at, reason, id);
+    const owned = this.begin();
+    try {
+      this.db
+        .prepare(
+          `UPDATE api_tokens SET revoked_at = ?, revoked_reason = ?
+           WHERE id = ? AND revoked_at IS NULL`,
+        )
+        .run(at, reason, id);
+      // And everything it minted, which is what makes minting safe at all: a
+      // credential that could outlive the one that created it would put
+      // revocation out of reach. One level, because a minted token may not
+      // mint.
+      this.db
+        .prepare(
+          `UPDATE api_tokens SET revoked_at = ?, revoked_reason = ?
+           WHERE created_by_token = ? AND revoked_at IS NULL`,
+        )
+        .run(at, `${reason} (minted by a revoked token)`, id);
+      this.commit(owned);
+    } catch (error) {
+      this.rollback(owned);
+      throw error;
+    }
   }
 
   public async deleteExpiredApiTokens(now: string): Promise<number> {
@@ -1828,6 +1846,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       scopes: parseJson<string[]>(row, "scopes_json"),
       createdAt: text(row, "created_at"),
       createdBySession: optionalText(row, "created_by_session"),
+      createdByToken: optionalText(row, "created_by_token"),
       expiresAt: optionalText(row, "expires_at"),
       lastUsedAt: optionalText(row, "last_used_at"),
       lastUsedIp: optionalText(row, "last_used_ip"),
