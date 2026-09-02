@@ -448,7 +448,12 @@ async function toggleKeepAwake(wanted) {
 function noteWorkerState(event) {
   workerStatus =
     event.state === "running"
-      ? "Running agents on this machine"
+      ? // Named, not counted. This line is the only place a person can see
+        // which CLIs this machine actually found, and "Running agents on this
+        // machine" is true of a worker that found one of the two they have
+        // installed — which is indistinguishable, from here, from a worker
+        // that is about to ignore every task sent to the other one.
+        (event.detail ?? "Running agents on this machine").replace(/\.$/u, "")
       : event.state === "restarting"
         ? "Reconnecting…"
         : `Not running — ${event.detail}`;

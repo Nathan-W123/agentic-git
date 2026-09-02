@@ -1,15 +1,34 @@
-### 0.5.13 — Claude installed natively is Claude the app can see
+### 0.5.13 — an unplugged laptop is still a laptop
 
-An agent whose CLI this app cannot find is an agent the control plane
-draws as having no machine at all. It goes grey, a mention brings up
-"nothing will pick this up yet", and the app offers to install a CLI that
-is already on the computer.
+Two silences, both of which made a working machine look like a missing one.
 
-That is what happened to Claude on Windows. The app looks along PATH and
-then in the standard install directories, and the Windows list named
-Node's own folder and npm's global folder but not the one a *native*
-installer uses — `%USERPROFILE%\.local\bin`, where Claude Code now puts
-`claude.exe`. Every other platform's list had it. Windows now does too.
+An unplugged laptop did not run anything. The worker checked the power
+source before asking for work and, on battery, declined — the thinking being
+that a laptop which sleeps mid-task holds its lease until it expires.
+
+What that missed is that asking for work is also the only thing telling the
+control plane this machine exists. So an unplugged laptop did not read as a
+machine that was waiting. It read as no machine at all: agents grey, mentions
+answered with "nothing will pick this up yet", and an offer to install a CLI
+already sitting on the disk — the whole time somebody was sitting in front of
+it, lid open, perfectly able to work.
+
+Weighed properly, that is much worse than what it was avoiding. A lease lost
+to standby costs one requeue after five minutes, and the room is told. So a
+laptop now works whether or not it is plugged in. A machine that really does
+sleep unattended can still opt out with `COORD_PAUSE_ON_BATTERY=1`, and when
+it does, the log says so rather than leaving you to guess.
+
+The second: the Agents menu said "Running agents on this machine" whether it
+had found both your CLIs or one of them, and the log never mentioned the
+subject. The list of CLIs a machine reports is exactly what decides whether
+an agent is reachable, so a machine that found one of two would take work
+for that one and report the other as having no machine anywhere. The menu
+now names them, the log names them on every start, and an empty list — a
+worker that will never be given a single task, however healthy it looks —
+says so outright with both halves of the comparison printed.
+
+Also: Claude installed natively is now Claude the app can see.
 
 ### 0.5.12 — your project's tools, on your say-so
 

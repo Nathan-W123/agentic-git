@@ -70,6 +70,7 @@ import {
   shouldClaimWork,
   systemPowerSource,
   type PowerSource,
+  type PowerState,
 } from "./power.js";
 
 /**
@@ -148,6 +149,11 @@ export interface WorkerOptions {
    * have to be running on a laptop that was actually unplugged.
    */
   powerSource?: PowerSource;
+  /**
+   * Stop taking work while on battery. Defaults to `COORD_PAUSE_ON_BATTERY`,
+   * and to off — a laptop works. See {@link Worker.pauseOnBattery}.
+   */
+  pauseOnBattery?: boolean;
   /**
    * An optional shortcut out of the idle wait.
    *
@@ -488,6 +494,11 @@ export class Worker {
   public constructor(private readonly options: WorkerOptions) {
     this.plans = options.planCache ?? new Map<string, CachedPlan>();
     this.power = options.powerSource ?? systemPowerSource();
+    this.pauseOnBattery =
+      options.pauseOnBattery ??
+      ["1", "true", "yes"].includes(
+        (process.env["COORD_PAUSE_ON_BATTERY"] ?? "").trim().toLowerCase(),
+      );
     this.concurrency = configuredConcurrency(options.concurrency);
     const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
     const planWaitBudget =
@@ -513,6 +524,41 @@ export class Worker {
     return this.identity?.id;
   }
 
+  /** Set by {@link register}; see {@link advertisedAdapters}. */
+  private advertised: string[] = [];
+
+  /**
+   * The power state this worker last refused work on, or `undefined` while it
+   * is taking work. Kept only so the refusal is logged when it changes rather
+   * than on every poll.
+   */
+  private declining: PowerState | undefined;
+
+  /**
+   * Whether to stop taking work while on battery.
+   *
+   * Off by default, which is the opposite of where this started. The original
+   * reasoning was sound as far as it went — a laptop that sleeps mid-task
+   * holds its lease until the five-minute expiry, so declining up front keeps
+   * the task visibly queued instead. What it weighed was the cost of a
+   * *sleeping* machine against nothing, and the cost of the caution turned
+   * out to be much larger than the cost it was avoiding.
+   *
+   * Declining never contacts the control plane, and that contact is the only
+   * thing telling it this machine exists. So an unplugged laptop was not a
+   * machine that was waiting: three minutes later it was no machine at all.
+   * Its owner's agents went grey, mentions were answered with "nothing will
+   * pick this up yet", and the app offered to install a CLI already sitting
+   * on the disk — for the whole time somebody was sitting in front of it,
+   * lid open, perfectly able to work.
+   *
+   * Against that, a lease lost to standby costs one requeue after five
+   * minutes, and since the control plane started announcing that in the room
+   * it is not even a silent one. So a laptop works by default, and anybody
+   * running a machine that really does sleep unattended can say so.
+   */
+  private readonly pauseOnBattery: boolean;
+
   public async register(): Promise<string> {
     const configured = new Set(
       Object.values(this.options.project.config.agents).map(
@@ -533,6 +579,7 @@ export class Worker {
             this.options.adapters?.includes(adapter),
           );
     const adapters = advertised;
+    this.advertised = [...adapters];
     const identity = await this.options.client.register({
       organizationId: this.options.organizationId,
       name: this.options.name ?? `worker-${process.pid}`,
@@ -541,6 +588,21 @@ export class Worker {
     });
     this.identity = identity;
     return identity.id;
+  }
+
+  /**
+   * What this worker told the control plane it can run.
+   *
+   * Worth reading back, because it is an intersection and an intersection can
+   * be empty. A worker that advertises nothing registers, polls happily
+   * forever, is never offered a single task, and reports itself as running
+   * the whole time — while the control plane, which decides an agent is
+   * reachable by exactly this list, draws every one of that person's agents
+   * as having no machine at all. Every symptom of it points somewhere else,
+   * so the list is said out loud at start rather than left to be inferred.
+   */
+  public get advertisedAdapters(): readonly string[] {
+    return this.advertised;
   }
 
   /** How many tasks this machine will hold at once. */
@@ -589,8 +651,32 @@ export class Worker {
     // hold work this machine cannot promise to finish. A laptop that claims a
     // task and then sleeps keeps it for the full lease expiry while its owner
     // watches nothing happen; declining leaves it visibly queued instead.
-    if (!shouldClaimWork(await this.power.read())) {
+    const power = await this.power.read();
+    if (this.pauseOnBattery && !shouldClaimWork(power)) {
+      // Said once per change of state, not once per poll: this loop runs
+      // every few seconds and a line each time would bury the log it is in.
+      //
+      // Said at all because the silence here is the whole problem. Declining
+      // never touches the control plane, and the control plane decides a
+      // machine is present by exactly that touch — so a laptop on battery
+      // stops being a machine that is waiting and becomes, to everyone in
+      // the room, a machine that does not exist. Its owner's agents go grey,
+      // a mention raises "nothing will pick this up yet", and the app offers
+      // to install a CLI that is already there. Nothing in the product ever
+      // said "battery", and this loop was the only thing that knew.
+      if (this.declining !== power) {
+        this.declining = power;
+        console.log(
+          `[worker] on ${power} — not claiming work, because ` +
+            "COORD_PAUSE_ON_BATTERY is set on this machine. Plug in, or " +
+            "unset it to work on battery.",
+        );
+      }
       return { worked: false };
+    }
+    if (this.declining !== undefined) {
+      this.declining = undefined;
+      console.log("[worker] claiming work again");
     }
     const assignment = await this.options.client.lease(
       workerId,

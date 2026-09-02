@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { PowerState } from "./power.js";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1775,6 +1776,91 @@ const FAKE_CLAUDE = [
   "});",
   "",
 ].join("\n");
+
+test("a laptop works on battery unless its owner says otherwise", async (t) => {
+  // The default was the other way round, and the caution cost more than it
+  // saved. Declining never contacts the control plane, and that contact is
+  // the only thing telling it this machine exists — so an unplugged laptop
+  // was not a machine that was waiting, it was no machine at all three
+  // minutes later, while somebody sat in front of it perfectly able to work.
+  // A lease lost to standby costs one requeue, announced in the room.
+  const runtime = await startRuntime(t);
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...parts: unknown[]) => {
+    said.push(parts.map(String).join(" "));
+  };
+  t.after(() => {
+    console.log = log;
+  });
+
+  const power = { read: async (): Promise<PowerState> => "battery" };
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const laptop = makeWorker(runtime, { powerSource: power });
+  await laptop.register();
+  assert.equal((await laptop.runOnce()).worked, true);
+  assert.deepEqual(
+    said.filter((line) => /not claiming work/u.test(line)),
+    [],
+  );
+
+  // And a machine that really does sleep unattended can still say so.
+  const paused = makeWorker(runtime, {
+    powerSource: power,
+    pauseOnBattery: true,
+  });
+  await paused.register();
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise it again",
+    agentId: "local",
+    validationCommands: [],
+  });
+  assert.equal((await paused.runOnce()).worked, false);
+  // Once per change of state, not once per poll: this runs every few seconds.
+  assert.equal((await paused.runOnce()).worked, false);
+  const refusals = said.filter((line) => /not claiming work/u.test(line));
+  assert.equal(refusals.length, 1, said.join("\n"));
+  assert.match(refusals[0] ?? "", /battery/u);
+  assert.match(refusals[0] ?? "", /COORD_PAUSE_ON_BATTERY/u);
+});
+
+test("a worker says which adapters it advertised, and an empty list is loud", async (t) => {
+  // The intersection of "what the config lists" and "what the host says this
+  // machine has" is what the control plane matches work against, and also
+  // what it decides an agent's reachability by. Empty, it produces a worker
+  // that registers, polls forever, is offered nothing, and reports itself as
+  // running — while every one of that person's agents is drawn as having no
+  // machine. Nothing about the symptom points at the list, so the list has to
+  // say itself.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "claude" },
+    theirs: { adapter: "codex" },
+  };
+  await runtime.project.save();
+
+  const both = makeWorker(runtime, { adapters: ["claude", "codex"] });
+  await both.register();
+  assert.deepEqual([...both.advertisedAdapters].sort(), ["claude", "codex"]);
+
+  // The host narrows it: a machine with only Codex installed advertises only
+  // Codex, however many agents the config lists.
+  const one = makeWorker(runtime, { adapters: ["codex"] });
+  await one.register();
+  assert.deepEqual([...one.advertisedAdapters], ["codex"]);
+
+  // And a host naming something the config has no agent for intersects to
+  // nothing. This is the state worth seeing, and it is reachable.
+  const none = makeWorker(runtime, { adapters: ["nonesuch"] });
+  await none.register();
+  assert.deepEqual([...none.advertisedAdapters], []);
+});
 
 test("a worker takes work from a control plane one protocol behind it, and refuses one two behind", async (t) => {
   // Protocol 4 added MCP servers to the lease, which are optional: a control
