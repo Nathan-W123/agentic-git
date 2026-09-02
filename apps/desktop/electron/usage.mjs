@@ -75,6 +75,17 @@ const USAGE_COMMANDS = {
       args: ["-p", "/usage", "--output-format", "stream-json", "--verbose"],
       timeoutMs: 60_000,
       done: (text) => text.includes('"rate_limit_event"'),
+      // Printing is not answering, and for this attempt that distinction is
+      // the whole thing. A stream-json run always prints — a system frame, an
+      // assistant turn, a result — so "stdout was not empty" made this attempt
+      // win every single time, which quietly made the fallback below
+      // unreachable code and filed a session summary as the usage reading.
+      //
+      // Exactly the rule the codex attempt already has for stderr, which was
+      // written for this same mistake and never applied here: an attempt has
+      // answered when it produced what it was asked for, and nothing else
+      // counts.
+      answered: (text) => text.includes('"rate_limit_event"'),
     },
     // A CLI too old to publish the event still answers the prompt, and the
     // server still has the parser that reads percentages out of the reply.
@@ -136,17 +147,82 @@ export async function readVendorUsage(vendor) {
   const executable =
     entry.command ?? (await findAgentCommand(vendor)) ?? vendor;
   let last;
+  /** The first attempt's stdout, kept for the probe when nothing answers. */
+  let firstOutput;
   for (const attempt of attempts) {
     const result = await runOnce(executable, attempt);
-    // The first attempt that actually answered wins — `ok` means this one
-    // printed something on stdout, which is the only stream a usage report
-    // comes back on. A complaint on stderr falls through to the next attempt.
+    firstOutput ??= result.raw ?? result.output;
+    // The first attempt that actually answered wins — `ok` now means this one
+    // produced what it was asked for, not merely that it printed. A complaint
+    // on stderr, or a stream that never carried the event, falls through to
+    // the next attempt.
     if (result.ok) {
       return result;
     }
     last = result;
   }
+  const carried = last?.raw ?? last?.output;
+  if (carried !== undefined) {
+    // Nothing produced a window, so say what was actually there instead of
+    // leaving the card to describe it from the shape of the text.
+    //
+    // Three readings of this evening's card were spent guessing which step
+    // failed, because "it answered with a session summary" is the same
+    // sentence whether the CLI is too old to publish the event, does not
+    // publish it in `-p` mode, or published it and something here missed it.
+    // Those need different fixes and the card could not tell them apart.
+    return {
+      ...last,
+      // `ok`, because there is something real to show and read: the card's
+      // job from here is to say what was found, and a reading marked
+      // unavailable falls back to the control plane's own login instead —
+      // which is a different machine and therefore a different account.
+      ok: true,
+      raw: `${probe(executable, firstOutput)}\n${carried}`,
+    };
+  }
   return last ?? { ok: false, detail: "Nothing to run." };
+}
+
+/**
+ * One line naming the CLI and what its stream actually carried.
+ *
+ * `--version` is asked of the binary, not of the account — it starts no turn
+ * and spends nothing, which is why it is safe to ask on a path somebody is
+ * already waiting on. The event types are read out of the run that just
+ * happened rather than provoking another one.
+ *
+ * Prepended to the raw rather than carried beside it, so it needs no change to
+ * the route, the store, or the shape either side already agrees on. Every
+ * parser downstream reads lines it recognises and skips the rest, and this
+ * line looks like none of them.
+ */
+function probe(executable, output) {
+  let version = "version unknown";
+  try {
+    const { command, args } = runnable(executable, ["--version"]);
+    const asked = spawnSync(command, args, {
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    const said = `${asked.stdout ?? ""}`.trim().split("\n")[0];
+    if (said) {
+      version = said.slice(0, 80);
+    }
+  } catch {
+    // A CLI that will not say its version still ran the command above, so
+    // this is a missing detail rather than a reason to report nothing.
+  }
+  const kinds = new Set();
+  for (const line of `${output ?? ""}`.split("\n")) {
+    const type = /"type"\s*:\s*"([\w.-]+)"/u.exec(line)?.[1];
+    if (type !== undefined) {
+      kinds.add(type);
+    }
+  }
+  const seen = kinds.size === 0 ? "no typed events" : [...kinds].join(", ");
+  return `kumi-probe: ${version} — stream carried: ${seen}`;
 }
 
 function runOnce(executable, attempt) {
@@ -191,12 +267,19 @@ function runOnce(executable, attempt) {
     /** What this attempt amounts to, from what each stream carried. */
     const settle = (exitCode) =>
       finish(
-        out.trim() === ""
+        out.trim() === "" || attempt.answered?.(out) === false
           ? {
               ok: false,
               detail:
                 err.trim().split("\n")[0]?.slice(0, 400) ??
                 `${executable} ${attempt.args.join(" ")} said nothing (exit ${String(exitCode)}).`,
+              // Carried even though this attempt did not answer. It is what
+              // the last attempt has to show if none of them do, and it is
+              // what the probe reads the event types out of — an attempt that
+              // printed a whole session and simply lacked one field is not the
+              // same as one that printed nothing, and throwing its output away
+              // here is what made the two indistinguishable downstream.
+              ...(out.trim() === "" ? {} : { output: out.slice(0, MAX_OUTPUT) }),
             }
           : { ok: true, raw: out.slice(0, MAX_OUTPUT), exitCode },
       );
