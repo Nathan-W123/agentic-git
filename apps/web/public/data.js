@@ -670,6 +670,13 @@ export const state = {
    * closed, so every new turn starts folded until the reader opens it.
    */
   thinkingOpen: {},
+  /**
+   * Which adapters this computer was detected with, and what each editor's
+   * connect button last said. Both are per-session: the scan is cheap and a
+   * remembered "Connected" would outlive somebody moving to another machine.
+   */
+  machineAgents: undefined,
+  editorConnected: {},
   /** Whether a summary is unfolded, keyed by reply id. Absent means open. */
   summaryOpen: {},
   /**
@@ -2345,6 +2352,35 @@ export async function createApiToken(name) {
     body: { name, scopes: [...DESKTOP_TOKEN_SCOPES] },
   });
   state.newApiToken = response.token;
+  await loadApiTokens();
+  return response.token;
+}
+
+/**
+ * What an editor connected to Kumi's MCP endpoint is allowed to do.
+ *
+ * Deliberately not {@link DESKTOP_TOKEN_SCOPES}. That set carries `run_task`,
+ * which is also what registering as a *worker* requires — so a token handed
+ * to an editor for filing work could instead register as a machine and lease
+ * other people's tasks. An editor needs to read the roster and submit, and
+ * `cancel_task` is authorised as `submit_task` for exactly this reason.
+ */
+export const EDITOR_TOKEN_SCOPES = ["view", "submit_task"];
+
+/**
+ * Mints a token for one editor on one machine, and hands it back once.
+ *
+ * One per editor per machine, rather than one shared secret: revoking the
+ * laptop you left on a train should not silently break the desktop you are
+ * sitting at. The name says which is which in the tokens list, because a
+ * screen full of identical rows is a screen where nobody dares revoke
+ * anything — which is what yours already looks like.
+ */
+export async function createEditorToken(label) {
+  const response = await api("/auth/tokens", {
+    method: "POST",
+    body: { name: label, scopes: [...EDITOR_TOKEN_SCOPES] },
+  });
   await loadApiTokens();
   return response.token;
 }

@@ -142,6 +142,32 @@ export function mergeCodexToml(text, server) {
   return `${existing.slice(0, from)}${section}${to < existing.length ? "\n" : ""}${existing.slice(to)}`;
 }
 
+/**
+ * Refuses to point an editor at anything but this deployment.
+ *
+ * The page supplies the credential and the app supplies the address, and this
+ * is the second half of that split. A config written here tells an editor
+ * where to send the person's work and the token that authorises it, so a page
+ * able to choose that address could quietly redirect both. Loopback is
+ * allowed because a developer running Kumi locally is the ordinary case.
+ */
+export function assertHttpsUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value));
+  } catch {
+    throw new Error(`${String(value)} is not a URL`);
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error(`${url.href} must be https (or http on loopback)`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("A server URL must not carry a username or password");
+  }
+  return url.href;
+}
+
 /** Where each editor keeps the file it reads, under one home directory. */
 export function configPathFor(vendor, home) {
   if (vendor === "claude") {
@@ -174,6 +200,7 @@ async function read(file) {
  */
 export async function connectEditor(input) {
   const { vendor, home, server } = input;
+  assertHttpsUrl(server.url);
   const file = configPathFor(vendor, home);
   if (file === undefined) {
     throw new Error(`${vendor} cannot be connected automatically`);

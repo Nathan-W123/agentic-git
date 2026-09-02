@@ -29,6 +29,7 @@ import {
   safeStorage,
   shell,
 } from "electron";
+import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -52,6 +53,7 @@ import {
 // install offer, the sign-in — was skipped in silence. Agents connected,
 // looked connected, and could run nothing.
 import { detectAgents } from "./agents.mjs";
+import { CONNECTABLE, connectEditor } from "./editor-mcp.mjs";
 import {
   forgetMcpServers,
   setStayAwake,
@@ -869,6 +871,85 @@ ipcMain.handle("kumi:agent-usage", async (_event, vendor) =>
 ipcMain.handle("kumi:machine-agents", async () =>
   Object.values(await detectAgents()).map((agent) => agent.adapter),
 );
+
+/**
+ * Connects one editor on this machine to this Kumi, from the dashboard.
+ *
+ * The split of responsibility is the point. The *page* supplies the token,
+ * because it is the thing holding a session that can mint one. The *app*
+ * supplies the address, from the server it is already signed in to — so a
+ * page cannot write a config that points somebody's editor, and the token
+ * authorising it, at an address of its choosing. `editor-mcp.mjs` refuses
+ * anything but https or loopback on top of that.
+ *
+ * Codex is finished separately, because it will not read a token out of a
+ * file. On Windows the variable is set for the user with `setx`; elsewhere
+ * the export line is handed back to paste, because a shell profile is
+ * somebody's own file in a way a config directory is not.
+ */
+ipcMain.handle("kumi:connect-editor", async (_event, vendor, token) => {
+  if (session?.server === undefined) {
+    return { ok: false, detail: "This app is not signed in to a server yet." };
+  }
+  if (typeof token !== "string" || token.trim() === "") {
+    return { ok: false, detail: "No token was supplied for the connection." };
+  }
+  try {
+    const written = await connectEditor({
+      vendor: String(vendor),
+      home: app.getPath("home"),
+      server: {
+        name: "kumi",
+        url: new URL("/api/v1/mcp", session.server).toString(),
+        token: token.trim(),
+      },
+    });
+    if (written.variable === undefined) {
+      return { ok: true, path: written.path };
+    }
+    const set = await setUserEnvironment(written.variable, token.trim());
+    return {
+      ok: true,
+      path: written.path,
+      ...(set
+        ? {}
+        : {
+            // Said rather than skipped: the file alone does not connect Codex,
+            // and reporting success here would be reporting half a job.
+            manual: `export ${written.variable}=${token.trim()}`,
+          }),
+    };
+  } catch (error) {
+    return { ok: false, detail: describe(error) };
+  }
+});
+
+/**
+ * Sets a variable for this user, where the platform lets an app do that.
+ *
+ * `setx` writes it to the registry for future processes, which is what a
+ * terminal opened after this will inherit. Everywhere else there is no
+ * equivalent that is not somebody's shell profile, so this answers false and
+ * the caller hands the line over instead of editing a file it does not own.
+ */
+async function setUserEnvironment(name, value) {
+  if (process.platform !== "win32") {
+    return false;
+  }
+  return await new Promise((resolve) => {
+    const child = spawn(
+      path.join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32",
+        "setx.exe",
+      ),
+      [name, value],
+      { windowsHide: true, stdio: "ignore" },
+    );
+    child.once("error", () => resolve(false));
+    child.once("exit", (code) => resolve(code === 0));
+  });
+}
 
 // The renderer asks for the token here instead of being handed it on its
 // command line. Only the top frame of a window running our preload can reach

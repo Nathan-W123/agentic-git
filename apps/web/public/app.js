@@ -261,6 +261,7 @@ import {
   createApiToken,
   loadApiTokens,
   approveMcpServer,
+  createEditorToken,
   createMcpServer,
   deleteMcpServer,
   ensureMcpServers,
@@ -2611,6 +2612,90 @@ function mcpServersCard() {
   });
 }
 
+/**
+ * Pointing the editors on this computer at Kumi.
+ *
+ * The reverse of the MCP servers card below it: that one gives Kumi's agents
+ * tools, this one makes Kumi a tool inside Claude Code, Codex or Cursor, so
+ * "have Kumi fix the login redirect" typed in an editor lands in a channel
+ * here.
+ *
+ * A button rather than a command to copy, because the commands are not
+ * stable and every way of getting one wrong fails silently — the wrong
+ * scope binds the server to one folder, a pasted placeholder keeps its
+ * angle brackets, the word Bearer goes missing, and all three arrive as an
+ * unexplained 401 hours later. The app writes the file instead.
+ *
+ * In a browser there is no bridge to write anything, so the command comes
+ * back — the same fall-back the CLI install row takes.
+ */
+/**
+ * What this computer actually has, so the connect rows offer only editors
+ * that are here.
+ *
+ * The same scan the worker registers from, so the card and the worker cannot
+ * disagree about what this machine can run. Absent in a browser, where the
+ * card says to open the app instead; a failed scan leaves the answer unknown,
+ * which the card reads as "offer it" rather than greying out a row because a
+ * lookup did not finish.
+ */
+async function loadMachineAgents() {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge?.detected === undefined) {
+    return;
+  }
+  state.machineAgents = await bridge.detected().catch(() => undefined);
+}
+
+/** What people call each vendor's editor, which is not its adapter id. */
+const VENDOR_LABEL = {
+  claude: "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+};
+
+function editorMcpCard() {
+  const bridge = typeof window === "undefined" ? undefined : window.KUMI_INSTALL;
+  const heading = {
+    id: "editor-mcp",
+    heading: "Use Kumi from your editor",
+    description:
+      "Ask Kumi for work from inside Claude Code, Codex or Cursor. It files the task in a channel here and the thread follows it, the same as if you had typed it in Kumi.",
+  };
+  if (bridge?.connectEditor === undefined) {
+    return settingsSectionBlock({
+      ...heading,
+      body: settingRow({
+        row: "editor-mcp",
+        label: "Open Kumi's desktop app to connect an editor",
+        description:
+          "Connecting writes a config file on the computer the editor runs on, so it happens in the app rather than in a browser tab.",
+      }),
+    });
+  }
+  // Asked once when Settings opens and remembered; `undefined` means the
+  // question has not been answered yet, which reads as "offer it" rather than
+  // "greyed out" — a row disabled because a scan has not finished is a row
+  // that looks broken.
+  const detected = state.machineAgents;
+  const rows = (bridge.connectable ?? ["claude", "codex", "cursor"]).map((vendor) => {
+    const here = detected === undefined || detected.includes(vendor);
+    const done = state.editorConnected?.[vendor];
+    return settingRow({
+      label: VENDOR_LABEL[vendor] ?? vendor,
+      description: here
+        ? (done ?? "Writes its config on this computer and mints a token that can file work and nothing else.")
+        : "Not installed on this computer.",
+      control: `<button type="button" class="btn btn-sm${
+        here ? " btn-primary" : ""
+      }" data-act="editor-connect" data-value="${esc(vendor)}"${
+        here ? "" : " disabled"
+      }>Connect</button>`,
+    });
+  });
+  return settingsSectionBlock({ ...heading, body: rows.join("") });
+}
+
 /** Repository, approval policy and app tokens — the project-wide controls. */
 function projectControlsSection() {
   return `${settingsSectionBlock({
@@ -2620,7 +2705,7 @@ function projectControlsSection() {
       "Canonical state is owned by the control plane. Publishing it to a remote branch is /push in the channel.",
     body: `<div data-settings-row="repository" id="settings-row-repository"
       tabindex="-1">${repositoryDefinitionList()}</div>`,
-  })}${approvalPolicySection()}${apiTokensCard()}${mcpServersCard()}`;
+  })}${approvalPolicySection()}${apiTokensCard()}${editorMcpCard()}${mcpServersCard()}`;
 }
 
 /** Everything the person who runs this deployment looks after. */
@@ -8601,6 +8686,69 @@ function mcpBearerHeader(token) {
   };
 }
 
+/**
+ * Connects one editor on this machine, end to end.
+ *
+ * Three steps that used to be a person's job: mint a token scoped to filing
+ * work and nothing else, have the app write that editor's own config file,
+ * and say what is left. The token is never shown, because nobody has to
+ * carry it anywhere — which is also why it cannot be pasted with its angle
+ * brackets on, or without the word Bearer, or into the wrong scope.
+ *
+ * Failures land in the row rather than in a toast that scrolls away, since
+ * the row is where somebody will look next time they wonder whether it
+ * worked.
+ */
+async function connectEditorToKumi(vendor) {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge?.connectEditor === undefined) {
+    return;
+  }
+  const label = VENDOR_LABEL[vendor] ?? vendor;
+  state.editorConnected = { ...state.editorConnected, [vendor]: "Connecting…" };
+  render();
+  try {
+    // Named for the editor and the machine, so the tokens list is something a
+    // person can actually revoke from rather than a column of identical rows.
+    const token = await createEditorToken(`${label} on ${deviceLabel()}`);
+    const written = await bridge.connectEditor(vendor, token);
+    if (written?.ok !== true) {
+      state.editorConnected = {
+        ...state.editorConnected,
+        [vendor]: `Could not connect: ${written?.detail ?? "unknown error"}`,
+      };
+      render();
+      return;
+    }
+    state.editorConnected = {
+      ...state.editorConnected,
+      [vendor]:
+        written.manual === undefined
+          ? `Connected. Restart ${label} and ask it to have Kumi do something.`
+          : // Codex off Windows: the file is written and the variable is not,
+            // because a shell profile is the person's own file. Saying so beats
+            // reporting a job that is only half done.
+            `Config written. Add this to your shell, then restart ${label}: ${written.manual}`,
+    };
+  } catch (error) {
+    state.editorConnected = {
+      ...state.editorConnected,
+      [vendor]: `Could not connect: ${error.message}`,
+    };
+  }
+  render();
+}
+
+/** This computer, as the tokens list should name it. */
+function deviceLabel() {
+  const platform = /win/iu.test(navigator.platform ?? "")
+    ? "Windows"
+    : /mac/iu.test(navigator.platform ?? "")
+      ? "Mac"
+      : "this computer";
+  return platform;
+}
+
 function createMcpServerFromForm() {
   const read = (selector) =>
     (document.querySelector(selector)?.value ?? "").trim();
@@ -8725,6 +8873,7 @@ function openSettings(section = "general") {
   void Promise.allSettled([
     loadApiTokens(),
     ensureMcpServers(state.projectId),
+    loadMachineAgents(),
   ]).then(() => render());
   state.settingsAgentsLoading = state.providers.length === 0;
   void loadProviders()
@@ -11671,6 +11820,9 @@ document.addEventListener("click", (event) => {
       return;
     case "mcp-create":
       createMcpServerFromForm();
+      return;
+    case "editor-connect":
+      void connectEditorToKumi(value);
       return;
     case "mcp-approve": {
       const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
