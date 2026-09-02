@@ -8775,12 +8775,25 @@ async function connectEditorToKumi(vendor) {
     state.editorConnected = {
       ...state.editorConnected,
       [vendor]:
-        written.manual === undefined
-          ? `Connected. Restart ${label} and ask it to have Kumi do something.`
-          : // Codex off Windows: the file is written and the variable is not,
-            // because a shell profile is the person's own file. Saying so beats
-            // reporting a job that is only half done.
-            `Config written. Add this to your shell, then restart ${label}: ${written.manual}`,
+        written.manual !== undefined
+          ? // Codex off Windows: the file is written and the variable is not,
+            // because a shell profile is the person's own file. Saying so
+            // beats reporting a job that is only half done.
+            `Config written. Add this to your shell, then reopen ${label}: ${written.manual}`
+          : vendor === "codex"
+            ? // Codex is the one vendor that reads its token from the
+              // environment rather than its config, and "restart Codex" is
+              // wrong advice for half of the people who will read it. The
+              // Store app is not restarted by closing its window: Windows
+              // suspends it and resumes the same process, still holding the
+              // environment it was launched with, so it never sees a variable
+              // set after that. The CLI in a fresh terminal sees it at once,
+              // which is exactly how this presents — working in one Codex and
+              // not the other.
+              `Connected. A new terminal will see it straight away. For the ` +
+              `Codex app, end it in Task Manager first — closing its window ` +
+              `only suspends it, so it keeps the environment it started with.`
+            : `Connected. Restart ${label} and ask it to have Kumi do something.`,
     };
   } catch (error) {
     state.editorConnected = {

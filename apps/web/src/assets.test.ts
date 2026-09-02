@@ -1146,6 +1146,15 @@ test("the editor connect card offers only what the app can write, and never a co
   assert.match(connect, /bridge\.connectEditor\(vendor, token\)/u);
   assert.doesNotMatch(connect, /mcp add|claude\.json|config\.toml|https:/u);
 
+  // Codex is the one vendor whose token lives in the environment rather than
+  // its config, and "restart Codex" is wrong advice for the Store app: closing
+  // its window suspends it, and the resumed process still holds the
+  // environment it launched with. It works in a fresh terminal and not in the
+  // app, which is the confusing half of the symptom.
+  assert.match(connect, /vendor === "codex"/u);
+  assert.match(connect, /Task Manager/u);
+  assert.match(connect, /suspends it/u);
+
   // The token is minted for this editor on this machine, and is never shown:
   // nobody has to carry it anywhere, which is what makes every way of
   // mistyping it impossible.
