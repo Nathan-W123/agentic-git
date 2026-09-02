@@ -126,6 +126,13 @@ import {
   permissionsForRole,
   type Permission,
 } from "./authorization.js";
+import { handleMcpMessage, type McpTool } from "./mcp.js";
+import {
+  createMcpTools,
+  type McpAgent,
+  type McpRepository,
+  type McpToolDeps,
+} from "./mcp-tools.js";
 import {
   buildCatchUpDigest,
   catchUpSince,
@@ -6936,6 +6943,56 @@ export class ApiGateway {
     }
 
     const principal = this.requirePrincipal(context);
+
+    // Kumi as an MCP server: one route, JSON-RPC 2.0 over a single POST.
+    //
+    // Placed first because it is the whole of a protocol rather than one more
+    // endpoint, and because everything it can do is in `mcp-tools.ts` where it
+    // can be read in one sitting. See `mcp.ts` for why this is hand-rolled and
+    // why it answers in JSON rather than opening a stream.
+    if (path === `${API_PREFIX}/mcp`) {
+      if (method !== "POST") {
+        // Clients probe for an SSE stream on GET. Answering in the JSON-RPC
+        // shape rather than the gateway's own error envelope is what makes a
+        // client say "this server does not stream" instead of "transport
+        // failed".
+        this.sendJson(response, 405, {
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32600,
+            message: "This endpoint accepts POST only; it does not stream",
+          },
+        });
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = await this.readJson(request);
+      } catch {
+        this.sendJson(response, 200, {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32700, message: "Body was not valid JSON" },
+        });
+        return;
+      }
+      const reply = await handleMcpMessage({
+        payload,
+        tools: this.mcpTools(principal),
+        serverName: "kumi",
+        serverVersion: BUILD_IDENTITY,
+      });
+      if (reply.body === undefined) {
+        // A notification. No body at all — see `mcp.ts`.
+        response.writeHead(reply.status, { "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
+      this.sendJson(response, reply.status, reply.body);
+      return;
+    }
+
     if (method === "POST" && path === `${API_PREFIX}/auth/logout`) {
       // A bearer token has no session to end; revoking it is a separate,
       // explicit action so a stray logout cannot disable a running worker.
@@ -14116,6 +14173,165 @@ export class ApiGateway {
       }
     }
     return grants;
+  }
+
+  /**
+   * The tools this caller may drive over MCP.
+   *
+   * Built per request because every one of them closes over the principal: a
+   * tool has no session and no state of its own, so the token that arrived is
+   * the only thing that says who is asking.
+   */
+  private mcpTools(principal: AuthenticatedPrincipal): McpTool[] {
+    const deps: McpToolDeps = {
+      store: this.options.store,
+      assertScope: (permission) => {
+        assertTokenScope(principal, permission as Permission);
+      },
+      listRepositories: async () => await this.mcpRepositories(principal),
+      agentsIn: async (input) =>
+        await this.mcpAgentsIn(
+          input.projectId,
+          input.repositoryId,
+          input.channel,
+        ),
+      post: async (input) => {
+        const channelId = await this.mcpChannelId(
+          input.repositoryId,
+          input.channel,
+        );
+        const posted = await this.postChannelMessageAndDispatch({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          channelId,
+          content: input.content,
+          principal,
+          // The caller is in an editor with only this return value to go on.
+          // Reporting "sent" for work that threw on its way to being started
+          // is the one answer it must never give.
+          rethrowDispatchErrors: true,
+        });
+        return {
+          taskIds: posted.taskIds,
+          channelSlug: posted.channel.slug,
+        };
+      },
+      describeState: (status) => describeTaskState(status),
+      progressFor: async (taskId, limit) => {
+        const events = await this.options.store
+          .listAuditEvents({ taskId, types: ["agent_progress"] })
+          .catch(() => []);
+        return events
+          .slice(-limit)
+          .map((entry) => narrateTaskEvent(entry.event.type, entry.event.data))
+          .filter((line): line is string => line !== undefined);
+      },
+      outcomeFor: async (taskId) => {
+        const events = await this.options.store
+          .listAuditEvents({
+            taskId,
+            types: ["canonical_promoted", "task_reported", "task_failed"],
+          })
+          .catch(() => []);
+        const last = events.at(-1);
+        return last === undefined
+          ? undefined
+          : narrateTaskEvent(last.event.type, last.event.data);
+      },
+    };
+    return createMcpTools(deps);
+  }
+
+  /** Every repository this principal can reach, with its default roster. */
+  private async mcpRepositories(
+    principal: AuthenticatedPrincipal,
+  ): Promise<McpRepository[]> {
+    const organizations = await this.reachableOrganizations(principal);
+    const found: McpRepository[] = [];
+    for (const organization of organizations) {
+      const projects = await this.options.store
+        .listProjects(organization.id)
+        .catch(() => []);
+      for (const project of projects) {
+        // Authorisation per project rather than once: a grant holder reaches
+        // some projects and not others, and the narrowing set differs between
+        // them. A throw here means "not this one", not "not any".
+        const authorized = await authorizeProject(
+          this.options.store,
+          principal,
+          project.id,
+          "view",
+        ).catch(() => undefined);
+        if (authorized === undefined) {
+          continue;
+        }
+        const all = await this.options.store
+          .listProjectRepositories(project.id)
+          .catch(() => []);
+        const visible =
+          authorized.repositories === undefined
+            ? all
+            : all.filter((entry) => authorized.repositories?.has(entry.id));
+        for (const repository of visible) {
+          found.push({
+            projectId: project.id,
+            repository,
+            agents: await this.mcpAgentsIn(project.id, repository.id),
+          });
+        }
+      }
+    }
+    return found;
+  }
+
+  /** The mentionable roster of one room, with liveness folded in. */
+  private async mcpAgentsIn(
+    projectId: string,
+    repositoryId: string,
+    channel?: string,
+  ): Promise<McpAgent[]> {
+    const channelId = await this.mcpChannelId(repositoryId, channel);
+    const [candidates, project] = await Promise.all([
+      this.resolveChannelMentionCandidates(projectId, repositoryId, channelId),
+      this.options.store.getProject(projectId).catch(() => undefined),
+    ]);
+    const live = await this.liveWorkerOwners(project?.organizationId);
+    return candidates.map((candidate) => ({
+      name: candidate.name,
+      // Only meaningful where this deployment refuses to execute on its own
+      // behalf; everywhere else the control plane answers regardless and an
+      // offline owner is not a fact worth acting on.
+      online:
+        !localAgentsOnly() ||
+        ApiGateway.agentIsLive(live, candidate.userId, candidate.provider),
+      owner: candidate.userName,
+    }));
+  }
+
+  /** A channel named by slug, or the repository's default room. */
+  private async mcpChannelId(
+    repositoryId: string,
+    slug?: string,
+  ): Promise<string | undefined> {
+    if (slug === undefined) {
+      return undefined;
+    }
+    const channels = await this.options.store
+      .listSubChannels(repositoryId)
+      .catch(() => []);
+    const found = channels.find(
+      (channel) => channel.slug.toLowerCase() === slug.toLowerCase(),
+    );
+    if (found === undefined) {
+      throw new HttpError(
+        404,
+        "channel_not_found",
+        `No channel called #${slug}. This repository has: ${channels
+          .map((channel) => `#${channel.slug}`)
+          .join(", ")}.`,
+      );
+    }
+    return found.id;
   }
 
   private async reachableOrganizations(

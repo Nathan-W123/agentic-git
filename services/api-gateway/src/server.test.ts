@@ -20953,3 +20953,348 @@ test("creating an agent twice keeps the name it was dealt", async (t) => {
   });
   assert.equal(again.data.agent.callSign, first.data.agent.callSign);
 });
+
+/**
+ * Kumi over MCP: the endpoint a co-founder adds to Claude Code or Cursor.
+ *
+ * These go through real HTTP with a real bearer token, because the three
+ * things most likely to break are not in the protocol layer: the token path,
+ * the absence of an `Origin` header, and whether a tool's answer is a sentence
+ * a model can act on.
+ */
+async function mcpRuntime(t: TestContext, scopes: string[] = ["view", "submit_task"]) {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "payments");
+  runtime.chatConnections.set(bootstrapped.user.id, [{ provider: "anthropic" }]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const created = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "editor", scopes },
+  });
+  assert.equal(created.status, 201);
+  return {
+    runtime,
+    owner,
+    user: bootstrapped.user,
+    repositoryId,
+    token: created.data.token as string,
+  };
+}
+
+/** One JSON-RPC message over the MCP route, cookie-less like a real client. */
+async function rpc(
+  origin: string,
+  token: string,
+  message: Record<string, unknown>,
+) {
+  return await bearer(origin, "/api/v1/mcp", token, {
+    method: "POST",
+    body: message,
+  });
+}
+
+test("an MCP client can hand-shake and see the tools", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+
+  const hello = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {} },
+  });
+  assert.equal(hello.status, 200);
+  assert.deepEqual(hello.data.result.capabilities, { tools: {} });
+  assert.equal(hello.data.result.serverInfo.name, "kumi");
+
+  // No Origin header is sent, which is what every non-browser client does.
+  // The gateway's origin check must let that through or nothing works.
+  const listed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/list",
+  });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(
+    (listed.data.result.tools as Array<{ name: string }>).map((tool) => tool.name),
+    ["list_repositories", "submit_task", "task_status"],
+  );
+});
+
+test("a GET is refused in a shape an MCP client can read", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const probed = await bearer(runtime.origin, "/api/v1/mcp", token);
+  assert.equal(probed.status, 405);
+  // Not the gateway's own error envelope: a client probing for a stream has to
+  // read "does not stream", not "transport failed".
+  assert.equal(probed.data.jsonrpc, "2.0");
+  assert.equal(probed.data.error.code, -32600);
+});
+
+test("list_repositories names the room's agents and whether they are live", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const listed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  const text = listed.data.result.content[0].text as string;
+  assert.match(text, /payments/u);
+  // The roster travels with the repository because there is no `list_agents`,
+  // and without it a model cannot answer the question submit_task asks it.
+  assert.match(text, /@.+ — (online|offline)/u);
+});
+
+test("a token without the scope is told which scope, not that the server broke", async (t) => {
+  const { runtime, token } = await mcpRuntime(t, ["view"]);
+  const refused = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "x", objective: "do it" },
+    },
+  });
+  assert.equal(refused.status, 200);
+  assert.equal(refused.data.error, undefined, "sent as a protocol error");
+  assert.equal(refused.data.result.isError, true);
+  assert.match(refused.data.result.content[0].text, /submit_task/u);
+});
+
+test("submit_task names the repositories it can reach when given a wrong one", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const missed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 5,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "nonesuch", agent: "x", objective: "do it" },
+    },
+  });
+  assert.equal(missed.data.result.isError, true);
+  assert.match(missed.data.result.content[0].text, /No repository called/u);
+  assert.match(missed.data.result.content[0].text, /payments/u);
+});
+
+test("submit_task refuses a channel command and the everyone broadcast", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  // Both would post a message and start nothing, and the route would answer
+  // 201 — success for work that will never run.
+  const command = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 6,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "x", objective: "/push" },
+    },
+  });
+  assert.equal(command.data.result.isError, true);
+  assert.match(command.data.result.content[0].text, /channel command/u);
+
+  const broadcast = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "agents", objective: "do it" },
+    },
+  });
+  assert.equal(broadcast.data.result.isError, true);
+  assert.match(broadcast.data.result.content[0].text, /does not start work/u);
+});
+
+test("task_status says where a task got to", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "raise the retry ceiling",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: user.id,
+  });
+
+  const queued = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 8,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: task.id } },
+  });
+  assert.match(queued.data.result.content[0].text, /raise the retry ceiling/u);
+  assert.match(queued.data.result.content[0].text, /queued/iu);
+
+  await runtime.store.cancelSubmittedTask(task.id);
+  const stopped = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 9,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: task.id } },
+  });
+  // It follows the row rather than snapshotting it.
+  assert.doesNotMatch(
+    stopped.data.result.content[0].text as string,
+    /Status: queued/iu,
+  );
+
+  const missing = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 10,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: "task_nope" } },
+  });
+  assert.equal(missing.data.result.isError, true);
+});
+
+test("submit_task posts into the channel and hands back a task id", async (t) => {
+  const { runtime, token, repositoryId } = await mcpRuntime(t);
+  const roster = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 20,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  // Address whoever the roster actually named, so the test does not encode a
+  // display-name format that is allowed to change.
+  const agent = /@(.+?) — /u.exec(
+    roster.data.result.content[0].text as string,
+  )?.[1];
+  assert.ok(agent, "no agent in the roster to address");
+
+  const sent = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 21,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the retry ceiling",
+      },
+    },
+  });
+  assert.equal(sent.data.result.isError, undefined, sent.data.result.content[0].text);
+  const said = sent.data.result.content[0].text as string;
+  assert.match(said, /Task task_/u);
+
+  // The message is really in the room — this is the half that makes a task
+  // dispatched from an editor visible to everybody else.
+  const messages = await runtime.store.listChannelMessages(repositoryId, "", {});
+  assert.ok(
+    messages.some((message) => message.content.includes("raise the retry ceiling")),
+    "nothing was posted into the channel",
+  );
+
+  // And the id it quoted names a real task, which is what task_status needs.
+  const quoted = /Task (task_[\w-]+)/u.exec(said)?.[1] ?? "";
+  assert.ok(await runtime.store.getSubmittedTask(quoted), "quoted a task id that does not exist");
+});
+
+/**
+ * The offline exchange, which is the popup translated for a tool.
+ *
+ * The room asks before it sends — queue, reroute, or cancel — because a task
+ * filed against a machine that is not listening will sit there. An editor has
+ * no room to ask in, so the tool refuses to write anything, states the three
+ * choices, and waits to be called again. The rule it must never break is that
+ * the first call leaves *nothing* behind: no message, no task.
+ */
+test("submit_task asks before filing work against a machine that is off", async (t) => {
+  const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
+  process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_AGENTS_ONLY"];
+    } else {
+      process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
+    }
+  });
+
+  const { runtime, token, repositoryId } = await mcpRuntime(t);
+  const roster = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 30,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  const agent = /@(.+?) — /u.exec(
+    roster.data.result.content[0].text as string,
+  )?.[1];
+  assert.ok(agent);
+  // Nobody has registered a worker, so no machine is listening for anyone.
+  assert.match(roster.data.result.content[0].text as string, /— offline/u);
+
+  const asked = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 31,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent, objective: "raise the ceiling" },
+    },
+  });
+  const question = asked.data.result.content[0].text as string;
+  assert.match(question, /offline/u);
+  assert.match(question, /queue/u);
+  assert.match(question, /reroute/u);
+  assert.match(question, /cancel/u);
+  assert.match(question, /when_offline/u);
+
+  // Nothing was written. This is the assertion the whole design turns on.
+  assert.deepEqual(await runtime.store.listSubmittedTasks({ repositoryId }), []);
+  assert.deepEqual(
+    (await runtime.store.listChannelMessages(repositoryId, "", {})).filter(
+      (message) => message.content.includes("raise the ceiling"),
+    ),
+    [],
+  );
+
+  // Cancelling is a call that writes nothing either.
+  const dropped = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 32,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the ceiling",
+        when_offline: "cancel",
+      },
+    },
+  });
+  assert.match(dropped.data.result.content[0].text as string, /Nothing was submitted/u);
+  assert.deepEqual(await runtime.store.listSubmittedTasks({ repositoryId }), []);
+
+  // Answering "queue" files it, and says so rather than implying it started.
+  const queued = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 33,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the ceiling",
+        when_offline: "queue",
+      },
+    },
+  });
+  const filed = queued.data.result.content[0].text as string;
+  assert.equal(queued.data.result.isError, undefined, filed);
+  assert.match(filed, /Queued/u);
+  assert.match(filed, /machine comes back/u);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).length,
+    1,
+  );
+});
+
