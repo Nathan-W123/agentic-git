@@ -100,8 +100,147 @@ test("the open thread is restored too, not only the channel", async () => {
   assert.match(chats, /const SCROLL_SURFACES = \[[^\]]*"#chan-messages"/su);
   // `.thread-body` is worn by several panels; one panel's offset is not
   // another's, so the restore checks it is putting the position back into
-  // the surface it came from.
+  // the surface it came from — by key, with the class list kept only for a
+  // panel that has no key of its own. See the test below.
   assert.match(chats, /scroller\.className !== entry\.shape/u);
+});
+
+test("a surface that changes class is still the same conversation", async () => {
+  const chats = await publicFile("screen-chats.js");
+  // The transcript wears `chan-messages-loading` until its first page
+  // resolves and drops it the moment the messages are there. Pairing the
+  // captured position with its panel by class list therefore failed on
+  // exactly the render that swaps the skeleton for the conversation, and on
+  // every render where a file panel moved between its diff, its editor and
+  // its error — so the restore was skipped and the reader was left at the top
+  // of a history they were reading the middle of.
+  //
+  // The key is what identifies a surface: it names the conversation and it is
+  // the same string on both sides of a render.
+  const restore = chats.slice(
+    chats.indexOf("export function restoreChannelAnchor(saved) {"),
+    chats.indexOf("\n/**\n * The anchor each surface is currently sitting on"),
+  );
+  assert.notEqual(restore, "", "the anchor restore should exist");
+  assert.match(restore, /scroller\.dataset\.scrollKey !== entry\.key/u);
+  assert.match(
+    restore,
+    /entry\.key === undefined && scroller\.className !== entry\.shape/u,
+    "the class list may only decide for a surface that carries no key",
+  );
+  // Both variants of the transcript answer to the same key, which is what
+  // makes the pairing survive the swap between them.
+  assert.match(chats, /class="chan-messages chan-messages-loading"/u);
+  assert.equal(
+    [...chats.matchAll(/data-scroll-key="channel:\$\{esc\(repositoryId\)\}"/gu)]
+      .length >= 2,
+    true,
+    "the loading transcript and the loaded one share one identity",
+  );
+});
+
+test("a redraw nobody asked for costs one swap, not several", async () => {
+  const app = await publicFile("app.js");
+  // Everything that arrives on its own — the poll, a frame off the stream,
+  // the dozen background reads a channel fires on the way in — used to
+  // rebuild the whole document the moment it landed. Each swap throws the
+  // transcript away and puts it back, so a burst of them was the page
+  // visibly reloading, and every one of them was another chance to land the
+  // reader somewhere they had not been.
+  assert.match(app, /function scheduleRender\(\) \{/u);
+  const schedule = app.slice(
+    app.indexOf("function scheduleRender() {"),
+    app.indexOf("\nexport function render() {"),
+  );
+  assert.match(schedule, /if \(renderFrame !== undefined\) \{\s*return;/u);
+  assert.match(schedule, /window\.requestAnimationFrame\(\(\) => \{/u);
+  // A person pressing something still gets an immediate redraw, and it
+  // supersedes whatever was queued rather than being followed by it.
+  const render = app.slice(
+    app.indexOf("export function render() {"),
+    app.indexOf("\nfunction renderFailure(error) {"),
+  );
+  assert.match(render, /window\.cancelAnimationFrame\(renderFrame\)/u);
+  // The background reads in the render loop go through it.
+  const loop = app.slice(
+    app.indexOf("void ensureAgentOptions(state.selectedAgent"),
+    app.indexOf("\nfunction openUserDirectMessage(userId)"),
+  );
+  assert.doesNotMatch(
+    loop,
+    /^ +render\(\);$/mu,
+    "a background read must not rebuild the document on its own",
+  );
+});
+
+test("a poll does not throw away the changeset it is not asking about", async () => {
+  const app = await publicFile("app.js");
+  const code = await publicFile("screen-code.js");
+  // `refresh` runs on every frame off the stream and every poll tick. It used
+  // to invalidate the channel's code data each time, so the next render
+  // re-read the workspace, the file list and the run detail, and then rebuilt
+  // the entire document a second time when those answers came back. Nothing
+  // about a refresh says the files changed.
+  const refreshStart = app.indexOf(
+    "async function refresh({ quiet = false } = {}) {",
+  );
+  assert.notEqual(refreshStart, -1, "the context refresh should exist");
+  const refresh = app.slice(
+    refreshStart,
+    app.indexOf("\n/**\n * An invite link, if this is one.", refreshStart),
+  );
+  assert.notEqual(refresh, "", "the refresh should end where the next block starts");
+  assert.doesNotMatch(refresh, /invalidateCode\(\)/u);
+  assert.match(refresh, /scheduleRender\(\);/u);
+  // The events that really do say the files moved still say so themselves.
+  assert.match(app, /canonical_promoted"\) \{\s*invalidateCode\(\);/u);
+
+  // And invalidation means stale rather than gone: the panel keeps drawing
+  // what it has while the re-read runs, and only repaints if the answer
+  // turned out to be different.
+  assert.match(code, /export function invalidateCode\(\) \{\s*state\.codeStale = true;\s*\}/u);
+  assert.match(code, /function codeSignature\(\)/u);
+  const ensure = code.slice(
+    code.indexOf("export async function ensureCodeData(rerender) {"),
+    code.indexOf("\n/** Source before schema before docs"),
+  );
+  assert.match(ensure, /if \(drawn && state\.codeStale !== true\) \{\s*return;/u);
+  assert.match(ensure, /const before = codeSignature\(\);/u);
+  assert.match(
+    ensure,
+    /if \(!drawn \|\| codeSignature\(\) !== before\) \{\s*rerender\(\);/u,
+    "a re-read that found nothing new must not rebuild the document",
+  );
+});
+
+test("the transcript is put back before anything animates on top of it", async () => {
+  const app = await publicFile("app.js");
+  // An entrance is a transform, a transform counts in the rectangles
+  // `getBoundingClientRect` returns, and the anchor restore is arithmetic on
+  // exactly those rectangles. Measuring a transcript whose newest messages
+  // were already part-way through arriving therefore put the reader out by
+  // however far the animation had travelled — a different amount on every
+  // frame it was still running, which is a conversation that drifts under
+  // somebody who is only reading it.
+  const anchor = app.indexOf("restoreChannelAnchor(savedScroll);");
+  const follow = app.indexOf("restoreChannelScroll(savedScroll);");
+  const entrance = app.indexOf("playMessageEntrance(root);");
+  const reveal = app.indexOf("playTextReveal(root);");
+  const phases = app.indexOf("playPhaseSlots(root);");
+  for (const [name, index] of [
+    ["restoreChannelAnchor", anchor],
+    ["restoreChannelScroll", follow],
+    ["playMessageEntrance", entrance],
+    ["playTextReveal", reveal],
+    ["playPhaseSlots", phases],
+  ] as const) {
+    assert.notEqual(index, -1, `${name} should still run in the render loop`);
+  }
+  assert.equal(
+    follow < entrance && entrance < reveal && reveal < phases,
+    true,
+    "the position is decided first, and the movement is painted on top of it",
+  );
 });
 
 test("sending in every composer lands on the latest message", async () => {

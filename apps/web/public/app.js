@@ -3498,9 +3498,9 @@ async function deleteRepositoryAction(repositoryId) {
   const label = repositoryLabel(repositoryId);
   const phrase = `yesiwanttodelete${label.replace(/\s+/gu, "")}`;
   const values = await showModal({
-    title: "Delete this repository?",
-    subtitle: `This permanently deletes ${label}, its chat history, and its repository-scoped grants. This cannot be undone.`,
-    confirm: "Delete repository",
+    title: "Delete this workspace?",
+    subtitle: `This permanently deletes ${label}, its chat history, and its workspace-scoped grants. This cannot be undone.`,
+    confirm: "Delete workspace",
     body: `<label class="field">
         <span>Type <code>${esc(phrase)}</code> to confirm</span>
         <input class="input" name="confirmation" autocomplete="off"
@@ -3512,7 +3512,7 @@ async function deleteRepositoryAction(repositoryId) {
     return;
   }
   if (String(values.confirmation ?? "").trim().toLowerCase() !== phrase.toLowerCase()) {
-    toast(`Type ${phrase} exactly to delete this repository`, "error");
+    toast(`Type ${phrase} exactly to delete this workspace`, "error");
     return;
   }
   try {
@@ -5462,7 +5462,9 @@ function resumeLiveUpdates() {
       // arrived while this browser was away is now on screen.
       markChannelReadIfWatching(channel);
       if (!renameFieldFocused()) {
-        render();
+        // With the context refresh above, which is also on its way back:
+        // coming back to a tab is one redraw, not one per answer.
+        scheduleRender();
       }
     });
   }
@@ -7490,7 +7492,40 @@ function playPhaseSlots(root) {
   }
 }
 
+/** A coalesced render waiting for the next frame, if one is waiting. */
+let renderFrame;
+
+/**
+ * A redraw nobody is waiting on, folded into the next frame.
+ *
+ * Everything that arrives on its own — a poll tick, a frame off the stream,
+ * one of the background reads the channel fires on the way in — used to
+ * rebuild the whole document the moment it landed. Half a dozen of those
+ * answering within the same tick was half a dozen `innerHTML` swaps in a row,
+ * each one throwing the transcript away and putting it back, which is what a
+ * reader saw as the page reloading under them and, when a restore missed, as
+ * being moved somewhere they had not been.
+ *
+ * They are one piece of news to look at, so they get one redraw. A frame is
+ * the whole delay, and nothing that a person pressed goes through here:
+ * `render` stays immediate, and supersedes anything queued.
+ */
+function scheduleRender() {
+  if (renderFrame !== undefined) {
+    return;
+  }
+  renderFrame = window.requestAnimationFrame(() => {
+    renderFrame = undefined;
+    render();
+  });
+}
+
 export function render() {
+  // A queued redraw has nothing left to say once this one has run.
+  if (renderFrame !== undefined) {
+    window.cancelAnimationFrame(renderFrame);
+    renderFrame = undefined;
+  }
   if (rendering) {
     renderAgain = true;
     return;
@@ -7676,22 +7711,6 @@ function renderNow() {
   playSurfaceMotion(root);
   writeChatLocation();
 
-  // What the swap turned out to have *said*: the words that were not in the
-  // room a moment ago come in one at a time, and everything already there
-  // stays where it is. See `playTextReveal`.
-  //
-  // The shell first and the words second, because they are halves of one
-  // arrival: the message takes its place while its own text comes in, and a
-  // message the reveal has nothing to say about — a picture, a deleted line,
-  // a system notice — still arrives rather than appearing. Neither touches
-  // the other's property; see `playMessageEntrance`.
-  playMessageEntrance(root);
-  playTextReveal(root);
-  // And what it turned out to have *changed*: a run reporting its next phase
-  // swaps one line in place, without reanimating the message or the face it
-  // belongs to. See `playPhaseSlots`.
-  playPhaseSlots(root);
-
   // Chats owns this now: the inline file and diff blocks in the transcript are
   // the only place code is read, so the channel has to load its own changeset
   // rather than inherit one a separate Code screen happened to fetch first.
@@ -7703,9 +7722,34 @@ function renderNow() {
     // live conversation still gets the bottom.
     restoreChannelAnchor(savedScroll);
     restoreChannelScroll(savedScroll);
-    void ensureCodeData(render);
+    void ensureCodeData(scheduleRender);
     scrollThread();
   }
+
+  // What the swap turned out to have *said*: the words that were not in the
+  // room a moment ago come in one at a time, and everything already there
+  // stays where it is. See `playTextReveal`.
+  //
+  // The shell first and the words second, because they are halves of one
+  // arrival: the message takes its place while its own text comes in, and a
+  // message the reveal has nothing to say about — a picture, a deleted line,
+  // a system notice — still arrives rather than appearing. Neither touches
+  // the other's property; see `playMessageEntrance`.
+  //
+  // And after the restore above, all three of them. An entrance is a
+  // transform, a transform counts in `getBoundingClientRect`, and the restore
+  // is arithmetic on exactly those rectangles — so measuring a transcript
+  // whose newest messages were already part-way through arriving put the
+  // reader off by however far the animation had travelled, differently on
+  // every frame it was still running. The restore now measures the layout as
+  // it will settle, and the movement is painted on top of a position that has
+  // already been decided.
+  playMessageEntrance(root);
+  playTextReveal(root);
+  // And what it turned out to have *changed*: a run reporting its next phase
+  // swaps one line in place, without reanimating the message or the face it
+  // belongs to. See `playPhaseSlots`.
+  playPhaseSlots(root);
   // Outside the chats branch: a search box on any screen loses focus the same
   // way. After `restoreChannelScroll`, so the refocus does not fight it.
   restoreFocus(focusedField);
@@ -7714,13 +7758,18 @@ function renderNow() {
   // an empty surface for this to fill; painting on every route is also what
   // keeps an open list open across the render an arrow key causes.
   paintComposerSuggestions(activeChannelId());
+  // Everything below answers on its own time, and opening a channel fires a
+  // dozen of them at once. They redraw through `scheduleRender`, so the dozen
+  // answers cost one redraw between them rather than one each — nobody is
+  // waiting on any single one, and each extra swap was another chance to move
+  // a reader who had not asked to be moved.
   void ensureAgentOptions(state.selectedAgent, () => {
     if (
       state.route === "code" ||
       (state.route === "chats" &&
         primaryDestinationForWorkspace(activeChannelId()).kind === "agent")
     ) {
-      render();
+      scheduleRender();
     }
   });
   if (state.route === "chats") {
@@ -7730,7 +7779,7 @@ function renderNow() {
     // message back from the server.
     void ensureChannelMessages(activeChannelId(), () => {
       if (state.route === "chats") {
-        render();
+        scheduleRender();
       }
     });
     // The rail's unread badge counts from each room's local transcript. Only
@@ -7744,7 +7793,7 @@ function renderNow() {
         }
         void ensureChannelMessages(repo.id, () => {
           if (state.route === "chats") {
-            render();
+            scheduleRender();
           }
         });
       }
@@ -7753,12 +7802,12 @@ function renderNow() {
     // them reads `subChannelsFor` synchronously, so this only has to fill it.
     void ensureSubChannels(activeChannelId(), () => {
       if (state.route === "chats") {
-        render();
+        scheduleRender();
       }
     });
     void ensureChannelRoster(activeChannelId(), () => {
       if (state.route === "chats") {
-        render();
+        scheduleRender();
       }
     });
     // Grants feed the People-row promote / demote menus. Loaded with the
@@ -7766,7 +7815,7 @@ function renderNow() {
     // in that popover.
     void ensureRepositoryGrants(activeChannelId(), () => {
       if (state.route === "chats") {
-        render();
+        scheduleRender();
       }
     });
     // One-time: a workspace picture set before pictures were shared lives in
@@ -7774,7 +7823,7 @@ function renderNow() {
     // it was always meant for can see it too.
     void ensureChannelPictureShared(activeChannelId(), () => {
       if (state.route === "chats") {
-        render();
+        scheduleRender();
       }
     });
     // Once per channel, then only when the stream says the set changed. A
@@ -7786,7 +7835,7 @@ function renderNow() {
       state.pendingQuestions[channel] = [];
       void loadPendingQuestions(channel).then(() => {
         if (state.route === "chats") {
-          render();
+          scheduleRender();
         }
       });
     }
@@ -7812,7 +7861,7 @@ function renderNow() {
           void watchPreviewReady(channel);
         }
         if (state.route === "chats") {
-          render();
+          scheduleRender();
         }
       });
     }
@@ -7821,7 +7870,7 @@ function renderNow() {
     // are answers about right now, and a stale one is worse than none.
     void ensureDirectMessages(() => {
       if (state.route === "chats") {
-        render();
+        scheduleRender();
       }
     });
     // The roster's model/effort pickers read the provider's real options,
@@ -7842,7 +7891,7 @@ function renderNow() {
     )) {
       void ensureAgentOptions(provider, () => {
         if (state.route === "chats") {
-          render();
+          scheduleRender();
         }
       });
     }
@@ -7859,7 +7908,7 @@ function renderNow() {
       state.channelStats[repositoryId] = null;
       void loadChannelStats(repositoryId).then(() => {
         if (state.settingsOpen === true) {
-          render();
+          scheduleRender();
         }
       });
     }
@@ -7977,7 +8026,7 @@ function repositoryMenuItems(repositoryId) {
     {
       act: "channel-delete-repo",
       value: repositoryId,
-      label: "Delete repository",
+      label: "Delete workspace",
       iconName: "trash",
       danger: true,
     },
@@ -11761,8 +11810,22 @@ async function refresh({ quiet = false } = {}) {
   try {
     await loadContext();
     await loadInvitations();
-    invalidateCode();
-    render();
+    // No `invalidateCode` here. This runs on every frame off the stream and
+    // every poll tick, and throwing the channel's changeset away each time
+    // meant the next render re-read the workspace, the file list and the run
+    // detail — and then redrew the entire document a second time when the
+    // answers came back, several seconds apart from the first. Nothing about
+    // a refresh says the files changed. The events that do say so —
+    // canonical moving, a file saved or moved, the Files panel's own refresh
+    // button — call it themselves.
+    //
+    // Coalesced when nobody pressed anything: a burst of events off the
+    // stream is one piece of news to look at, not one redraw each.
+    if (quiet) {
+      scheduleRender();
+    } else {
+      render();
+    }
   } catch (error) {
     if (error.status === 401) {
       state.principal = undefined;
@@ -11925,7 +11988,10 @@ function scheduleChannelReconcile(channelRepositoryId) {
             (key) => !audibleBefore.has(key),
           );
         if (!renameFieldFocused()) {
-          render();
+          // The same event also schedules a context refresh, and the two
+          // used to redraw the whole document one after the other for one
+          // message. One frame folds them together.
+          scheduleRender();
         }
         // A muted room makes no sound. The message still arrived and the
         // transcript still shows it; what the mute switches off is being
@@ -12311,7 +12377,7 @@ async function boot() {
       const channel = activeChannelId();
       void loadPendingQuestions(channel).then(() => {
         if (state.route === "chats" && !renameFieldFocused()) {
-          render();
+          scheduleRender();
         }
       });
       return;
@@ -12319,7 +12385,7 @@ async function boot() {
     if (frame?.type === "channel-typing") {
       noteTyping(frame);
       if (state.route === "chats" && !renameFieldFocused()) {
-        render();
+        scheduleRender();
         // `typingOn` only drops expired entries when something reads it, and
         // the last frame is by definition the last thing that would have. One
         // sweep after the TTL is what actually takes the dots down when the
@@ -12333,7 +12399,7 @@ async function boot() {
             return;
           }
           if (state.route === "chats") {
-            render();
+            scheduleRender();
           }
         }, TYPING_SWEEP_MS);
       }
@@ -12364,7 +12430,7 @@ async function boot() {
       const channel = activeChannelId();
       void loadPendingQuestions(channel).then(() => {
         if (state.route === "chats" && !renameFieldFocused()) {
-          render();
+          scheduleRender();
         }
       });
     }
