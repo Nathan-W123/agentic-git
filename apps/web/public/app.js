@@ -11272,7 +11272,7 @@ document.addEventListener("click", (event) => {
       // agents screen, which is where somebody deciding how to connect one
       // actually is — routing it past the question left the whole flow
       // reachable only from a channel's plus menu.
-      void connectProviderSomehow(value, render);
+      void connectProviderSomehow(value, render, openSettingsSearchResult);
       return;
     case "agent-check-cli":
       // The machine half of an agent, on demand. Connecting used to be the
@@ -11299,7 +11299,7 @@ document.addEventListener("click", (event) => {
       return;
     case "agent-add":
       closePopover();
-      void startAddAgentFlow(render);
+      void startAddAgentFlow(render, openSettingsSearchResult);
       return;
     case "agent-disconnect":
       // Asks before it destroys, and removes the agent rather than only its

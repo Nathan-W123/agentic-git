@@ -113,7 +113,7 @@ function providerConnectionDescription(provider) {
  * after this step, which keeps browser approval, code exchange, and credential
  * entry in one implementation.
  */
-export async function startAddAgentFlow(rerender) {
+export async function startAddAgentFlow(rerender, goToSettings) {
   try {
     if (!state.providersLoaded) {
       await loadProviders();
@@ -202,7 +202,7 @@ export async function startAddAgentFlow(rerender) {
   if (providerId === "") {
     return;
   }
-  await connectProviderSomehow(providerId, rerender);
+  await connectProviderSomehow(providerId, rerender, goToSettings);
 }
 
 /**
@@ -232,10 +232,14 @@ export async function connectEditorToKumi(vendor, rerender) {
     const minted = await createEditorToken(`${label} on ${deviceLabel()}`);
     const written = await bridge.connectEditor(vendor, minted.token);
     if (written?.ok !== true) {
-      state.editorConnected = {
-        ...state.editorConnected,
-        [vendor]: `Could not connect: ${written?.detail ?? "unknown error"}`,
-      };
+      const why = `Could not connect ${label}: ${written?.detail ?? "unknown error"}`;
+      state.editorConnected = { ...state.editorConnected, [vendor]: why };
+      // Said where the person is standing. The row below is on the Settings
+      // screen, and this is reached from the agents screen and from a
+      // channel's menu — so writing only to the row meant pressing Connect,
+      // watching the dialog close, and being told the outcome on a page
+      // nobody had opened.
+      toast(why, "error");
       rerender();
       return;
     }
@@ -271,11 +275,11 @@ export async function connectEditorToKumi(vendor, rerender) {
               `only suspends it, so it keeps the environment it started with.`
             : `Connected. Restart ${label} and ask it to have Kumi do something.`),
     };
+    toast(state.editorConnected[vendor], "ok");
   } catch (error) {
-    state.editorConnected = {
-      ...state.editorConnected,
-      [vendor]: `Could not connect: ${error.message}`,
-    };
+    const why = `Could not connect ${label}: ${error.message}`;
+    state.editorConnected = { ...state.editorConnected, [vendor]: why };
+    toast(why, "error");
   }
   rerender();
 }
@@ -305,7 +309,7 @@ function deviceLabel() {
  * kind of thing pointing different ways, and flattening them reads as three
  * unrelated options.
  */
-export async function connectProviderSomehow(providerId, rerender) {
+export async function connectProviderSomehow(providerId, rerender, goToSettings) {
   const label = agentLabelOf(providerId);
   const vendor = PROVIDER_VENDOR[providerId];
   const bridge = window.KUMI_INSTALL;
@@ -319,7 +323,9 @@ export async function connectProviderSomehow(providerId, rerender) {
 
   const kind = await chooseFrom({
     title: `Connect ${label}`,
-    subtitle: "Two different things are called connecting. Which do you want?",
+    subtitle:
+      "Two different things are called connecting, and they do not replace " +
+      "each other. Which do you want?",
     confirm: "Continue",
     cancel: "Not now",
     body: `<fieldset class="agent-provider-picker">
@@ -327,18 +333,19 @@ export async function connectProviderSomehow(providerId, rerender) {
       <label class="agent-provider-choice">
         <input type="radio" name="connectionKind" value="cli" checked>
         <span class="agent-provider-copy">
-          <strong>Run agents on this computer</strong>
-          <small>Installs and signs in ${esc(label)}'s CLI, so you can
-            @mention this agent and it does the work here. This is what makes
-            the agent exist.</small>
+          <strong>CLI — run agents on this computer</strong>
+          <small>Installs ${esc(label)}'s command-line tool and signs it in, so
+            you can @mention this agent and it does the work here. This is the
+            one that makes the agent exist. Nothing to do with MCP.</small>
         </span>
       </label>
       <label class="agent-provider-choice">
         <input type="radio" name="connectionKind" value="mcp">
         <span class="agent-provider-copy">
-          <strong>Connect tools with MCP</strong>
-          <small>Either let ${esc(label)} send work to Kumi, or give Kumi's
-            agents tools to use while they work.</small>
+          <strong>MCP — connect tools</strong>
+          <small>Separate from the CLI, and it does not replace it. Either let
+            ${esc(label)} send work to Kumi, or give Kumi's agents tools to use
+            while they work.</small>
         </span>
       </label>
     </fieldset>
@@ -401,8 +408,16 @@ export async function connectProviderSomehow(providerId, rerender) {
   // The servers themselves live in project settings, because approving one is
   // a decision about the project rather than about this agent — and it is
   // recorded there against whoever made it.
-  location.hash = "#/settings/mcp-servers";
-  rerender();
+  //
+  // `#/settings/mcp-servers` was not a route. Nothing happened, on the one
+  // branch of this flow whose whole job is to take somebody somewhere, so
+  // choosing it looked exactly like choosing nothing. `project-controls` is
+  // the section that actually holds the card.
+  toast("Approve a server here, then it reaches every agent on this repository", "ok");
+  // Handed in rather than imported: the shell imports this module, so
+  // reaching back into it would be a cycle. The caller owns navigation
+  // anyway — this one owns the decision.
+  goToSettings?.("project-controls", "mcp-servers");
 }
 
 /**
