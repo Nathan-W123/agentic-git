@@ -4882,12 +4882,18 @@ function conversationInfoPanel(repositoryId) {
   </aside>`;
 }
 
-/** Pinned messages are context beside the channel, never another transcript. */
+/**
+ * Pinned messages are context beside the channel, never another transcript.
+ *
+ * The body is the bare list of pins. It used to be the whole transcript shelf
+ * — frame, fold and all — rendered with the shelf forced open, which dragged
+ * the shelf's "N pinned" header in with it. In a panel that header collapsed
+ * nothing: its chevron closed the panel, directly under the header's own
+ * close cross and directly above the row controls, so the surface's most
+ * icon-like thing was the one control nobody meant to press.
+ */
 function pinnedMessagesPanel(repositoryId) {
-  const wasOpen = state.pinsOpen;
-  state.pinsOpen = true;
-  const pins = pinnedBanner(repositoryId);
-  state.pinsOpen = wasOpen;
+  const pins = pinnedList(repositoryId);
   return `<aside class="thread-panel pins-panel" aria-label="Pinned messages">
     ${panelGrip()}
     <header class="thread-head">
@@ -4897,9 +4903,9 @@ function pinnedMessagesPanel(repositoryId) {
       ${panelClose("secondary-context-close", "Close pinned messages (Esc)")}
     </header>
     <div class="thread-body secondary-info-body">${
-      pins.includes("chan-pin-row")
-        ? pins
-        : '<p class="util-empty">Nothing is pinned in this conversation.</p>'
+      pins === ""
+        ? '<p class="util-empty">Nothing is pinned in this conversation.</p>'
+        : pins
     }</div>
   </aside>`;
 }
@@ -9142,12 +9148,14 @@ export function dismissOfflinePrompt(rerender) {
 /**
  * What this channel has decided not to lose, in a strip above the messages.
  *
- * The banner reads from the server-fed pinned list rather than the loaded
+ * The shelf reads from the server-fed pinned list rather than the loaded
  * transcript, because a pin exists precisely so a message survives the room
- * moving on — a banner that only knew the current page would forget exactly
+ * moving on — a strip that only knew the current page would forget exactly
  * the pins it was for. Closed, the shelf is not drawn at all — no collapsed
- * row, no rule, no reserved height — so the header's pin shortcut, beside the
- * people and agent counts, is the only thing that brings it back.
+ * row, no rule, no reserved height — so the workspace's pin shortcut, beside
+ * Threads and Files, is the only thing that brings it back. It carries no
+ * fold control of its own: the shortcut that opened it is what closes it,
+ * and a second one inside meant two different chevrons for one state.
  */
 function pinnedBanner(repositoryId) {
   const pins = state.channelPins[repositoryId] ?? [];
@@ -9158,19 +9166,29 @@ function pinnedBanner(repositoryId) {
   }
   return `<div class="chan-pins open" aria-hidden="false">
     <div class="chan-pins-surface">
-      <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
-        aria-expanded="true">
-        <span>${pins.length} pinned</span>
-        <span class="spacer"></span>
-        ${icon("chevronDown")}
-      </button>
-      <div class="chan-pins-list-frame" aria-hidden="false">
-        <div class="chan-pins-list">${pins
-        .map((entry) => pinnedRow(repositoryId, entry))
-        .join("")}</div>
-      </div>
+      <div class="chan-pins-list-frame" aria-hidden="false">${pinnedList(
+        repositoryId,
+      )}</div>
     </div>
   </div>`;
+}
+
+/**
+ * The pins themselves, as rows — the one list both surfaces draw.
+ *
+ * The shelf above the transcript and the pins panel beside it are the same
+ * rows in different frames, so a row gained in one is a row gained in the
+ * other. Empty is the empty string rather than an empty list, so each caller
+ * says in its own words what having nothing pinned looks like.
+ */
+function pinnedList(repositoryId) {
+  const pins = state.channelPins[repositoryId] ?? [];
+  if (pins.length === 0) {
+    return "";
+  }
+  return `<div class="chan-pins-list">${pins
+    .map((entry) => pinnedRow(repositoryId, entry))
+    .join("")}</div>`;
 }
 
 /**

@@ -832,13 +832,13 @@ test("pinned messages stay available and open at their thread root", async () =>
     /\$\{icon\("pin"\)\}/u,
     "the pinned-message pullout should not repeat the pin icon",
   );
-  // The shelf above the conversation and the pins panel beside it are one
-  // renderer — the panel is this banner with the shelf forced open — so a
-  // row gained in one is a row gained in the other.
+  // The shelf above the conversation and the pins panel beside it draw one
+  // list of rows, so a row gained in one is a row gained in the other. Only
+  // the frame differs: the shelf folds, the panel does not.
   assert.match(banner, /pinnedRow\(repositoryId, entry\)/u);
   assert.match(
     slice(chats, "function pinnedMessagesPanel(", "\n/**"),
-    /const pins = pinnedBanner\(repositoryId\);/u,
+    /const pins = pinnedList\(repositoryId\);/u,
   );
   assert.match(action, /state\.activeChannelThread = value;/u);
   assert.match(action, /state\.scrollToThreadMessage = value;/u);
@@ -897,6 +897,22 @@ test("a pin can be taken back from the row that lists it", async () => {
   // is a control a touch screen does not have.
   assert.match(css, /\.chan-pin-off \{/u);
   assert.doesNotMatch(css, /:hover \.chan-pin-off \{/u);
+
+  // And it is the only control the panel body offers. The panel used to
+  // render the transcript shelf whole, which brought the shelf's "N pinned"
+  // fold header with it — a chevron that collapsed nothing here, because in
+  // a panel the same click closes the panel. Sitting between the header's
+  // close cross and the rows' own unpin, the one obviously pressable glyph
+  // in the list threw the whole list away.
+  const panel = slice(chats, "function pinnedMessagesPanel(", "\n/**");
+  const list = slice(chats, "function pinnedList(", "\nfunction pinnedRow(");
+  for (const source of [panel, list]) {
+    assert.doesNotMatch(source, /chevronDown/u, "no fold chevron in the panel");
+    assert.doesNotMatch(source, /channel-pins-toggle/u);
+    assert.doesNotMatch(source, /chan-pins-head/u);
+  }
+  assert.doesNotMatch(chats, /class="chan-pins-head"/u);
+  assert.doesNotMatch(css, /\.chan-pins-head/u);
 });
 
 test("a reaction is only offered where it can be saved, and is taken back when it is not", async () => {

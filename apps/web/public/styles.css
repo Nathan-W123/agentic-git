@@ -5821,36 +5821,6 @@ button.chip.lg:hover {
   overflow: hidden;
 }
 
-.chan-pins-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 14px;
-  background: none;
-  border: none;
-  color: var(--text-2);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.chan-pins-head svg {
-  width: 14px;
-  height: 14px;
-}
-
-.chan-pins-head [data-icon="chevronDown"] {
-  transition: transform 180ms ease;
-}
-
-.chan-pins.open .chan-pins-head [data-icon="chevronDown"] {
-  transform: rotate(180deg);
-}
-
-.chan-pins-head .spacer {
-  flex: 1;
-}
-
 .chan-pins-list-frame {
   display: grid;
   grid-template-rows: 0fr;
@@ -5875,7 +5845,6 @@ button.chip.lg:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .chan-pins,
-  .chan-pins-head [data-icon="chevronDown"],
   .chan-pins-list-frame {
     transition: none;
   }
@@ -13963,16 +13932,10 @@ dialog.modal[open]::backdrop {
   color: var(--text-3);
 }
 
-.pins-panel .chan-pins {
-  display: block;
-  visibility: visible;
-  opacity: 1;
-  border: 0;
-}
-
 /* The compact shelf above a conversation keeps its own 132px scroller so it
-   cannot squeeze the transcript. Inside the dedicated panel, the panel body
-   is already the scroller; let the pin list grow into that available height
+   cannot squeeze the transcript, and folds away inside a collapsing frame.
+   The panel takes the rows on their own — no frame to unfold, and the panel
+   body is already the scroller — so the list grows into the height it has
    instead of clipping after a few rows and leaving the rest of it empty. */
 .pins-panel .chan-pins-list {
   max-height: none;
