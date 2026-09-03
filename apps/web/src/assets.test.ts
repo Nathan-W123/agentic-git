@@ -1173,6 +1173,7 @@ test("the editor connect card offers only what the app can write, and never a co
 
 test("connecting an agent asks which of the three connections is meant", async () => {
   const agents = await publicFile("screen-agents.js");
+  const app = await publicFile("app.js");
 
   // "Connect Codex" meant three different things and the screen offered one
   // of them, with the other two on a Settings page nobody looking at an agent
@@ -1201,9 +1202,16 @@ test("connecting an agent asks which of the three connections is meant", async (
   // machine the editor runs on, which a browser cannot do.
   assert.match(flow, /bridge\?\.connectEditor !== undefined/u);
 
-  // The chooser is entered from adding an agent, so the question is asked
-  // where the decision is made rather than after it.
+  // Entered from both ways in, which is the point. Adding an agent asks, and
+  // so does the Connect button on the agents screen — the flow was reachable
+  // only from a channel's plus menu when that button went straight to the
+  // CLI path, which is not where anybody was looking.
   assert.match(agents, /await connectProviderSomehow\(providerId, rerender\)/u);
+  assert.match(app, /case "agent-connect":[\s\S]{0,400}connectProviderSomehow\(value, render\)/u);
+  assert.doesNotMatch(
+    app,
+    /case "agent-connect":[\s\S]{0,400}connectAgent\(value, render\)/u,
+  );
 
   // A radio group hands `showModal` its last option rather than the checked
   // one, so every chooser would answer the same way regardless of the press.

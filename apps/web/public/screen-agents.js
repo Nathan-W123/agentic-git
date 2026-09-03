@@ -296,7 +296,7 @@ function deviceLabel() {
  * kind of thing pointing different ways, and flattening them reads as three
  * unrelated options.
  */
-async function connectProviderSomehow(providerId, rerender) {
+export async function connectProviderSomehow(providerId, rerender) {
   const label = agentLabelOf(providerId);
   const vendor = PROVIDER_VENDOR[providerId];
   const bridge = window.KUMI_INSTALL;
