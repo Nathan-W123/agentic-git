@@ -120,7 +120,7 @@ export async function startAddAgentFlow(rerender, goToSettings) {
       await loadProviders();
     }
   } catch (error) {
-    toast(`Could not load available agents — ${error.message}`, "error");
+    toast(`Could not load available agents. ${error.message}`, "error");
     return;
   }
 
@@ -211,13 +211,14 @@ export async function startAddAgentFlow(rerender, goToSettings) {
  *
  * Three steps that used to be a person's job: mint a token scoped to filing
  * work and nothing else, have the app write that editor's own config file,
- * and say what is left. The token is never shown, because nobody has to
- * carry it anywhere — which is also why it cannot be pasted with its angle
- * brackets on, or without the word Bearer, or into the wrong scope.
+ * and say what is left. The token is never shown, because nobody has to carry
+ * it anywhere, which is also why it cannot be pasted with its angle brackets
+ * on, or without the word Bearer, or into the wrong scope.
  *
- * Failures land in the row rather than in a toast that scrolls away, since
- * the row is where somebody will look next time they wonder whether it
- * worked.
+ * The outcome is a dialog somebody closes, not a toast. What it says is the
+ * one instruction that decides whether the connection works, and a message
+ * that clears itself after six seconds is the wrong carrier for it: the
+ * Codex advice below was missed exactly that way.
  */
 export async function connectEditorToKumi(vendor, rerender) {
   const bridge = window.KUMI_INSTALL;
@@ -225,64 +226,88 @@ export async function connectEditorToKumi(vendor, rerender) {
     return;
   }
   const label = VENDOR_LABEL[vendor] ?? vendor;
-  state.editorConnected = { ...state.editorConnected, [vendor]: "Connecting…" };
+  rememberEditor(vendor, "connecting", "Connecting");
   rerender();
+  let outcome;
   try {
     // Named for the editor and the machine, so the tokens list is something a
     // person can actually revoke from rather than a column of identical rows.
     const minted = await createEditorToken(`${label} on ${deviceLabel()}`);
     const written = await bridge.connectEditor(vendor, minted.token);
-    if (written?.ok !== true) {
-      const why = `Could not connect ${label}: ${written?.detail ?? "unknown error"}`;
-      state.editorConnected = { ...state.editorConnected, [vendor]: why };
-      // Said where the person is standing. The row below is on the Settings
-      // screen, and this is reached from the agents screen and from a
-      // channel's menu — so writing only to the row meant pressing Connect,
-      // watching the dialog close, and being told the outcome on a page
-      // nobody had opened.
-      toast(why, "error");
-      rerender();
-      return;
-    }
-    state.editorConnected = {
-      ...state.editorConnected,
-      [vendor]:
-        // Said first, because it changes what the connection can do. A
-        // viewer's editor can read the roster and follow a task and cannot
-        // file one, and finding that out by being refused mid-sentence is
-        // worse than being told now.
-        (minted.readOnly
-          ? "Connected read-only — your role cannot submit tasks, so this " +
-            "editor can follow work but not file it. An owner can grant you " +
-            "developer access. "
-          : "") +
-        (written.manual !== undefined
-          ? // Codex off Windows: the file is written and the variable is not,
-            // because a shell profile is the person's own file. Saying so
-            // beats reporting a job that is only half done.
-            `Config written. Add this to your shell, then reopen ${label}: ${written.manual}`
-          : vendor === "codex"
-            ? // Codex is the one vendor that reads its token from the
-              // environment rather than its config, and "restart Codex" is
-              // wrong advice for half of the people who will read it. The
-              // Store app is not restarted by closing its window: Windows
-              // suspends it and resumes the same process, still holding the
-              // environment it was launched with, so it never sees a variable
-              // set after that. The CLI in a fresh terminal sees it at once,
-              // which is exactly how this presents — working in one Codex and
-              // not the other.
-              `Connected. A new terminal will see it straight away. For the ` +
-              `Codex app, end it in Task Manager first — closing its window ` +
-              `only suspends it, so it keeps the environment it started with.`
-            : `Connected. Restart ${label} and ask it to have Kumi do something.`),
-    };
-    toast(state.editorConnected[vendor], "ok");
+    outcome =
+      written?.ok !== true
+        ? {
+            state: "failed",
+            message: `Could not connect ${label}. ${
+              written?.detail ?? "The app gave no reason."
+            }`,
+          }
+        : { state: "connected", message: editorNextStep(vendor, label, written, minted) };
   } catch (error) {
-    const why = `Could not connect ${label}: ${error.message}`;
-    state.editorConnected = { ...state.editorConnected, [vendor]: why };
-    toast(why, "error");
+    outcome = {
+      state: "failed",
+      message: `Could not connect ${label}. ${error.message}`,
+    };
   }
+  rememberEditor(vendor, outcome.state, outcome.message);
   rerender();
+  await showModal({
+    title:
+      outcome.state === "connected"
+        ? `${label} is connected`
+        : `${label} was not connected`,
+    subtitle:
+      outcome.state === "connected"
+        ? `${label} can now file work into Kumi.`
+        : "Nothing was written, and nothing on your account changed.",
+    body: `<p class="modal-hint">${esc(outcome.message)}</p>`,
+    confirm: "Close",
+    cancel: "",
+  });
+}
+
+/** Remembers what happened to one editor, for the rows that report it. */
+function rememberEditor(vendor, connectionState, message) {
+  state.editorConnected = {
+    ...state.editorConnected,
+    [vendor]: { state: connectionState, message },
+  };
+}
+
+/**
+ * What is left to do after the config is written, per editor.
+ *
+ * Only Codex gets the advice about the environment, and only Codex should:
+ * it is the one vendor that reads its token from a variable rather than from
+ * the file just written, so it is the one vendor where writing the file is
+ * not the end of the job. Telling somebody with Claude or Cursor to restart
+ * their computer is asking for a reboot that changes nothing.
+ */
+function editorNextStep(vendor, label, written, minted) {
+  // Said first, because it changes what the connection can do. A viewer's
+  // editor can read the roster and follow a task and cannot file one, and
+  // finding that out by being refused mid-sentence is worse than being told
+  // now.
+  const scope = minted.readOnly
+    ? "Connected read only. Your role cannot submit tasks, so this editor " +
+      "can follow work but not file it. An owner can grant you " +
+      "developer access. "
+    : "";
+  if (written.manual !== undefined) {
+    // Codex away from Windows: the file is written and the variable is not,
+    // because a shell profile is the person's own file. Saying so beats
+    // reporting a job that is only half done.
+    return `${scope}Config written. Add this line to your shell, then reopen ${label}: ${written.manual}`;
+  }
+  if (vendor === "codex") {
+    // Codex reads its token from the environment, and a running program keeps
+    // the environment it started with. Restarting the computer is the one
+    // instruction that is true for both the Codex app and every terminal;
+    // "close Codex" is not, because the Store build only suspends when its
+    // window closes and resumes holding the same environment.
+    return `${scope}Connected. Codex reads its token from your account's environment, and a program that is already running keeps the environment it started with. Restart your computer, then ask Codex to have Kumi do something.`;
+  }
+  return `${scope}Connected. Restart ${label}, then ask it to have Kumi do something.`;
 }
 
 /** This computer, as the tokens list should name it. */
@@ -404,9 +429,9 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
         mark: "wand",
         title: "Give Kumi's agents tools",
         badge: `Kumi → tools`,
-        note: `Approve a server — documentation, issues, a browser — and every
-          agent working on this repository can use it. Approving is recorded,
-          and each teammate's computer asks before running anything.`,
+        note: `Approve a server (documentation, issues, a browser) and every agent
+          working on this repository can use it. Approving is recorded, and
+          each teammate's computer asks before running anything.`,
       })}
     </fieldset>`,
   }, "mcpDirection");
@@ -425,7 +450,16 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
   // branch of this flow whose whole job is to take somebody somewhere, so
   // choosing it looked exactly like choosing nothing. `project-controls` is
   // the section that actually holds the card.
-  toast("Approve a server here, then it reaches every agent on this repository", "ok");
+  await showModal({
+    title: "Approve a tool server",
+    subtitle:
+      "Kumi is opening the place these are kept, in this project's settings.",
+    body: `<p class="modal-hint">Approve a server there and every agent working
+      on this repository can use it. Approving is recorded against you, and
+      each teammate's computer asks before it runs anything.</p>`,
+    confirm: "Close",
+    cancel: "",
+  });
   // Handed in rather than imported: the shell imports this module, so
   // reaching back into it would be a cycle. The caller owns navigation
   // anyway — this one owns the decision.
@@ -601,7 +635,7 @@ export async function installVendorCli(vendor, rerender) {
       `One thing left: sign in. Kumi uses this machine's own ${esc(vendor)} ` +
       "login, so it has to be done here, once.",
     body: `<p class="modal-hint">This opens a terminal already running
-      <code>${esc(plan.signIn)}</code>. Follow its sign-in, then come back —
+      <code>${esc(plan.signIn)}</code>. Follow its sign-in, then come back.
       Kumi picks it up on its own.</p>`,
     confirm: "Open the sign-in",
     cancel: "Later",
@@ -667,7 +701,7 @@ async function connectLocalAgent(providerId, rerender) {
   try {
     agent = await createLocalAgent(providerId);
   } catch (error) {
-    toast(`Could not create the ${label} agent — ${error.message}`, "error");
+    toast(`Could not create the ${label} agent. ${error.message}`, "error");
     return false;
   }
   await loadProviders();
@@ -699,14 +733,14 @@ const REFUSAL = {
       runs this agent.`,
     body: `Agents run on your own machine, so Kumi has to see the CLI before it
       creates one. Open Kumi's desktop app on the computer that will run this
-      agent and connect it there — nothing was created here.`,
+      agent and connect it there. Nothing was created here.`,
   },
   missing: {
     subtitle: "The CLI is not installed on this machine.",
     repair: `This agent cannot run until it is installed. Press Check the CLI
       again and Kumi will offer to install it for you.`,
     body: `An agent without its CLI cannot run, so none was created. Install it
-      and press Connect again — Kumi can do the install for you from the same
+      and press Connect again. Kumi can do the install for you from the same
       button.`,
   },
   "signed-out": {
@@ -715,8 +749,8 @@ const REFUSAL = {
       happen here. This agent stays where it is and starts working the moment
       the login is live.`,
     body: `Kumi runs it under this machine's own login, so the sign-in has to
-      happen here. Finish it and press Connect again — no agent was created,
-      and nothing on your account changed.`,
+      happen here. Finish it and press Connect again. No agent was created, and
+      nothing on your account changed.`,
   },
   unknown: {
     subtitle: "This machine could not be asked.",
@@ -796,8 +830,8 @@ async function settleLogin(verdict, vendor, bridge, providerId) {
       `Kumi runs it under this machine's own ${esc(vendor)} login, so it has ` +
       "to be signed in here before there is an agent to create.",
     body: `<p class="modal-hint">This opens a terminal running the sign-in.
-      Finish it there, then come back — Kumi checks again rather than taking
-      your word for it, so nothing is created until it can see the login.</p>`,
+      Finish it there, then come back. Kumi checks again rather than taking your
+      word for it, so nothing is created until it can see the login.</p>`,
     confirm: "Open the sign-in",
     cancel: "Not now",
   });
@@ -815,8 +849,8 @@ async function settleLogin(verdict, vendor, bridge, providerId) {
   const finished = await showModal({
     title: "Finished signing in?",
     subtitle: `Kumi will ask ${esc(vendor)} again before creating the agent.`,
-    body: `<p class="modal-hint">If the sign-in did not work, close this —
-      nothing has been created and nothing on your account has changed.</p>`,
+    body: `<p class="modal-hint">If the sign-in did not work, close this.
+      Nothing has been created and nothing on your account has changed.</p>`,
     confirm: "I have signed in",
     cancel: "Not yet",
   });
@@ -883,7 +917,7 @@ export async function disconnectAgent(providerId, rerender) {
             will not be able to cancel it or reply to it by name.</p>`
         : "") +
       `<p class="modal-hint">Nothing is uninstalled, and your
-      ${esc(label)} account is untouched — you can connect it again whenever
+      ${esc(label)} account is untouched, so you can connect it again whenever
       you like.</p>`,
     confirm: "Disconnect",
     cancel: "Keep it",
@@ -896,7 +930,7 @@ export async function disconnectAgent(providerId, rerender) {
       method: "DELETE",
     });
   } catch (error) {
-    toast(`Could not disconnect ${label} — ${error.message}`, "error");
+    toast(`Could not disconnect ${label}. ${error.message}`, "error");
     return false;
   }
   forgetAgentInLoadedRosters(providerId);
@@ -950,10 +984,10 @@ export async function checkLocalCli(providerId, rerender) {
     // was found.
     toast(
       window.KUMI_SERVER === undefined
-        ? "Open the Kumi app on the machine that runs this agent — a browser " +
+        ? "Open the Kumi app on the machine that runs this agent. A browser " +
             "cannot see what is installed there."
         : "This copy of the Kumi app is too old to install or check a CLI. " +
-            "Download the latest version and open it again — your agents and " +
+            "Download the latest version and open it again. Your agents and " +
             "their names are kept.",
       "error",
     );
@@ -1047,7 +1081,7 @@ async function signInAgent(providerId, mode, rerender) {
     tab?.close();
     // The caller offers a fresh attempt, and saying why beats silently
     // showing a credential form the user did not ask for.
-    toast(`${agentLabelOf(providerId)} sign-in unavailable — ${error.message}`, "error");
+    toast(`${agentLabelOf(providerId)} sign-in unavailable. ${error.message}`, "error");
     return false;
   }
   state.providerConnecting?.delete(providerId);
@@ -1068,7 +1102,7 @@ async function signInAgent(providerId, mode, rerender) {
   const link =
     `<p class="modal-hint"><a class="link" target="_blank" rel="noopener noreferrer"
        href="${esc(flow.verificationUrl)}">Open the ${esc(agentLabelOf(providerId))} sign-in page</a>
-     — it opens in a new tab, on your own account.</p>`;
+     It opens in a new tab, on your own account.</p>`;
   // Whether the browser hands back a code varies by vendor and by how the
   // sign-in page resolves: approving in the browser is often enough on its
   // own, and the CLI exits without ever prompting. So the flow is polled
@@ -1243,10 +1277,10 @@ export async function connectAgent(providerId, rerender) {
         cancel: pasteable ? "Use a credential instead" : "Not now",
         body: `<p class="modal-hint">Nothing was saved, and nothing on your
           account changed. This is usually the sign-in tab being closed or
-          taking too long — starting it again is normally all it needs.${
+          taking too long, and starting it again is normally all it needs.${
             pasteable
               ? " If the message above says this account is not eligible, " +
-                "signing in again will not help — connect a credential instead."
+                "signing in again will not help, so connect a credential instead."
               : ""
           }</p>`,
       });
@@ -1309,8 +1343,8 @@ export async function connectAgent(providerId, rerender) {
           placeholder="Which account this is"></label>
       <label class="field"><span>Who can task it</span>
         <select class="input" name="visibility">
-          <option value="personal" selected>Personal — only you can task it</option>
-          <option value="org">Org-wide — anyone with access to a repository
+          <option value="personal" selected>Personal, only you can task it</option>
+          <option value="org">Org-wide, anyone with access to a repository
             it works in can @mention it there</option>
         </select></label>
       <p class="modal-hint">This agent will be added to every repository you
@@ -1323,7 +1357,7 @@ export async function connectAgent(providerId, rerender) {
       }
       <p class="modal-hint">Stored encrypted, never shown again, and never
         shared with anyone else on this deployment. "Org-wide" only changes
-        who may @mention this agent to submit work — the credential itself is
+        who may @mention this agent to submit work. The credential itself is
         still never shared.</p>`,
   });
   if (values === undefined) {
@@ -1428,7 +1462,7 @@ async function signInGitHub(rerender) {
     state.providerConnecting?.delete("github");
     rerender();
     tab?.close();
-    toast(`GitHub sign-in unavailable — ${error.message}`, "error");
+    toast(`GitHub sign-in unavailable. ${error.message}`, "error");
     return false;
   }
   state.providerConnecting?.delete("github");
@@ -1467,7 +1501,7 @@ async function signInGitHub(rerender) {
     confirm: "I've approved it",
     body: `<p class="modal-hint"><a class="link" target="_blank"
         rel="noopener noreferrer" href="${esc(flow.verificationUrl)}">Open
-        the GitHub sign-in page</a> — it opens in a new tab.</p>
+        the GitHub sign-in page</a>. It opens in a new tab.</p>
       <p class="modal-code">${esc(flow.userCode ?? "")}</p>
       <p class="modal-hint">Enter that code on the page, approve the
         access, then come back here. Pushes an agent runs for you will
@@ -1542,7 +1576,7 @@ export async function connectGitHubAccount(rerender) {
         confirm: "Try again",
         cancel: "Paste a token instead",
         body: `<p class="modal-hint">This is usually the sign-in tab being
-          closed or the code expiring — starting again is normally all it
+          closed or the code expiring, and starting again is normally all it
           needs. A pasted personal access token works too, and can be
           scoped to single repositories where the sign-in cannot.</p>`,
       });

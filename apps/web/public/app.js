@@ -52,6 +52,7 @@ import {
   setMyTheme,
   myAgents,
   notifications,
+  PROVIDER_VENDOR,
   persist,
   isFavourite,
   flushChannelDrafts,
@@ -2078,6 +2079,31 @@ function agentProviderRow(agent) {
   const localAgent =
     state.localAgentsOnly === true && agent.exists === true && !agent.mine;
   const connecting = state.providerConnecting?.has(agent.id) === true;
+  // The second connection this row can have, and it is a different thing from
+  // the first. The CLI is what makes the agent run here; MCP is what lets that
+  // editor file work into Kumi. A row that showed only the first said "Not
+  // connected" about a Codex somebody had just connected over MCP, because the
+  // two were never the same question.
+  const editor = state.editorConnected?.[PROVIDER_VENDOR[agent.id]];
+  const mcp =
+    editor === undefined
+      ? ""
+      : editor.state === "connected"
+        ? statusBadge("ok", "MCP", {
+            iconName: "link",
+            title: "This editor can file work into Kumi",
+          })
+        : editor.state === "connecting"
+          ? statusBadge("info", "MCP", { iconName: "link", title: "Connecting" })
+          : statusBadge("warn", "MCP failed", {
+              iconName: "alert",
+              title: editor.message ?? "",
+            });
+  // Named once there are two of them. "Not connected" beside a green MCP badge
+  // reads as a contradiction rather than as two answers to two questions, so
+  // the CLI badge says which connection it is talking about exactly when
+  // something else is standing next to it.
+  const cliLabel = mcp === "" ? "Not connected" : "No CLI";
   const status = agent.needsReconnect
     ? statusBadge("warn", "Sign-in expired", { iconName: "alert" })
     : agent.mine
@@ -2086,15 +2112,15 @@ function agentProviderRow(agent) {
         ? statusBadge("ok", "Connected", { iconName: "checkCircle" })
         : agent.hostAccount
           ? statusBadge("info", "Available", { iconName: "info" })
-          : statusBadge("idle", "Not connected", { iconName: "minusCircle" });
+          : statusBadge("idle", cliLabel, { iconName: "minusCircle" });
   const detail = agent.needsReconnect
-    ? "Sign in again — every task given to this agent will fail until you do."
+    ? "Sign in again. Every task given to this agent will fail until you do."
     : agent.mine
       ? agent.hasName === true
         ? `as ${callSign}`
         : "as you"
       : localAgent
-        ? `as ${callSign} — runs on this machine`
+        ? `as ${callSign}, runs on this machine`
         : agent.hostAccount
           ? "using this machine's account"
           : "";
@@ -2162,7 +2188,7 @@ function agentProviderRow(agent) {
     row: `agent-${agent.id}`,
     mark: vendorMark(agent.id),
     name: agentLabelOf(agent.id),
-    status,
+    status: `${status}${mcp}`,
     detail,
     controls,
     busy: connecting,
@@ -2470,7 +2496,7 @@ function apiTokensCard() {
         : `<div class="st-token-secret" role="status">
             <div class="st-row-label">Copy this now</div>
             <p class="st-row-help">It is shown once. Kumi keeps only a
-              fingerprint, so nobody — including us — can read it back.</p>
+              fingerprint, so nobody, including us, can read it back.</p>
             <code class="token-secret">${esc(minted)}</code>
             <span class="st-token-secret-actions">
               <button type="button" class="btn btn-sm" data-act="token-copy">Copy</button>
@@ -2729,7 +2755,7 @@ function editorMcpCard() {
   const detected = state.machineAgents;
   const rows = (bridge.connectable ?? ["claude", "codex", "cursor"]).map((vendor) => {
     const here = detected === undefined || detected.includes(vendor);
-    const done = state.editorConnected?.[vendor];
+    const done = state.editorConnected?.[vendor]?.message;
     return settingRow({
       label: VENDOR_LABEL[vendor] ?? vendor,
       description: here

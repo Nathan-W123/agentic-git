@@ -1151,13 +1151,27 @@ test("the editor connect card offers only what the app can write, and never a co
   assert.doesNotMatch(connect, /mcp add|claude\.json|config\.toml|https:/u);
 
   // Codex is the one vendor whose token lives in the environment rather than
-  // its config, and "restart Codex" is wrong advice for the Store app: closing
-  // its window suspends it, and the resumed process still holds the
-  // environment it launched with. It works in a fresh terminal and not in the
-  // app, which is the confusing half of the symptom.
+  // in the config just written, so it is the one vendor where writing the file
+  // is not the end of the job. A running program keeps the environment it
+  // started with, and restarting the computer is the single instruction that
+  // is true for both the Codex app and every terminal.
   assert.match(connect, /vendor === "codex"/u);
-  assert.match(connect, /Task Manager/u);
-  assert.match(connect, /suspends it/u);
+  assert.match(connect, /Restart your computer/u);
+  // And only Codex. Telling somebody with Claude or Cursor to restart their
+  // machine asks for a reboot that changes nothing, and the environment
+  // sentence is meaningless for an editor that reads its config file.
+  // Pinned on the returned strings rather than on a slice of the function,
+  // because the prose explaining the rule mentions the environment too and a
+  // looser assertion catches its own justification.
+  assert.match(
+    connect,
+    /return `\$\{scope\}Connected\. Restart \$\{label\}, then ask it to have Kumi do something\.`;/u,
+  );
+  const codexAdvice = connect.slice(connect.indexOf('if (vendor === "codex")'));
+  assert.match(codexAdvice, /Restart your computer/u);
+  // The advice somebody actually followed and it did not work is gone: closing
+  // Codex through Task Manager was true only for the Store build.
+  assert.doesNotMatch(connect, /Task Manager/u);
 
   // The token is minted for this editor on this machine, and is never shown:
   // nobody has to carry it anywhere, which is what makes every way of
@@ -1169,6 +1183,54 @@ test("the editor connect card offers only what the app can write, and never a co
   // registering as a worker, so an editor token carrying it could lease other
   // people's work.
   assert.match(data, /EDITOR_TOKEN_SCOPES = \["view", "submit_task"\]/u);
+});
+
+test("an agent row reports both of the connections it can have", async () => {
+  const app = await publicFile("app.js");
+  const row = sourceOf(app, "agentProviderRow", "integrationsSection");
+
+  // Two different things, and the row used to show one. Somebody connected
+  // Codex over MCP, was told it worked, and the row above the message went on
+  // saying "Not connected" — which is true of the CLI and says nothing about
+  // what they had just done.
+  assert.match(row, /state\.editorConnected\?\.\[PROVIDER_VENDOR\[agent\.id\]\]/u);
+  assert.match(row, /statusBadge\("ok", "MCP"/u);
+  assert.match(row, /statusBadge\("warn", "MCP failed"/u);
+  // Both badges reach the row, rather than the second replacing the first.
+  assert.match(row, /status: `\$\{status\}\$\{mcp\}`/u);
+
+  // Nothing is claimed for an editor nobody has tried: absent stays absent
+  // rather than rendering as a failure.
+  assert.match(row, /editor === undefined\s*\?\s*""/u);
+
+  // And the two badges say which connection each is about. "Not connected"
+  // beside a green MCP badge reads as a contradiction rather than as two
+  // answers to two different questions.
+  assert.match(row, /const cliLabel = mcp === "" \? "Not connected" : "No CLI"/u);
+});
+
+test("the connection pipeline is free of em dashes", async () => {
+  // Asked for, and worth pinning: the copy here is written and rewritten
+  // often, and a dash reintroduced by hand is invisible in review.
+  const agents = await publicFile("screen-agents.js");
+  const app = await publicFile("app.js");
+  const visible = (source: string): string[] =>
+    source
+      .split("\n")
+      .filter((line) => line.includes("\u2014"))
+      .filter((line) => !/^\s*(?:\*|\/\/|\/\*)/u.test(line))
+      .map((line) => line.trim());
+
+  assert.deepEqual(visible(agents), [], "screen-agents.js carries the whole flow");
+  for (const [name, from, to] of [
+    ["agentProviderRow", "function agentProviderRow", "function integrationsSection"],
+    ["editorMcpCard", "function editorMcpCard", "function projectControlsSection"],
+  ] as const) {
+    const start = app.indexOf(from);
+    const end = app.indexOf(to, start);
+    assert.ok(start !== -1 && end > start, `${name} was not found`);
+    assert.deepEqual(visible(app.slice(start, end)), [], name);
+  }
 });
 
 test("connecting an agent asks which of the three connections is meant", async () => {
@@ -1297,14 +1359,19 @@ test("a viewer can still connect an editor, read-only, and is told so", async ()
     agents.indexOf("function deviceLabel"),
   );
   assert.match(connect, /minted\.readOnly/u);
-  // And every outcome is said where the person is standing. The row it also
-  // writes is on the Settings screen, and this is reached from the agents
-  // screen and from a channel menu — so writing only to the row meant the
-  // dialog closing and nothing being reported anywhere they were looking.
-  assert.match(connect, /toast\([\s\S]{0,80}"ok"\)/u);
-  assert.equal((connect.match(/toast\(/gu) ?? []).length >= 3, true, "every outcome should say so");
-  assert.match(connect, /read-only/u);
+  // Every outcome is said where the person is standing, and said in something
+  // they close. A toast cleared itself after six seconds, which is the wrong
+  // carrier for the one instruction that decides whether the connection works
+  // — the Codex advice was missed exactly that way.
+  assert.match(connect, /await showModal\(/u);
+  assert.doesNotMatch(connect, /toast\(/u);
+  assert.match(connect, /confirm: "Close"/u);
+  assert.match(connect, /read only/u);
   assert.match(connect, /developer access/u);
+
+  // Both outcomes, not just the happy one.
+  assert.match(connect, /is connected`/u);
+  assert.match(connect, /was not connected`/u);
 });
 
 test("the catalogue pins every version and fills the form rather than creating", async () => {
