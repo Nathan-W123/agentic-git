@@ -1729,6 +1729,20 @@ const AUDIT_THREAD_TITLE = "Audit log";
 const THREAD_RECONCILE_INTERVAL_MS = 60_000;
 
 /**
+ * How long a task waits unclaimed before the room is told nothing took it.
+ *
+ * Longer than it needs to be, on purpose. A lease is five minutes and a worker
+ * polls every five seconds, so anything genuinely being picked up is picked up
+ * inside one of those. Ten leaves room for a machine that is merely slow to
+ * wake without narrating a delay nobody would otherwise have noticed, and the
+ * notice is not urgent: it corrects a sentence, it does not stop anything.
+ */
+const STALLED_TASK_MS = 10 * 60 * 1000;
+
+/** Marks a coordinator line about work that never started. See `reportStalledTasks`. */
+const CHANNEL_STALLED_PREFIX = "\u23f3";
+
+/**
  * How often the seat count on every paying subscription is checked against
  * the people who can actually work.
  *
@@ -4480,6 +4494,12 @@ export interface ApiGatewayOptions {
    * {@link PLAN_HOLD_TTL_MS}.
    */
   planHoldTtlMs?: number;
+  /**
+   * How long a task waits unclaimed before the room is told. Overridable for
+   * the same reason `planHoldTtlMs` is: a test cannot wait ten minutes, and a
+   * sweep nobody can reach in a test is a sweep nobody has run.
+   */
+  stalledTaskMs?: number;
 }
 
 interface RequestContext {
@@ -5921,10 +5941,15 @@ export class ApiGateway {
     // longer here. Its clock is the row's own timestamp rather than a timer
     // in memory, so the wait ends whether or not anything survived.
     void this.lapseStalePlanHolds().catch(() => undefined);
+    // And the fourth: work nobody ever picked up. Its clock is the row's own
+    // `submittedAt`, so like the hold sweep it does not care which process
+    // was running when the task was filed.
+    void this.reportStalledTasks().catch(() => undefined);
     this.threadReconcileTimer = setInterval(() => {
       void this.reconcileFinishedThreads().catch(() => undefined);
       void this.reconcileArbitrationNotices().catch(() => undefined);
       void this.lapseStalePlanHolds().catch(() => undefined);
+      void this.reportStalledTasks().catch(() => undefined);
     }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
   }
@@ -22308,7 +22333,127 @@ export class ApiGateway {
    * `planned` by then, and cancelling a run that has just started would be
    * far worse than letting one late plan live.
    */
-  private async lapseStalePlanHolds(): Promise<void> {
+/**
+   * Says so when nothing ever picked a task up.
+   *
+   * `waitingForAMachine` is decided once, at dispatch, and never revisited. A
+   * machine that was live at that instant and then went away — or that is
+   * running but will never be offered this work, because its adapter list
+   * does not carry the agent's vendor — leaves the thread saying "I've taken
+   * this task and I'm working on it" in front of a row nothing will ever
+   * claim. The offline exchange cannot reach this: it runs strictly before
+   * dispatch, and answers the case where the agent already reads as offline.
+   * This is the other direction, and it had nobody watching it.
+   *
+   * Deliberately not a cancellation. The work is still good and still runs if
+   * the machine comes back; what was missing was anybody saying that it had
+   * not started. `lapseStalePlanHolds` beside this one may cancel because a
+   * plan nobody approved has genuinely ended.
+   *
+   * Three things keep this from crying wolf. A task queued behind another by
+   * `afterTaskId` is waiting by design. A repository with any active lease is
+   * working, and this row is behind that work. And the notice is written once,
+   * recorded as `task_stalled` against the task rather than in memory, so a
+   * restart does not say it again.
+   */
+  private async reportStalledTasks(): Promise<void> {
+    const cutoff = Date.now() - (this.options.stalledTaskMs ?? STALLED_TASK_MS);
+    for (const repository of await this.options.store.listRepositories()) {
+      const queued = await this.options.store
+        .listSubmittedTasks({ repositoryId: repository.id, status: "submitted" })
+        .catch((): [] => []);
+      const candidates = queued.filter(
+        (task) =>
+          task.afterTaskId === undefined &&
+          Date.parse(task.submittedAt) <= cutoff,
+      );
+      if (candidates.length === 0) {
+        // The common case, and the reason nothing below runs unconditionally:
+        // most rooms have nothing queued at all, and this walks every
+        // repository on the deployment once a minute.
+        continue;
+      }
+      // One read for the whole repository rather than one per task. A lease
+      // anywhere here means work is moving and these rows are behind it.
+      const active = await this.options.store
+        .listWorkLeases({ repositoryId: repository.id, status: "active" })
+        .catch((): [] => []);
+      if (active.length > 0) {
+        continue;
+      }
+      const messages = await this.options.store
+        .listChannelMessages(repository.id, "", { limit: 200 })
+        .catch((): [] => []);
+      for (const task of candidates) {
+        const said = await this.options.store
+          .listAuditEvents({
+            taskId: task.id,
+            types: ["task_stalled"],
+            limit: 1,
+          })
+          .catch((): [] => []);
+        if (said.length > 0) {
+          continue;
+        }
+        const root = messages.find((message) => message.taskId === task.id);
+        if (root === undefined || task.projectId === undefined) {
+          // No thread to correct — submitted outside a channel, or a row
+          // predating project stamping, which the reply cannot be addressed
+          // without inventing an id the room does not have. Recorded anyway,
+          // so the sweep does not reconsider it every minute for the life of
+          // the row.
+          await this.noteStalledTask(task);
+          continue;
+        }
+        await this.appendChannelThreadReply({
+          projectId: task.projectId,
+          repositoryId: repository.id,
+          messageId: root.id,
+          authorId: "coordinator",
+          content:
+            `${CHANNEL_STALLED_PREFIX} Nothing has picked this up. It is still ` +
+            "queued and will start on its own if the machine that runs this " +
+            "agent comes back — open Kumi there, or say `/cancel` here and " +
+            "give it to somebody who is online.",
+          kind: "system",
+        }).catch((error: unknown) => {
+          // A channel write that fails must not stop the record below: the
+          // audit row is what keeps this from being said twice, and losing it
+          // would turn one missed notice into one every minute.
+          process.stderr.write(
+            `[channel] stalled notice for ${task.id} could not be posted: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          );
+          return undefined;
+        });
+        await this.noteStalledTask(task);
+      }
+    }
+  }
+
+  /** Records that the stall was noticed, so it is only ever said once. */
+  private async noteStalledTask(task: {
+    id: string;
+    projectId: string | undefined;
+    repositoryId: string;
+    submittedAt: string;
+  }): Promise<void> {
+    await this.options.store
+      .appendAudit(undefined, {
+        type: "task_stalled",
+        taskId: task.id,
+        data: {
+          projectId: task.projectId,
+          repositoryId: task.repositoryId,
+          submittedAt: task.submittedAt,
+          reason: "No worker claimed this task",
+        },
+      })
+      .catch(() => undefined);
+  }
+
+    private async lapseStalePlanHolds(): Promise<void> {
     const ttl =
       this.options.planHoldTtlMs ??
       planHoldTtlMs(process.env["COORD_PLAN_HOLD_TTL_MINUTES"]);

@@ -413,6 +413,8 @@ async function startRuntime(
     threadReconcileIntervalMs?: number;
     /** How long a held `/plan` waits before it lapses. */
     planHoldTtlMs?: number;
+    /** How long a task waits unclaimed before the room is told nothing took it. */
+    stalledTaskMs?: number;
     /** How long the audit log keeps an event. Zero keeps everything. */
     auditRetentionDays?: number;
     /** How often the retention sweep runs, so a test need not wait hours. */
@@ -1220,6 +1222,9 @@ async function startRuntime(
     ...(options.threadReconcileIntervalMs === undefined
       ? {}
       : { threadReconcileIntervalMs: options.threadReconcileIntervalMs }),
+    ...(options.stalledTaskMs === undefined
+      ? {}
+      : { stalledTaskMs: options.stalledTaskMs }),
     ...(options.auditRetentionDays === undefined
       ? {}
       : { auditRetentionDays: options.auditRetentionDays }),
@@ -8653,6 +8658,130 @@ test("a thread carries what its task changed, and keeps it", async (t) => {
     );
     return message?.changedFiles?.length === 1;
   }, "the final changeset never replaced the live summary");
+});
+
+test("a task nobody picks up is said so in its thread, once", async (t) => {
+  // `waitingForAMachine` is decided once, at dispatch. A machine that was live
+  // at that instant and then went away leaves the thread saying "I've taken
+  // this task and I'm working on it" in front of a row nothing will ever
+  // claim. The offline exchange cannot reach this: it runs strictly before
+  // dispatch and answers the case where the agent already reads as offline.
+  const runtime = await startRuntime(t, {
+    threadReconcileIntervalMs: 40,
+    stalledTaskMs: 0,
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "nobody-home");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) rename the button" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(task?.status, "submitted");
+
+  const noticesFor = async (): Promise<string[]> => {
+    const messages = await runtime.store.listChannelMessages(
+      repositoryId,
+      ownerId,
+    );
+    const root = messages.find((message) => message.taskId === task?.id);
+    return (root?.replies ?? [])
+      .filter((reply) => reply.kind === "system")
+      .map((reply) => reply.content);
+  };
+
+  // Two full sweeps. The second is the point: the notice is recorded against
+  // the task rather than in memory, so it is said once however often the
+  // reconciler runs — and a restart does not say it again either.
+  await waitFor(
+    async () => (await noticesFor()).length > 0,
+    "the sweep never said anything about a task nobody claimed",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  const notices = await noticesFor();
+  assert.equal(notices.length, 1, notices.join(" | "));
+  assert.match(notices[0] ?? "", /Nothing has picked this up/u);
+  // Not a cancellation. The work is still good and still runs if the machine
+  // comes back; what was missing was anybody saying it had not started.
+  const [after] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(after?.status, "submitted");
+  assert.equal(
+    (await runtime.store.listAuditEvents({ taskId: task?.id, types: ["task_stalled"] }))
+      .length,
+    1,
+  );
+});
+
+test("a task that is merely waiting its turn is left alone", async (t) => {
+  // Two ways a queued row is fine, and the sweep must recognise both or it
+  // narrates ordinary work as a fault every minute.
+  const runtime = await startRuntime(t, {
+    threadReconcileIntervalMs: 40,
+    stalledTaskMs: 0,
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "busy-room");
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) the first thing" },
+  });
+  const [queued] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.ok(queued !== undefined);
+
+  // A live lease anywhere in this repository means work is moving and this
+  // row is behind it.
+  const worker = await runtime.store.registerWorker({
+    userId: ownerId,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    name: "a-machine",
+    adapters: ["claude"],
+    version: "1",
+  });
+  const busy = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "work that is actually running",
+    agentId: "claude",
+    validationCommands: [],
+  });
+  const leased = await runtime.store.leaseNextTask({
+    workerId: worker.id,
+    taskId: busy.id,
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    baseRevision: "b".repeat(40),
+    ttlMs: 60_000,
+  });
+  assert.ok(leased !== undefined, "the second task should have been leased");
+
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  const messages = await runtime.store.listChannelMessages(repositoryId, ownerId);
+  const root = messages.find((message) => message.taskId === queued.id);
+  assert.deepEqual(
+    (root?.replies ?? [])
+      .filter((reply) => reply.kind === "system")
+      .map((reply) => reply.content),
+    [],
+    "a room with work in flight should say nothing about the queue behind it",
+  );
 });
 
 test("a command and a mention work together, and /plan holds the run", async (t) => {

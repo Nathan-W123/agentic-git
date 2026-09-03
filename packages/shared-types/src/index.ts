@@ -1453,6 +1453,20 @@ export type AuditEventType =
   | "task_failed"
   | "task_cancelled"
   /**
+   * Nothing picked a task up, and the thread was told so.
+   *
+   * Written once per task by the stall sweep, and read by it to know it has
+   * already spoken. `waitingForAMachine` is decided once, at dispatch: a
+   * machine that was live at that instant and never leases the work leaves a
+   * thread saying "I've taken this task and I'm working on it" in front of a
+   * row nothing will ever claim. This is the only record that anybody noticed.
+   *
+   * Not a cancellation. The work stays queued and still runs if the machine
+   * comes back, which is why this is its own type rather than a reason on
+   * `task_cancelled`.
+   */
+  | "task_stalled"
+  /**
    * Work stopped by somebody who means to continue it, and the moment it
    * was continued. A pair, and deliberately not `task_cancelled` /
    * `task_submitted`: the channel narrates from these, and a pause narrated
