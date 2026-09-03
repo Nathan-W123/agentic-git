@@ -358,7 +358,6 @@ test("a message's words can be taken off the screen", async () => {
   const app = await publicFile("app.js");
 
   assert.match(chats, /export async function copyMessageText\(repositoryId, messageId\)/u);
-  assert.match(chats, /navigator\.clipboard\.writeText\(text\)/u);
   assert.match(app, /case "channel-message-copy":/u);
   assert.match(chats, /act: "channel-message-copy"/u);
 
@@ -366,12 +365,148 @@ test("a message's words can be taken off the screen", async () => {
   // into them and not only the roots.
   const copy = slice(chats, "export async function copyMessageText", "\n/**");
   assert.match(copy, /roots\.flatMap\(\(message\) => message\.replies \?\? \[\]\)/u);
-  // Attachment references are an internal address for a picture; they paste as
-  // noise. Removed rather than truncated at, because a sent message can carry
-  // one in the middle of a sentence.
-  assert.match(copy, /\.replace\(ATTACHMENT_PATTERN, ""\)/u);
   // A denied clipboard beats a button that looks like it worked.
   assert.match(copy, /Could not reach the clipboard/u);
+
+  // An attachment reference is an internal address for a picture, so what
+  // goes on the clipboard is the picture's own address. It used to be deleted
+  // outright, which threw the picture away with it. Swapped in place rather
+  // than truncated at, because a sent message can carry one in the middle of
+  // a sentence.
+  const plain = slice(chats, "function messageClipboardText(", "\n/**");
+  assert.match(
+    plain,
+    /\.replace\(ATTACHMENT_PATTERN, \(_reference, _alt, id\) =>\s+attachmentUrl\(repositoryId, id\),/u,
+  );
+  assert.doesNotMatch(chats, /\.replace\(ATTACHMENT_PATTERN, ""\)/u);
+
+  // The words run through the same renderer the transcript uses, so an
+  // address somebody posted arrives as a link and not as bare text.
+  const html = slice(chats, "function messageClipboardHtml(", "\n/**");
+  assert.match(html, /richText\(/u);
+
+  // Where two flavours cannot be written, the words and the addresses in them
+  // still go.
+  const write = slice(chats, "async function writeClipboardPayload", "\n/**");
+  assert.match(write, /navigator\.clipboard\.writeText\(text\)/u);
+});
+
+test("a copied message carries its pictures and its links", async () => {
+  const [chats, ui] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("ui.js"),
+  ]);
+  // Run rather than pattern-matched: what matters is the payload that reaches
+  // the clipboard, which is two flavours built from four helpers and the
+  // transcript's own renderer.
+  const source = [
+    slice(chats, "const ATTACHMENT_PATTERN =", "\n\n/**"),
+    slice(ui, "export function esc(value) {", "\n\nexport function cx"),
+    slice(chats, "function mentionMarkup(", "\nfunction messageBody("),
+    slice(chats, "function attachmentUrl(", "\n/**\n * The way back down"),
+  ]
+    .join("\n\n")
+    .replaceAll(/^export /gmu, "");
+
+  // Structural rather than `Blob`: the real blobs are built inside the module
+  // under test, and all this side of it ever does is read them back.
+  type Flavours = Record<string, { text: () => Promise<string> }>;
+  class FakeClipboardItem {
+    readonly data: Flavours;
+    constructor(data: Flavours) {
+      this.data = data;
+    }
+  }
+  const written: { plain?: string; html?: string; fallback?: string } = {};
+  const clipboard = {
+    write: async (items: Array<{ data: Flavours }>): Promise<void> => {
+      const data = items[0]?.data ?? {};
+      written.plain = await (data["text/plain"]?.text() ?? Promise.resolve(""));
+      written.html = await (data["text/html"]?.text() ?? Promise.resolve(""));
+    },
+    writeText: async (value: string): Promise<void> => {
+      written.fallback = value;
+    },
+  };
+  const fakeWindow: {
+    location: { href: string };
+    ClipboardItem: typeof FakeClipboardItem | undefined;
+  } = {
+    location: { href: "https://kumi.example.com/dashboard" },
+    ClipboardItem: FakeClipboardItem,
+  };
+  const toasts: string[] = [];
+  let roots: Array<{ id: string; content: string }> = [];
+
+  const copyMessageText = new Function(
+    "API_ROOT",
+    "state",
+    "window",
+    "navigator",
+    "channelMessagesFor",
+    "channelParticipants",
+    "toast",
+    `${source}\nreturn copyMessageText;`,
+  )(
+    "/api/v1",
+    { projectId: "proj-1" },
+    fakeWindow,
+    { clipboard },
+    () => roots,
+    () => [],
+    (message: string) => toasts.push(message),
+  ) as (repositoryId: string, messageId: string) => Promise<void>;
+
+  const attachment = "0123456789abcdef0123456789abcdef.png";
+  const address = `https://kumi.example.com/api/v1/projects/proj-1/repositories/repo-1/attachments/${attachment}`;
+
+  roots = [
+    {
+      id: "m1",
+      content: `Look at this https://example.com/spec\n\n![A sunset](attachment:${attachment})`,
+    },
+  ];
+  await copyMessageText("repo-1", "m1");
+
+  // The picture is an address on the plain flavour, not a hole where it was.
+  assert.equal(
+    written.plain,
+    `Look at this https://example.com/spec\n\n${address}`,
+  );
+  // And a picture on the rich one, under the address somebody posted, which
+  // the transcript's own renderer turned into a link on the way through.
+  assert.equal(
+    written.html,
+    `<p>Look at this <a class="message-link" href="https://example.com/spec" ` +
+      `target="_blank" rel="noopener noreferrer">https://example.com/spec</a>` +
+      `</p><a href="${address}"><img src="${address}" alt="A sunset"></a>`,
+  );
+  assert.equal(toasts.join(), "Message copied");
+
+  // A message that is only a picture used to be refused as having no text.
+  toasts.length = 0;
+  roots = [{ id: "m2", content: `![A sunset](attachment:${attachment})` }];
+  await copyMessageText("repo-1", "m2");
+  assert.equal(written.plain, address);
+  assert.equal(
+    written.html,
+    `<a href="${address}"><img src="${address}" alt="A sunset"></a>`,
+  );
+  assert.equal(toasts.join(), "Message copied");
+
+  // Without `ClipboardItem` the words and the addresses still go, as one
+  // plain string.
+  toasts.length = 0;
+  fakeWindow.ClipboardItem = undefined;
+  await copyMessageText("repo-1", "m2");
+  assert.equal(written.fallback, address);
+  assert.equal(toasts.join(), "Message copied");
+
+  // A message with nothing in it at all is still turned away.
+  toasts.length = 0;
+  roots = [{ id: "m3", content: "   " }];
+  await copyMessageText("repo-1", "m3");
+  assert.equal(toasts.join(), "That message has no text to copy");
 });
 
 test("the transcript announces itself to a screen reader", async () => {

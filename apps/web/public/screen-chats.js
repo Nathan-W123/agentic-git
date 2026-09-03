@@ -29,6 +29,7 @@ import {
   agentWorkingProgress,
   agentsThinkingIn,
 api,
+  API_ROOT,
   canEditChannelEntry,
   canDeleteChannelEntry,
   canManageOrganization,
@@ -3152,12 +3153,12 @@ export function messageOverflowMenuItems(
   const isReplyRow = entry.messageId !== undefined;
   const items = [
     {
-      // The words, not the row: what somebody wants off a message is the text
-      // they can paste somewhere else, without the attachment references the
-      // composer wrote into it or the mention markup.
+      // The message, not the row: the words somebody can paste somewhere
+      // else, with the pictures and the addresses they came with and without
+      // the internal references the composer wrote into it.
       act: "channel-message-copy",
       value: String(entry.id),
-      label: "Copy text",
+      label: "Copy message",
       iconName: "copy",
     },
   ];
@@ -4043,12 +4044,132 @@ export function reactionPicker(anchor, repositoryId, messageId) {
 }
 
 /**
- * A message's words on the clipboard.
+ * Where one attachment lives, as an address that still works after a paste.
  *
- * The text as it was written, minus the attachment reference lines the
- * composer appends — those are an internal address for a picture and paste as
- * noise into anything outside this app. Roots and thread replies both, since
- * the same row renders in both places.
+ * The transcript draws its pictures from a path, which is all a page on this
+ * origin needs. A clipboard is not on this origin — the words land in a mail
+ * client, another browser, somebody's notes — so an address that leaves here
+ * has to be absolute. `API_ROOT` is a path in a browser and a configured
+ * origin in the desktop shell, and resolving it against the current document
+ * covers both without the callers knowing which one they got.
+ */
+function attachmentUrl(repositoryId, id) {
+  const path =
+    `${API_ROOT}/projects/${encodeURIComponent(state.projectId)}` +
+    `/repositories/${encodeURIComponent(repositoryId ?? "")}` +
+    `/attachments/${encodeURIComponent(id)}`;
+  try {
+    return new URL(path, window.location.href).href;
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * Every picture a message carries, in the order it carries them.
+ *
+ * The same read `messageBody` does when it draws them, kept apart because the
+ * clipboard wants the references themselves: what to lift out of the words,
+ * and what to put on the board in their place.
+ */
+function messageAttachments(content) {
+  return [...String(content ?? "").matchAll(ATTACHMENT_PATTERN)].map(
+    (match) => ({
+      reference: match[0],
+      alt: match[1] || "Attached image",
+      id: match[2],
+    }),
+  );
+}
+
+/**
+ * The plain-text flavour of a copied message.
+ *
+ * The text as it was written, with every attachment reference swapped for the
+ * address of the picture it stands for. The reference itself is an internal
+ * address and pastes as noise — but deleting it, which is what this used to
+ * do, threw the picture out with it, and a message that was only a picture
+ * copied as nothing at all.
+ *
+ * Swapped in place rather than truncated at: `draftText` slices a *draft* at
+ * its first attachment because a draft keeps its references in a block at the
+ * end, but a sent message can carry one in the middle of a sentence.
+ */
+function messageClipboardText(content, repositoryId) {
+  return String(content ?? "")
+    .replace(ATTACHMENT_PATTERN, (_reference, _alt, id) =>
+      attachmentUrl(repositoryId, id),
+    )
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+}
+
+/**
+ * The rich flavour of the same message.
+ *
+ * Anywhere that takes HTML — a mail client, a document, another chat — gets
+ * the pictures as pictures and the addresses somebody posted as links, which
+ * is what copying a message with an image in it was meant to take. Built here
+ * rather than reusing `messageBody`, whose markup is for this page: its
+ * `<img>` carries a path, and in the desktop shell it carries `data-src` and
+ * no source at all, so pasted anywhere else it would arrive broken.
+ */
+function messageClipboardHtml(content, repositoryId, mentions) {
+  const attachments = messageAttachments(content);
+  let stripped = String(content ?? "");
+  for (const attachment of attachments) {
+    stripped = stripped.replace(attachment.reference, "");
+  }
+  const words = richText(
+    stripped.replace(/\n{3,}/gu, "\n\n").trim(),
+    mentions ?? channelParticipants(repositoryId),
+  );
+  return (
+    words +
+    attachments
+      .map((attachment) => {
+        const source = esc(attachmentUrl(repositoryId, attachment.id));
+        const alt = esc(attachment.alt);
+        return `<a href="${source}"><img src="${source}" alt="${alt}"></a>`;
+      })
+      .join("")
+  );
+}
+
+/**
+ * Both flavours onto the board, or the words alone if that is all it takes.
+ *
+ * `ClipboardItem` is how one copy carries two representations at once, and
+ * the place it is pasted picks the richest one it understands. Where it is
+ * missing, or where the browser refuses the HTML flavour, the plain text
+ * still goes: the words and the addresses matter more than the markup around
+ * them, and every picture is in both.
+ */
+async function writeClipboardPayload(text, html) {
+  if (
+    typeof window.ClipboardItem === "function" &&
+    typeof navigator.clipboard?.write === "function"
+  ) {
+    try {
+      await navigator.clipboard.write([
+        new window.ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // Falls through to the plain write, which is also what reports a
+      // clipboard that cannot be reached at all.
+    }
+  }
+  await navigator.clipboard.writeText(text);
+}
+
+/**
+ * A message onto the clipboard, pictures and links and all.
+ *
+ * Roots and thread replies both, since the same row renders in both places.
  */
 export async function copyMessageText(repositoryId, messageId) {
   const roots = channelMessagesFor(repositoryId);
@@ -4057,20 +4178,19 @@ export async function copyMessageText(repositoryId, messageId) {
     roots.flatMap((message) => message.replies ?? []).find(
       (reply) => reply.id === messageId,
     );
-  // Removed rather than truncated at: `draftText` slices a *draft* at its
-  // first attachment because a draft keeps its references in a block at the
-  // end, but a sent message can have a picture in the middle of a sentence,
-  // and slicing there would put half of it on the clipboard.
-  const text = String(entry?.content ?? "")
-    .replace(ATTACHMENT_PATTERN, "")
-    .replace(/\n{3,}/gu, "\n\n")
-    .trim();
-  if (text === "") {
+  const text = messageClipboardText(entry?.content, repositoryId);
+  const attachments = messageAttachments(entry?.content);
+  // A message with nothing in it but pictures has something to copy now —
+  // their addresses — so only a genuinely empty one is turned away.
+  if (text === "" && attachments.length === 0) {
     toast("That message has no text to copy", "error");
     return;
   }
   try {
-    await navigator.clipboard.writeText(text);
+    await writeClipboardPayload(
+      text,
+      messageClipboardHtml(entry?.content, repositoryId, entry?.mentions),
+    );
     toast("Message copied");
   } catch {
     // A denied clipboard permission or an insecure origin. Saying so beats a

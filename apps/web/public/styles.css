@@ -5267,7 +5267,7 @@ button.chip.lg:hover {
   /* The hold belongs to this app for its whole length. A long press over
      text otherwise raises the platform's selection magnifier and copy bubble
      on top of the bar the same press is opening, and the two fight for the
-     finger. The words are still copyable: "Copy text" is the first thing in
+     finger. The words are still copyable: "Copy message" is the first thing in
      the row's own menu. */
   .cmsg-row:not(.cmsg-system),
   .dm-msg {
