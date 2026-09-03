@@ -1705,11 +1705,25 @@ function workspaceActivityStrip() {
  * Read-only by design — canonical moves through the pipeline, not through a
  * field on a settings page — so it is a definition list rather than a stack
  * of rows with no controls in them.
+ *
+ * Named the way it is named everywhere else — through `repositoryLabel`, so a
+ * repository somebody has renamed reads here as what they renamed it to. This
+ * page printed the raw id instead, which is how a workspace called Kumi in
+ * its own header was still LATTICE in its settings. The id has not gone
+ * anywhere: it addresses every route and names the mirror on disk, so it
+ * keeps a row of its own for whoever came here to read exactly that.
  */
 function repositoryDefinitionList() {
   const repository = currentRepository();
   return definitionList([
-    { term: "Repository", value: repository?.id ?? "No repository open" },
+    {
+      term: "Repository",
+      value:
+        repository === undefined
+          ? "No repository open"
+          : repositoryLabel(repository.id),
+    },
+    { term: "Identifier", value: repository?.id ?? "—", mono: true },
     { term: "Canonical branch", value: repository?.branch ?? "—", mono: true },
     {
       term: "Remote",
@@ -2326,7 +2340,9 @@ function invitationsCard() {
               settingRow({
                 label: invite.email,
                 description: `${esc(invite.role)} on ${esc(
-                  invite.repositoryId ?? "every channel",
+                  invite.repositoryId === undefined
+                    ? "every channel"
+                    : repositoryLabel(invite.repositoryId),
                 )} · invited ${esc(relativeTime(invite.createdAt))}`,
                 control: `${badge(invite.status)}
                   <button type="button" class="btn btn-sm" data-act="invite-revoke"
@@ -2351,7 +2367,14 @@ function workspaceSection() {
     body: `<div data-settings-row="workspace-identity"
       id="settings-row-workspace-identity" tabindex="-1">${definitionList([
         { term: "Project", value: state.project?.name ?? "This project" },
-        { term: "Channel open", value: repository?.id ?? "None" },
+        {
+          term: "Channel open",
+          // The name, not the handle: this row answers "which of these am I
+          // changing", and the answer has to be the one word the rest of the
+          // interface calls this workspace.
+          value:
+            repository === undefined ? "None" : repositoryLabel(repository.id),
+        },
         {
           term: "People",
           value: exactCountLabel(
@@ -2838,7 +2861,14 @@ function settingsSectionMarkup(section) {
     case "billing":
       return billingSection();
     case "deployment":
-      return deploymentSection();
+      // Asked again here, and not only where the sidebar is built. This is
+      // the one category that is not everybody's, and the only one whose
+      // markup fetches as it renders — drawing it is what puts the waitlist,
+      // every address that ever asked for an account, on screen. A stored
+      // `settingsSection` read back before the principal arrives must not be
+      // able to reach it, so the render path carries the same gate the
+      // navigation does.
+      return iAmSystemAdmin() ? deploymentSection() : generalSection();
     case "project-controls":
       return projectControlsSection();
     default:

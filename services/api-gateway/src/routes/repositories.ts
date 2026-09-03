@@ -24,6 +24,7 @@ import {
 } from "../field-validation.js";
 import {
   matchPath,
+  publicRepository,
   publicUser,
 } from "../gateway-util.js";
 import {
@@ -77,10 +78,10 @@ export async function routeRepositories(
       // no others: this list is how the interface learns what exists, so
       // returning everything here would defeat the grant regardless of what
       // the per-repository routes enforce.
-      repositories:
-        repositories === undefined
-          ? all
-          : all.filter((entry) => repositories.has(entry.id)),
+      repositories: (repositories === undefined
+        ? all
+        : all.filter((entry) => repositories.has(entry.id))
+      ).map((entry) => publicRepository(entry)),
     });
     return true;
   }
@@ -118,7 +119,7 @@ export async function routeRepositories(
         actorId: principal.user.id,
       },
     });
-    gw.sendJson(response, 201, { repository });
+    gw.sendJson(response, 201, { repository: publicRepository(repository) });
     return true;
   }
 
@@ -174,7 +175,7 @@ export async function routeRepositories(
         actorId: principal.user.id,
       },
     });
-    gw.sendJson(response, 201, { repository });
+    gw.sendJson(response, 201, { repository: publicRepository(repository) });
     return true;
   }
 
@@ -419,7 +420,7 @@ export async function routeRepositories(
       },
     });
     const repository = await gw.options.store.getRepository(repositoryId);
-    gw.sendJson(response, 200, { repository });
+    gw.sendJson(response, 200, { repository: publicRepository(repository) });
     return true;
   }
 
@@ -499,7 +500,7 @@ export async function routeRepositories(
       },
     });
     const repository = await gw.options.store.getRepository(repositoryId);
-    gw.sendJson(response, 200, { repository });
+    gw.sendJson(response, 200, { repository: publicRepository(repository) });
     return true;
   }
 

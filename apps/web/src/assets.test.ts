@@ -4104,6 +4104,22 @@ test("the product is named Kumi throughout the browser surface", async () => {
       `${file} still has the old spelling`,
     );
   }
+
+  // A rename reaches the settings pages too. These rows printed the
+  // repository id, which is the handle the routes and the mirror directory
+  // are keyed by — so the workspace renamed to Kumi introduced itself as
+  // LATTICE on the two pages whose whole job is to say which workspace this
+  // is. They resolve the name the way every other surface does now.
+  const app = await publicFile("app.js");
+  assert.doesNotMatch(
+    app,
+    /term: "(?:Repository|Channel open)", value: repository\?\.id/u,
+  );
+  assert.equal(
+    (app.match(/repositoryLabel\(repository\.id\)/gu) ?? []).length,
+    2,
+    "the settings identity rows should name the workspace, not key it",
+  );
 });
 
 test("the standalone logo follows the theme without changing the wordmark or appearing in the channel rail", async () => {

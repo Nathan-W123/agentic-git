@@ -443,16 +443,37 @@ test("the renamed categories keep their old ids working", async () => {
 
 test("the waitlist is where whoever runs the deployment finds it", async () => {
   const app = await publicFile("app.js");
+  const settings = await publicFile("screen-settings.js");
 
   // Under Deployment, beside the other things only a system administrator
   // sees, and above the health numbers: the top of that screen is a job —
   // a queue somebody works down — and the rest of it is a readout.
-  const dialog = slice(app, "const SETTINGS_SECTIONS = [", "\n/**\n * The user's own GitHub");
-  assert.match(
-    dialog,
-    /case "deployment":\s*\n\s*return `\$\{waitlistCard\(\)\}\$\{deploymentCard\(\)\}`/u,
+  //
+  // The category list lives in the settings module now; the markup that
+  // answers it stayed with the router, where the data layer is.
+  const sections = slice(
+    settings,
+    "export const SETTINGS_SECTIONS = [",
+    "\n/**\n * Old ids that must keep working.",
   );
-  assert.match(dialog, /id: "deployment"[\s\S]{0,200}adminOnly: true/u);
+  assert.match(sections, /id: "deployment"[\s\S]{0,240}adminOnly: true/u);
+
+  const markup = slice(
+    app,
+    "function deploymentSection() {",
+    "\n/**\n * The categories this account may actually open.",
+  );
+  assert.match(
+    markup,
+    /return `\$\{waitlistCard\(\)\}\$\{deploymentCard\(\)\}`/u,
+  );
+  // And the one place that draws it asks whether this account runs the
+  // deployment before it does. `adminOnly` keeps the category out of the
+  // sidebar; this keeps its contents off the screen.
+  assert.match(
+    markup,
+    /case "deployment":[\s\S]{0,700}iAmSystemAdmin\(\) \? deploymentSection\(\) : generalSection\(\)/u,
+  );
 
   // Letting somebody in and taking them off the list are both one press, and
   // both go through the data layer rather than patching the row on screen.

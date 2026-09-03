@@ -249,6 +249,30 @@ export function matchPath(pathname: string, pattern: RegExp): string[] | undefin
 }
 
 /**
+ * A repository as the rest of the world reads it.
+ *
+ * `id` is the handle: it keys every row, names the mirror directory, and is
+ * what a caller addresses a route with, so it cannot become whatever somebody
+ * renamed the repository to. `displayName` is that rename, and absent means
+ * nobody has made one. Neither is a field a client can just print - every
+ * consumer had to know to prefer one and fall back to the other, and any that
+ * did not showed the handle to somebody who had renamed it precisely so they
+ * would stop seeing it.
+ *
+ * So the resolution happens once, here, and ships as `name`. Both fields stay
+ * exactly as they were for anything already reading them.
+ */
+export function publicRepository<T extends { id: string; displayName?: string }>(
+  repository: T | undefined,
+): (T & { name: string }) | undefined {
+  if (repository === undefined) {
+    return undefined;
+  }
+  const named = (repository.displayName ?? "").trim();
+  return { ...repository, name: named === "" ? repository.id : named };
+}
+
+/**
  * Drops rows for repositories the caller cannot reach.
  *
  * Per-repository access is only real if the lists respect it. Tasks, runs and
