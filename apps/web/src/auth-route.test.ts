@@ -74,6 +74,28 @@ test("the footer links are addresses rather than dead hashes", async () => {
   );
 });
 
+test("sign-in is a focused card without changing its form contract", async () => {
+  const app = await publicFile("app.js");
+  const auth = app.slice(app.indexOf("function renderAuth()"));
+  const login = auth.slice(
+    auth.indexOf("if (!bootstrap && !register)"),
+    auth.indexOf('return `<main class="auth-shell">'),
+  );
+
+  assert.match(login, /class="auth-shell auth-login-shell"/u);
+  assert.match(login, /class="auth-card auth-login-card" data-act="login"/u);
+  assert.match(login, /Welcome back/u);
+  assert.match(login, /name="email" type="email"/u);
+  assert.match(login, /autocomplete="username"/u);
+  assert.match(login, /name="password" type="password" minlength="12"/u);
+  assert.match(login, /autocomplete="current-password"/u);
+  assert.match(
+    login,
+    /href="#forgot" data-act="auth-mode"\s*data-value="forgot"/u,
+    "password recovery should remain available from the sign-in card",
+  );
+});
+
 test("arriving on a sign-in link opens sign-in, and clicking one moves the URL", async () => {
   const app = await publicFile("app.js");
   // Boot honours the link somebody arrived on — but only once first-time

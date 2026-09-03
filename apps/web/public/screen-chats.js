@@ -29,6 +29,7 @@ import {
   agentWorkingProgress,
   agentsThinkingIn,
 api,
+  API_ROOT,
   canEditChannelEntry,
   canDeleteChannelEntry,
   canManageOrganization,
@@ -3152,12 +3153,12 @@ export function messageOverflowMenuItems(
   const isReplyRow = entry.messageId !== undefined;
   const items = [
     {
-      // The words, not the row: what somebody wants off a message is the text
-      // they can paste somewhere else, without the attachment references the
-      // composer wrote into it or the mention markup.
+      // The message, not the row: the words somebody can paste somewhere
+      // else, with the pictures and the addresses they came with and without
+      // the internal references the composer wrote into it.
       act: "channel-message-copy",
       value: String(entry.id),
-      label: "Copy text",
+      label: "Copy message",
       iconName: "copy",
     },
   ];
@@ -4043,12 +4044,132 @@ export function reactionPicker(anchor, repositoryId, messageId) {
 }
 
 /**
- * A message's words on the clipboard.
+ * Where one attachment lives, as an address that still works after a paste.
  *
- * The text as it was written, minus the attachment reference lines the
- * composer appends — those are an internal address for a picture and paste as
- * noise into anything outside this app. Roots and thread replies both, since
- * the same row renders in both places.
+ * The transcript draws its pictures from a path, which is all a page on this
+ * origin needs. A clipboard is not on this origin — the words land in a mail
+ * client, another browser, somebody's notes — so an address that leaves here
+ * has to be absolute. `API_ROOT` is a path in a browser and a configured
+ * origin in the desktop shell, and resolving it against the current document
+ * covers both without the callers knowing which one they got.
+ */
+function attachmentUrl(repositoryId, id) {
+  const path =
+    `${API_ROOT}/projects/${encodeURIComponent(state.projectId)}` +
+    `/repositories/${encodeURIComponent(repositoryId ?? "")}` +
+    `/attachments/${encodeURIComponent(id)}`;
+  try {
+    return new URL(path, window.location.href).href;
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * Every picture a message carries, in the order it carries them.
+ *
+ * The same read `messageBody` does when it draws them, kept apart because the
+ * clipboard wants the references themselves: what to lift out of the words,
+ * and what to put on the board in their place.
+ */
+function messageAttachments(content) {
+  return [...String(content ?? "").matchAll(ATTACHMENT_PATTERN)].map(
+    (match) => ({
+      reference: match[0],
+      alt: match[1] || "Attached image",
+      id: match[2],
+    }),
+  );
+}
+
+/**
+ * The plain-text flavour of a copied message.
+ *
+ * The text as it was written, with every attachment reference swapped for the
+ * address of the picture it stands for. The reference itself is an internal
+ * address and pastes as noise — but deleting it, which is what this used to
+ * do, threw the picture out with it, and a message that was only a picture
+ * copied as nothing at all.
+ *
+ * Swapped in place rather than truncated at: `draftText` slices a *draft* at
+ * its first attachment because a draft keeps its references in a block at the
+ * end, but a sent message can carry one in the middle of a sentence.
+ */
+function messageClipboardText(content, repositoryId) {
+  return String(content ?? "")
+    .replace(ATTACHMENT_PATTERN, (_reference, _alt, id) =>
+      attachmentUrl(repositoryId, id),
+    )
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+}
+
+/**
+ * The rich flavour of the same message.
+ *
+ * Anywhere that takes HTML — a mail client, a document, another chat — gets
+ * the pictures as pictures and the addresses somebody posted as links, which
+ * is what copying a message with an image in it was meant to take. Built here
+ * rather than reusing `messageBody`, whose markup is for this page: its
+ * `<img>` carries a path, and in the desktop shell it carries `data-src` and
+ * no source at all, so pasted anywhere else it would arrive broken.
+ */
+function messageClipboardHtml(content, repositoryId, mentions) {
+  const attachments = messageAttachments(content);
+  let stripped = String(content ?? "");
+  for (const attachment of attachments) {
+    stripped = stripped.replace(attachment.reference, "");
+  }
+  const words = richText(
+    stripped.replace(/\n{3,}/gu, "\n\n").trim(),
+    mentions ?? channelParticipants(repositoryId),
+  );
+  return (
+    words +
+    attachments
+      .map((attachment) => {
+        const source = esc(attachmentUrl(repositoryId, attachment.id));
+        const alt = esc(attachment.alt);
+        return `<a href="${source}"><img src="${source}" alt="${alt}"></a>`;
+      })
+      .join("")
+  );
+}
+
+/**
+ * Both flavours onto the board, or the words alone if that is all it takes.
+ *
+ * `ClipboardItem` is how one copy carries two representations at once, and
+ * the place it is pasted picks the richest one it understands. Where it is
+ * missing, or where the browser refuses the HTML flavour, the plain text
+ * still goes: the words and the addresses matter more than the markup around
+ * them, and every picture is in both.
+ */
+async function writeClipboardPayload(text, html) {
+  if (
+    typeof window.ClipboardItem === "function" &&
+    typeof navigator.clipboard?.write === "function"
+  ) {
+    try {
+      await navigator.clipboard.write([
+        new window.ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // Falls through to the plain write, which is also what reports a
+      // clipboard that cannot be reached at all.
+    }
+  }
+  await navigator.clipboard.writeText(text);
+}
+
+/**
+ * A message onto the clipboard, pictures and links and all.
+ *
+ * Roots and thread replies both, since the same row renders in both places.
  */
 export async function copyMessageText(repositoryId, messageId) {
   const roots = channelMessagesFor(repositoryId);
@@ -4057,20 +4178,19 @@ export async function copyMessageText(repositoryId, messageId) {
     roots.flatMap((message) => message.replies ?? []).find(
       (reply) => reply.id === messageId,
     );
-  // Removed rather than truncated at: `draftText` slices a *draft* at its
-  // first attachment because a draft keeps its references in a block at the
-  // end, but a sent message can have a picture in the middle of a sentence,
-  // and slicing there would put half of it on the clipboard.
-  const text = String(entry?.content ?? "")
-    .replace(ATTACHMENT_PATTERN, "")
-    .replace(/\n{3,}/gu, "\n\n")
-    .trim();
-  if (text === "") {
+  const text = messageClipboardText(entry?.content, repositoryId);
+  const attachments = messageAttachments(entry?.content);
+  // A message with nothing in it but pictures has something to copy now —
+  // their addresses — so only a genuinely empty one is turned away.
+  if (text === "" && attachments.length === 0) {
     toast("That message has no text to copy", "error");
     return;
   }
   try {
-    await navigator.clipboard.writeText(text);
+    await writeClipboardPayload(
+      text,
+      messageClipboardHtml(entry?.content, repositoryId, entry?.mentions),
+    );
     toast("Message copied");
   } catch {
     // A denied clipboard permission or an insecure origin. Saying so beats a
@@ -4882,12 +5002,18 @@ function conversationInfoPanel(repositoryId) {
   </aside>`;
 }
 
-/** Pinned messages are context beside the channel, never another transcript. */
+/**
+ * Pinned messages are context beside the channel, never another transcript.
+ *
+ * The body is the bare list of pins. It used to be the whole transcript shelf
+ * — frame, fold and all — rendered with the shelf forced open, which dragged
+ * the shelf's "N pinned" header in with it. In a panel that header collapsed
+ * nothing: its chevron closed the panel, directly under the header's own
+ * close cross and directly above the row controls, so the surface's most
+ * icon-like thing was the one control nobody meant to press.
+ */
 function pinnedMessagesPanel(repositoryId) {
-  const wasOpen = state.pinsOpen;
-  state.pinsOpen = true;
-  const pins = pinnedBanner(repositoryId);
-  state.pinsOpen = wasOpen;
+  const pins = pinnedList(repositoryId);
   return `<aside class="thread-panel pins-panel" aria-label="Pinned messages">
     ${panelGrip()}
     <header class="thread-head">
@@ -4897,9 +5023,9 @@ function pinnedMessagesPanel(repositoryId) {
       ${panelClose("secondary-context-close", "Close pinned messages (Esc)")}
     </header>
     <div class="thread-body secondary-info-body">${
-      pins.includes("chan-pin-row")
-        ? pins
-        : '<p class="util-empty">Nothing is pinned in this conversation.</p>'
+      pins === ""
+        ? '<p class="util-empty">Nothing is pinned in this conversation.</p>'
+        : pins
     }</div>
   </aside>`;
 }
@@ -9142,12 +9268,14 @@ export function dismissOfflinePrompt(rerender) {
 /**
  * What this channel has decided not to lose, in a strip above the messages.
  *
- * The banner reads from the server-fed pinned list rather than the loaded
+ * The shelf reads from the server-fed pinned list rather than the loaded
  * transcript, because a pin exists precisely so a message survives the room
- * moving on — a banner that only knew the current page would forget exactly
+ * moving on — a strip that only knew the current page would forget exactly
  * the pins it was for. Closed, the shelf is not drawn at all — no collapsed
- * row, no rule, no reserved height — so the header's pin shortcut, beside the
- * people and agent counts, is the only thing that brings it back.
+ * row, no rule, no reserved height — so the workspace's pin shortcut, beside
+ * Threads and Files, is the only thing that brings it back. It carries no
+ * fold control of its own: the shortcut that opened it is what closes it,
+ * and a second one inside meant two different chevrons for one state.
  */
 function pinnedBanner(repositoryId) {
   const pins = state.channelPins[repositoryId] ?? [];
@@ -9158,19 +9286,29 @@ function pinnedBanner(repositoryId) {
   }
   return `<div class="chan-pins open" aria-hidden="false">
     <div class="chan-pins-surface">
-      <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
-        aria-expanded="true">
-        <span>${pins.length} pinned</span>
-        <span class="spacer"></span>
-        ${icon("chevronDown")}
-      </button>
-      <div class="chan-pins-list-frame" aria-hidden="false">
-        <div class="chan-pins-list">${pins
-        .map((entry) => pinnedRow(repositoryId, entry))
-        .join("")}</div>
-      </div>
+      <div class="chan-pins-list-frame" aria-hidden="false">${pinnedList(
+        repositoryId,
+      )}</div>
     </div>
   </div>`;
+}
+
+/**
+ * The pins themselves, as rows — the one list both surfaces draw.
+ *
+ * The shelf above the transcript and the pins panel beside it are the same
+ * rows in different frames, so a row gained in one is a row gained in the
+ * other. Empty is the empty string rather than an empty list, so each caller
+ * says in its own words what having nothing pinned looks like.
+ */
+function pinnedList(repositoryId) {
+  const pins = state.channelPins[repositoryId] ?? [];
+  if (pins.length === 0) {
+    return "";
+  }
+  return `<div class="chan-pins-list">${pins
+    .map((entry) => pinnedRow(repositoryId, entry))
+    .join("")}</div>`;
 }
 
 /**
