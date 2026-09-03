@@ -4345,6 +4345,16 @@ export interface ApiGatewayOptions {
   staticAssets?: ReadonlyMap<string, StaticAsset>;
   requestBodyLimit?: number;
   rateLimitPerMinute?: number;
+  /**
+   * The MCP endpoint's own budget, separate from the dashboard's.
+   *
+   * Not a tighter cap — the same generosity, out of a different pool. An
+   * editor's model polling `task_status` and a browser loading the dashboard
+   * arrive from one office's IP looking identical to a per-IP limiter, so on
+   * a shared bucket the polling starves the person watching the thread. They
+   * are different clients doing different work and they get different budgets.
+   */
+  mcpRateLimitPerMinute?: number;
   authRateLimitPerMinute?: number;
   /** Event poll cadence; exposed for deterministic embedded runtimes/tests. */
   webSocketPollIntervalMs?: number;
@@ -5204,6 +5214,21 @@ function safeEqual(left: string, right: string): boolean {
  * bucket. Capped because a chain longer than this is not a deployment
  * topology, it is a forged header.
  */
+/**
+ * A positive whole number from the environment, or nothing.
+ *
+ * Nothing rather than a fallback, so the caller's own default stays the one
+ * documented default: a typo'd setting should leave the shipped value in
+ * place, not silently install a different one.
+ */
+function positiveInteger(configured: string | undefined): number | undefined {
+  if (configured === undefined || configured.trim() === "") {
+    return undefined;
+  }
+  const parsed = Number(configured);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function trustedProxyHops(configured: string | undefined): number {
   const parsed = Number(configured ?? "");
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
@@ -5345,6 +5370,7 @@ export class ApiGateway {
   public readonly workerEvents: WorkerEventHub;
   private readonly auth: AuthService;
   private readonly limiter: RateLimiter;
+  private readonly mcpLimiter: RateLimiter;
   private readonly authLimiter: RateLimiter;
   private readonly activeRuns = new Set<string>();
   /**
@@ -5743,6 +5769,12 @@ export class ApiGateway {
     });
     this.authLimiter = new RateLimiter({
       capacity: options.authRateLimitPerMinute ?? 10,
+    });
+    this.mcpLimiter = new RateLimiter({
+      capacity:
+        options.mcpRateLimitPerMinute ??
+        positiveInteger(process.env["COORD_MCP_RATE_LIMIT_PER_MINUTE"]) ??
+        240,
     });
     this.server = createServer((request, response) => {
       void this.handle(request, response);
@@ -6215,9 +6247,18 @@ export class ApiGateway {
         // mail to an address the caller chose, so an unthrottled one is a way
         // to make this deployment relay a stranger's messages.
         url.pathname.startsWith(`${API_PREFIX}/auth/password-reset`);
-      const rate = (authRoute ? this.authLimiter : this.limiter).consume(
-        `${ip}:${authRoute ? "auth" : "api"}`,
-      );
+      // Its own bucket, and its own key, so neither can spend the other's.
+      // See `mcpRateLimitPerMinute`: an editor polling and a browser reading
+      // are one IP to a per-IP limiter and must not share a budget.
+      const mcpRoute = url.pathname === `${API_PREFIX}/mcp`;
+      const bucket = authRoute ? "auth" : mcpRoute ? "mcp" : "api";
+      const rate = (
+        authRoute
+          ? this.authLimiter
+          : mcpRoute
+            ? this.mcpLimiter
+            : this.limiter
+      ).consume(`${ip}:${bucket}`);
       response.setHeader("RateLimit-Limit", String(rate.limit));
       response.setHeader("RateLimit-Remaining", String(rate.remaining));
       response.setHeader(

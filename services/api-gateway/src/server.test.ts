@@ -459,6 +459,10 @@ async function startRuntime(
       };
       explanation: string;
     };
+    /** The dashboard's per-minute budget, for the bucket-isolation test. */
+    rateLimitPerMinute?: number;
+    /** The MCP endpoint's own per-minute budget, which must be separate. */
+    mcpRateLimitPerMinute?: number;
     /** Consecutive direct push results, for a conflict followed by its retry. */
     pushOutcomes?: Array<{
       outcome: "done" | "refused";
@@ -1172,6 +1176,12 @@ async function startRuntime(
     store,
     operations,
     bootstrapToken: BOOTSTRAP_TOKEN,
+    ...(options.rateLimitPerMinute === undefined
+      ? {}
+      : { rateLimitPerMinute: options.rateLimitPerMinute }),
+    ...(options.mcpRateLimitPerMinute === undefined
+      ? {}
+      : { mcpRateLimitPerMinute: options.mcpRateLimitPerMinute }),
     chatterFilter: {
       readsAsChatter: async (text: string) => localChatter(text),
       // The mirror the local-agents path reads. Anything the stub does not
@@ -1969,6 +1979,37 @@ async function bearer(
     data: text.length === 0 ? undefined : JSON.parse(text),
   };
 }
+
+test("an editor polling over MCP cannot spend the dashboard's rate limit", async (t) => {
+  // Both arrive from one IP and look identical to a per-IP limiter: the
+  // person's browser and the model in their editor sit behind the same office
+  // NAT. On a shared bucket a model polling `task_status` in a loop throttles
+  // the human watching the thread, which is the wrong client to punish and
+  // reads as "Kumi is down".
+  const runtime = await startRuntime(t, {
+    rateLimitPerMinute: 2,
+    mcpRateLimitPerMinute: 2,
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  // Spend the MCP budget to nothing.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await client.request("/api/v1/mcp", {
+      method: "POST",
+      body: { jsonrpc: "2.0", id: attempt, method: "ping" },
+    });
+  }
+  const exhausted = await client.request("/api/v1/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 99, method: "ping" },
+  });
+  assert.equal(exhausted.status, 429);
+
+  // The dashboard's budget is untouched by any of it.
+  const dashboard = await client.request("/api/v1/health");
+  assert.notEqual(dashboard.status, 429);
+});
 
 test("somebody invited to one repository can run a worker, and only on that repository", async (t) => {
   // The whole local-execution premise depends on this: agents run on the
