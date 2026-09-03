@@ -1188,17 +1188,26 @@ test("connecting an agent asks which of the three connections is meant", async (
     assert.ok(end > start, `${to} was not found after ${from}`);
     return agents.slice(start, end);
   };
-  const flow = between("connectProviderSomehow", "chooseFrom");
+  const flow = between("connectProviderSomehow", "choiceRow");
   // Each option names its own mechanism, because "connect" alone is what was
   // ambiguous in the first place — somebody choosing the CLI and being shown a
-  // terminal sign-in should not be surprised by it.
-  assert.match(flow, /CLI — run agents on this computer/u);
-  assert.match(flow, /MCP — connect tools/u);
-  assert.match(flow, /Nothing to do with MCP/u);
+  // terminal sign-in should not be surprised by it. The mechanism now rides in
+  // a badge beside a plain-English heading rather than inside the heading, so
+  // the heading can say what the option does.
+  assert.match(flow, /title: "Run agents on this computer"/u);
+  assert.match(flow, /badge: "CLI"/u);
+  assert.match(flow, /title: "Connect tools"/u);
+  assert.match(flow, /badge: "MCP"/u);
+  assert.match(flow, /does not replace the CLI/u);
   // The two MCP directions are a second question, not two more items in the
   // first list: they are the same thing pointing opposite ways.
-  assert.match(flow, /Ask Kumi for work from/u);
-  assert.match(flow, /Give Kumi's agents tools/u);
+  assert.match(flow, /title: `Send work to Kumi from \$\{esc\(label\)\}`/u);
+  assert.match(flow, /title: "Give Kumi's agents tools"/u);
+  // And the direction is shown as a direction. "MCP goes both ways" is a
+  // sentence somebody has to hold in their head; an arrow is the same fact at
+  // a glance, and it is what stops two opposite options reading alike.
+  assert.match(flow, /badge: `\$\{esc\(label\)\} → Kumi`/u);
+  assert.match(flow, /badge: `Kumi → tools`/u);
   assert.match(flow, /connectAgent\(providerId, rerender\)/u);
   assert.match(flow, /connectEditorToKumi\(vendor, rerender\)/u);
   // The tools direction has to actually go somewhere. `#/settings/mcp-servers`
@@ -1210,8 +1219,12 @@ test("connecting an agent asks which of the three connections is meant", async (
   assert.doesNotMatch(flow, /location\.hash/u);
 
   // Offered only where it can work: the editor half writes a file on the
-  // machine the editor runs on, which a browser cannot do.
+  // machine the editor runs on, which a browser cannot do. And when it cannot,
+  // the option says why in a badge of its own — a row at reduced opacity says
+  // only that something is wrong with it, never what.
   assert.match(flow, /bridge\?\.connectEditor !== undefined/u);
+  assert.match(flow, /blocked: editorable/u);
+  assert.match(flow, /"Needs the desktop app"/u);
 
   // Entered from both ways in, which is the point. Adding an agent asks, and
   // so does the Connect button on the agents screen — the flow was reachable
@@ -1224,14 +1237,37 @@ test("connecting an agent asks which of the three connections is meant", async (
     /case "agent-connect":[\s\S]{0,400}connectAgent\(value, render\)/u,
   );
 
-  // A radio group hands `showModal` its last option rather than the checked
-  // one, so every chooser would answer the same way regardless of the press.
-  // The listener has to be attached while the dialog is open, which means the
-  // modal is started and awaited separately.
+  // These are decision cards, not agent tiles. They used to borrow
+  // `.agent-provider-picker`, which is a two-column grid built for the four
+  // short provider tiles: two columns of a 448px dialog left each option's
+  // prose about ten characters wide, so "CLI — run agents on this computer"
+  // wrapped to six lines and the sentence under it became a vertical ribbon.
+  // Neither choice could be read, which is a poor way to ask a question.
+  const row = between("choiceRow", "chooseFrom");
+  assert.match(flow, /class="choice-list"/u);
+  // Scoped to the markup: the prose above `choiceRow` names the old class to
+  // explain what went wrong, and a bare match would catch the explanation.
+  assert.doesNotMatch(flow, /class="agent-provider-picker"/u);
+  assert.match(row, /class="choice\$\{disabled \? " is-disabled" : ""\}"/u);
+  assert.match(row, /class="choice-note"/u);
+  const styles = await publicFile("styles.css");
+  assert.match(styles, /\.modal-card:has\(\.choice-list\)/u);
+  // Placed explicitly. Two of the four children span both rows, and letting
+  // the grid auto-place them put the heading in the 18px tick column.
+  assert.match(styles, /\.choice-head \{\n  grid-column: 2;\n  grid-row: 1;/u);
+  assert.match(styles, /\.choice-tick \{\n  grid-column: 3;\n  grid-row: 1 \/ 3;/u);
+
+  // `showModal` resolves a radio group to its checked value itself, so the
+  // chooser is a thin wrapper. It used to mirror the answer into a hidden
+  // field on every change, which was written when the modal took the last
+  // radio in document order — a bug fixed at the source, whose workaround
+  // outlived it in three places. Pinned from both ends: the wrapper stays
+  // simple only for as long as the modal keeps doing this.
   const chooser = between("chooseFrom", "pause");
-  assert.match(chooser, /const pending = showModal\(spec\)/u);
-  assert.match(chooser, /addEventListener\("change", sync\)/u);
-  assert.match(chooser, /removeEventListener\("change", sync\)/u);
+  assert.match(chooser, /const values = await showModal\(spec\)/u);
+  assert.doesNotMatch(chooser, /addEventListener/u);
+  const ui = await publicFile("ui.js");
+  assert.match(ui, /if \(field\.type === "radio"\) \{[\s\S]{0,200}if \(field\.checked\)/u);
 });
 
 test("a viewer can still connect an editor, read-only, and is told so", async () => {
