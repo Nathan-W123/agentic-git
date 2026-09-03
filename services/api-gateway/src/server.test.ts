@@ -21,6 +21,7 @@ import {
 
 import { AGENT_ACCOUNT_PREFIX, mcpServersForLease } from "@coord/shared-types";
 import { createSecretSealer, type SecretSealer } from "@coord/workspace-manager";
+import type { ProxyDial } from "./mcp-proxy.js";
 
 import type { StripeClient } from "./stripe.js";
 import { effectiveRole, subscriptionAllowsWork } from "./billing.js";
@@ -432,6 +433,11 @@ async function startRuntime(
      * with no credential store looks like to the routes that need one.
      */
     secretSealer?: SecretSealer;
+    /**
+     * Stands in for the socket when an approved MCP server is dialled, so a
+     * test can assert what travelled rather than what a hostname resolved to.
+     */
+    mcpDial?: ProxyDial;
     /**
      * Drops the optional `listAgents` operation, as a deployment that does
      * not implement it does — the fallback path for anything that joins
@@ -1255,6 +1261,7 @@ async function startRuntime(
   const gateway = new ApiGateway({
     store,
     operations,
+    ...(options.mcpDial === undefined ? {} : { mcpDial: options.mcpDial }),
     bootstrapToken: BOOTSTRAP_TOKEN,
     ...(options.rateLimitPerMinute === undefined
       ? {}
@@ -22266,6 +22273,261 @@ function mcpHttpServerBody(
     ...overrides,
   };
 }
+
+/**
+ * The project's approved servers, re-offered to an editor as Kumi's own tools.
+ *
+ * The module's own behaviour — namespacing, the cache, what a broken reply
+ * costs — is in `mcp-proxy.test.ts`. What only this file can show is the
+ * wiring: which servers qualify, whose secrets travel with the call, and
+ * whether the key ever reaches the editor.
+ */
+async function proxyRuntime(t: TestContext) {
+  withMcpServersEnabled(t);
+  const dialled: Array<{ url: string; headers: Record<string, string>; body: unknown }> =
+    [];
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+    mcpDial: async (input) => {
+      dialled.push({
+        url: input.url,
+        headers: { ...input.headers },
+        body: input.body,
+      });
+      const method = (input.body as { method?: string }).method;
+      return method === "tools/list"
+        ? {
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              tools: [
+                {
+                  name: "list_issues",
+                  description: "Lists open issues",
+                  inputSchema: { type: "object", properties: {} },
+                },
+              ],
+            },
+          }
+        : {
+            jsonrpc: "2.0",
+            id: 1,
+            result: { content: [{ type: "text", text: "two issues" }] },
+          };
+    },
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "payments");
+  const created = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const token = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "editor", scopes: ["view", "submit_task"] },
+  });
+  return {
+    runtime,
+    owner,
+    repositoryId,
+    dialled,
+    serverId: created.data.server.id as string,
+    token: token.data.token as string,
+  };
+}
+
+async function listedTools(origin: string, token: string, id = 90) {
+  const listed = await rpc(origin, token, {
+    jsonrpc: "2.0",
+    id,
+    method: "tools/list",
+  });
+  return (listed.data.result.tools as Array<{ name: string }>).map(
+    (tool) => tool.name,
+  );
+}
+
+test("approving a server for agents does not put it in an editor's hands", async (t) => {
+  const { runtime, owner, token, serverId, dialled } = await proxyRuntime(t);
+
+  // Approved to run beside agents on teammates' machines. That is one
+  // decision; having the control plane dial it for whoever is typing in
+  // Cursor is another, and this is the state between them.
+  const approved = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(approved.status, 200);
+  assert.equal(approved.data.server.editorEnabled, false);
+  assert.equal(
+    (await listedTools(runtime.origin, token)).includes("linear__list_issues"),
+    false,
+    "an approval alone put the server in the tool list",
+  );
+  assert.deepEqual(dialled, [], "dialled a server nobody opted in");
+
+  const opened = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(opened.status, 200, JSON.stringify(opened.data));
+  assert.equal(opened.data.server.editorEnabled, true);
+  assert.ok(
+    (await listedTools(runtime.origin, token, 91)).includes("linear__list_issues"),
+  );
+});
+
+test("a proxied call carries the project's secret and the editor never sees it", async (t) => {
+  const { runtime, owner, token, serverId, dialled } = await proxyRuntime(t);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+
+  const called = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 92,
+    method: "tools/call",
+    params: {
+      name: "linear__list_issues",
+      arguments: { state: "open" },
+    },
+  });
+  assert.equal(called.status, 200);
+  assert.equal(called.data.result.isError, undefined, JSON.stringify(called.data));
+  assert.equal(called.data.result.content[0].text, "two issues");
+
+  const call = dialled.at(-1);
+  // The public header and the opened secret both travel, and the far end is
+  // asked for the name it knows rather than the namespaced one.
+  assert.equal(call?.headers["X-Team"], "platform");
+  assert.equal(call?.headers["Authorization"], MCP_TEST_SECRET);
+  assert.deepEqual((call?.body as { params?: unknown }).params, {
+    name: "list_issues",
+    arguments: { state: "open" },
+  });
+
+  // And none of it came back down the wire. This is the whole point of
+  // proxying rather than handing an editor the server's address and key.
+  const answered = JSON.stringify(called.data);
+  assert.equal(answered.includes(MCP_TEST_SECRET), false, "secret leaked");
+  assert.equal(
+    (await listedTools(runtime.origin, token, 93)).length > 0 &&
+      JSON.stringify(await listedTools(runtime.origin, token, 94)).includes(
+        MCP_TEST_SECRET,
+      ),
+    false,
+  );
+
+  // The call is on the record: "was Linear reachable during that afternoon"
+  // has to be answerable afterwards.
+  const audited = await runtime.store.listAuditEvents({
+    types: ["project_changed"],
+  });
+  assert.ok(
+    audited.some((entry) => entry.event.data["action"] === "mcp_tool_called"),
+    "a proxied call left no trace",
+  );
+});
+
+test("withdrawing the approval takes the tools away at once", async (t) => {
+  const { runtime, owner, token, serverId } = await proxyRuntime(t);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.ok(
+    (await listedTools(runtime.origin, token, 95)).includes("linear__list_issues"),
+  );
+
+  const withdrawn = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: false } },
+  );
+  assert.equal(withdrawn.data.server.editorEnabled, false);
+  // On the next request, not in five minutes when a cache lapses. Somebody
+  // switching a server off expects it to be off.
+  assert.equal(
+    (await listedTools(runtime.origin, token, 96)).includes("linear__list_issues"),
+    false,
+  );
+  // And it cannot be handed back to editors while the approval is off.
+  const reopened = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(reopened.status, 409);
+});
+
+test("a command cannot be offered to an editor, and says why", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const created = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    {
+      method: "POST",
+      body: {
+        name: "files",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem@1.0.0"],
+      },
+    },
+  );
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${created.data.server.id}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  const refused = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${created.data.server.id}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  // Refused up front rather than stored and quietly ignored. A stdio server
+  // is a process, and the control plane starting one chosen by a project
+  // admin is what this architecture keeps out.
+  assert.equal(refused.status, 400);
+  assert.match(String(refused.data.error.message), /over a URL/u);
+});
+
+test("with the switch off no server reaches an editor, whatever is stored", async (t) => {
+  const { runtime, owner, token, serverId, dialled } = await proxyRuntime(t);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.ok(
+    (await listedTools(runtime.origin, token, 97)).includes("linear__list_issues"),
+  );
+
+  // The switch is a fence rather than a suggestion: turning it off has to
+  // stop the control plane dialling anything, not merely stop new rows.
+  withMcpServersEnabled(t, false);
+  const before = dialled.length;
+  assert.equal(
+    (await listedTools(runtime.origin, token, 98)).includes("linear__list_issues"),
+    false,
+  );
+  assert.equal(dialled.length, before);
+});
 
 test("an MCP server is stored sealed, listed by secret name only, and scoped to its project", async (t) => {
   withMcpServersEnabled(t);

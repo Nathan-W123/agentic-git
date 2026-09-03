@@ -447,6 +447,21 @@ export interface McpServerRecord {
   values: Record<string, string>;
   secretNames: string[];
   enabled: boolean;
+  /**
+   * Whether this server may also be reached from an editor, through Kumi's
+   * own MCP endpoint.
+   *
+   * A second opt-in rather than a consequence of `enabled`, because it is a
+   * different decision with a different blast radius. `enabled` means the
+   * server runs on a teammate's machine, beside an agent, after that machine's
+   * owner has consented, scoped to one lease. This means the *control plane*
+   * dials it, with the project's secrets, for whoever is typing in Cursor.
+   * Approving the first must not silently grant the second.
+   *
+   * Only ever true alongside `enabled`: a server nobody has approved at all
+   * is not reachable from anywhere.
+   */
+  editorEnabled: boolean;
   scope: McpServerScope;
   repositoryIds: string[];
   approvedBy?: UserId;
@@ -2097,7 +2112,12 @@ export interface CoordinationStore {
    */
   listMcpServers(
     projectId: ProjectId,
-    filter?: { repositoryId?: string; enabledOnly?: boolean },
+    filter?: {
+      repositoryId?: string;
+      enabledOnly?: boolean;
+      /** Both opt-ins. What the editor tool proxy asks for. */
+      editorEnabledOnly?: boolean;
+    },
   ): Promise<McpServerRecord[]>;
   /** Throws `Unknown MCP server: …`. Cannot move `enabled`. */
   updateMcpServer(
@@ -2107,11 +2127,26 @@ export interface CoordinationStore {
   /**
    * The one way `enabled` moves. Enabling records who approved and when;
    * disabling clears both, so the record never shows a name beside "off".
-   * Throws `Unknown MCP server: …`.
+   * Disabling also clears `editorEnabled`, because a withdrawn approval that
+   * left a server still reachable from an editor would be a withdrawal in
+   * name only. Throws `Unknown MCP server: …`.
    */
   setMcpServerApproval(
     id: string,
     approval: { enabled: boolean; approvedBy: UserId; approvedAt: string },
+  ): Promise<McpServerRecord>;
+  /**
+   * The one way `editorEnabled` moves, and it can only move up while
+   * `enabled` is true: granting editor access to a server nobody approved
+   * would arm it through a door the approval screen does not show. Turning
+   * `enabled` off through {@link setMcpServerApproval} takes editor access
+   * with it, so there is no state where a withdrawn approval leaves a server
+   * still reachable. Throws `Unknown MCP server: …`.
+   */
+  setMcpServerEditorAccess(
+    id: string,
+    enabled: boolean,
+    at: string,
   ): Promise<McpServerRecord>;
   /** Removes the server and its repository attachments. Absent is not an error. */
   deleteMcpServer(id: string): Promise<void>;

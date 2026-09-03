@@ -1346,6 +1346,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       // Off until somebody with the standing to say otherwise does, through
       // the one method that can; see `McpServerRecord`.
       enabled: false,
+      editorEnabled: false,
       scope: input.scope ?? "repository",
       repositoryIds: normalizeMcpRepositoryIds(input.repositoryIds ?? []),
       createdBy: input.createdBy,
@@ -1370,7 +1371,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
 
   public async listMcpServers(
     projectId: string,
-    filter: { repositoryId?: string; enabledOnly?: boolean } = {},
+    filter: {
+      repositoryId?: string;
+      enabledOnly?: boolean;
+      editorEnabledOnly?: boolean;
+    } = {},
   ): Promise<McpServerRecord[]> {
     const repositoryId = filter.repositoryId;
     return copy(
@@ -1378,6 +1383,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         .map((stored) => stored.record)
         .filter((record) => record.projectId === projectId)
         .filter((record) => filter.enabledOnly !== true || record.enabled)
+        .filter(
+          (record) =>
+            filter.editorEnabledOnly !== true ||
+            (record.enabled && record.editorEnabled),
+        )
         .filter(
           (record) =>
             repositoryId === undefined ||
@@ -1443,8 +1453,29 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       // quietly resumed.
       delete record.approvedBy;
       delete record.approvedAt;
+      // And with it the editor's reach. A withdrawal that left the control
+      // plane still dialling the server for anybody in Cursor would be a
+      // withdrawal in name only.
+      record.editorEnabled = false;
     }
     record.updatedAt = approval.approvedAt;
+    return copy(record);
+  }
+
+  public async setMcpServerEditorAccess(
+    id: string,
+    enabled: boolean,
+    at: string,
+  ): Promise<McpServerRecord> {
+    const { record } = this.requireMcpServer(id);
+    // Granting requires an approval already in force; revoking never does.
+    if (enabled && !record.enabled) {
+      throw new Error(
+        `MCP server ${id} is not approved, so it cannot be opened to editors`,
+      );
+    }
+    record.editorEnabled = enabled;
+    record.updatedAt = at;
     return copy(record);
   }
 

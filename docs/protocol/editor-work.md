@@ -128,6 +128,46 @@ A hold that lapses *during* integration is reported as a lost hold rather than
 a refusal, with the advice to take the task again and report the same diff.
 The window really can close inside the call.
 
+## The project's tools, in the editor
+
+The same connection carries traffic the other way. A project admin approves an
+MCP server once; every agent Kumi starts on a teammate's laptop gets it. The
+person in Cursor got nothing, and would have had to add the same server to
+their own config with their own copy of the API key.
+
+An approved server can therefore be re-offered through the endpoint the editor
+is already connected to. Its tools appear as `<server>__<tool>`, and a call is
+relayed to the far end with the project's own secrets attached. The editor
+never sees the key.
+
+Three limits, all deliberate:
+
+- **HTTP servers only.** A `stdio` server is a process, and the control plane
+  starting a process chosen by a project admin is the one thing this
+  architecture has consistently refused. Those keep running where they already
+  do: on the machine that consented, beside an agent, under a lease. Trying to
+  open one to editors is refused with a sentence saying why.
+- **A second opt-in per server**, `editorEnabled`, and it can only be granted
+  while the ordinary approval is in force. `enabled` means the server may run
+  on a teammate's laptop after that machine agrees; this means the control
+  plane itself dials it, with the project's secrets, for whoever is typing.
+  Different blast radius, different switch. Withdrawing the approval takes
+  editor access with it, so there is no state where a withdrawal leaves a
+  server reachable.
+- **`COORD_MCP_ENABLED` is a fence, not a suggestion.** With it off nothing is
+  dialled, whatever is stored.
+
+`tools/list` runs at the start of every editor session, so the manifest is
+cached for five minutes, keyed on the server row's `updatedAt` — every write
+moves it, so an edit or a withdrawal invalidates itself with no cache-busting
+call for a route to forget. Concurrent handshakes share one dial. A failure is
+cached for a minute, so one server being down does not spend every handshake's
+patience, and does not keep it invisible once it returns. One unreachable
+server never costs the others their tools.
+
+Every proxied call is audited as `mcp_tool_called`, so "was Linear reachable
+during that afternoon" is answerable afterwards.
+
 ## Where the code is
 
 | Concern | File |
@@ -135,4 +175,6 @@ The window really can close inside the call.
 | The three tools, and the diff parser | `services/api-gateway/src/mcp-work.ts` |
 | Presence and bundle tickets | `services/api-gateway/src/editor-sessions.ts` |
 | Taking, extending, admitting, reporting | `apps/cli/src/editor-work.ts` |
+| The manifest cache and the tool proxy | `services/api-gateway/src/mcp-proxy.ts` |
+| The outbound dial, with its five guards | `services/api-gateway/src/mcp-dialer.ts` |
 | The bundle route and the liveness merge | `services/api-gateway/src/server.ts` |

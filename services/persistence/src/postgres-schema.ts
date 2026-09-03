@@ -1258,4 +1258,15 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS created_by_token TEXT`,
     ],
   },
+  {
+    // The second opt-in. See the SQLite copy of this migration for why
+    // reaching a server from an editor is a different decision from letting
+    // it run beside an agent on somebody's laptop.
+    version: 56,
+    name: "mcp-servers-for-editors",
+    statements: [
+      `ALTER TABLE project_mcp_servers
+         ADD COLUMN IF NOT EXISTS editor_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+    ],
+  },
 ];

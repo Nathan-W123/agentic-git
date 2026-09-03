@@ -2497,6 +2497,24 @@ export async function approveMcpServer(projectId, id, enabled) {
   return response.server;
 }
 
+/**
+ * Opens (or closes) a server to editors connected over MCP.
+ *
+ * A second act, deliberately not folded into approval. Approving means the
+ * server runs on a teammate's own computer, beside an agent, after that
+ * computer has said yes. This means Kumi itself calls the server, with the
+ * project's key, for whoever is typing in Cursor. Different thing, different
+ * button.
+ */
+export async function shareMcpServerWithEditors(projectId, id, enabled) {
+  const response = await api(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}/editor-access`,
+    { method: "POST", body: { enabled } },
+  );
+  await ensureMcpServers(projectId);
+  return response.server;
+}
+
 export async function deleteMcpServer(projectId, id) {
   await api(
     `/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}`,

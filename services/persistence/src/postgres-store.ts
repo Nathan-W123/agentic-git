@@ -2018,7 +2018,11 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
   public async listMcpServers(
     projectId: string,
-    filter: { repositoryId?: string; enabledOnly?: boolean } = {},
+    filter: {
+      repositoryId?: string;
+      enabledOnly?: boolean;
+      editorEnabledOnly?: boolean;
+    } = {},
   ): Promise<McpServerRecord[]> {
     // A project-wide server attaches everywhere; a repository-scoped one
     // only where its join rows say. Both filters are folded into the one
@@ -2032,8 +2036,14 @@ export class PostgresCoordinationStore implements CoordinationStore {
                  WHERE server_id = project_mcp_servers.id
                    AND repository_id = $2))
           AND ($3::boolean = false OR enabled)
+          AND ($4::boolean = false OR (enabled AND editor_enabled))
         ORDER BY LOWER(name) COLLATE "C", id COLLATE "C"`,
-      [projectId, filter.repositoryId ?? null, filter.enabledOnly === true],
+      [
+        projectId,
+        filter.repositoryId ?? null,
+        filter.enabledOnly === true,
+        filter.editorEnabledOnly === true,
+      ],
     );
     const records: McpServerRecord[] = [];
     for (const row of rows) {
@@ -2114,7 +2124,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
     // decision with a fresh name on it rather than the old one resumed.
     const result = await this.query(
       `UPDATE project_mcp_servers
-          SET enabled = $1, approved_by = $2, approved_at = $3, updated_at = $4
+          SET enabled = $1, approved_by = $2, approved_at = $3,
+              -- Withdrawing approval takes editor access with it: a server
+              -- the approval screen shows as off must not still be dialled
+              -- by the control plane for anybody in an editor.
+              editor_enabled = (editor_enabled AND $1),
+              updated_at = $4
         WHERE id = $5`,
       [
         approval.enabled,
@@ -2126,6 +2141,35 @@ export class PostgresCoordinationStore implements CoordinationStore {
     );
     if ((result.rowCount ?? 0) === 0) {
       throw new Error(`Unknown MCP server: ${id}`);
+    }
+    return await this.requireMcpServer(id);
+  }
+
+  public async setMcpServerEditorAccess(
+    id: string,
+    enabled: boolean,
+    at: string,
+  ): Promise<McpServerRecord> {
+    // `AND enabled` on the grant, so editor access cannot be turned on for a
+    // server nobody approved. Revoking is unconditional: taking access away
+    // must work whatever state the row is in.
+    const result = await this.query(
+      enabled
+        ? `UPDATE project_mcp_servers
+              SET editor_enabled = true, updated_at = $1
+            WHERE id = $2 AND enabled`
+        : `UPDATE project_mcp_servers
+              SET editor_enabled = false, updated_at = $1
+            WHERE id = $2`,
+      [at, id],
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      if ((await this.getMcpServer(id)) === undefined) {
+        throw new Error(`Unknown MCP server: ${id}`);
+      }
+      throw new Error(
+        `MCP server ${id} is not approved, so it cannot be opened to editors`,
+      );
     }
     return await this.requireMcpServer(id);
   }
@@ -2236,6 +2280,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       // `getMcpServerSecrets` and nothing else.
       secretNames: mcpSecretNames(parseJson<McpServerSecrets>(row, "secrets_json")),
       enabled: flag(row, "enabled"),
+      editorEnabled: flag(row, "editor_enabled"),
       scope: text(row, "scope") as McpServerScope,
       repositoryIds,
       ...(approvedBy === undefined ? {} : { approvedBy }),

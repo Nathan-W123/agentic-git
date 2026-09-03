@@ -1631,6 +1631,30 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE api_tokens ADD COLUMN created_by_token TEXT`,
     ],
   },
+  {
+    /**
+     * A second, separate opt-in: may this server also be reached from an
+     * editor, through Kumi's own MCP endpoint?
+     *
+     * Not folded into `enabled`, because the two decisions are not the same
+     * decision. `enabled` says a server may run on a teammate's laptop beside
+     * an agent Kumi started, where the machine owner is asked first and the
+     * lease names exactly one task. Editor access says the control plane
+     * itself will dial that server, with the project's secrets, on behalf of
+     * whoever is typing in Cursor — a different process, a different network,
+     * and no per-task scope at all. An admin approving the first should not
+     * silently be granting the second.
+     *
+     * Default false, so every server that already exists stays exactly as
+     * armed as it was.
+     */
+    version: 56,
+    name: "mcp-servers-for-editors",
+    statements: [
+      `ALTER TABLE project_mcp_servers
+         ADD COLUMN editor_enabled INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

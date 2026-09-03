@@ -135,7 +135,7 @@ import {
   permissionsForRole,
   type Permission,
 } from "./authorization.js";
-import { handleMcpMessage, type McpTool } from "./mcp.js";
+import { handleMcpMessage, mcpRefusal, type McpTool } from "./mcp.js";
 import {
   createMcpTools,
   type McpAgent,
@@ -143,6 +143,14 @@ import {
   type McpToolDeps,
 } from "./mcp-tools.js";
 import { createMcpWorkTools, type McpWorkDeps } from "./mcp-work.js";
+import {
+  callProxiedTool,
+  McpManifestCache,
+  proxiedTools,
+  type ProxyDial,
+  type ProxyTarget,
+} from "./mcp-proxy.js";
+import { dialMcp } from "./mcp-dialer.js";
 import { BundleTickets, EditorPresence } from "./editor-sessions.js";
 import {
   buildCatchUpDigest,
@@ -4492,6 +4500,15 @@ export interface ApiGatewayOptions {
    */
   appBaseUrl?: string;
   /**
+   * How an approved MCP server is actually dialled.
+   *
+   * {@link dialMcp} in every deployment; a fixture in the tests that are
+   * about what gets sent rather than about the socket. Injectable because
+   * the interesting part of the proxy is which secrets travel with which
+   * request, and that cannot be asserted through a real hostname.
+   */
+  mcpDial?: ProxyDial;
+  /**
    * The local first pass over unaddressed channel messages.
    *
    * Defaults to the embedding filter, or to one that passes everything on
@@ -5749,6 +5766,14 @@ export class ApiGateway {
   private readonly editors = new EditorPresence();
   /** One-shot permission to fetch one lease's bundle. Same file, same reason. */
   private readonly bundleTickets = new BundleTickets();
+  /**
+   * What each approved MCP server offers, so a handshake does not dial them.
+   *
+   * `tools/list` runs at the start of every editor session. Without this,
+   * three approved servers would put three round trips to somebody else's
+   * infrastructure in front of every one of them.
+   */
+  private readonly manifests = new McpManifestCache();
   /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
@@ -7608,9 +7633,20 @@ export class ApiGateway {
         });
         return;
       }
+      // Resolved only for the two methods that read a tool list. `initialize`
+      // and `notifications/initialized` arrive first and would otherwise pay
+      // for a manifest fetch before the session has asked for anything.
+      const asked =
+        typeof payload === "object" && payload !== null
+          ? (payload as Record<string, unknown>)["method"]
+          : undefined;
+      const needsTools = asked === "tools/list" || asked === "tools/call";
       const reply = await handleMcpMessage({
         payload,
-        tools: this.mcpTools(principal),
+        tools: [
+          ...this.mcpTools(principal),
+          ...(needsTools ? await this.proxyTools(principal) : []),
+        ],
         serverName: "kumi",
         serverVersion: BUILD_IDENTITY,
       });
@@ -9403,14 +9439,30 @@ export class ApiGateway {
         "u",
       ),
     );
+    // Its own route beside `approval`, and for the same reason `approval` is
+    // not part of `PATCH`: this is a security decision with its own answer,
+    // and one thing to grep for when asking who opened a server to editors.
+    const mcpEditorAccessMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/mcp-servers/([^/]+)/editor-access$`,
+        "u",
+      ),
+    );
     if (
       mcpServersMatch !== undefined ||
       mcpServerMatch !== undefined ||
-      mcpApprovalMatch !== undefined
+      mcpApprovalMatch !== undefined ||
+      mcpEditorAccessMatch !== undefined
     ) {
       const projectId =
-        mcpServersMatch?.[0] ?? mcpServerMatch?.[0] ?? mcpApprovalMatch?.[0] ?? "";
-      const serverId = mcpServerMatch?.[1] ?? mcpApprovalMatch?.[1];
+        mcpServersMatch?.[0] ??
+        mcpServerMatch?.[0] ??
+        mcpApprovalMatch?.[0] ??
+        mcpEditorAccessMatch?.[0] ??
+        "";
+      const serverId =
+        mcpServerMatch?.[1] ?? mcpApprovalMatch?.[1] ?? mcpEditorAccessMatch?.[1];
       const { project } = await authorizeProject(
         this.options.store,
         principal,
@@ -9691,6 +9743,46 @@ export class ApiGateway {
         );
         await audit(
           enabled ? "mcp_server_enabled" : "mcp_server_disabled",
+          server,
+        );
+        this.sendJson(response, 200, { server });
+        return;
+      }
+      if (mcpEditorAccessMatch !== undefined && method === "POST") {
+        const current = await existing();
+        const body = objectBody(await this.readJson(request));
+        const enabled = booleanField(body["enabled"], "enabled", false) ?? false;
+        if (enabled && current.transport !== "http") {
+          // Refused up front rather than stored and silently ignored. A
+          // stdio server is a process, and the control plane starting one
+          // chosen by a project admin is what this whole architecture keeps
+          // out; there is no way to honour this switch for one.
+          throw new HttpError(
+            400,
+            "invalid_request",
+            `${current.name} runs as a command on the machine that uses it, ` +
+              "so Kumi cannot offer it to an editor. Only servers reached " +
+              "over a URL can be shared this way.",
+          );
+        }
+        let server: McpServerRecord;
+        try {
+          server = await this.options.store.setMcpServerEditorAccess(
+            current.id,
+            enabled,
+            new Date().toISOString(),
+          );
+        } catch (error) {
+          throw new HttpError(
+            409,
+            "not_approved",
+            error instanceof Error
+              ? error.message
+              : "That server could not be opened to editors",
+          );
+        }
+        await audit(
+          enabled ? "mcp_server_editor_opened" : "mcp_server_editor_closed",
           server,
         );
         this.sendJson(response, 200, { server });
@@ -15449,6 +15541,110 @@ export class ApiGateway {
       },
     };
     return [...createMcpTools(deps), ...createMcpWorkTools(this.workDeps(principal))];
+  }
+
+  /**
+   * The project's approved servers, re-offered as tools this endpoint owns.
+   *
+   * Answers an empty list rather than throwing whenever anything is missing:
+   * the switch is off, no credential store was opened, nobody has opted a
+   * server in. An editor's handshake must not fail because a feature nobody
+   * turned on is not turned on.
+   */
+  private async proxyTools(
+    principal: AuthenticatedPrincipal,
+  ): Promise<McpTool[]> {
+    const sealer = this.options.secretSealer;
+    if (!mcpServersEnabled() || sealer === undefined) {
+      return [];
+    }
+    const targets: ProxyTarget[] = [];
+    const seen = new Set<string>();
+    for (const entry of await this.mcpReachable(principal)) {
+      if (seen.has(entry.projectId)) {
+        continue;
+      }
+      seen.add(entry.projectId);
+      const servers = await this.options.store
+        .listMcpServers(entry.projectId, { editorEnabledOnly: true })
+        .catch((): [] => []);
+      for (const server of servers) {
+        // http only. A stdio server is a process, and the control plane
+        // starting a process chosen by a project admin is the one thing this
+        // architecture has refused throughout. Those keep running where they
+        // already do: on the machine that consented, beside an agent.
+        if (server.transport !== "http" || server.url === undefined) {
+          continue;
+        }
+        const opened: Record<string, string> = {};
+        const sealed = await this.options.store
+          .getMcpServerSecrets(server.id)
+          .catch(() => undefined);
+        let readable = true;
+        for (const [name, secret] of Object.entries(sealed ?? {})) {
+          try {
+            opened[name] = sealer.open(secret);
+          } catch {
+            // A secret this deployment's key cannot open means the server
+            // would be dialled without its credential and answer 401. Drop
+            // the whole server rather than offer tools that cannot work.
+            readable = false;
+            break;
+          }
+        }
+        if (!readable) {
+          continue;
+        }
+        targets.push({
+          serverId: server.id,
+          serverName: server.name,
+          projectId: entry.projectId,
+          url: server.url,
+          headers: { ...server.values, ...opened },
+          // The manifest is believed only while the row has not changed.
+          revision: server.updatedAt,
+        });
+      }
+    }
+    if (targets.length === 0) {
+      return [];
+    }
+    const byId = new Map(targets.map((target) => [target.serverId, target]));
+    const dial: ProxyDial =
+      this.options.mcpDial ?? (async (input) => await dialMcp(input));
+    const { tools } = await proxiedTools(targets, dial, this.manifests);
+    return tools.map((tool) => ({
+      name: tool.name,
+      title: `${tool.remoteName} (${tool.serverName})`,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      run: async (args: Readonly<Record<string, unknown>>) => {
+        // `view`, not `submit_task`: reaching a tool the workspace already
+        // approved is reading the workspace's own capabilities, and a token
+        // that may see the project may use them. What the tool then does is
+        // the far end's business, which is why opting a server in is the
+        // decision that matters and it is made by an administrator.
+        assertTokenScope(principal, "view");
+        const target = byId.get(tool.serverId);
+        if (target === undefined) {
+          return mcpRefusal(
+            `${tool.serverName} is no longer available to this account.`,
+          );
+        }
+        await this.options.store.appendAudit(undefined, {
+          type: "project_changed",
+          data: {
+            projectId: tool.projectId,
+            action: "mcp_tool_called",
+            serverId: tool.serverId,
+            name: tool.serverName,
+            tool: tool.remoteName,
+            actorId: principal.user.id,
+          },
+        });
+        return await callProxiedTool({ tool, target, args: { ...args }, dial });
+      },
+    }));
   }
 
   /**

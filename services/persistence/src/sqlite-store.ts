@@ -1968,7 +1968,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   public async listMcpServers(
     projectId: string,
-    filter: { repositoryId?: string; enabledOnly?: boolean } = {},
+    filter: {
+      repositoryId?: string;
+      enabledOnly?: boolean;
+      editorEnabledOnly?: boolean;
+    } = {},
   ): Promise<McpServerRecord[]> {
     // A project-wide server attaches everywhere; a repository-scoped one
     // only where its join rows say. Both filters are folded into the one
@@ -1983,6 +1987,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
                    WHERE server_id = project_mcp_servers.id
                      AND repository_id = ?))
             AND (? = 0 OR enabled = 1)
+            AND (? = 0 OR (enabled = 1 AND editor_enabled = 1))
           ORDER BY LOWER(name), id`,
       )
       .all(
@@ -1990,6 +1995,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         filter.repositoryId ?? null,
         filter.repositoryId ?? null,
         filter.enabledOnly === true ? 1 : 0,
+        filter.editorEnabledOnly === true ? 1 : 0,
       ) as Row[];
     return rows.map((row) =>
       this.toMcpServer(row, this.mcpServerRepositoryIds(text(row, "id"))),
@@ -2059,18 +2065,54 @@ export class SqliteCoordinationStore implements CoordinationStore {
     const result = this.db
       .prepare(
         `UPDATE project_mcp_servers
-            SET enabled = ?, approved_by = ?, approved_at = ?, updated_at = ?
+            SET enabled = ?, approved_by = ?, approved_at = ?,
+                editor_enabled = CASE WHEN ? = 1 THEN editor_enabled ELSE 0 END,
+                updated_at = ?
           WHERE id = ?`,
       )
       .run(
         approval.enabled ? 1 : 0,
         approval.enabled ? approval.approvedBy : null,
         approval.enabled ? approval.approvedAt : null,
+        // Withdrawing approval takes editor access with it. Leaving it set
+        // would mean a server the approval screen shows as off is still being
+        // dialled by the control plane for anybody in an editor.
+        approval.enabled ? 1 : 0,
         approval.approvedAt,
         id,
       );
     if (Number(result.changes) === 0) {
       throw new Error(`Unknown MCP server: ${id}`);
+    }
+    return await this.requireMcpServer(id);
+  }
+
+  public async setMcpServerEditorAccess(
+    id: string,
+    enabled: boolean,
+    at: string,
+  ): Promise<McpServerRecord> {
+    // `AND enabled = 1` on the grant, so editor access cannot be turned on
+    // for a server nobody approved. Revoking is unconditional: taking access
+    // away must work whatever state the row is in.
+    const result = this.db
+      .prepare(
+        enabled
+          ? `UPDATE project_mcp_servers
+                SET editor_enabled = 1, updated_at = ?
+              WHERE id = ? AND enabled = 1`
+          : `UPDATE project_mcp_servers
+                SET editor_enabled = 0, updated_at = ?
+              WHERE id = ?`,
+      )
+      .run(at, id);
+    if (Number(result.changes) === 0) {
+      if ((await this.getMcpServer(id)) === undefined) {
+        throw new Error(`Unknown MCP server: ${id}`);
+      }
+      throw new Error(
+        `MCP server ${id} is not approved, so it cannot be opened to editors`,
+      );
     }
     return await this.requireMcpServer(id);
   }
@@ -2181,6 +2223,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       // `getMcpServerSecrets` and nothing else.
       secretNames: mcpSecretNames(parseJson<McpServerSecrets>(row, "secrets_json")),
       enabled: integer(row, "enabled") === 1,
+      editorEnabled: integer(row, "editor_enabled") === 1,
       scope: text(row, "scope") as McpServerScope,
       repositoryIds,
       ...(approvedBy === undefined ? {} : { approvedBy }),
