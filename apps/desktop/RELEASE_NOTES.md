@@ -1,3 +1,50 @@
+### 0.5.15 — an agent you have is an agent that runs
+
+Connecting an agent used to hand you the agent first and ask this computer
+about it afterwards. Press Connect and a named agent appeared on every roster
+before a single question had been put to the machine that was supposed to run
+it. If the CLI was missing, or installed and signed out, you were told so by a
+message that cleared itself six seconds later, and the agent stayed: in every
+channel, mentionable by anyone, and unable to do anything at all. The first
+your colleagues learned of it was work that went nowhere.
+
+That was a deliberate choice once, on the reasoning that an agent which is
+there and greyed out is honest. It is not. Grey is not a thing the person
+mentioning it can see.
+
+So the order is reversed. This app is asked whether the CLI is here and
+whether it is signed in, and only then is the agent created and named. The
+install and the sign-in are still offered on the way through, because that is
+the whole of the remaining setup and you are already standing there, but
+neither is taken on trust: each is checked again afterwards, since offering a
+remedy is not evidence that it worked. Every way out before the end leaves
+your account exactly as it was, and the reason you have no agent is a dialog
+you close rather than a message that vanishes.
+
+The sign-in is genuinely read. Claude is asked for its auth status and its
+answer parsed, Codex for its login status, Gemini for the credentials on
+disk. Cursor, Copilot and Kiro sign in through a browser session nothing here
+can inspect, so they are connected on what can be established, which is that
+the CLI is present, and the app says so rather than guessing.
+
+Connecting an editor over MCP now ends in a dialog too, and the agent list
+shows both connections an agent can have instead of only one. A Codex you had
+just connected over MCP used to say "Not connected" on its own row, which was
+true of its CLI and silent about what you had done.
+
+And the Codex advice is fixed. Codex reads its token from your account's
+environment rather than from the config file this app writes, so writing the
+file is not the end of the job for that one vendor. The instruction is to
+restart your computer, which is true for both the Codex app and every
+terminal. It no longer tells you to end Codex in Task Manager, and it no
+longer appears for Claude or Cursor, where restarting anything at all changes
+nothing.
+
+A note on order: this app has to be updated before a new CLI agent can be
+connected. A build that cannot answer the sign-in question is treated as
+unable to answer rather than as a yes, which is the whole point. Agents you
+already have keep working, and MCP connections are unaffected.
+
 ### 0.5.14 — connect an editor with a button
 
 Kumi can now be used from inside Claude Code, Codex or Cursor: ask one of
