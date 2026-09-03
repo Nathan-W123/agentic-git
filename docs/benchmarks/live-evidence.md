@@ -121,6 +121,59 @@ last successful promotion in each arm ran the repository's tests against a tree
 containing every earlier change. Zero integration failures therefore means both
 final trees passed at promotion time.
 
+## What it costs, in tokens
+
+Every number above this line is structural — attempts, failures, rework. None
+of them says what a run *spent*, and that was not an oversight of collection
+but of instrumentation: `tokenMetrics` was reached only from the coordinated
+arm, so the benchmark could measure the cost of coordinating and never the
+cost of not coordinating. The uncoordinated arm built an adapter per prepare
+and dropped the reference before anyone could ask it. Both arms now report.
+
+One run, Claude through the shipped `prompt-cli` adapter, same three tasks:
+
+| | coordinated | uncoordinated | delta |
+| --- | ---: | ---: | ---: |
+| planning | 688,779 | 470,262 | **-218,517** |
+| execution | 505,891 | 971,483 | **+465,592** |
+| **total** | **1,194,670** | **1,441,745** | **+247,075** |
+| elapsed | 279,097 ms | 299,702 ms | +20,605 ms |
+
+**Coordination cost 20.7% fewer tokens**, and the phase split says why. The
+uncoordinated arm plans *less* — it has no conflict evidence to plan against —
+and executes nearly twice as much, because two of its three tasks are executed
+a second time against a canonical that moved. Coordination pays a 218k
+planning premium and takes back 466k of execution: a return of **2.13x on the
+planning spend**.
+
+That is the same two wasted integration cycles the attempts column has counted
+in every run on this page, priced for the first time.
+
+### The one number that holds still
+
+Planning cost is remarkably stable between runs: 690,130 and 688,779 across
+two separate coordinated runs, a difference of 0.2%. Execution is where the
+variance lives (703,722 against 505,891 for the same three tasks). Planning is
+the predictable half of the bill, which is what makes the blanket claim —
+skipping the planning turn when a task is alone in its repository — a lever
+with a knowable size rather than a guess.
+
+### What this does not show
+
+**One run.** The attempts column is nine-for-nine across Codex and Claude; this
+token comparison is a single measurement and should be read as one. It wants
+repeating before anything is built on the exact percentage.
+
+**A rebuild here is a full agent cycle.** The uncoordinated arm replans and
+re-executes from scratch against the moved canonical. A person hitting the
+same conflict might hand-merge two lines in ninety seconds. So read 1,441,745
+as "what it costs when an agent redoes the work", not "what a conflict costs a
+human team". Against that, the run also excludes everything a human conflict
+actually costs — noticing the failure, context-switching back, reviewing,
+waiting on CI — none of which the coordinated arm pays either, because it
+never had the conflict. On the clock the omission is much the larger of the
+two.
+
 ## On elapsed time
 
 Elapsed time is the weakest number on this page and should be read last.
@@ -129,6 +182,12 @@ The coordinated arm sequences colliding work into waves; the uncoordinated arm
 runs everything at once and redoes what fails. At three tasks with a
 ~2-minute agent, those two shapes cost about the same, and which one wins on
 the clock depends on machine conditions more than on the scheduler.
+
+Three clean Claude runs make that concrete rather than hedged. Coordinated
+came in at 325s, 333s and 279s; uncoordinated at 299s, 308s and 300s. The
+uncoordinated arm is the steadier of the two and won two of the three, which
+is the opposite of what the token figures say — and exactly why the clock is
+read last here.
 
 Host throughput is not stable enough for cross-time comparison. The scripted
 benchmark measured ~17 s and ~35 s for identical code at different points
@@ -147,6 +206,30 @@ $env:COORD_AGENT_ADAPTER = "codex"
 $env:COORD_AGENT_TASKS = "all"
 node apps/cli/dist/index.js benchmark --scenario=live-pricing --live --json
 ```
+
+Or with Claude Code, which is what produced the token figures above:
+
+```powershell
+$env:COORD_AGENT_CMD = "claude"
+$env:COORD_AGENT_ADAPTER = "prompt-cli"
+$env:COORD_AGENT_TASKS = "all"
+node apps/cli/dist/index.js benchmark --scenario=live-pricing --live --json
+```
+
+`COORD_AGENT_TASKS = "all"` is not optional and fails quietly: it defaults to
+a single scripted task, so without it the uncoordinated arm runs scripted
+agents and reports a result that looks fine and measures nothing.
+
+The run prints nothing until both arms finish — roughly fifteen minutes —
+whether or not `--json` is passed. A blank terminal is not a hung run. What
+distinguishes the two is the fixture directory: exactly one
+`coord-benchmark-*` under the temp directory means one run in flight, and two
+means two competing for CPU and throughput, which inflates both arms' elapsed
+figures.
+
+`claude` refuses `--dangerously-skip-permissions` under root or an elevated
+shell, which the execution half of every task needs. Planning succeeds and
+execution fails, so a run that dies part-way is usually this.
 
 `workspace-write` is the default. On native Windows the adapter explicitly
 selects Codex's preferred `elevated` backend while continuing to ignore other

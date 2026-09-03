@@ -183,7 +183,8 @@ function printBenchmarkTable(
       "Failed".padEnd(8),
       "Rework".padEnd(8),
       "Missed".padEnd(8),
-      "Elapsed",
+      "Elapsed".padEnd(12),
+      "Tokens",
     ].join(""),
   );
   for (const row of rows) {
@@ -196,9 +197,29 @@ function printBenchmarkTable(
         String(row.integrationFailures).padEnd(8),
         `${row.reworkCount} (${row.reworkRate})`.padEnd(8),
         String(row.undetectedConflicts).padEnd(8),
-        `${row.elapsedMs} ms`,
+        `${row.elapsedMs} ms`.padEnd(12),
+        // A dash, never a zero: an arm driven by scripted agents spends
+        // nothing a transcript can report, and "0" would read as a
+        // measurement rather than as an absence.
+        row.tokensTotal === undefined
+          ? "-"
+          : row.tokensTotal.toLocaleString("en-US"),
       ].join(""),
     );
+  }
+  for (const row of rows) {
+    const byPhase = row.tokensByPhase;
+    if (byPhase === undefined) {
+      continue;
+    }
+    // Planning against execution is the split that decides whether
+    // coordination's extra thinking costs less than the rework it avoids, so
+    // it is worth a line of its own rather than living only in `--json`.
+    const phases = Object.entries(byPhase)
+      .sort(([, a], [, b]) => b - a)
+      .map(([phase, tokens]) => `${phase} ${tokens.toLocaleString("en-US")}`)
+      .join(", ");
+    console.log(`\n${row.mode} tokens by phase: ${phases}`);
   }
   console.log(
     `\nRework avoided by coordination: ${report.reworkAvoided} ` +

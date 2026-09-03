@@ -2877,6 +2877,11 @@ function threadProgress(entry) {
   const task =
     state.tasks.find(
       (candidate) =>
+        // `entry.id !== undefined` first: without it a task carrying no
+        // conversation matches an entry carrying no id, because both sides
+        // are `undefined`, and the thread inherits a bar from a run it has
+        // nothing to do with.
+        entry.id !== undefined &&
         candidate.conversationId === entry.id &&
         ["submitted", "claimed"].includes(candidate.status),
     ) ?? state.tasks.find((candidate) => candidate.id === entry.taskId);
@@ -4364,17 +4369,39 @@ function channelMentionCandidates(repositoryId) {
     { name: "agents", kind: "broadcast", hint: "every agent" },
     { name: "everyone", kind: "broadcast", hint: "everyone here" },
   ].filter((entry) => query === "" || entry.name.includes(query));
+  const matched = channelParticipants(repositoryId)
+    .filter((entry) => typeof entry.name === "string" && entry.name !== "")
+    .filter(
+      (entry) =>
+        query === "" ||
+        entry.name.toLowerCase().includes(query) ||
+        (typeof entry.email === "string" &&
+          entry.email.toLowerCase().includes(query)),
+    );
+  // A name that starts with what was typed is the one the typist meant; a
+  // name that merely contains those letters is a coincidence. Without this
+  // the two were indistinguishable and the roster's own order decided, so
+  // "@na" in a room holding Luna, Diana, Shana and Cabana filled all five
+  // rows with coincidences and pushed Nathan off the end — the one person
+  // the query actually named was the one it would not offer.
+  //
+  // Two stable passes rather than a comparator: within each group the
+  // roster's order is already the meaningful one, and a sort that reorders
+  // equal keys would scramble it.
+  const ranked =
+    query === ""
+      ? matched
+      : [
+          ...matched.filter((entry) =>
+            entry.name.toLowerCase().startsWith(query),
+          ),
+          ...matched.filter(
+            (entry) => !entry.name.toLowerCase().startsWith(query),
+          ),
+        ];
   return [
     ...broadcast,
-    ...channelParticipants(repositoryId)
-      .filter((entry) => typeof entry.name === "string" && entry.name !== "")
-      .filter(
-        (entry) =>
-          query === "" ||
-          entry.name.toLowerCase().includes(query) ||
-          (typeof entry.email === "string" &&
-            entry.email.toLowerCase().includes(query)),
-      ),
+    ...ranked,
     // Five, not seven. The picker opens upward from the composer and covers
     // the conversation you are replying to, so every extra row is a line of
     // context taken away at the moment you most want it. Five is enough to
@@ -8213,6 +8240,12 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
                   states a flip cannot reach the one it is not between. -->
              <button type="button" class="btn-quiet" data-act="sub-channel-visibility"
                data-value="${esc(channelId)}">Change who can use it</button>
+             <button type="button" class="btn-quiet" data-act="channel-mute"
+               data-value="${esc(repositoryId)}">${
+                 isChannelMuted(repositoryId)
+                   ? "Unmute this channel"
+                   : "Mute this channel"
+               }</button>
              <button type="button" class="btn-quiet btn-danger" data-act="sub-channel-delete"
                data-value="${esc(channelId)}">Delete</button>
            </div>

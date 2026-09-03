@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -161,8 +161,10 @@ test("materialising a wave of workspaces still happens in parallel", async () =>
   try {
     // Excluding everything from everything would close the window too, and
     // would turn the widest part of the pipeline — a wave materialising every
-    // task's workspace at once — into a queue. Two adds create two different
-    // directories and delete nothing, so they are allowed to overlap.
+    // task's workspace at once — into a queue, each add being a full
+    // checkout. So adds overlap. They are not free of each other while they
+    // do — see the commondir race at the end of this file — but that window
+    // is git's own and is retried, not locked out.
     const { repository, version } = await seedRepository(
       repositories,
       root,
@@ -235,6 +237,118 @@ test("a successful teardown does not also rescan the mirror", async () => {
     // made every teardown rescan every worktree the mirror had, under an
     // exclusive lock — quadratic in the width of a wave, for nothing.
     assert.deepEqual(pruned, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The window that is git's, not ours.
+ *
+ * The lock above stops a delete running beside anything else. It cannot stop
+ * two adds colliding, because until this was measured they were believed not
+ * to: "two adds create two different directories and delete nothing". They do
+ * both of those things and still collide, because `git worktree add` writes
+ * the new worktree's `commondir` with an ordinary open-truncate-write, and
+ * every `worktree` invocation reads each registered worktree's `commondir`
+ * while enumerating. For the moment between the open and the write that file
+ * exists and is empty, and a neighbour reading it dies with
+ *
+ *     fatal: failed to read .../worktrees/<other>/commondir: Success
+ *
+ * — "Success" being errno untouched, since the read did not fail, it returned
+ * nothing. Eight parallel adds against one mirror on git 2.43 reproduce it in
+ * roughly one attempt in a hundred and sixty with the CPU saturated, and not
+ * at all on an idle machine, which is why it only ever appeared as a
+ * full-suite flake.
+ *
+ * Serialising adds would close it and would also queue the widest part of the
+ * pipeline, so the add stays parallel and the loss is retried. These two
+ * tests hold that shape: the race is retried, and nothing else is.
+ */
+class CommondirRaceGitClient extends GitClient {
+  public adds = 0;
+
+  public constructor(private readonly failFirst: string) {
+    super();
+  }
+
+  public override async run(
+    args: readonly string[],
+    options: GitRunOptions = {},
+  ): Promise<ProcessOutput> {
+    if (args.includes("worktree") && args.includes("add")) {
+      this.adds += 1;
+      if (this.adds === 1) {
+        throw new Error(this.failFirst);
+      }
+    }
+    return await super.run(args, options);
+  }
+}
+
+test("an add that loses git's commondir race is run again", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-worktree-race-"));
+  const mirror = path.join(root, "canonical.git");
+  const client = new CommondirRaceGitClient(
+    `git worktree add failed: fatal: failed to read ${mirror}/worktrees/` +
+      "task_other-abc123/commondir: Success",
+  );
+
+  try {
+    const repositories = new RepositoryService(new GitClient());
+    const { repository, version } = await seedRepository(
+      repositories,
+      root,
+      "canonical",
+    );
+    const manager = new GitWorktreeWorkspaceManager(client);
+
+    // The first attempt loses the race; the workspace still materialises,
+    // because losing it says nothing about this add except its timing.
+    const workspace = await manager.create({
+      taskId: "task_retried",
+      rootPath: path.join(root, "workspaces"),
+      repository,
+      baseVersion: version,
+    });
+    assert.equal(client.adds, 2);
+    assert.equal(await readFile(path.join(workspace.path, "a.txt"), "utf8"), "seed\n");
+
+    await manager.destroy(workspace);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an add that failed on its own merits is not run again", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-worktree-race-"));
+  const client = new CommondirRaceGitClient(
+    "git worktree add failed: fatal: invalid reference: deadbeef",
+  );
+
+  try {
+    const repositories = new RepositoryService(new GitClient());
+    const { repository, version } = await seedRepository(
+      repositories,
+      root,
+      "canonical",
+    );
+    const manager = new GitWorktreeWorkspaceManager(client);
+
+    // Retrying a bad revision would turn one clear failure into three slow
+    // ones and report the last, so the reason has to reach the caller first
+    // time and unchanged.
+    await assert.rejects(
+      manager.create({
+        taskId: "task_doomed",
+        rootPath: path.join(root, "workspaces"),
+        repository,
+        baseVersion: version,
+      }),
+      /invalid reference: deadbeef/u,
+    );
+    assert.equal(client.adds, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
