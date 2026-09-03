@@ -8114,6 +8114,12 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
                   states a flip cannot reach the one it is not between. -->
              <button type="button" class="btn-quiet" data-act="sub-channel-visibility"
                data-value="${esc(channelId)}">Change who can use it</button>
+             <button type="button" class="btn-quiet" data-act="channel-mute"
+               data-value="${esc(repositoryId)}">${
+                 isChannelMuted(repositoryId)
+                   ? "Unmute this channel"
+                   : "Mute this channel"
+               }</button>
              <button type="button" class="btn-quiet btn-danger" data-act="sub-channel-delete"
                data-value="${esc(channelId)}">Delete</button>
            </div>

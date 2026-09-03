@@ -477,18 +477,53 @@ async function withWorktreeWrite<T>(
  * Shared access, for `add`.
  *
  * Adding enumerates the registered worktrees like everything else, so it must
- * not run while a delete is in progress — but two adds create two *different*
- * directories and remove nothing, so they cannot hurt each other. Letting
- * them overlap matters: a wave starts by materialising every task's workspace
- * at once, and serialising that would turn the widest part of the pipeline
- * into a queue for no safety gained.
+ * not run while a delete is in progress. Letting adds overlap each other
+ * matters: a wave starts by materialising every task's workspace at once, and
+ * each add is a full checkout, so serialising them would turn the widest part
+ * of the pipeline into a queue.
+ *
+ * They are not free of each other, though — see {@link lostTheCommondirRace}.
+ * Two adds create two different directories and delete nothing, and still
+ * collide, because git writes the new `commondir` non-atomically and every
+ * `worktree` invocation reads it. That window is inside git and cannot be
+ * held from out here, so it is retried rather than locked out; this lock is
+ * only about deletes, which is all it was ever able to be about.
  */
 async function withWorktreeRead<T>(
   repositoryPath: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   const lock = mirrorLock(repositoryPath);
-  await lock.exclusive;
+  // Waiting on the gate and joining the set have to happen without yielding
+  // in between. They did not: `await lock.exclusive` resolved, and only on
+  // the next microtask did the reader add itself to `shared`. A delete that
+  // arrived in that window published its own gate and took its snapshot of
+  // `shared` while the reader was still in the gap — so it waited for nobody
+  // and its `prune` ran alongside an `add` that had already been let through.
+  // That is the interleaving behind
+  //
+  //     fatal: failed to read .../worktrees/<other>/commondir
+  //
+  // and it is why the failure only ever appeared under load: the gap is one
+  // microtask wide, and something has to land inside it.
+  //
+  // So re-check after waking. `lock.exclusive` is replaced synchronously by
+  // any delete that arrives, so finding it unchanged means none did, and the
+  // registration below runs in that same microtask — before any delete can
+  // publish a gate, let alone snapshot the set. Finding it changed means one
+  // did, and this reader waits again on the gate it published.
+  //
+  // A reader can in principle be lapped by an unbroken stream of deletes.
+  // Deletes here are one per teardown and finite, and the alternative —
+  // registering first and checking afterwards — is a deadlock: the delete
+  // waits for the reader it just found, the reader waits for the delete.
+  for (;;) {
+    const admitted = lock.exclusive;
+    await admitted;
+    if (lock.exclusive === admitted) {
+      break;
+    }
+  }
   let release: () => void = () => {};
   const entry = new Promise<void>((resolve) => {
     release = resolve;
@@ -501,6 +536,36 @@ async function withWorktreeRead<T>(
     lock.shared.delete(entry);
   }
 }
+
+/**
+ * Whether a failed `worktree add` lost a race inside git rather than failing.
+ *
+ * `git worktree add` writes the new worktree's `commondir` with an ordinary
+ * open-truncate-write, so for the moment between the open and the write the
+ * file exists and is empty. Every `worktree` invocation on that mirror reads
+ * each registered worktree's `commondir` while enumerating, and one that
+ * lands in the window dies:
+ *
+ *     fatal: failed to read .../worktrees/<other>/commondir: Success
+ *
+ * "Success" is errno untouched — the read did not fail, it returned nothing —
+ * which is what makes the message identifiable. Git takes no lock over this,
+ * so it is not a window that can be closed from out here.
+ *
+ * What it can be is survived. The window is microseconds wide and belongs to
+ * a *different* add, so the second attempt is against a mirror whose
+ * neighbour has finished writing. Deliberately narrow: a retry that also
+ * swallowed a bad revision or an occupied path would turn one clear failure
+ * into three slow ones.
+ */
+function lostTheCommondirRace(error: unknown): boolean {
+  return /failed to read .*[/\\]worktrees[/\\][^/\\]+[/\\]commondir/u.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+/** How many times a lost race is worth re-running before it is a failure. */
+const WORKTREE_ADD_ATTEMPTS = 3;
 
 export class GitWorktreeWorkspaceManager implements WorkspaceManager {
   public constructor(private readonly git = new GitClient()) {}
@@ -516,26 +581,40 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
     );
     assertWithinRoot(rootPath, workspacePath);
 
-    try {
-      await withWorktreeRead(input.repository.path, async () => {
-        await this.git.run([
-          `--git-dir=${input.repository.path}`,
-          "worktree",
-          "add",
-          "--detach",
-          workspacePath,
-          input.baseVersion.revision,
-        ]);
-      });
-    } catch (error) {
-      await withWorktreeWrite(input.repository.path, async () => {
-        await this.git.run(
-          [`--git-dir=${input.repository.path}`, "worktree", "prune"],
-          { allowFailure: true },
-        );
-      });
-      await rm(workspacePath, { recursive: true, force: true });
-      throw error;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await withWorktreeRead(input.repository.path, async () => {
+          await this.git.run([
+            `--git-dir=${input.repository.path}`,
+            "worktree",
+            "add",
+            "--detach",
+            workspacePath,
+            input.baseVersion.revision,
+          ]);
+        });
+        break;
+      } catch (error) {
+        // Whatever went wrong, this mirror may now carry a half-written
+        // administrative entry and this path a half-checked-out tree. Both
+        // are cleared before anything else looks at either — including the
+        // next attempt, which would otherwise find its own path occupied.
+        // The prune is exclusive, so it also waits out every other add in
+        // flight, which is what separates a retry from the window it lost.
+        await withWorktreeWrite(input.repository.path, async () => {
+          await this.git.run(
+            [`--git-dir=${input.repository.path}`, "worktree", "prune"],
+            { allowFailure: true },
+          );
+        });
+        await rm(workspacePath, { recursive: true, force: true });
+        if (
+          attempt >= WORKTREE_ADD_ATTEMPTS ||
+          !lostTheCommondirRace(error)
+        ) {
+          throw error;
+        }
+      }
     }
 
     return {

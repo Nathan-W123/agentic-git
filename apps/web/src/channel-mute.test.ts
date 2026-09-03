@@ -130,7 +130,7 @@ test("mute sits with the other channel settings, and asks nobody's permission", 
   assert.match(app, /async function muteChannelAction\(repositoryId\)/u);
   assert.match(
     app,
-    /case "channel-mute":\s*\n\s*void muteChannelAction\(value\);/u,
+    /case "channel-mute":\s*\n\s*closePopover\(\);\s*\n\s*void muteChannelAction\(value\);/u,
   );
 });
 

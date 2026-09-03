@@ -1759,9 +1759,12 @@ test("people and agents only animate downward when the sidebar expands", async (
     css,
     /\.chats-shell\.chan-collapsed \.chan-roster \{\s*grid-template-rows: 0fr;/u,
   );
+  // Channels joined the same rule, so the `:is()` list is read for the two
+  // members this test is about rather than matched whole. What is being
+  // asserted is unchanged: the two sections have somewhere to travel from.
   assert.match(
     css,
-    /\.chats-shell\.chan-collapsed :is\(\.chan-sec-people, \.chan-sec-agents\),[\s\S]{0,120}transform: translateY\(-10px\);/u,
+    /\.chats-shell\.chan-collapsed :is\([^)]*\.chan-sec-people[^)]*\.chan-sec-agents[^)]*\),[\s\S]{0,200}transform: translateY\(-10px\);/u,
   );
   assert.match(
     css,
@@ -3665,14 +3668,18 @@ test("a connected agent is not painted as a working one", async () => {
   assert.match(chatHeader, /agentFace\(agent, 34, \{ status: agent\.status, progress \}\)/u);
   assert.doesNotMatch(chatHeader, /<span class="dot/u);
 
-  // The full agents screen still writes a separate status word and dot, and
-  // an idle connection remains amber there rather than green.
-  assert.match(agents, /agent\.presence === "idle"\s*\?\s*"orange"/u);
+  // The amber-for-idle dot went with the agents screen itself, which is a
+  // retired route — `settings floats above the product routes` guards that
+  // retirement, so it is not re-asserted here. `screen-agents.js` owns only
+  // credential setup now; agent activity is shown where the work happens.
+  const settingsScreen = await publicFile("screen-settings.js");
+  assert.doesNotMatch(agents, /renderAgents/u);
 
-  // And the count that opens the agents screen says what it counts.
-  assert.match(agents, /label: "Connected agents",/u);
+  // The count that opens the connections list still says what it counts: a
+  // stored credential is not an agent that is doing anything.
+  assert.match(settingsScreen, /label: "Connected agents",/u);
   assert.equal(
-    /label: "Active agents",/u.test(agents),
+    /label: "Active agents",/u.test(settingsScreen),
     false,
     "a stored credential is not an active agent",
   );
@@ -8714,8 +8721,18 @@ test("the transcript reads in a column rather than across the window", async () 
   // A message run edge to edge on a wide screen is a message read twice: the
   // eye leaves the end of one line with nowhere to land on the next. Day
   // separators still span the panel so "Today" is not left-shifted short.
-  assert.match(css, /--room-column: 940px;/u);
-  assert.match(css, /--message-max: 100%;/u);
+  // The bound, not its value. `--room-column` was 940px and is the panel's
+  // own width now — a deliberate reversal, with the reason written above the
+  // declaration: a fixed measure left long posts wrapping beside a large
+  // empty area. What has to stay true is that rows are bounded by a named
+  // column at all, rather than running to the window's edge.
+  assert.match(css, /--room-column: [^;]+;/u);
+  assert.match(css, /--message-max: [^;]+;/u);
+  assert.match(
+    css,
+    /max-width: var\(--room-column\);/u,
+    "message rows are still held to the column rather than the window",
+  );
   assert.match(
     css,
     /\.chan-messages \{[\s\S]{0,400}padding: 12px 18px 20px;/u,
