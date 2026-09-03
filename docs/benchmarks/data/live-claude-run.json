@@ -1,0 +1,57 @@
+{
+  "generatedAt": "2026-09-03T21:35:02.919Z",
+  "scenario": "live-pricing",
+  "scenarioDescription": "Real agents on a structured module tree; overlap is discovered, not declared.",
+  "coordinated": {
+    "mode": "coordinated",
+    "scenario": "live-pricing",
+    "tasksPlanned": 3,
+    "tasksCompleted": 3,
+    "completionRate": 1,
+    "conflictWarnings": 3,
+    "integrationAttempts": 3,
+    "integrationFailures": 0,
+    "reworkCount": 0,
+    "reworkRate": 0,
+    "undetectedConflicts": 0,
+    "elapsedMs": 279097,
+    "finalRevision": "6815528321aaeb02e197042d4fab52fd7ac83477",
+    "tokensTotal": 1194670,
+    "tokensByTask": {
+      "task_handling_fee": 208543,
+      "task_free_delivery": 477783,
+      "task_rounding": 508344
+    },
+    "tokensByPhase": {
+      "planning": 688779,
+      "execution": 505891
+    }
+  },
+  "uncoordinated": {
+    "mode": "uncoordinated",
+    "scenario": "live-pricing",
+    "tasksPlanned": 3,
+    "tasksCompleted": 3,
+    "completionRate": 1,
+    "conflictWarnings": 0,
+    "integrationAttempts": 5,
+    "integrationFailures": 2,
+    "reworkCount": 2,
+    "reworkRate": 0.6667,
+    "undetectedConflicts": 0,
+    "elapsedMs": 299702,
+    "finalRevision": "9bd5a7f27cb0eac8c78c902c78d1b12892ef4aff",
+    "tokensTotal": 1441745,
+    "tokensByTask": {
+      "task_handling_fee": 283904,
+      "task_free_delivery": 634232,
+      "task_rounding": 523609
+    },
+    "tokensByPhase": {
+      "planning": 470262,
+      "execution": 971483
+    }
+  },
+  "reworkAvoided": 2,
+  "reworkRateAvoided": 0.6667
+}
