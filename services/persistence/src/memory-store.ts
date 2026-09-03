@@ -117,6 +117,7 @@ import {
   mcpSecretNames,
   normalizeMcpRepositoryIds,
   repositoryConflicts,
+  WORKER_RETIREMENT_MS,
 } from "./store.js";
 import {
   DEFAULT_ORGANIZATION_ID,
@@ -708,18 +709,39 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       registeredAt: now,
       lastSeenAt: now,
     };
+    // The same retirement the SQL stores make, so a test that proves the rule
+    // against this one is proving the rule. A row referenced by any lease is
+    // kept: the SQL stores could not delete it if they tried.
+    const deadBefore = new Date(Date.now() - WORKER_RETIREMENT_MS).toISOString();
+    const leased = new Set(
+      [...this.workLeases.values()].map((lease) => lease.workerId),
+    );
+    for (const [id, existing] of [...this.workers.entries()]) {
+      if (
+        existing.userId === input.userId &&
+        existing.organizationId === input.organizationId &&
+        existing.name === input.name &&
+        existing.lastSeenAt < deadBefore &&
+        !leased.has(id)
+      ) {
+        this.workers.delete(id);
+      }
+    }
     this.workers.set(worker.id, worker);
     return { ...worker, adapters: [...worker.adapters] };
   }
 
   public async listWorkers(filter?: {
     organizationId?: string;
+    seenAfter?: string;
   }): Promise<WorkerRecord[]> {
     return [...this.workers.values()]
       .filter(
         (worker) =>
-          filter?.organizationId === undefined ||
-          worker.organizationId === filter.organizationId,
+          (filter?.organizationId === undefined ||
+            worker.organizationId === filter.organizationId) &&
+          (filter?.seenAfter === undefined ||
+            worker.lastSeenAt > filter.seenAfter),
       )
       .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
       .map((worker) => ({ ...worker, adapters: [...worker.adapters] }));
@@ -1324,6 +1346,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       // Off until somebody with the standing to say otherwise does, through
       // the one method that can; see `McpServerRecord`.
       enabled: false,
+      editorEnabled: false,
       scope: input.scope ?? "repository",
       repositoryIds: normalizeMcpRepositoryIds(input.repositoryIds ?? []),
       createdBy: input.createdBy,
@@ -1348,7 +1371,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
 
   public async listMcpServers(
     projectId: string,
-    filter: { repositoryId?: string; enabledOnly?: boolean } = {},
+    filter: {
+      repositoryId?: string;
+      enabledOnly?: boolean;
+      editorEnabledOnly?: boolean;
+    } = {},
   ): Promise<McpServerRecord[]> {
     const repositoryId = filter.repositoryId;
     return copy(
@@ -1356,6 +1383,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         .map((stored) => stored.record)
         .filter((record) => record.projectId === projectId)
         .filter((record) => filter.enabledOnly !== true || record.enabled)
+        .filter(
+          (record) =>
+            filter.editorEnabledOnly !== true ||
+            (record.enabled && record.editorEnabled),
+        )
         .filter(
           (record) =>
             repositoryId === undefined ||
@@ -1421,8 +1453,29 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       // quietly resumed.
       delete record.approvedBy;
       delete record.approvedAt;
+      // And with it the editor's reach. A withdrawal that left the control
+      // plane still dialling the server for anybody in Cursor would be a
+      // withdrawal in name only.
+      record.editorEnabled = false;
     }
     record.updatedAt = approval.approvedAt;
+    return copy(record);
+  }
+
+  public async setMcpServerEditorAccess(
+    id: string,
+    enabled: boolean,
+    at: string,
+  ): Promise<McpServerRecord> {
+    const { record } = this.requireMcpServer(id);
+    // Granting requires an approval already in force; revoking never does.
+    if (enabled && !record.enabled) {
+      throw new Error(
+        `MCP server ${id} is not approved, so it cannot be opened to editors`,
+      );
+    }
+    record.editorEnabled = enabled;
+    record.updatedAt = at;
     return copy(record);
   }
 

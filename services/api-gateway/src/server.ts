@@ -77,6 +77,8 @@ import {
   FORCE_QUESTION_MARKER,
   KEEP_IT_SIMPLE_DIRECTIVE,
   localAgentsOnly,
+  EDITOR_HOLD_MS,
+  EDITOR_WORKER_VERSION,
   mcpServersEnabled,
   projectBudgets,
   readsAsReportRequest,
@@ -85,6 +87,7 @@ import {
   uniqueStrings,
   withoutRoleContext,
   type ApprovalStatus,
+  type FilePatch,
   type FilePatchStatus,
   type McpServerTransport,
   type SequencedAuditEvent,
@@ -134,13 +137,31 @@ import {
   permissionsForRole,
   type Permission,
 } from "./authorization.js";
-import { handleMcpMessage, type McpTool } from "./mcp.js";
+import { handleMcpMessage, mcpRefusal, type McpTool } from "./mcp.js";
 import {
   createMcpTools,
   type McpAgent,
   type McpRepository,
   type McpToolDeps,
 } from "./mcp-tools.js";
+import {
+  createMcpWorkTools,
+  editorBehind,
+  EDITOR_LABELS,
+  EDITOR_VENDORS,
+  type EditorVendor,
+  type McpTakenTask,
+  type McpWorkDeps,
+} from "./mcp-work.js";
+import {
+  callProxiedTool,
+  McpManifestCache,
+  proxiedTools,
+  type ProxyDial,
+  type ProxyTarget,
+} from "./mcp-proxy.js";
+import { dialMcp } from "./mcp-dialer.js";
+import { BundleTickets, EditorPresence } from "./editor-sessions.js";
 import {
   buildCatchUpDigest,
   catchUpSince,
@@ -1727,6 +1748,20 @@ function threadNameIn(content: string): string | undefined {
 const AUDIT_THREAD_TITLE = "Audit log";
 
 const THREAD_RECONCILE_INTERVAL_MS = 60_000;
+
+/**
+ * How long a task waits unclaimed before the room is told nothing took it.
+ *
+ * Longer than it needs to be, on purpose. A lease is five minutes and a worker
+ * polls every five seconds, so anything genuinely being picked up is picked up
+ * inside one of those. Ten leaves room for a machine that is merely slow to
+ * wake without narrating a delay nobody would otherwise have noticed, and the
+ * notice is not urgent: it corrects a sentence, it does not stop anything.
+ */
+const STALLED_TASK_MS = 10 * 60 * 1000;
+
+/** Marks a coordinator line about work that never started. See `reportStalledTasks`. */
+const CHANNEL_STALLED_PREFIX = "\u23f3";
 
 /**
  * How often the seat count on every paying subscription is checked against
@@ -4095,6 +4130,13 @@ export interface ApiOperations {
     // whether to post, and what. The body is still relayed whole to the
     // worker, so an implementation may return more than this names.
   }): Promise<{ accepted: boolean; answer?: string }>;
+  /**
+   * Work taken and reported by an editor rather than by a worker process.
+   *
+   * Absent on a deployment that cannot run tasks at all, which answers the
+   * three MCP work tools with 501 rather than with silence.
+   */
+  editorWork?: EditorWorkOperations;
   /** Dashboard overlay workspaces; absent on deployments without them. */
   workspace?: WorkspaceOperations;
   /** Direct provider chat (Anthropic/OpenAI/Google); absent when unsupported. */
@@ -4113,6 +4155,66 @@ export interface ApiOperations {
  * encrypted live in the implementation, and the token itself is never echoed
  * back in any response.
  */
+/**
+ * Doing a Kumi task from inside an editor, with no worker process anywhere.
+ *
+ * The three verbs are the whole of it: take one task and a hold on it, keep
+ * the hold while a long turn runs, file what came back. Everything they reach
+ * lives on the other side of this interface, exactly as leasing does, because
+ * the gateway routes work and decides none of it.
+ *
+ * The shape differs from {@link ApiOperations.leaseWork} in one way that
+ * matters: nothing here carries a workspace, a bundle, or an admitted plan.
+ * The agent already has the repository open, and its plan is written from the
+ * diff at report time rather than promised at take time. See
+ * `apps/cli/src/editor-work.ts` for why that is the only honest order.
+ */
+export interface EditorWorkOperations {
+  take(input: {
+    actorId: string;
+    organizationId: string;
+    projectId: string;
+    /** The repositories this caller may be handed work from. Never widened. */
+    repositoryIds: readonly string[];
+    /** Which CLI this editor is: `claude`, `codex`, `cursor` and so on. */
+    vendor: string;
+    /** How the editor's worker row is named. */
+    label: string;
+    /** One named task, for an editor taking back work it has just filed. */
+    taskId?: string;
+  }): Promise<
+    | {
+        leaseId: string;
+        taskId: string;
+        objective: string;
+        repositoryId: string;
+        branch: string;
+        baseRevision: string;
+        baseVersion: number;
+        expiresAt: string;
+        validationCommands: readonly string[];
+      }
+    | undefined
+  >;
+  report(input: {
+    leaseId: string;
+    actorId: string;
+    status: "completed" | "failed" | "released";
+    patches: readonly FilePatch[];
+    summary: string;
+    detail?: string;
+  }): Promise<
+    | { outcome: "accepted"; integrationStatus?: string; requeued?: boolean }
+    | { outcome: "refused"; reason: string }
+    | { outcome: "lease_lost"; reason: string }
+  >;
+  /** The new expiry, or `undefined` when the hold was already gone. */
+  extend(input: {
+    leaseId: string;
+    ttlMs: number;
+  }): Promise<string | undefined>;
+}
+
 export interface GitHubCredentialOperations {
   status(input: { userId: string }): Promise<unknown>;
   connect(input: { userId: string; token: string }): Promise<unknown>;
@@ -4410,6 +4512,15 @@ export interface ApiGatewayOptions {
    */
   appBaseUrl?: string;
   /**
+   * How an approved MCP server is actually dialled.
+   *
+   * {@link dialMcp} in every deployment; a fixture in the tests that are
+   * about what gets sent rather than about the socket. Injectable because
+   * the interesting part of the proxy is which secrets travel with which
+   * request, and that cannot be asserted through a real hostname.
+   */
+  mcpDial?: ProxyDial;
+  /**
    * The local first pass over unaddressed channel messages.
    *
    * Defaults to the embedding filter, or to one that passes everything on
@@ -4480,6 +4591,12 @@ export interface ApiGatewayOptions {
    * {@link PLAN_HOLD_TTL_MS}.
    */
   planHoldTtlMs?: number;
+  /**
+   * How long a task waits unclaimed before the room is told. Overridable for
+   * the same reason `planHoldTtlMs` is: a test cannot wait ten minutes, and a
+   * sweep nobody can reach in a test is a sweep nobody has run.
+   */
+  stalledTaskMs?: number;
 }
 
 interface RequestContext {
@@ -4829,6 +4946,19 @@ function mcpArgsField(value: unknown): string[] | undefined {
  * longer. The suffix is refused only on this deployment's own names, for the
  * case where it is mounted under a path prefix.
  */
+/**
+ * The editor a token is being minted for, or nothing.
+ *
+ * Anything unrecognised reads as "not an editor" rather than as an error: the
+ * value decides who does somebody's work, and an unknown one must fall back to
+ * asking rather than name an agent nobody has.
+ */
+function optionalEditorVendor(value: unknown): EditorVendor | undefined {
+  return typeof value === "string"
+    ? EDITOR_VENDORS.find((vendor) => vendor === value.trim().toLowerCase())
+    : undefined;
+}
+
 function mcpUrlLoopsBack(url: URL, ownHosts: readonly string[]): boolean {
   const pathname = url.pathname.replace(/\/+$/u, "");
   const endpoint = `${API_PREFIX}/mcp`;
@@ -5651,6 +5781,24 @@ export class ApiGateway {
   private readonly stripeWebhookSecret: string | undefined;
   private readonly stripePriceId: string | undefined;
   private readonly appBaseUrl: string;
+  /**
+   * Editors that have taken work recently, and are therefore at a keyboard.
+   *
+   * In memory rather than in `workers`, because an editor is not a process
+   * that polls: it would read as dead three minutes into every session, and
+   * would mint a dead row per session besides. See `editor-sessions.ts`.
+   */
+  private readonly editors = new EditorPresence();
+  /** One-shot permission to fetch one lease's bundle. Same file, same reason. */
+  private readonly bundleTickets = new BundleTickets();
+  /**
+   * What each approved MCP server offers, so a handshake does not dial them.
+   *
+   * `tools/list` runs at the start of every editor session. Without this,
+   * three approved servers would put three round trips to somebody else's
+   * infrastructure in front of every one of them.
+   */
+  private readonly manifests = new McpManifestCache();
   /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
@@ -5921,10 +6069,15 @@ export class ApiGateway {
     // longer here. Its clock is the row's own timestamp rather than a timer
     // in memory, so the wait ends whether or not anything survived.
     void this.lapseStalePlanHolds().catch(() => undefined);
+    // And the fourth: work nobody ever picked up. Its clock is the row's own
+    // `submittedAt`, so like the hold sweep it does not care which process
+    // was running when the task was filed.
+    void this.reportStalledTasks().catch(() => undefined);
     this.threadReconcileTimer = setInterval(() => {
       void this.reconcileFinishedThreads().catch(() => undefined);
       void this.reconcileArbitrationNotices().catch(() => undefined);
       void this.lapseStalePlanHolds().catch(() => undefined);
+      void this.reportStalledTasks().catch(() => undefined);
     }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
   }
@@ -6308,8 +6461,20 @@ export class ApiGateway {
       const stripeWebhookPath =
         request.method === "POST" &&
         url.pathname === `${API_PREFIX}/stripe/webhook`;
+      // A bundle ticket is the credential, and it has to be: the caller is a
+      // `curl` on somebody's laptop pulling a file down before `git fetch`
+      // reads it, with no header to put a token in. The ticket is minted only
+      // by a `take_task` that authenticated normally, names one lease, is
+      // spent on first use and dies in ten minutes. Public here means "no
+      // cookie and no bearer", not "unauthenticated".
+      const bundleTicketPath =
+        request.method === "GET" &&
+        new RegExp(`^${API_PREFIX}/mcp/bundle/[A-Za-z0-9-]{1,80}$`, "u").test(
+          url.pathname,
+        );
       const isPublic =
         stripeWebhookPath ||
+        bundleTicketPath ||
         (request.method === "GET" && url.pathname === `${API_PREFIX}/health`) ||
         (request.method === "GET" && invitationPath) ||
         (passwordResetPath &&
@@ -7400,6 +7565,64 @@ export class ApiGateway {
       return;
     }
 
+    // The bundle an editor was told to fetch, against the one-shot ticket
+    // `take_task` issued. Its own route rather than the worker's, because the
+    // worker's asks for `run_task` — the scope that also admits registering
+    // as a worker — and an editor holding one task must never be able to take
+    // everybody else's. The ticket is checked here, and then the lease is
+    // checked again behind it: a ticket is a name for one lease, never a
+    // permission that outlives it.
+    const bundleTicket = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/mcp/bundle/([A-Za-z0-9-]{1,80})$`, "u"),
+    );
+    if (bundleTicket !== undefined && method === "GET") {
+      const spent = this.bundleTickets.redeem(bundleTicket[0] ?? "");
+      if (spent === undefined) {
+        throw new HttpError(
+          404,
+          "not_found",
+          "That download link has been used already or has expired. Call " +
+            "extend_task to get another one.",
+        );
+      }
+      const bundleOperation = this.options.operations.leaseBundle;
+      if (bundleOperation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot serve repository bundles",
+        );
+      }
+      // The lease, not the ticket holder. A ticket is minted by the take that
+      // created the lease, so it can only ever name that person's own hold —
+      // re-checking the owner here would be a branch nothing can reach. What
+      // *can* change between minting and spending is the hold itself.
+      const lease = await this.options.store.getWorkLease(spent.leaseId);
+      if (lease === undefined || lease.status !== "active") {
+        throw new HttpError(
+          409,
+          "lease_lost",
+          "That hold is no longer active; take the task again",
+        );
+      }
+      const bundle = await bundleOperation(spent.leaseId);
+      if (bundle === undefined) {
+        throw new HttpError(
+          409,
+          "lease_lost",
+          "That hold is no longer active; take the task again",
+        );
+      }
+      response
+        .writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": bundle.byteLength,
+        })
+        .end(bundle);
+      return;
+    }
+
     const principal = this.requirePrincipal(context);
 
     // Kumi as an MCP server: one route, JSON-RPC 2.0 over a single POST.
@@ -7435,9 +7658,20 @@ export class ApiGateway {
         });
         return;
       }
+      // Resolved only for the two methods that read a tool list. `initialize`
+      // and `notifications/initialized` arrive first and would otherwise pay
+      // for a manifest fetch before the session has asked for anything.
+      const asked =
+        typeof payload === "object" && payload !== null
+          ? (payload as Record<string, unknown>)["method"]
+          : undefined;
+      const needsTools = asked === "tools/list" || asked === "tools/call";
       const reply = await handleMcpMessage({
         payload,
-        tools: this.mcpTools(principal),
+        tools: [
+          ...this.mcpTools(principal),
+          ...(needsTools ? await this.proxyTools(principal) : []),
+        ],
         serverName: "kumi",
         serverVersion: BUILD_IDENTITY,
       });
@@ -8452,6 +8686,11 @@ export class ApiGateway {
         }
       }
 
+      // Which editor this is for, when it is for one. Validated against the
+      // fixed list rather than stored as typed: it decides who does somebody's
+      // work, so an unrecognised value must read as "not an editor" instead of
+      // as an agent nobody has.
+      const editorVendor = optionalEditorVendor(body["editorVendor"]);
       const expiresInDays = body["expiresInDays"];
       if (
         expiresInDays !== undefined &&
@@ -8480,6 +8719,10 @@ export class ApiGateway {
         // Recorded so revoking the parent revokes this too, which is the
         // whole of what makes minting from a token safe.
         ...(parent === undefined ? {} : { createdByToken: parent.id }),
+        // Recorded once, at mint, so the tools can tell which editor a
+        // request came from without asking the model to say. Read from the
+        // name otherwise, which is editable and therefore only a hint.
+        ...(editorVendor === undefined ? {} : { editorVendor }),
       });
       await this.options.store.appendAudit(undefined, {
         type: "api_token_issued",
@@ -9230,14 +9473,30 @@ export class ApiGateway {
         "u",
       ),
     );
+    // Its own route beside `approval`, and for the same reason `approval` is
+    // not part of `PATCH`: this is a security decision with its own answer,
+    // and one thing to grep for when asking who opened a server to editors.
+    const mcpEditorAccessMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/mcp-servers/([^/]+)/editor-access$`,
+        "u",
+      ),
+    );
     if (
       mcpServersMatch !== undefined ||
       mcpServerMatch !== undefined ||
-      mcpApprovalMatch !== undefined
+      mcpApprovalMatch !== undefined ||
+      mcpEditorAccessMatch !== undefined
     ) {
       const projectId =
-        mcpServersMatch?.[0] ?? mcpServerMatch?.[0] ?? mcpApprovalMatch?.[0] ?? "";
-      const serverId = mcpServerMatch?.[1] ?? mcpApprovalMatch?.[1];
+        mcpServersMatch?.[0] ??
+        mcpServerMatch?.[0] ??
+        mcpApprovalMatch?.[0] ??
+        mcpEditorAccessMatch?.[0] ??
+        "";
+      const serverId =
+        mcpServerMatch?.[1] ?? mcpApprovalMatch?.[1] ?? mcpEditorAccessMatch?.[1];
       const { project } = await authorizeProject(
         this.options.store,
         principal,
@@ -9518,6 +9777,46 @@ export class ApiGateway {
         );
         await audit(
           enabled ? "mcp_server_enabled" : "mcp_server_disabled",
+          server,
+        );
+        this.sendJson(response, 200, { server });
+        return;
+      }
+      if (mcpEditorAccessMatch !== undefined && method === "POST") {
+        const current = await existing();
+        const body = objectBody(await this.readJson(request));
+        const enabled = booleanField(body["enabled"], "enabled", false) ?? false;
+        if (enabled && current.transport !== "http") {
+          // Refused up front rather than stored and silently ignored. A
+          // stdio server is a process, and the control plane starting one
+          // chosen by a project admin is what this whole architecture keeps
+          // out; there is no way to honour this switch for one.
+          throw new HttpError(
+            400,
+            "invalid_request",
+            `${current.name} runs as a command on the machine that uses it, ` +
+              "so Kumi cannot offer it to an editor. Only servers reached " +
+              "over a URL can be shared this way.",
+          );
+        }
+        let server: McpServerRecord;
+        try {
+          server = await this.options.store.setMcpServerEditorAccess(
+            current.id,
+            enabled,
+            new Date().toISOString(),
+          );
+        } catch (error) {
+          throw new HttpError(
+            409,
+            "not_approved",
+            error instanceof Error
+              ? error.message
+              : "That server could not be opened to editors",
+          );
+        }
+        await audit(
+          enabled ? "mcp_server_editor_opened" : "mcp_server_editor_closed",
           server,
         );
         this.sendJson(response, 200, { server });
@@ -15131,11 +15430,23 @@ export class ApiGateway {
         assertTokenScope(principal, permission as Permission);
       },
       listRepositories: async () => await this.mcpRepositories(principal),
+      callerEditor: () => editorBehind(principal.token),
+      takeFiledTask: async (taskId) => {
+        const vendor = editorBehind(principal.token);
+        return vendor === undefined
+          ? undefined
+          : await this.takeForEditor(principal, {
+              vendor,
+              label: `${EDITOR_LABELS[vendor]} (editor)`,
+              taskId,
+            });
+      },
       agentsIn: async (input) =>
         await this.mcpAgentsIn(
           input.projectId,
           input.repositoryId,
           input.channel,
+          principal.user.id,
         ),
       post: async (input) => {
         const channelId = await this.mcpChannelId(
@@ -15275,15 +15586,432 @@ export class ApiGateway {
           : narrateTaskEvent(last.event.type, last.event.data);
       },
     };
-    return createMcpTools(deps);
+    return [...createMcpTools(deps), ...createMcpWorkTools(this.workDeps(principal))];
+  }
+
+  /**
+   * The project's approved servers, re-offered as tools this endpoint owns.
+   *
+   * Answers an empty list rather than throwing whenever anything is missing:
+   * the switch is off, no credential store was opened, nobody has opted a
+   * server in. An editor's handshake must not fail because a feature nobody
+   * turned on is not turned on.
+   */
+  private async proxyTools(
+    principal: AuthenticatedPrincipal,
+  ): Promise<McpTool[]> {
+    const sealer = this.options.secretSealer;
+    if (!mcpServersEnabled() || sealer === undefined) {
+      return [];
+    }
+    const targets: ProxyTarget[] = [];
+    const seen = new Set<string>();
+    for (const entry of await this.mcpReachable(principal)) {
+      if (seen.has(entry.projectId)) {
+        continue;
+      }
+      seen.add(entry.projectId);
+      const servers = await this.options.store
+        .listMcpServers(entry.projectId, { editorEnabledOnly: true })
+        .catch((): [] => []);
+      for (const server of servers) {
+        // http only. A stdio server is a process, and the control plane
+        // starting a process chosen by a project admin is the one thing this
+        // architecture has refused throughout. Those keep running where they
+        // already do: on the machine that consented, beside an agent.
+        if (server.transport !== "http" || server.url === undefined) {
+          continue;
+        }
+        const opened: Record<string, string> = {};
+        const sealed = await this.options.store
+          .getMcpServerSecrets(server.id)
+          .catch(() => undefined);
+        let readable = true;
+        for (const [name, secret] of Object.entries(sealed ?? {})) {
+          try {
+            opened[name] = sealer.open(secret);
+          } catch {
+            // A secret this deployment's key cannot open means the server
+            // would be dialled without its credential and answer 401. Drop
+            // the whole server rather than offer tools that cannot work.
+            readable = false;
+            break;
+          }
+        }
+        if (!readable) {
+          continue;
+        }
+        targets.push({
+          serverId: server.id,
+          serverName: server.name,
+          projectId: entry.projectId,
+          url: server.url,
+          headers: { ...server.values, ...opened },
+          // The manifest is believed only while the row has not changed.
+          revision: server.updatedAt,
+        });
+      }
+    }
+    if (targets.length === 0) {
+      return [];
+    }
+    const byId = new Map(targets.map((target) => [target.serverId, target]));
+    const dial: ProxyDial =
+      this.options.mcpDial ?? (async (input) => await dialMcp(input));
+    const { tools } = await proxiedTools(targets, dial, this.manifests);
+    return tools.map((tool) => ({
+      name: tool.name,
+      title: `${tool.remoteName} (${tool.serverName})`,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      run: async (args: Readonly<Record<string, unknown>>) => {
+        // `view`, not `submit_task`: reaching a tool the workspace already
+        // approved is reading the workspace's own capabilities, and a token
+        // that may see the project may use them. What the tool then does is
+        // the far end's business, which is why opting a server in is the
+        // decision that matters and it is made by an administrator.
+        assertTokenScope(principal, "view");
+        const target = byId.get(tool.serverId);
+        if (target === undefined) {
+          return mcpRefusal(
+            `${tool.serverName} is no longer available to this account.`,
+          );
+        }
+        await this.options.store.appendAudit(undefined, {
+          type: "project_changed",
+          data: {
+            projectId: tool.projectId,
+            action: "mcp_tool_called",
+            serverId: tool.serverId,
+            name: tool.serverName,
+            tool: tool.remoteName,
+            actorId: principal.user.id,
+          },
+        });
+        return await callProxiedTool({ tool, target, args: { ...args }, dial });
+      },
+    }));
+  }
+
+  /**
+   * What the three work tools may do, bound to one caller.
+   *
+   * Every one of them is authorized the way `cancel_task` is rather than the
+   * way `POST /workers/leases` is: `submit_task` on the token, the project
+   * checked with `authorizeProject`, and the row itself owned by the caller.
+   * `run_task` is deliberately never asked for here, because it is the scope
+   * that admits worker registration, and a token handed to an editor to do
+   * one task must not be able to take everybody else's.
+   */
+  private workDeps(principal: AuthenticatedPrincipal): McpWorkDeps {
+    const operation = (): EditorWorkOperations => {
+      const editorWork = this.options.operations.editorWork;
+      if (editorWork === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot run tasks",
+        );
+      }
+      return editorWork;
+    };
+    /**
+     * The lease this caller is holding on a task, or a sentence saying why
+     * not.
+     *
+     * Ownership is checked against the worker row rather than against the
+     * task: two people may both be able to see a task, and only one of them
+     * is holding it. The lease route a desktop worker uses makes exactly this
+     * check, and for exactly this reason.
+     */
+    const heldLease = async (
+      taskId: string,
+    ): Promise<
+      | { lease: WorkLease; task: SubmittedTask; owner: WorkerRecord }
+      | { refusal: string }
+    > => {
+      const task = await this.options.store.getSubmittedTask(taskId);
+      if (task === undefined || task.projectId === undefined) {
+        return { refusal: `No task called "${taskId}".` };
+      }
+      await authorizeProject(
+        this.options.store,
+        principal,
+        task.projectId,
+        "submit_task",
+      );
+      const now = new Date().toISOString();
+      await this.options.store.expireWorkLeases(now);
+      const lease = (
+        await this.options.store.listWorkLeases({
+          status: "active",
+          projectId: task.projectId,
+        })
+      ).find((candidate) => candidate.taskId === taskId);
+      if (lease === undefined) {
+        return {
+          refusal:
+            `Nobody is holding ${taskId} right now. If you were, the hold ran ` +
+            "out and the task went back in the queue; call take_task to pick " +
+            "work up again.",
+        };
+      }
+      const owner = await this.options.store.getWorker(lease.workerId);
+      if (owner === undefined || owner.userId !== principal.user.id) {
+        return {
+          refusal: `${taskId} is being worked on by somebody else.`,
+        };
+      }
+      return { lease, task, owner };
+    };
+    return {
+      assertScope: (permission) => {
+        assertTokenScope(principal, permission as Permission);
+      },
+      // From the token this request arrived on, never from the model. See
+      // `editorBehind`: the connection already knows, and asking the caller
+      // to tell us was asking it to repeat something it could get wrong.
+      callerEditor: () => editorBehind(principal.token),
+      take: async (input) => await this.takeForEditor(principal, input),
+      report: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return { outcome: "not_held", reason: held.refusal };
+        }
+        const reported = await operation().report({
+          leaseId: held.lease.id,
+          actorId: principal.user.id,
+          status: input.status,
+          patches: input.patches,
+          summary: input.summary,
+          ...(input.detail === undefined ? {} : { detail: input.detail }),
+        });
+        if (reported.outcome === "lease_lost") {
+          return { outcome: "not_held", reason: reported.reason };
+        }
+        if (reported.outcome === "refused") {
+          return { outcome: "refused", reason: reported.reason };
+        }
+        if (input.status === "released") {
+          return {
+            outcome: "accepted",
+            note: `${input.taskId} is back in the queue for somebody else.`,
+          };
+        }
+        if (input.status === "failed") {
+          return {
+            outcome: "accepted",
+            note: `Recorded that ${input.taskId} could not be done, and said so in its thread.`,
+          };
+        }
+        if (reported.requeued === true) {
+          return {
+            outcome: "accepted",
+            note:
+              "Canonical moved on while you were working, so this went back " +
+              "in the queue to be redone against the newer revision. Call " +
+              "take_task to pick it up again.",
+          };
+        }
+        return {
+          outcome: "accepted",
+          note:
+            reported.integrationStatus === "integrated" ||
+            reported.integrationStatus === undefined
+              ? `Landed. ${input.taskId} is done and its thread says so.`
+              : `Filed, and integration reported ${reported.integrationStatus}. The thread has the detail.`,
+        };
+      },
+      note: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return "not_held";
+        }
+        // The event a desktop worker writes, written the same way, so the
+        // watcher narrates it into the thread without knowing or caring
+        // which end produced it. A line from Cursor and a line from a laptop
+        // are the same line to everybody reading.
+        await this.options.store.appendAudit(undefined, {
+          type: "agent_progress",
+          taskId: held.lease.taskId,
+          data: {
+            projectId: held.lease.projectId,
+            repositoryId: held.lease.repositoryId,
+            workerId: held.lease.workerId,
+            leaseId: held.lease.id,
+            message: input.message,
+          },
+        });
+        // Evidence of life, so it renews the hold exactly as a worker's
+        // heartbeat does. An editor that has been narrating its work for
+        // thirty-five minutes is demonstrably alive, and losing its task at
+        // the half hour for want of a separate call would be punishing it
+        // for saying so. `extend_task` remains the way to ask for *longer*
+        // than the ordinary window; this only keeps the ordinary one.
+        await this.options.operations.editorWork
+          ?.extend({ leaseId: held.lease.id, ttlMs: EDITOR_HOLD_MS })
+          .catch(() => undefined);
+        for (const vendor of held.owner.adapters) {
+          this.editors.declare({ userId: principal.user.id, vendor });
+        }
+        return "recorded";
+      },
+      extend: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return undefined;
+        }
+        const expiresAt = await operation().extend({
+          leaseId: held.lease.id,
+          ttlMs: input.minutes * 60 * 1000,
+        });
+        if (expiresAt === undefined) {
+          return undefined;
+        }
+        // Still working, so still here. The vendor comes off the row holding
+        // the lease rather than from the request: an editor cannot declare
+        // presence for an agent it is not the one running.
+        for (const vendor of held.owner.adapters) {
+          this.editors.declare({ userId: principal.user.id, vendor });
+        }
+        return {
+          expiresAt,
+          bundleUrl: `${this.appBaseUrl}${API_PREFIX}/mcp/bundle/${this.bundleTickets.issue(
+            { leaseId: held.lease.id, userId: principal.user.id },
+          )}`,
+        };
+      },
+    };
+  }
+
+
+  /**
+   * Hands this caller one task to do in their editor.
+   *
+   * The one resolver, used by `take_task` and by `submit_task` when it gives
+   * an editor back the work it has just filed. Two copies of "which projects
+   * may this person be handed work from" is two answers, and the one that
+   * drifted would be the one deciding whose code runs on somebody's laptop.
+   */
+  private async takeForEditor(
+    principal: AuthenticatedPrincipal,
+    input: {
+      vendor: EditorVendor;
+      label: string;
+      repository?: string;
+      taskId?: string;
+    },
+  ): Promise<McpTakenTask | undefined> {
+    const editorWork = this.options.operations.editorWork;
+    if (editorWork === undefined) {
+      return undefined;
+    }
+    const reachable = await this.mcpReachable(principal);
+        const wanted =
+          input.repository === undefined
+            ? reachable
+            : reachable.filter(
+                (entry) =>
+                  entry.repository.id.toLowerCase() ===
+                  input.repository?.toLowerCase(),
+              );
+        if (input.repository !== undefined && wanted.length === 0) {
+          throw new HttpError(
+            404,
+            "repository_not_found",
+            `No repository called "${input.repository}".`,
+          );
+        }
+        // Grouped by project, because leasing is a per-project question and
+        // the repository narrowing has to travel with it: a collaborator
+        // reaches a project through repository grants alone, and handing the
+        // project id without the grant set would let one grant execute work
+        // from every repository beside it.
+        const byProject = new Map<string, string[]>();
+        for (const entry of wanted) {
+          const held = byProject.get(entry.projectId) ?? [];
+          held.push(entry.repository.id);
+          byProject.set(entry.projectId, held);
+        }
+        for (const [projectId, repositoryIds] of byProject) {
+          const { project } = await authorizeProject(
+            this.options.store,
+            principal,
+            projectId,
+            "submit_task",
+          ).catch(() => ({ project: undefined }));
+          if (project === undefined) {
+            continue;
+          }
+          const taken = await editorWork.take({
+            actorId: principal.user.id,
+            organizationId: project.organizationId,
+            projectId,
+            repositoryIds,
+            vendor: input.vendor,
+            label: input.label,
+            ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+          });
+          if (taken === undefined) {
+            continue;
+          }
+          // Declared here and nowhere else. Taking work is the one act that
+          // proves an editor is at the keyboard and will come back, which is
+          // exactly what a mention needs to know before it is dispatched.
+          this.editors.declare({
+            userId: principal.user.id,
+            vendor: input.vendor,
+          });
+          return {
+            taskId: taken.taskId,
+            objective: taken.objective,
+            repository: taken.repositoryId,
+            branch: taken.branch,
+            baseRevision: taken.baseRevision,
+            expiresAt: taken.expiresAt,
+            // Absolute, because the caller is a `git fetch` on somebody's
+            // laptop rather than a page on this origin. A deployment with no
+            // base URL configured still answers with the path, which is
+            // wrong for git and obvious rather than silent.
+            bundleUrl: `${this.appBaseUrl}${API_PREFIX}/mcp/bundle/${this.bundleTickets.issue(
+              { leaseId: taken.leaseId, userId: principal.user.id },
+            )}`,
+            validationCommands: taken.validationCommands,
+          };
+        }
+        return undefined;
   }
 
   /** Every repository this principal can reach, with its default roster. */
   private async mcpRepositories(
     principal: AuthenticatedPrincipal,
   ): Promise<McpRepository[]> {
-    const organizations = await this.reachableOrganizations(principal);
     const found: McpRepository[] = [];
+    for (const entry of await this.mcpReachable(principal)) {
+      found.push({
+        projectId: entry.projectId,
+        repository: entry.repository,
+        agents: await this.mcpAgentsIn(entry.projectId, entry.repository.id),
+      });
+    }
+    return found;
+  }
+
+  /**
+   * Every repository this principal can reach, without the rosters.
+   *
+   * Split out because resolving a room's mentionable agents is the expensive
+   * half and only one caller wants it. `take_task` asks this on every poll
+   * and cares about nothing but which repositories it may be handed work
+   * from; paying for a roster read per repository to answer that was a cost
+   * with no reader.
+   */
+  private async mcpReachable(
+    principal: AuthenticatedPrincipal,
+  ): Promise<Array<{ projectId: string; repository: StoredRepository }>> {
+    const organizations = await this.reachableOrganizations(principal);
+    const found: Array<{ projectId: string; repository: StoredRepository }> =
+      [];
     for (const organization of organizations) {
       const projects = await this.options.store
         .listProjects(organization.id)
@@ -15309,11 +16037,7 @@ export class ApiGateway {
             ? all
             : all.filter((entry) => authorized.repositories?.has(entry.id));
         for (const repository of visible) {
-          found.push({
-            projectId: project.id,
-            repository,
-            agents: await this.mcpAgentsIn(project.id, repository.id),
-          });
+          found.push({ projectId: project.id, repository });
         }
       }
     }
@@ -15325,6 +16049,8 @@ export class ApiGateway {
     projectId: string,
     repositoryId: string,
     channel?: string,
+    /** Whose agents these are, so the roster can say which are the caller's. */
+    ownerId?: string,
   ): Promise<McpAgent[]> {
     const channelId = await this.mcpChannelId(repositoryId, channel);
     const [candidates, project] = await Promise.all([
@@ -15334,6 +16060,13 @@ export class ApiGateway {
     const live = await this.liveWorkerOwners(project?.organizationId);
     return candidates.map((candidate) => ({
       name: candidate.name,
+      // The CLI behind it and whether it is the caller's own. Together these
+      // are what let `submit_task` answer "who did the person mean" without
+      // making a model guess from a list of names.
+      ...(PROVIDER_TO_VENDOR[candidate.provider] === undefined
+        ? {}
+        : { vendor: PROVIDER_TO_VENDOR[candidate.provider] }),
+      mine: ownerId !== undefined && candidate.userId === ownerId,
       // Only meaningful where this deployment refuses to execute on its own
       // behalf; everywhere else the control plane answers regardless and an
       // offline owner is not a fact worth acting on.
@@ -15873,24 +16606,98 @@ export class ApiGateway {
   private async liveWorkerOwners(
     organizationId?: string,
   ): Promise<Map<string, Set<string>>> {
-    const workers = await this.options.store
-      .listWorkers(
-        organizationId === undefined ? undefined : { organizationId },
-      )
-      .catch((): [] => []);
+    // The cutoff goes to the store, not to a loop here. This runs on every
+    // roster read and every @mention, and `registerWorker` writes a fresh row
+    // per worker start, so reading the whole table and discarding most of it
+    // made the commonest query in the product scale with how often people had
+    // restarted their desktops.
+    const live = await this.pollingOwners(organizationId);
+    // Editors folded in here rather than asked about beside this. There is
+    // one liveness answer in this process and this is it: a second source
+    // consulted by the roster and not by dispatch is exactly how an agent
+    // comes to be drawn as available and then told nothing is running it.
+    //
+    // Not narrowed by organization, and it cannot be: an editor declares a
+    // person and a vendor, not a tenant. That is safe in the direction it is
+    // wrong in, because everything downstream asks "is this agent's owner
+    // live", and the owner is already the agent's own.
+    for (const [userId, vendors] of this.editors.owners()) {
+      const advertised = live.get(userId) ?? new Set<string>();
+      for (const vendor of vendors) {
+        advertised.add(vendor);
+      }
+      live.set(userId, advertised);
+    }
+    return live;
+  }
+
+  /**
+   * Everyone with a machine that is actually polling for work.
+   *
+   * The workers half on its own, because two callers want different things
+   * from it: the roster wants it merged with editors, and the sentence that
+   * says whether work has *begun* wants it alone. One query builder rather
+   * than two, so "which workers count as live" is stated once.
+   */
+  private async pollingOwners(
+    organizationId?: string,
+  ): Promise<Map<string, Set<string>>> {
+    // The cutoff goes to the store, not to a loop here. This runs on every
+    // roster read and every @mention, and `registerWorker` writes a fresh row
+    // per worker start, so reading the whole table and discarding most of it
+    // made the commonest query in the product scale with how often people had
+    // restarted their desktops.
     const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
-    const live = new Map<string, Set<string>>();
+    const workers = await this.options.store
+      .listWorkers({
+        ...(organizationId === undefined ? {} : { organizationId }),
+        seenAfter: cutoff,
+      })
+      .catch((): [] => []);
+    const polling = new Map<string, Set<string>>();
     for (const worker of workers) {
-      if (worker.lastSeenAt <= cutoff) {
+      // An editor's row is not a machine that polls. It exists because a
+      // lease needs a foreign key, and counting it here is what made the
+      // distinction below collapse the first time it was written.
+      if (worker.version === EDITOR_WORKER_VERSION) {
         continue;
       }
-      const advertised = live.get(worker.userId) ?? new Set<string>();
+      const advertised = polling.get(worker.userId) ?? new Set<string>();
       for (const adapter of worker.adapters) {
         advertised.add(adapter);
       }
-      live.set(worker.userId, advertised);
+      polling.set(worker.userId, advertised);
     }
-    return live;
+    return polling;
+  }
+
+  /**
+   * The same question, answered with *how* rather than only whether.
+   *
+   * Both are live, and for the roster that is the whole answer: an editor
+   * will do the work, so drawing it as available is right. But the two are
+   * not the same promise, and one sentence in this product depends on the
+   * difference. A worker polls, so a task it can take starts within seconds
+   * and "I've taken this and I'm working on it" is true. An editor cannot be
+   * woken: it picks work up the next time the person asks it to, and telling
+   * the room the work has begun would be a straight lie for as long as they
+   * do not.
+   */
+  private async agentLiveness(
+    projectId: string,
+    ownerId: string,
+    provider: string,
+  ): Promise<"worker" | "editor" | undefined> {
+    const project = await this.options.store
+      .getProject(projectId)
+      .catch(() => undefined);
+    const polling = await this.pollingOwners(project?.organizationId);
+    if (ApiGateway.agentIsLive(polling, ownerId, provider)) {
+      return "worker";
+    }
+    return ApiGateway.agentIsLive(this.editors.owners(), ownerId, provider)
+      ? "editor"
+      : undefined;
   }
 
   /**
@@ -18166,13 +18973,21 @@ export class ApiGateway {
       // Only asked on a deployment that executes nothing itself, because
       // only there can the answer be no. Everywhere else the control plane
       // takes the task the moment it lands and the present tense is true.
-      const waitingForAMachine =
-        localAgentsOnly() &&
-        !(await this.agentHasLiveMachine(
-          projectId,
-          candidate.userId,
-          candidate.provider,
-        ));
+      // Three answers, not two, and the third is the one this used to get
+      // wrong. An editor is live in the sense the roster cares about — it
+      // will do the work — but it cannot be woken, so it picks the task up
+      // the next time the person asks it to. Saying "I'm working on it"
+      // there is a lie for as long as they do not ask, and the room has no
+      // way to tell it from a run that has genuinely started.
+      const liveness = localAgentsOnly()
+        ? await this.agentLiveness(
+            projectId,
+            candidate.userId,
+            candidate.provider,
+          )
+        : "worker";
+      const waitingForAMachine = liveness === undefined;
+      const waitingForAnEditor = liveness === "editor";
       const acknowledgement = await this.appendChannelThreadReply({
         projectId,
         repositoryId,
@@ -18182,7 +18997,11 @@ export class ApiGateway {
           ? "I've filed this, but nothing is running it yet — my agents run " +
             "on my own machine and it isn't online. I'll start as soon as " +
             "it is."
-          : input.planOnly === true
+          : waitingForAnEditor
+            ? "I've filed this. I'm running inside an editor rather than on " +
+              "a machine that watches for work, so I'll pick it up the next " +
+              "time I'm asked to there."
+            : input.planOnly === true
             ? "I've taken this task and I'm working on the plan."
             : startsNow
               ? "I've taken this task and I'm working on it."
@@ -22305,7 +23124,127 @@ export class ApiGateway {
    * `planned` by then, and cancelling a run that has just started would be
    * far worse than letting one late plan live.
    */
-  private async lapseStalePlanHolds(): Promise<void> {
+/**
+   * Says so when nothing ever picked a task up.
+   *
+   * `waitingForAMachine` is decided once, at dispatch, and never revisited. A
+   * machine that was live at that instant and then went away — or that is
+   * running but will never be offered this work, because its adapter list
+   * does not carry the agent's vendor — leaves the thread saying "I've taken
+   * this task and I'm working on it" in front of a row nothing will ever
+   * claim. The offline exchange cannot reach this: it runs strictly before
+   * dispatch, and answers the case where the agent already reads as offline.
+   * This is the other direction, and it had nobody watching it.
+   *
+   * Deliberately not a cancellation. The work is still good and still runs if
+   * the machine comes back; what was missing was anybody saying that it had
+   * not started. `lapseStalePlanHolds` beside this one may cancel because a
+   * plan nobody approved has genuinely ended.
+   *
+   * Three things keep this from crying wolf. A task queued behind another by
+   * `afterTaskId` is waiting by design. A repository with any active lease is
+   * working, and this row is behind that work. And the notice is written once,
+   * recorded as `task_stalled` against the task rather than in memory, so a
+   * restart does not say it again.
+   */
+  private async reportStalledTasks(): Promise<void> {
+    const cutoff = Date.now() - (this.options.stalledTaskMs ?? STALLED_TASK_MS);
+    for (const repository of await this.options.store.listRepositories()) {
+      const queued = await this.options.store
+        .listSubmittedTasks({ repositoryId: repository.id, status: "submitted" })
+        .catch((): [] => []);
+      const candidates = queued.filter(
+        (task) =>
+          task.afterTaskId === undefined &&
+          Date.parse(task.submittedAt) <= cutoff,
+      );
+      if (candidates.length === 0) {
+        // The common case, and the reason nothing below runs unconditionally:
+        // most rooms have nothing queued at all, and this walks every
+        // repository on the deployment once a minute.
+        continue;
+      }
+      // One read for the whole repository rather than one per task. A lease
+      // anywhere here means work is moving and these rows are behind it.
+      const active = await this.options.store
+        .listWorkLeases({ repositoryId: repository.id, status: "active" })
+        .catch((): [] => []);
+      if (active.length > 0) {
+        continue;
+      }
+      const messages = await this.options.store
+        .listChannelMessages(repository.id, "", { limit: 200 })
+        .catch((): [] => []);
+      for (const task of candidates) {
+        const said = await this.options.store
+          .listAuditEvents({
+            taskId: task.id,
+            types: ["task_stalled"],
+            limit: 1,
+          })
+          .catch((): [] => []);
+        if (said.length > 0) {
+          continue;
+        }
+        const root = messages.find((message) => message.taskId === task.id);
+        if (root === undefined || task.projectId === undefined) {
+          // No thread to correct — submitted outside a channel, or a row
+          // predating project stamping, which the reply cannot be addressed
+          // without inventing an id the room does not have. Recorded anyway,
+          // so the sweep does not reconsider it every minute for the life of
+          // the row.
+          await this.noteStalledTask(task);
+          continue;
+        }
+        await this.appendChannelThreadReply({
+          projectId: task.projectId,
+          repositoryId: repository.id,
+          messageId: root.id,
+          authorId: "coordinator",
+          content:
+            `${CHANNEL_STALLED_PREFIX} Nothing has picked this up. It is still ` +
+            "queued and will start on its own if the machine that runs this " +
+            "agent comes back — open Kumi there, or say `/cancel` here and " +
+            "give it to somebody who is online.",
+          kind: "system",
+        }).catch((error: unknown) => {
+          // A channel write that fails must not stop the record below: the
+          // audit row is what keeps this from being said twice, and losing it
+          // would turn one missed notice into one every minute.
+          process.stderr.write(
+            `[channel] stalled notice for ${task.id} could not be posted: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          );
+          return undefined;
+        });
+        await this.noteStalledTask(task);
+      }
+    }
+  }
+
+  /** Records that the stall was noticed, so it is only ever said once. */
+  private async noteStalledTask(task: {
+    id: string;
+    projectId: string | undefined;
+    repositoryId: string;
+    submittedAt: string;
+  }): Promise<void> {
+    await this.options.store
+      .appendAudit(undefined, {
+        type: "task_stalled",
+        taskId: task.id,
+        data: {
+          projectId: task.projectId,
+          repositoryId: task.repositoryId,
+          submittedAt: task.submittedAt,
+          reason: "No worker claimed this task",
+        },
+      })
+      .catch(() => undefined);
+  }
+
+    private async lapseStalePlanHolds(): Promise<void> {
     const ttl =
       this.options.planHoldTtlMs ??
       planHoldTtlMs(process.env["COORD_PLAN_HOLD_TTL_MINUTES"]);

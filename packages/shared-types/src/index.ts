@@ -1453,6 +1453,20 @@ export type AuditEventType =
   | "task_failed"
   | "task_cancelled"
   /**
+   * Nothing picked a task up, and the thread was told so.
+   *
+   * Written once per task by the stall sweep, and read by it to know it has
+   * already spoken. `waitingForAMachine` is decided once, at dispatch: a
+   * machine that was live at that instant and never leases the work leaves a
+   * thread saying "I've taken this task and I'm working on it" in front of a
+   * row nothing will ever claim. This is the only record that anybody noticed.
+   *
+   * Not a cancellation. The work stays queued and still runs if the machine
+   * comes back, which is why this is its own type rather than a reason on
+   * `task_cancelled`.
+   */
+  | "task_stalled"
+  /**
    * Work stopped by somebody who means to continue it, and the moment it
    * was continued. A pair, and deliberately not `task_cancelled` /
    * `task_submitted`: the channel narrates from these, and a pause narrated
@@ -3052,6 +3066,40 @@ export interface ResolvedMcpServer {
  * on version 9 still has to know that a version-3 worker will never look.
  */
 export const MCP_LEASE_PROTOCOL_VERSION = 4;
+
+/**
+ * What a worker row minted for an editor records as its version.
+ *
+ * A lease needs a `workers` row, so an editor gets one — and that makes it
+ * indistinguishable, on the face of it, from a desktop that polls. The two
+ * are not the same promise. A worker takes a task within seconds of it being
+ * filed; an editor cannot be woken and picks work up the next time somebody
+ * asks it to. Anything that tells a room work has *started* has to know which
+ * it is talking to, or it says "I'm working on it" about a task nothing has
+ * touched.
+ *
+ * Named here because the row is written in the CLI and read in the gateway,
+ * and a literal in both places is a distinction that survives exactly until
+ * somebody changes one of them.
+ */
+export const EDITOR_WORKER_VERSION = "editor";
+
+/**
+ * How long an editor holds a task before it must say it is still there.
+ *
+ * Half an hour, against a worker's five minutes, and the difference is what a
+ * lease means at each end. A worker's is renewed by a timer beside the
+ * process, so a short window only ever asks "is that process alive". An
+ * editor's is renewed by an agent choosing to call a tool, and between two
+ * such calls a person can read a diff, go and look at something, and come
+ * back. Anything short enough to catch an abandoned editor quickly is short
+ * enough to take work away from one that is running.
+ *
+ * Here rather than beside the operation that issues it, because the gateway
+ * renews a hold too — a line of progress is evidence of life, and renewing to
+ * a different number there would mean two answers to how long a hold lasts.
+ */
+export const EDITOR_HOLD_MS = 30 * 60 * 1000;
 
 /**
  * One stored MCP server, as the lease needs to read it.

@@ -1762,6 +1762,177 @@ for (const backend of backends) {
    * organization may be named, and this decides that naming it actually
    * bounds the rows.
    */
+  /**
+   * `registerWorker` writes a fresh row on every worker start, with no upsert
+   * and nothing anywhere deleting them, so the table grew with restarts rather
+   * than with machines. Every roster read and every @mention then loaded all of
+   * it to answer "who is online", which made the commonest query in the product
+   * scale with how often people had reopened their desktops.
+   *
+   * Two rules fix it, and both have to hold in all three backends or the one a
+   * real deployment runs keeps the leak.
+   */
+  test(`${backend.name}: a restart retires the machine's dead row`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "restarts@example.invalid",
+        displayName: "Owner",
+        passwordDigest: "unused",
+      });
+      const machine = {
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "the-same-laptop",
+        adapters: ["codex"],
+        version: "1",
+      };
+      const long = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+      const first = await store.registerWorker(machine);
+      // Aged deliberately rather than waited for: the row has to be past the
+      // retirement window, and the window is half an hour.
+      await store.touchWorker(first.id, long);
+      const second = await store.registerWorker(machine);
+
+      assert.deepEqual(
+        (await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID }))
+          .map((worker) => worker.id),
+        [second.id],
+        "the dead row should be gone and the new one kept",
+      );
+
+      // A different machine belonging to the same person is untouched. The
+      // retirement is per machine, not a sweep of everything that owner has.
+      const other = await store.registerWorker({ ...machine, name: "a-desktop" });
+      await store.touchWorker(second.id, long);
+      const third = await store.registerWorker(machine);
+      assert.deepEqual(
+        new Set(
+          (await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID }))
+            .map((worker) => worker.id),
+        ),
+        new Set([other.id, third.id]),
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a worker that took a task is kept, however old`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "worked@example.invalid",
+        displayName: "Owner",
+        passwordDigest: "unused",
+      });
+      await store.saveRepository(REPOSITORY);
+      const machine = {
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "did-some-work",
+        adapters: ["codex"],
+        version: "1",
+      };
+
+      const first = await store.registerWorker(machine);
+      const task = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "something that happened",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const leased = await store.leaseNextTask({
+        workerId: first.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      });
+      assert.equal(leased?.task.id, task.id);
+      // Finished, so nothing about this row is still in use. It is history
+      // rather than litter, and `work_leases.worker_id` is a foreign key: the
+      // SQL stores could not delete it even if the rule said to.
+      await store.finishWorkLease(
+        leased!.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+      await store.touchWorker(
+        first.id,
+        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      );
+
+      const second = await store.registerWorker(machine);
+      assert.deepEqual(
+        new Set(
+          (await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID }))
+            .map((worker) => worker.id),
+        ),
+        new Set([first.id, second.id]),
+        "a worker referenced by a lease must survive",
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: listWorkers can be asked only for live machines`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "live@example.invalid",
+        displayName: "Owner",
+        passwordDigest: "unused",
+      });
+      const base = {
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        adapters: ["codex"],
+        version: "1",
+      };
+      const stale = await store.registerWorker({ ...base, name: "stale" });
+      const fresh = await store.registerWorker({ ...base, name: "fresh" });
+      const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      await store.touchWorker(stale.id, hourAgo);
+
+      const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+      assert.deepEqual(
+        (
+          await store.listWorkers({
+            organizationId: DEFAULT_ORGANIZATION_ID,
+            seenAfter: cutoff,
+          })
+        ).map((worker) => worker.id),
+        [fresh.id],
+      );
+
+      // Strictly after, so a row seen exactly at the cutoff is out. The
+      // gateway's own liveness test used `<=` on the same comparison, and the
+      // two answering differently would be a difference nobody could see.
+      assert.deepEqual(
+        (
+          await store.listWorkers({
+            organizationId: DEFAULT_ORGANIZATION_ID,
+            seenAfter: hourAgo,
+          })
+        ).map((worker) => worker.id),
+        [fresh.id],
+      );
+
+      // Unasked, the filter does not apply, so the fleet view still shows a
+      // machine that is merely asleep.
+      assert.equal(
+        (await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID }))
+          .length,
+        2,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: workers list only within their organization`, async () => {
     const { store, cleanup } = await backend.open();
     try {
@@ -2101,6 +2272,7 @@ for (const backend of backends) {
         createdAt: "2026-01-01T00:00:00.000Z",
         createdBySession: "auth_1",
         createdByToken: undefined,
+    editorVendor: undefined,
         expiresAt: "2026-06-01T00:00:00.000Z",
         lastUsedAt: undefined,
         lastUsedIp: undefined,
@@ -2117,6 +2289,7 @@ for (const backend of backends) {
         createdAt: "2025-01-01T00:00:00.000Z",
         createdBySession: undefined,
         createdByToken: undefined,
+    editorVendor: undefined,
         expiresAt: "2025-02-01T00:00:00.000Z",
         lastUsedAt: undefined,
         lastUsedIp: undefined,
@@ -6013,6 +6186,105 @@ for (const backend of backends) {
           approvedBy: "user_admin",
           approvedAt: "2026-01-05T00:00:00.000Z",
         }),
+        /Unknown MCP server/,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: reaching a server from an editor is a second, separate opt-in`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(mcpServer({ id: "mcp_edit", name: "linear" }));
+      // Strict, because SQLite stores 0/1 and Postgres a boolean: a mapper
+      // that forgets to convert passes every truthiness check and fails the
+      // first `=== true` in a caller.
+      assert.strictEqual(
+        present(await store.getMcpServer("mcp_edit"), "mcp_edit").editorEnabled,
+        false,
+      );
+
+      // Approving a server for agents does not open it to editors. They are
+      // different decisions: one runs a process on a teammate's laptop after
+      // that machine consents, the other has the control plane dial the
+      // server with the project's secrets for whoever is typing.
+      await store.setMcpServerApproval("mcp_edit", {
+        enabled: true,
+        approvedBy: "user_admin",
+        approvedAt: "2026-01-02T00:00:00.000Z",
+      });
+      assert.strictEqual(
+        present(await store.getMcpServer("mcp_edit"), "mcp_edit").editorEnabled,
+        false,
+      );
+      assert.deepEqual(
+        await store.listMcpServers(DEFAULT_PROJECT_ID, {
+          editorEnabledOnly: true,
+        }),
+        [],
+      );
+
+      const opened = await store.setMcpServerEditorAccess(
+        "mcp_edit",
+        true,
+        "2026-01-03T00:00:00.000Z",
+      );
+      assert.strictEqual(opened.editorEnabled, true);
+      assert.strictEqual(opened.enabled, true);
+      assert.deepEqual(
+        (
+          await store.listMcpServers(DEFAULT_PROJECT_ID, {
+            editorEnabledOnly: true,
+          })
+        ).map((entry) => entry.id),
+        ["mcp_edit"],
+      );
+
+      // An ordinary edit moves neither flag, exactly as it moves neither
+      // half of the approval.
+      const edited = await store.updateMcpServer("mcp_edit", {
+        args: ["--verbose"],
+        updatedAt: "2026-01-04T00:00:00.000Z",
+      });
+      assert.strictEqual(edited.editorEnabled, true);
+
+      // Withdrawing the approval takes the editor's reach with it. Anything
+      // else leaves a server the approval screen shows as off still being
+      // dialled by the control plane.
+      const withdrawn = await store.setMcpServerApproval("mcp_edit", {
+        enabled: false,
+        approvedBy: "user_admin",
+        approvedAt: "2026-01-05T00:00:00.000Z",
+      });
+      assert.strictEqual(withdrawn.enabled, false);
+      assert.strictEqual(withdrawn.editorEnabled, false);
+      assert.strictEqual(
+        present(await store.getMcpServer("mcp_edit"), "mcp_edit").editorEnabled,
+        false,
+      );
+
+      // And it cannot be granted back while the approval is off: that would
+      // be arming the server through a door the approval screen does not show.
+      await assert.rejects(
+        store.setMcpServerEditorAccess("mcp_edit", true, "2026-01-06T00:00:00.000Z"),
+        /not approved/,
+      );
+      // Revoking something already revoked is not an error, so a screen can
+      // send the state it wants rather than the change it computed.
+      assert.strictEqual(
+        (
+          await store.setMcpServerEditorAccess(
+            "mcp_edit",
+            false,
+            "2026-01-07T00:00:00.000Z",
+          )
+        ).editorEnabled,
+        false,
+      );
+      await assert.rejects(
+        store.setMcpServerEditorAccess("mcp_missing", true, "2026-01-08T00:00:00.000Z"),
         /Unknown MCP server/,
       );
     } finally {

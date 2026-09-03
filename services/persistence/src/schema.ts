@@ -1631,6 +1631,54 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE api_tokens ADD COLUMN created_by_token TEXT`,
     ],
   },
+  {
+    /**
+     * A second, separate opt-in: may this server also be reached from an
+     * editor, through Kumi's own MCP endpoint?
+     *
+     * Not folded into `enabled`, because the two decisions are not the same
+     * decision. `enabled` says a server may run on a teammate's laptop beside
+     * an agent Kumi started, where the machine owner is asked first and the
+     * lease names exactly one task. Editor access says the control plane
+     * itself will dial that server, with the project's secrets, on behalf of
+     * whoever is typing in Cursor — a different process, a different network,
+     * and no per-task scope at all. An admin approving the first should not
+     * silently be granting the second.
+     *
+     * Default false, so every server that already exists stays exactly as
+     * armed as it was.
+     */
+    version: 56,
+    name: "mcp-servers-for-editors",
+    statements: [
+      `ALTER TABLE project_mcp_servers
+         ADD COLUMN editor_enabled INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
+  {
+    /**
+     * Which editor a token was minted for, when it was minted for one.
+     *
+     * So the control plane can tell that a request came from Codex rather
+     * than from Claude Code, without asking the model to say so. That matters
+     * because `submit_task` used to require an agent name, which meant an
+     * editor asking Kumi to do something had to *invent* the assignment: a
+     * person who named nobody had their work sent to whichever agent the
+     * model picked off the roster, which is how a prompt typed in Codex came
+     * to be run by Claude.
+     *
+     * The token name already carries this — the app mints "Codex on <device>"
+     * — and reading it back is the fallback for every connection made before
+     * this column existed. A name is editable, though, and a person renaming
+     * their token in settings must not quietly change who does their work.
+     * So it is recorded once, at mint, where nothing can drift.
+     */
+    version: 57,
+    name: "editor-tokens-name-their-editor",
+    statements: [
+      `ALTER TABLE api_tokens ADD COLUMN editor_vendor TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

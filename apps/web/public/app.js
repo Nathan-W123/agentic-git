@@ -264,6 +264,7 @@ import {
   createApiToken,
   loadApiTokens,
   approveMcpServer,
+  shareMcpServerWithEditors,
   createMcpServer,
   deleteMcpServer,
   ensureMcpServers,
@@ -2617,6 +2618,12 @@ function mcpServersCard() {
           relativeTime(server.approvedAt),
         )}`
       : "not approved";
+  // Said in the row rather than left to the button, because the two states
+  // read very differently: one is a program on a teammate's laptop, the
+  // other is Kumi calling out with the project's key for anybody in an
+  // editor.
+  const reachOf = (server) =>
+    server.editorEnabled === true ? "also in editors" : "agents only";
   const secretsOf = (server) => {
     const count = (server.secretNames ?? []).length;
     return `${String(count)} secret${count === 1 ? "" : "s"}`;
@@ -2679,12 +2686,24 @@ function mcpServersCard() {
                 label: server.name ?? "Unnamed",
                 description: `${esc(server.transport ?? "stdio")} · ${scopeOf(server)} · ${secretsOf(
                   server,
-                )} · ${approvalOf(server)}`,
+                )} · ${approvalOf(server)} · ${reachOf(server)}`,
                 control: `<button type="button" class="btn btn-sm${
                   server.enabled === true ? "" : " btn-primary"
                 }" data-act="mcp-approve" data-value="${esc(server.id)}">${
                   server.enabled === true ? "Disable" : "Approve"
-                }</button>
+                }</button>${
+                  // Only for http servers, and only once approved. A stdio
+                  // server is a command, and Kumi will not start one; a
+                  // server nobody approved has nothing to share.
+                  server.transport === "http" && server.enabled === true
+                    ? `<button type="button" class="btn btn-sm"
+                        data-act="mcp-editors" data-value="${esc(server.id)}">${
+                        server.editorEnabled === true
+                          ? "Take out of editors"
+                          : "Offer in editors"
+                      }</button>`
+                    : ""
+                }
                 <button type="button" class="btn btn-sm btn-danger"
                   data-act="mcp-remove" data-value="${esc(server.id)}">Remove</button>`,
               }),
@@ -11894,6 +11913,22 @@ document.addEventListener("click", (event) => {
       void approveMcpServer(state.projectId, value, enabled)
         .then(() => {
           toast(enabled ? "Server approved" : "Server disabled", "ok");
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "mcp-editors": {
+      const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
+      const enabled = server?.editorEnabled !== true;
+      void shareMcpServerWithEditors(state.projectId, value, enabled)
+        .then(() => {
+          toast(
+            enabled
+              ? "Offered to editors connected to Kumi"
+              : "Taken out of editors",
+            "ok",
+          );
           render();
         })
         .catch((error) => toast(error.message, "error"));

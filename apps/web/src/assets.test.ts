@@ -1263,7 +1263,12 @@ test("connecting an agent asks which of the three connections is meant", async (
   assert.match(flow, /does not replace the CLI/u);
   // The two MCP directions are a second question, not two more items in the
   // first list: they are the same thing pointing opposite ways.
-  assert.match(flow, /title: `Send work to Kumi from \$\{esc\(label\)\}`/u);
+  assert.match(flow, /title: `Work with Kumi from \$\{esc\(label\)\}`/u);
+  // Both halves of what that connection now is. It began as a way to file
+  // work from an editor; it is also how an editor picks work up and does it
+  // with no CLI installed, and an option that names only the first sends
+  // somebody to install a CLI they do not need.
+  assert.match(flow, /pick\s+up work waiting for it/u);
   assert.match(flow, /title: "Give Kumi's agents tools"/u);
   // And the direction is shown as a direction. "MCP goes both ways" is a
   // sentence somebody has to hold in their head; an arrow is the same fact at

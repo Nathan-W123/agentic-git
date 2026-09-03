@@ -138,6 +138,7 @@ import {
   normalizeMcpRepositoryIds,
   parseChangedFiles,
   repositoryConflicts,
+  WORKER_RETIREMENT_MS,
 } from "./store.js";
 import {
   DEFAULT_PROJECT_ID,
@@ -805,6 +806,13 @@ export class SqliteCoordinationStore implements CoordinationStore {
       registeredAt: now,
       lastSeenAt: now,
     };
+    // Before the insert, so the row just written is never a candidate.
+    this.retireFinishedWorkers(
+      input.userId,
+      input.organizationId,
+      input.name,
+      new Date(Date.now() - WORKER_RETIREMENT_MS).toISOString(),
+    );
     this.db
       .prepare(
         `INSERT INTO workers
@@ -827,21 +835,58 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   public async listWorkers(filter?: {
     organizationId?: string;
+    seenAfter?: string;
   }): Promise<WorkerRecord[]> {
     // `= ?` rather than a caller-side filter, so a legacy row with a NULL
     // organization never matches and cannot surface in a tenant's fleet.
-    const rows =
-      filter?.organizationId === undefined
-        ? (this.db
-            .prepare("SELECT * FROM workers ORDER BY last_seen_at DESC")
-            .all() as Row[])
-        : (this.db
-            .prepare(
-              `SELECT * FROM workers WHERE organization_id = ?
-               ORDER BY last_seen_at DESC`,
-            )
-            .all(filter.organizationId) as Row[]);
+    //
+    // `seenAfter` in the WHERE rather than in the caller, so
+    // `workers_by_organization (organization_id, last_seen_at DESC)` serves
+    // it. Filtering afterwards read every dead row on every roster load.
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (filter?.organizationId !== undefined) {
+      clauses.push("organization_id = ?");
+      values.push(filter.organizationId);
+    }
+    if (filter?.seenAfter !== undefined) {
+      clauses.push("last_seen_at > ?");
+      values.push(filter.seenAfter);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM workers${
+          clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`
+        } ORDER BY last_seen_at DESC`,
+      )
+      .all(...values) as Row[];
     return rows.map((row) => this.toWorker(row));
+  }
+
+  /**
+   * Deletes one machine's rows that can no longer be doing anything.
+   *
+   * `NOT EXISTS` over the leases rather than a status test: the column is a
+   * foreign key, so a row referenced by a lease of any status cannot be
+   * deleted at all, and asking only about active ones would turn this into an
+   * occasional constraint failure on the registration path.
+   */
+  private retireFinishedWorkers(
+    userId: string,
+    organizationId: string,
+    name: string,
+    deadBefore: string,
+  ): void {
+    this.db
+      .prepare(
+        `DELETE FROM workers
+          WHERE user_id = ? AND organization_id = ? AND name = ?
+            AND last_seen_at < ?
+            AND NOT EXISTS (
+              SELECT 1 FROM work_leases WHERE work_leases.worker_id = workers.id
+            )`,
+      )
+      .run(userId, organizationId, name, deadBefore);
   }
 
   public async getWorker(id: string): Promise<WorkerRecord | undefined> {
@@ -1746,8 +1791,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `INSERT INTO api_tokens
            (id, user_id, organization_id, name, secret_hash, scopes_json,
-            created_at, created_by_session, created_by_token, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            created_at, created_by_session, created_by_token, editor_vendor,
+            expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         token.id,
@@ -1759,6 +1805,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         token.createdAt,
         token.createdBySession ?? null,
         token.createdByToken ?? null,
+        token.editorVendor ?? null,
         token.expiresAt ?? null,
       );
   }
@@ -1847,6 +1894,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
       createdBySession: optionalText(row, "created_by_session"),
       createdByToken: optionalText(row, "created_by_token"),
+      editorVendor: optionalText(row, "editor_vendor"),
       expiresAt: optionalText(row, "expires_at"),
       lastUsedAt: optionalText(row, "last_used_at"),
       lastUsedIp: optionalText(row, "last_used_ip"),
@@ -1923,7 +1971,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   public async listMcpServers(
     projectId: string,
-    filter: { repositoryId?: string; enabledOnly?: boolean } = {},
+    filter: {
+      repositoryId?: string;
+      enabledOnly?: boolean;
+      editorEnabledOnly?: boolean;
+    } = {},
   ): Promise<McpServerRecord[]> {
     // A project-wide server attaches everywhere; a repository-scoped one
     // only where its join rows say. Both filters are folded into the one
@@ -1938,6 +1990,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
                    WHERE server_id = project_mcp_servers.id
                      AND repository_id = ?))
             AND (? = 0 OR enabled = 1)
+            AND (? = 0 OR (enabled = 1 AND editor_enabled = 1))
           ORDER BY LOWER(name), id`,
       )
       .all(
@@ -1945,6 +1998,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         filter.repositoryId ?? null,
         filter.repositoryId ?? null,
         filter.enabledOnly === true ? 1 : 0,
+        filter.editorEnabledOnly === true ? 1 : 0,
       ) as Row[];
     return rows.map((row) =>
       this.toMcpServer(row, this.mcpServerRepositoryIds(text(row, "id"))),
@@ -2014,18 +2068,54 @@ export class SqliteCoordinationStore implements CoordinationStore {
     const result = this.db
       .prepare(
         `UPDATE project_mcp_servers
-            SET enabled = ?, approved_by = ?, approved_at = ?, updated_at = ?
+            SET enabled = ?, approved_by = ?, approved_at = ?,
+                editor_enabled = CASE WHEN ? = 1 THEN editor_enabled ELSE 0 END,
+                updated_at = ?
           WHERE id = ?`,
       )
       .run(
         approval.enabled ? 1 : 0,
         approval.enabled ? approval.approvedBy : null,
         approval.enabled ? approval.approvedAt : null,
+        // Withdrawing approval takes editor access with it. Leaving it set
+        // would mean a server the approval screen shows as off is still being
+        // dialled by the control plane for anybody in an editor.
+        approval.enabled ? 1 : 0,
         approval.approvedAt,
         id,
       );
     if (Number(result.changes) === 0) {
       throw new Error(`Unknown MCP server: ${id}`);
+    }
+    return await this.requireMcpServer(id);
+  }
+
+  public async setMcpServerEditorAccess(
+    id: string,
+    enabled: boolean,
+    at: string,
+  ): Promise<McpServerRecord> {
+    // `AND enabled = 1` on the grant, so editor access cannot be turned on
+    // for a server nobody approved. Revoking is unconditional: taking access
+    // away must work whatever state the row is in.
+    const result = this.db
+      .prepare(
+        enabled
+          ? `UPDATE project_mcp_servers
+                SET editor_enabled = 1, updated_at = ?
+              WHERE id = ? AND enabled = 1`
+          : `UPDATE project_mcp_servers
+                SET editor_enabled = 0, updated_at = ?
+              WHERE id = ?`,
+      )
+      .run(at, id);
+    if (Number(result.changes) === 0) {
+      if ((await this.getMcpServer(id)) === undefined) {
+        throw new Error(`Unknown MCP server: ${id}`);
+      }
+      throw new Error(
+        `MCP server ${id} is not approved, so it cannot be opened to editors`,
+      );
     }
     return await this.requireMcpServer(id);
   }
@@ -2136,6 +2226,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       // `getMcpServerSecrets` and nothing else.
       secretNames: mcpSecretNames(parseJson<McpServerSecrets>(row, "secrets_json")),
       enabled: integer(row, "enabled") === 1,
+      editorEnabled: integer(row, "editor_enabled") === 1,
       scope: text(row, "scope") as McpServerScope,
       repositoryIds,
       ...(approvedBy === undefined ? {} : { approvedBy }),

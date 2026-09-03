@@ -36,6 +36,7 @@ import {
   requiredString,
   type McpTool,
 } from "./mcp.js";
+import { takenTaskBrief, type McpTakenTask } from "./mcp-work.js";
 
 /** An agent as a person in an editor needs to see it. */
 export interface McpAgent {
@@ -43,6 +44,10 @@ export interface McpAgent {
   /** Whether its owner has a machine listening right now. */
   readonly online: boolean;
   readonly owner: string;
+  /** The CLI behind it: `claude`, `codex`, and so on. */
+  readonly vendor?: string;
+  /** Whether it belongs to the person holding this connection. */
+  readonly mine: boolean;
 }
 
 /** A repository the caller can reach, with the roster of its default room. */
@@ -68,6 +73,19 @@ export interface McpToolDeps {
   readonly store: CoordinationStore;
   /** Refuses unless the caller's token carries this permission. */
   assertScope(permission: string): void;
+  /**
+   * Which editor is on the other end, from its own token.
+   *
+   * The reason `submit_task` no longer makes the model name an agent. See
+   * `editorBehind` in `mcp-work.ts`.
+   */
+  callerEditor(): string | undefined;
+  /**
+   * Takes a task this caller has just filed, so the editor that asked for
+   * the work can be the one that does it. Absent on a deployment that cannot
+   * run tasks at all, where filing is still perfectly useful.
+   */
+  takeFiledTask?(taskId: string): Promise<McpTakenTask | undefined>;
   /** Every repository this caller may see, across their projects. */
   listRepositories(): Promise<McpRepository[]>;
   /** The mentionable roster of one room, with liveness. */
@@ -235,7 +253,11 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
         },
         agent: {
           type: "string",
-          description: "Agent to address, without the @.",
+          description:
+            "Optional. Which agent should do it, without the @. Leave it " +
+            "out and Kumi gives the work to the agent for this editor, " +
+            "which is almost always what the person meant. Name one only " +
+            "when they asked for somebody else.",
         },
         objective: {
           type: "string",
@@ -261,13 +283,13 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
           description: "Agent to send it to instead, when when_offline is 'reroute'.",
         },
       },
-      required: ["repository", "agent", "objective"],
+      required: ["repository", "objective"],
       additionalProperties: false,
     },
     async run(args) {
       deps.assertScope("submit_task");
       const named = requiredString(args, "repository", 200);
-      const agentName = requiredString(args, "agent", 200).replace(/^@/u, "");
+      const agentName = optionalString(args, "agent", 200)?.replace(/^@/u, "");
       const objective = requiredString(args, "objective");
       const channel = optionalString(args, "channel", 200)?.replace(/^#/u, "");
       const whenOffline = optionalChoice(args, "when_offline", OFFLINE_CHOICES);
@@ -288,7 +310,7 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
             "command. Describe the work instead.",
         );
       }
-      if (agentName.toLowerCase() === "agents") {
+      if (agentName?.toLowerCase() === "agents") {
         return mcpRefusal(
           "@agents addresses everyone in the room and does not start work. " +
             "Name one agent; list_repositories shows who is there.",
@@ -301,14 +323,50 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
         repositoryId: found.repository.id,
         ...(channel === undefined ? {} : { channel }),
       });
-      const target = roster.find(
-        (agent) => agent.name.toLowerCase() === agentName.toLowerCase(),
-      );
+      // Nobody named. This used to be impossible — the argument was required
+      // — and that was the bug: a person who names no agent has expressed no
+      // preference, and the model, forced to fill the field in, picked one
+      // off the roster. Work typed into Codex was run by Claude, and nothing
+      // anywhere had made that decision on purpose.
+      //
+      // The order below is what a person means, in the order they mean it.
+      const editor = deps.callerEditor();
+      const own =
+        editor === undefined
+          ? undefined
+          : roster.find((agent) => agent.mine && agent.vendor === editor);
+      const target =
+        agentName === undefined
+          ? (own ??
+            // No editor to fall back on. One agent in the room is not a
+            // guess; more than one is, so it asks.
+            (roster.length === 1 ? roster[0] : undefined))
+          : roster.find(
+              (agent) => agent.name.toLowerCase() === agentName.toLowerCase(),
+            );
+      if (target === undefined && agentName === undefined) {
+        return mcpText(
+          roster.length === 0
+            ? `No agents are in ${repositoryLabel(found)} yet. Add one in Kumi first.`
+            : [
+                `Who should do this in ${repositoryLabel(found)}?`,
+                "",
+                ...roster.map(
+                  (agent) =>
+                    `  @${agent.name} (${agent.owner})${
+                      agent.online ? "" : " — offline"
+                    }`,
+                ),
+                "",
+                "Ask the person, then call submit_task again with agent set.",
+              ].join("\n"),
+        );
+      }
       if (target === undefined) {
         return mcpRefusal(
           roster.length === 0
             ? `No agents are in ${repositoryLabel(found)} yet. Add one in Kumi first.`
-            : `No agent called "${agentName}" in ${repositoryLabel(
+            : `No agent called "${agentName ?? ""}" in ${repositoryLabel(
                 found,
               )}. You can address: ${roster
                 .map((agent) => `@${agent.name}`)
@@ -338,7 +396,13 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
       // and says so in a thread nobody in this conversation is reading. The
       // window is three minutes wide and advisory — re-checked on the second
       // call, so an agent that came back in the meantime is simply used.
-      if (!addressed.online && whenOffline === undefined) {
+      // The caller's own editor is, by definition, at the keyboard: it is the
+      // thing asking. Sending it down the offline exchange would be telling
+      // somebody their machine is not listening while they are typing into
+      // it, and the first prompt of a session would always take that path,
+      // because presence is only declared once an editor takes work.
+      const mine = addressed === own;
+      if (!mine && !addressed.online && whenOffline === undefined) {
         const alternatives = roster.filter(
           (agent) => agent.online && agent.name !== addressed.name,
         );
@@ -381,10 +445,40 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
             `else. Open Kumi to see what it said.`,
         );
       }
+      const taskId = posted.taskIds[0] ?? "";
+      // Filed, and then taken back, when the agent that was asked is the one
+      // asking. A prompt typed into Codex should be done by Codex: the person
+      // is sitting in front of it, it is signed in, and handing the work to
+      // some other process is the surprise this whole path exists to remove.
+      //
+      // The message is still posted first, and that ordering is the point:
+      // the room sees the work either way, and the thread follows it exactly
+      // as it would have. What changes is who picks it up, not whether
+      // anybody else can see it.
+      if (mine && deps.takeFiledTask !== undefined) {
+        const taken = await deps.takeFiledTask(taskId).catch(() => undefined);
+        if (taken !== undefined) {
+          return mcpText(
+            [
+              `Filed in #${posted.channelSlug} and taken by you, because it ` +
+                `was addressed to @${addressed.name}. Do it here.`,
+              "",
+              takenTaskBrief(taken),
+            ].join("\n"),
+          );
+        }
+        // Something else got there first, or this deployment cannot lease.
+        // Not an error: the task is real and filed, and saying where it went
+        // beats reporting a failure for work that started fine.
+        return mcpText(
+          `Sent to @${addressed.name} in #${posted.channelSlug}. Task ${taskId}. ` +
+            "Something else picked it up before you could; task_status follows it.",
+        );
+      }
       return mcpText(
         [
           `Sent to @${addressed.name} in #${posted.channelSlug}.`,
-          `Task ${posted.taskIds[0]}.`,
+          `Task ${taskId}.`,
           addressed.online
             ? "It is running on their machine now."
             : "Queued — it will start when their machine comes back.",

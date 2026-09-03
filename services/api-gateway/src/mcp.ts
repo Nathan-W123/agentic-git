@@ -52,24 +52,37 @@ const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
 
-/** What a tool hands back. Text only; no images, no embedded resources yet. */
+/**
+ * What a tool hands back.
+ *
+ * Every tool Kumi writes answers in text, and {@link mcpText} is how. The
+ * block type is not pinned to `"text"` because a proxied tool's answer is
+ * written by somebody else's server, which may legitimately return an image
+ * or an embedded resource, and relaying that unchanged is more honest than
+ * dropping it on the floor for not being a shape this file predicted.
+ */
 export interface McpToolResult {
-  readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }>;
+  readonly content: ReadonlyArray<
+    Readonly<{ type: string; text?: string; [key: string]: unknown }>
+  >;
   /** True when the tool ran and could not do what was asked. */
   readonly isError?: boolean;
 }
 
-/** One tool, as `tools/list` describes it and `tools/call` runs it. */
+/**
+ * One tool, as `tools/list` describes it and `tools/call` runs it.
+ *
+ * `inputSchema` is an open record rather than the exact shape Kumi's own
+ * tools use, for the same reason as above: a proxied tool carries the schema
+ * its own server published, and the far end is what validates against it. The
+ * tools in this repository still write the strict shape by hand, a few lines
+ * from where they read it.
+ */
 export interface McpTool {
   readonly name: string;
   readonly title: string;
   readonly description: string;
-  readonly inputSchema: {
-    readonly type: "object";
-    readonly properties: Readonly<Record<string, unknown>>;
-    readonly required?: readonly string[];
-    readonly additionalProperties: false;
-  };
+  readonly inputSchema: Readonly<Record<string, unknown>>;
   run(args: Readonly<Record<string, unknown>>): Promise<McpToolResult>;
 }
 

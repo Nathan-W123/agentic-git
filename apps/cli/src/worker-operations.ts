@@ -36,6 +36,11 @@ import {
 import { IntegrationService } from "@coord/integration-service";
 
 import {
+  extendEditorWork,
+  reportEditorWork,
+  takeEditorWork,
+} from "./editor-work.js";
+import {
   CLAIM_HEARTBEAT_INTERVAL_MS,
   askToDeliver,
   parseWorkingChanges,
@@ -303,7 +308,7 @@ export interface WorkResultAcceptance {
  */
 export const STALE_REASSESSMENT_BUDGET = 1;
 
-interface WorkResultServices {
+export interface WorkResultServices {
   repositories?: RepositoryService;
   integrations?: IntegrationService;
   /** Reads what a canonical advance changed, to decide whether it matters. */
@@ -417,6 +422,20 @@ async function trace(
   data: Readonly<Record<string, unknown>>,
 ): Promise<void> {
   await store.appendAudit(runId, { type, taskId, data });
+}
+
+/**
+ * The adapter a task's agent needs, or `undefined` when nothing constrains it.
+ *
+ * Exported under a longer name for `editor-work.ts`, which asks the identical
+ * question about an editor: an editor advertises exactly one vendor, and work
+ * for a different one must fall past it rather than be taken and failed.
+ */
+export function editorAdapterName(
+  project: CoordinatorProject | undefined,
+  task: SubmittedTask,
+): string | undefined {
+  return adapterName(project, task);
 }
 
 function adapterName(
@@ -3898,6 +3917,66 @@ export function workerOperations(
           admitting.delete(key);
         }
       }
+    },
+    editorWork: {
+      take: async (input: {
+        actorId: string;
+        organizationId: string;
+        projectId: string;
+        repositoryIds: readonly string[];
+        vendor: string;
+        label: string;
+        taskId?: string;
+      }) => {
+        const taken = await takeEditorWork(store, input, repositories, project);
+        return taken === undefined
+          ? undefined
+          : {
+              leaseId: taken.leaseId,
+              taskId: taken.task.id,
+              objective: taken.task.objective,
+              repositoryId: taken.task.repositoryId,
+              branch: taken.repository.branch,
+              baseRevision: taken.baseRevision,
+              baseVersion: taken.baseVersion,
+              expiresAt: taken.expiresAt,
+              // Flattened to the line somebody would type. The tool prints
+              // these for an agent to run, and a structured triple would have
+              // to be reassembled by a model that can only guess at quoting.
+              validationCommands: taken.task.validationCommands.map(
+                (command) =>
+                  [command.executable, ...command.args].join(" ").trim(),
+              ),
+            };
+      },
+      // Queued behind the same per-repository chain admission uses, and for
+      // the same reason: this path admits a plan too, and two of them
+      // deciding against the same executing set at once is exactly what that
+      // serialisation exists to prevent.
+      report: async (input: {
+        leaseId: string;
+        actorId: string;
+        status: "completed" | "failed" | "released";
+        patches: readonly FilePatch[];
+        summary: string;
+        detail?: string;
+      }) => {
+        const lease = await store.getWorkLease(input.leaseId);
+        const key = lease?.repositoryId ?? input.leaseId;
+        const run = async () =>
+          await reportEditorWork(store, input, services);
+        const queued = (admitting.get(key) ?? Promise.resolve()).then(run, run);
+        admitting.set(key, queued);
+        try {
+          return await queued;
+        } finally {
+          if (admitting.get(key) === queued) {
+            admitting.delete(key);
+          }
+        }
+      },
+      extend: async (input: { leaseId: string; ttlMs: number }) =>
+        await extendEditorWork(store, input),
     },
     acceptWorkResult: async (input: WorkResultInput) => {
       const existing = processing.get(input.leaseId);

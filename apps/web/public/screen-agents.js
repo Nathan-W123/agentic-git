@@ -232,7 +232,7 @@ export async function connectEditorToKumi(vendor, rerender) {
   try {
     // Named for the editor and the machine, so the tokens list is something a
     // person can actually revoke from rather than a column of identical rows.
-    const minted = await createEditorToken(`${label} on ${deviceLabel()}`);
+    const minted = await createEditorToken(`${label} on ${deviceLabel()}`, vendor);
     const written = await bridge.connectEditor(vendor, minted.token);
     outcome =
       written?.ok !== true
@@ -258,7 +258,7 @@ export async function connectEditorToKumi(vendor, rerender) {
         : `${label} was not connected`,
     subtitle:
       outcome.state === "connected"
-        ? `${label} can now file work into Kumi.`
+        ? `${label} can now file work into Kumi, and pick up work waiting for it.`
         : "Nothing was written, and nothing on your account changed.",
     body: `<p class="modal-hint">${esc(outcome.message)}</p>`,
     confirm: "Close",
@@ -375,9 +375,9 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
         mark: "link",
         title: "Connect tools",
         badge: "MCP",
-        note: `A separate thing, and it does not replace the CLI. Either send
-          work to Kumi from ${esc(label)}, or give Kumi's agents tools to use
-          while they work.`,
+        note: `A separate thing, and it does not replace the CLI. Either work
+          with Kumi from inside ${esc(label)}, or give Kumi's agents tools to
+          use while they work.`,
       })}
     </fieldset>`,
   }, "connectionKind");
@@ -406,7 +406,7 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
         checked: editorable,
         disabled: !editorable,
         mark: "send",
-        title: `Send work to Kumi from ${esc(label)}`,
+        title: `Work with Kumi from ${esc(label)}`,
         badge: `${esc(label)} → Kumi`,
         blocked: editorable
           ? undefined
@@ -415,8 +415,10 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
             : "Not supported yet",
         note: editorable
           ? `Type "have Kumi fix the login redirect" in ${esc(label)} and the
-             task is filed here, with a thread following it. Kumi writes the
-             config on this computer.`
+             task is filed here, with a thread following it. It can also pick
+             up work waiting for it and do it in the repository you already
+             have open, with no CLI installed. Kumi writes the config on this
+             computer.`
           : bridge?.connectEditor === undefined
             ? `This writes a file on the computer ${esc(label)} runs on, so it
                has to be set up from Kumi's desktop app rather than a browser.`
