@@ -426,11 +426,13 @@ test("loading, empty, error and dirty states all exist and say what they are", a
   );
 
   const list = definitionList([
-    { term: "Repository", value: "LATTICE" },
+    { term: "Repository", value: "Kumi" },
+    { term: "Identifier", value: "LATTICE", mono: true },
     { term: "Canonical branch", value: "main", mono: true },
   ]);
   assert.match(list, /<dt>Repository<\/dt>/u);
-  assert.match(list, /<dd>LATTICE<\/dd>/u);
+  assert.match(list, /<dd>Kumi<\/dd>/u);
+  assert.match(list, /class="st-deflist-mono">LATTICE/u);
   assert.match(list, /class="st-deflist-mono">main/u);
 });
 
@@ -623,6 +625,28 @@ test("project controls separates repository, policy and tokens", async () => {
   );
   // Repository is read-only facts, as a definition list.
   assert.match(app, /function repositoryDefinitionList\(\)[\s\S]{0,600}definitionList\(\[/u);
+
+  // And the first of those facts is what the workspace is *called*, resolved
+  // the way every other surface resolves it. Printing the raw id here is the
+  // bug this guards: a workspace renamed to Kumi still read LATTICE in its own
+  // settings. The handle keeps a row, because it is what addresses the routes
+  // and names the mirror — it just is not the name any more.
+  const repositoryFacts = app.slice(
+    app.indexOf("function repositoryDefinitionList() {"),
+    app.indexOf("function policyDraftFrom(policy) {"),
+  );
+  assert.match(
+    repositoryFacts,
+    /term: "Repository",[\s\S]{0,200}repositoryLabel\(repository\.id\)/u,
+  );
+  assert.doesNotMatch(
+    repositoryFacts,
+    /term: "Repository", value: repository\?\.id/u,
+  );
+  assert.match(
+    repositoryFacts,
+    /term: "Identifier", value: repository\?\.id \?\? "—", mono: true/u,
+  );
 
   // Approval settings are rows with semantic switches and explicit minutes.
   const policy = app.slice(

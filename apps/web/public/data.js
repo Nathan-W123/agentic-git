@@ -6231,6 +6231,10 @@ export async function renameRepository(repositoryId, name) {
     } else {
       repository.displayName = response?.repository?.displayName ?? trimmed;
     }
+    // The resolved name the gateway sends alongside it, kept in step for the
+    // same reason: a row left holding the name it had before the rename is
+    // worse than one holding no name at all.
+    repository.name = response?.repository?.name ?? repositoryLabel(repositoryId);
   }
   return response?.repository;
 }
@@ -6239,6 +6243,11 @@ export async function renameRepository(repositoryId, name) {
  * What to call a repository on screen: its display name once somebody has
  * renamed it, and its id — which is what every repository is called until
  * then — otherwise.
+ *
+ * The same resolution the gateway now ships as `name`, done here as well
+ * rather than read from there, because a rename is applied to this record
+ * optimistically and the local answer has to be right before the refetch
+ * lands.
  */
 export function repositoryLabel(repositoryId) {
   const repository = state.repositories.find((repo) => repo.id === repositoryId);

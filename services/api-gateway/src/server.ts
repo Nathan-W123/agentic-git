@@ -4715,8 +4715,29 @@ function narrowToRepositories<T extends { repositoryId?: string }>(
   );
 }
 
-
-
+/**
+ * A repository as the rest of the world reads it.
+ *
+ * `id` is the handle: it keys every row, names the mirror directory, and is
+ * what a caller addresses a route with, so it cannot become whatever somebody
+ * renamed the repository to. `displayName` is that rename, and absent means
+ * nobody has made one. Neither is a field a client can just print — every
+ * consumer had to know to prefer one and fall back to the other, and any that
+ * did not showed the handle to somebody who had renamed it precisely so they
+ * would stop seeing it.
+ *
+ * So the resolution happens once, here, and ships as `name`. Both fields stay
+ * exactly as they were for anything already reading them.
+ */
+function publicRepository<T extends { id: string; displayName?: string }>(
+  repository: T | undefined,
+): (T & { name: string }) | undefined {
+  if (repository === undefined) {
+    return undefined;
+  }
+  const named = (repository.displayName ?? "").trim();
+  return { ...repository, name: named === "" ? repository.id : named };
+}
 
 function publicInvitation(invitation: {
   id: string;
@@ -8527,10 +8548,10 @@ export class ApiGateway {
         // no others: this list is how the interface learns what exists, so
         // returning everything here would defeat the grant regardless of what
         // the per-repository routes enforce.
-        repositories:
-          repositories === undefined
-            ? all
-            : all.filter((entry) => repositories.has(entry.id)),
+        repositories: (repositories === undefined
+          ? all
+          : all.filter((entry) => repositories.has(entry.id))
+        ).map((entry) => publicRepository(entry)),
       });
       return;
     }
@@ -8568,7 +8589,7 @@ export class ApiGateway {
           actorId: principal.user.id,
         },
       });
-      this.sendJson(response, 201, { repository });
+      this.sendJson(response, 201, { repository: publicRepository(repository) });
       return;
     }
 
@@ -8624,7 +8645,7 @@ export class ApiGateway {
           actorId: principal.user.id,
         },
       });
-      this.sendJson(response, 201, { repository });
+      this.sendJson(response, 201, { repository: publicRepository(repository) });
       return;
     }
 
@@ -8869,7 +8890,7 @@ export class ApiGateway {
         },
       });
       const repository = await this.options.store.getRepository(repositoryId);
-      this.sendJson(response, 200, { repository });
+      this.sendJson(response, 200, { repository: publicRepository(repository) });
       return;
     }
 
@@ -8949,7 +8970,7 @@ export class ApiGateway {
         },
       });
       const repository = await this.options.store.getRepository(repositoryId);
-      this.sendJson(response, 200, { repository });
+      this.sendJson(response, 200, { repository: publicRepository(repository) });
       return;
     }
 
