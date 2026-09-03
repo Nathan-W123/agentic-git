@@ -8267,6 +8267,23 @@ export class ApiGateway {
             allowed.add(permission);
           }
         }
+        // Repository grants count too, and leaving them out made this refuse
+        // everybody it was meant to serve. A repository-scoped invitation
+        // grants that one repository and deliberately no organization
+        // membership — which is the whole point of scoping it — and the
+        // invitation route requires a repository, so in practice *every*
+        // person invited to a deployment arrives with grants and no
+        // memberships. Bounding a token by memberships alone therefore
+        // bounded it by nothing: a developer on the only repository they can
+        // see was told their role granted not even `view`, and could create
+        // no token at all.
+        for (const grant of await this.options.store
+          .listGrantsForUser(principal.user.id)
+          .catch((): [] => [])) {
+          for (const permission of permissionsForRole(grant.role)) {
+            allowed.add(permission);
+          }
+        }
       }
       const exceeded = requested.filter((scope) => !allowed.has(scope));
       if (exceeded.length > 0) {
