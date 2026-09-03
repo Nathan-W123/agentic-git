@@ -1041,7 +1041,10 @@ test("settings floats above the product routes", async () => {
   assert.deepEqual(parsed, ["chats", "notifications"]);
   assert.match(source, /state\.settingsOpen === true \? settingsDialog\(\) : ""/u);
   assert.match(source, /role="dialog"[\s\S]{0,80}aria-modal="true"/u);
-  assert.match(source, /data-act="settings-section"/u);
+  // The dialog shell stays in `app.js`; its sections are rendered by
+  // `screen-settings.js`, which is where this moved to.
+  const settingsScreen = await publicFile("screen-settings.js");
+  assert.match(settingsScreen, /data-act="settings-section"/u);
   // Code is read where it is discussed — files and diffs render inline in the
   // channel transcript — so neither it nor the coordinator is a page of its
   // own, and tasks still belong to the agent that owns them.
