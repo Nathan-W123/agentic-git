@@ -1067,15 +1067,32 @@ async function startRuntime(
       return { stub: true, projectId: input.projectId };
     },
     async leaseWork(input) {
-      const leased = await store.leaseNextTask({
-        workerId: input.workerId,
-        projectId: input.projectId,
-        baseRevision: "a".repeat(40),
-        ttlMs: 5 * 60 * 1000,
-        ...(input.repositoryId === undefined
-          ? {}
-          : { repositoryId: input.repositoryId }),
-      });
+      // The real `leaseWork` narrows its candidate list by `repositories`
+      // before it leases anything, so a fake that leased first and answered
+      // afterwards would test the gateway's backstop instead of the rule.
+      // Asking per allowed repository is the same narrowing the store's own
+      // clause can express.
+      const allowed =
+        input.repositories === undefined
+          ? [input.repositoryId]
+          : input.repositoryId === undefined
+            ? [...input.repositories]
+            : input.repositories.has(input.repositoryId)
+              ? [input.repositoryId]
+              : [];
+      let leased: Awaited<ReturnType<typeof store.leaseNextTask>>;
+      for (const repositoryId of allowed) {
+        leased = await store.leaseNextTask({
+          workerId: input.workerId,
+          projectId: input.projectId,
+          baseRevision: "a".repeat(40),
+          ttlMs: 5 * 60 * 1000,
+          ...(repositoryId === undefined ? {} : { repositoryId }),
+        });
+        if (leased !== undefined) {
+          break;
+        }
+      }
       if (leased === undefined) {
         return undefined;
       }
@@ -1952,6 +1969,165 @@ async function bearer(
     data: text.length === 0 ? undefined : JSON.parse(text),
   };
 }
+
+test("somebody invited to one repository can run a worker, and only on that repository", async (t) => {
+  // The whole local-execution premise depends on this: agents run on the
+  // machines of the people who own them. A collaborator invited to a single
+  // repository owns a machine like anybody else, but `POST /workers/register`
+  // authorized through memberships alone, so their worker was refused on its
+  // very first call — "You do not have permission to perform this action" in
+  // a log file, over and over, every few minutes. Nothing they could do about
+  // it and nothing anywhere saying what was wrong. Their agent then read as
+  // permanently offline in every channel, which looked like a second,
+  // unrelated bug.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const shared = await invitableRepository(owner, "fleet-shared");
+  const private_ = await invitableRepository(owner, "fleet-private");
+
+  const guest = await runtime.store.createUser({
+    email: "fleet-guest@example.com",
+    displayName: "Guest",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: shared,
+    userId: guest.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    comped: false,
+    createdAt: new Date().toISOString(),
+  });
+
+  const guestClient = new TestClient(runtime.origin);
+  await guestClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: guest.email, password: PASSWORD },
+  });
+  // Minted from the grant, which is the fix one layer down: the token route
+  // reads grants too, so a collaborator can carry `run_task` at all.
+  const minted = await guestClient.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "guest machine", scopes: ["view", "run_task"] },
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.data.token as string;
+
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "guest-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(registered.status, 201);
+  const workerId = registered.data.id as string;
+
+  // Work in the repository they were actually given.
+  const mine = await runtime.store.submitTask({
+    repositoryId: shared,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "fix the login redirect",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
+  });
+  assert.equal(leased.status, 200);
+  assert.equal(leased.data.task.id, mine.id);
+
+  // And work in a repository beside it, which they were not. Admitting the
+  // worker must not have widened what it may be handed: the grant covers one
+  // repository, and a lease is an arbitrary agent run on this person's own
+  // laptop against their own vendor subscription. 204, the same answer an
+  // empty queue gives, because from where they stand the queue is empty.
+  await runtime.store.submitTask({
+    repositoryId: private_,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rotate the signing key",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  const withheld = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    { method: "POST", body: { workerId, projectId: DEFAULT_PROJECT_ID } },
+  );
+  assert.equal(withheld.status, 204);
+
+  // The fleet is the company's, not theirs. They see the machine they run —
+  // that is how anybody knows whether their own agent will answer — and not
+  // how much infrastructure the organization operates.
+  const ownerWorker = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    (
+      await owner.request("/api/v1/auth/tokens", {
+        method: "POST",
+        body: { name: "owner machine", scopes: ["view", "run_task"] },
+      })
+    ).data.token as string,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "owner-desktop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(ownerWorker.status, 201);
+
+  const fleet = await bearer(
+    runtime.origin,
+    `/api/v1/workers?organizationId=${DEFAULT_ORGANIZATION_ID}`,
+    token,
+  );
+  assert.equal(fleet.status, 200);
+  assert.deepEqual(
+    (fleet.data.workers as { name: string }[]).map((worker) => worker.name),
+    ["guest-laptop"],
+  );
+
+  // A stranger holding neither a membership nor a grant is refused exactly as
+  // before. Widening this to grants must not have widened it to everybody.
+  const stranger = await runtime.store.createUser({
+    email: "fleet-stranger@example.com",
+    displayName: "Stranger",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const strangerClient = new TestClient(runtime.origin);
+  await strangerClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: stranger.email, password: PASSWORD },
+  });
+  const refused = await strangerClient.request("/api/v1/workers/register", {
+    method: "POST",
+    body: {
+      organizationId: DEFAULT_ORGANIZATION_ID,
+      name: "stranger-laptop",
+      adapters: ["codex"],
+      version: "1.0.0",
+    },
+  });
+  assert.equal(refused.status, 403);
+  // And refused in words, because a worker log is the only place this is ever
+  // read. "You do not have permission to perform this action", alone in a
+  // file, is what sent two people hunting through networks and reinstalls.
+  assert.match(String(refused.data.error?.message), /invite you to it/u);
+});
 
 test("a token may mint a narrower one, which dies with it", async (t) => {
   // The desktop app authenticates with a token, so the rule that only a

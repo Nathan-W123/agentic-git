@@ -488,6 +488,21 @@ export async function leaseWork(
     workerId: string;
     projectId: string;
     repositoryId?: string;
+    /**
+     * The only repositories this caller may be handed work from.
+     *
+     * Absent means "no limit", which is what an organization member gets.
+     * Present means the caller reaches this project through repository
+     * grants and holds precisely these — someone invited to one repository,
+     * running a worker on their own machine. Without it, a grant on one
+     * repository would be a licence to execute tasks from every other
+     * repository in the same project, on their laptop, with their
+     * credentials, which is the opposite of what granting one repository
+     * means.
+     *
+     * An empty set is therefore honoured as "nothing", not read as absent.
+     */
+    repositories?: ReadonlySet<string>;
     /** Test override; deployments configure COORD_REPOSITORY_PARALLELISM. */
     repositoryParallelism?: number;
     /**
@@ -597,6 +612,16 @@ export async function leaseWork(
     )
   ).flat();
 
+  // Applied after listing rather than pushed into the query, because the
+  // store's filter takes one repository and this is a set. A worker asking
+  // for a specific `repositoryId` it does not hold falls out here too, which
+  // is the point: the id on the request is a preference the worker states,
+  // never a permission it asserts.
+  const reachable =
+    input.repositories === undefined
+      ? pending
+      : pending.filter((task) => input.repositories?.has(task.repositoryId));
+
   // Tasks known to be waiting on someone else go to the back of the queue.
   //
   // Planning is the expensive half of a lease and it happens before the
@@ -612,10 +637,10 @@ export async function leaseWork(
   // starved by it, only postponed behind work that can actually run.
   const waiting = legacyAdmissionLoop()
     ? new Set<TaskId>()
-    : await tasksWaitingOnActiveWork(store, pending);
+    : await tasksWaitingOnActiveWork(store, reachable);
   const ordered = [
-    ...pending.filter((task) => !waiting.has(task.id)),
-    ...pending.filter((task) => waiting.has(task.id)),
+    ...reachable.filter((task) => !waiting.has(task.id)),
+    ...reachable.filter((task) => waiting.has(task.id)),
   ];
 
   // Try every compatible candidate rather than only the first: another
@@ -3736,6 +3761,7 @@ export function workerOperations(
       workerId: string;
       projectId: string;
       repositoryId?: string;
+      repositories?: ReadonlySet<string>;
       kinds?: readonly TaskKind[];
       protocolVersion?: number;
     }) =>

@@ -124,6 +124,7 @@ import {
 } from "@coord/local-triage";
 import {
   authorizeOrganization,
+  authorizeOrganizationOrGrant,
   authorizeProject,
   authorizeRepository,
   canAssignRole,
@@ -4001,6 +4002,12 @@ export interface ApiOperations {
     projectId: string;
     actorId: string;
     repositoryId?: string;
+    /**
+     * The only repositories this caller may be handed work from, when the
+     * caller reaches the project through repository grants rather than an
+     * organization role. Absent means every repository in the project.
+     */
+    repositories?: ReadonlySet<string>;
     /** What this worker can execute. Absent means work alone. */
     kinds?: readonly ("task" | "question")[];
     /**
@@ -7483,16 +7490,49 @@ export class ApiGateway {
         stringField(body["organizationId"], "organizationId", { max: 120 }) ??
         "";
       // The tenant is decided here, once, and every later read of this worker
-      // is filtered by it. `authorizeOrganization` is what enforces it: it
-      // rejects a token bound elsewhere before consulting the caller's role,
-      // so a credential confined to one organization cannot enrol a worker
-      // into another even if its owner is a member of both.
-      await authorizeOrganization(
+      // is filtered by it. `authorizeOrganizationOrGrant` is what enforces it:
+      // it rejects a token bound elsewhere before consulting the caller's
+      // role, so a credential confined to one organization cannot enrol a
+      // worker into another even if its owner is a member of both.
+      //
+      // Grants count, and they have to. Somebody invited to one repository
+      // has no organization membership at all, so the membership-only check
+      // this used to make refused them outright: install the app, sign in,
+      // and be told "You do not have permission to perform this action" by
+      // the first call the worker ever makes. Their machine never registered,
+      // so it never appeared online, so their agent was unmentionable —
+      // "nothing is running it yet" — with nothing anywhere saying why.
+      //
+      // Nothing is widened by admitting them: what the worker may then be
+      // *handed* is decided per lease by `authorizeProject`, which narrows to
+      // the repositories the grant actually covers.
+      await authorizeOrganizationOrGrant(
         this.options.store,
         principal,
         organizationId,
         "run_task",
-      );
+      ).catch((error: unknown) => {
+        // Said properly, because of where it is read. This is the first call
+        // a worker ever makes and the only place its failure appears is a
+        // log file on somebody's own machine, with no page around it to
+        // explain anything. The generic "You do not have permission to
+        // perform this action" sent two people hunting through networks,
+        // reinstalls and vendor logins for a problem that was an unfinished
+        // invitation.
+        if (
+          error instanceof AuthenticationError &&
+          error.code === "forbidden"
+        ) {
+          throw new HttpError(
+            403,
+            "forbidden",
+            "This account cannot run agents in that workspace. Ask an " +
+              "administrator to invite you to it, or to a repository in it, " +
+              "as a developer or above — view-only access cannot run work.",
+          );
+        }
+        throw error;
+      });
       const adapters = body["adapters"];
       if (
         !Array.isArray(adapters) ||
@@ -7524,8 +7564,14 @@ export class ApiGateway {
       // The organization is required rather than defaulted. These are counts,
       // but a platform-wide count still reports how busy other tenants are,
       // which is not this caller's to know.
-      const { organizationId } = await this.authorizeFleet(principal, url);
-      const { workers, active } = await this.organizationFleet(organizationId);
+      const { organizationId, wholeFleet } = await this.authorizeFleet(
+        principal,
+        url,
+      );
+      const { workers, active } = await this.organizationFleet(
+        organizationId,
+        wholeFleet ? undefined : principal.user.id,
+      );
       const byWorker = new Map<string, number>();
       for (const lease of active) {
         byWorker.set(lease.workerId, (byWorker.get(lease.workerId) ?? 0) + 1);
@@ -7544,8 +7590,20 @@ export class ApiGateway {
       // the tenant boundary — not the registering user — is what makes that
       // safe: `authorizeFleet` requires membership of the organization being
       // asked about, and the store filters on the same id.
-      const { organizationId } = await this.authorizeFleet(principal, url);
-      const { workers, active } = await this.organizationFleet(organizationId);
+      //
+      // Except for somebody who reaches this organization only through a
+      // repository grant. They are not on the team; they were handed one
+      // repository. They still need to see their own machine — that is how
+      // anybody knows whether their agent will answer — so they get exactly
+      // that and no more.
+      const { organizationId, wholeFleet } = await this.authorizeFleet(
+        principal,
+        url,
+      );
+      const { workers, active } = await this.organizationFleet(
+        organizationId,
+        wholeFleet ? undefined : principal.user.id,
+      );
       const leasesByWorker = new Map<string, typeof active>();
       for (const lease of active) {
         const bucket = leasesByWorker.get(lease.workerId) ?? [];
@@ -7580,7 +7638,14 @@ export class ApiGateway {
       }
       const projectId =
         stringField(body["projectId"], "projectId", { max: 120 }) ?? "";
-      const { project } = await authorizeProject(
+      // `repositories` is not decoration. A collaborator invited to one
+      // repository has no organization role, reaches this project through
+      // that grant alone, and `authorizeProject` folds every grant they hold
+      // here into one role to answer "can they reach the project at all".
+      // That answer must not become "and may therefore run anything in it":
+      // the narrowing is passed down to the lease, which is the only place
+      // that decides what a machine is handed.
+      const { project, repositories } = await authorizeProject(
         this.options.store,
         principal,
         projectId,
@@ -7645,6 +7710,7 @@ export class ApiGateway {
         projectId,
         actorId: principal.user.id,
         ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(repositories === undefined ? {} : { repositories }),
         ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
         ...(protocolVersion === undefined ? {} : { protocolVersion }),
       });
@@ -7654,6 +7720,13 @@ export class ApiGateway {
         response.writeHead(204).end();
         return;
       }
+      // Checked again on the way out, against the same two bounds the
+      // request was authorized on. `leaseWork` is an operation a deployment
+      // supplies, and an authorization that only holds because one
+      // implementation remembered to apply it is not an authorization. The
+      // repository half matters most: it is the only thing standing between a
+      // grant on one repository and an agent run from the repository beside
+      // it, on this person's laptop, with their vendor login.
       if (
         assignment.task.projectId !== projectId ||
         assignment.lease.projectId !== projectId
@@ -7668,6 +7741,22 @@ export class ApiGateway {
           500,
           "invalid_assignment",
           "Worker assignment escaped its authorized project",
+        );
+      }
+      if (
+        repositories !== undefined &&
+        !repositories.has(assignment.task.repositoryId)
+      ) {
+        await this.options.store.finishWorkLease(
+          assignment.lease.id,
+          "released",
+          new Date().toISOString(),
+          "control-plane repository mismatch",
+        );
+        throw new HttpError(
+          500,
+          "invalid_assignment",
+          "Worker assignment escaped its authorized repositories",
         );
       }
       this.sendJson(response, 200, assignment);
@@ -15338,7 +15427,7 @@ export class ApiGateway {
   private async authorizeFleet(
     principal: AuthenticatedPrincipal,
     url: URL,
-  ): Promise<{ organizationId: string }> {
+  ): Promise<{ organizationId: string; wholeFleet: boolean }> {
     const organizationId = url.searchParams.get("organizationId")?.trim() ?? "";
     if (organizationId.length === 0) {
       throw new HttpError(
@@ -15347,13 +15436,19 @@ export class ApiGateway {
         "organizationId is required",
       );
     }
-    await authorizeOrganization(
+    // Grants count for reaching the fleet at all, because somebody invited to
+    // one repository does run a machine here and has to be able to see
+    // whether it is online. What they see is another question: `wholeFleet`
+    // is false for them, and the routes below show them their own machines
+    // rather than the whole company's. Being handed one repository is not
+    // being told how much infrastructure the organization operates.
+    const { repositories } = await authorizeOrganizationOrGrant(
       this.options.store,
       principal,
       organizationId,
       "view",
     );
-    return { organizationId };
+    return { organizationId, wholeFleet: repositories === undefined };
   }
 
   /**
@@ -15791,11 +15886,28 @@ export class ApiGateway {
     return vendor === undefined ? true : advertised.has(vendor);
   }
 
-  private async organizationFleet(organizationId: string): Promise<{
+  private async organizationFleet(
+    organizationId: string,
+    /**
+     * Narrows the answer to one person's own machines.
+     *
+     * Passed for a caller who reaches this organization through a repository
+     * grant rather than a membership. Applied to the workers, which then
+     * narrows the leases with them, since a lease is only ever reported
+     * against a worker in the list.
+     */
+    onlyUserId?: string,
+  ): Promise<{
     workers: WorkerRecord[];
     active: WorkLease[];
   }> {
-    const workers = await this.options.store.listWorkers({ organizationId });
+    const everyWorker = await this.options.store.listWorkers({
+      organizationId,
+    });
+    const workers =
+      onlyUserId === undefined
+        ? everyWorker
+        : everyWorker.filter((worker) => worker.userId === onlyUserId);
     const owned = new Set(workers.map((worker) => worker.id));
     const visibleProjects = new Set(
       (await this.options.store.listProjects(organizationId)).map(
