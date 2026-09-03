@@ -1189,14 +1189,25 @@ test("connecting an agent asks which of the three connections is meant", async (
     return agents.slice(start, end);
   };
   const flow = between("connectProviderSomehow", "chooseFrom");
-  assert.match(flow, /Run agents on this computer/u);
-  assert.match(flow, /Connect tools with MCP/u);
+  // Each option names its own mechanism, because "connect" alone is what was
+  // ambiguous in the first place — somebody choosing the CLI and being shown a
+  // terminal sign-in should not be surprised by it.
+  assert.match(flow, /CLI — run agents on this computer/u);
+  assert.match(flow, /MCP — connect tools/u);
+  assert.match(flow, /Nothing to do with MCP/u);
   // The two MCP directions are a second question, not two more items in the
   // first list: they are the same thing pointing opposite ways.
   assert.match(flow, /Ask Kumi for work from/u);
   assert.match(flow, /Give Kumi's agents tools/u);
   assert.match(flow, /connectAgent\(providerId, rerender\)/u);
   assert.match(flow, /connectEditorToKumi\(vendor, rerender\)/u);
+  // The tools direction has to actually go somewhere. `#/settings/mcp-servers`
+  // was not a route, so the one branch whose entire job is to take somebody
+  // to a screen did nothing at all — indistinguishable from choosing nothing.
+  // Navigation is handed in rather than imported, because the shell imports
+  // this module and reaching back would be a cycle.
+  assert.match(flow, /goToSettings\?\.\("project-controls", "mcp-servers"\)/u);
+  assert.doesNotMatch(flow, /location\.hash/u);
 
   // Offered only where it can work: the editor half writes a file on the
   // machine the editor runs on, which a browser cannot do.
@@ -1206,8 +1217,8 @@ test("connecting an agent asks which of the three connections is meant", async (
   // so does the Connect button on the agents screen — the flow was reachable
   // only from a channel's plus menu when that button went straight to the
   // CLI path, which is not where anybody was looking.
-  assert.match(agents, /await connectProviderSomehow\(providerId, rerender\)/u);
-  assert.match(app, /case "agent-connect":[\s\S]{0,400}connectProviderSomehow\(value, render\)/u);
+  assert.match(agents, /await connectProviderSomehow\(providerId, rerender, goToSettings\)/u);
+  assert.match(app, /case "agent-connect":[\s\S]{0,400}connectProviderSomehow\(value, render, openSettingsSearchResult\)/u);
   assert.doesNotMatch(
     app,
     /case "agent-connect":[\s\S]{0,400}connectAgent\(value, render\)/u,
@@ -1250,6 +1261,12 @@ test("a viewer can still connect an editor, read-only, and is told so", async ()
     agents.indexOf("function deviceLabel"),
   );
   assert.match(connect, /minted\.readOnly/u);
+  // And every outcome is said where the person is standing. The row it also
+  // writes is on the Settings screen, and this is reached from the agents
+  // screen and from a channel menu — so writing only to the row meant the
+  // dialog closing and nothing being reported anywhere they were looking.
+  assert.match(connect, /toast\([\s\S]{0,80}"ok"\)/u);
+  assert.equal((connect.match(/toast\(/gu) ?? []).length >= 3, true, "every outcome should say so");
   assert.match(connect, /read-only/u);
   assert.match(connect, /developer access/u);
 });
@@ -2692,7 +2709,7 @@ test("adding another agent always begins with a provider choice", async () => {
   assert.match(agents, /await connectAgent\(providerId, rerender\)/u);
   assert.match(
     app,
-    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render\);/u,
+    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render, openSettingsSearchResult\);/u,
   );
 
   // A connection belongs to this account. A host CLI login (`connected`) is
