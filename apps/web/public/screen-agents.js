@@ -120,7 +120,7 @@ export async function startAddAgentFlow(rerender, goToSettings) {
       await loadProviders();
     }
   } catch (error) {
-    toast(`Could not load available agents — ${error.message}`, "error");
+    toast(`Could not load available agents. ${error.message}`, "error");
     return;
   }
 
@@ -211,13 +211,14 @@ export async function startAddAgentFlow(rerender, goToSettings) {
  *
  * Three steps that used to be a person's job: mint a token scoped to filing
  * work and nothing else, have the app write that editor's own config file,
- * and say what is left. The token is never shown, because nobody has to
- * carry it anywhere — which is also why it cannot be pasted with its angle
- * brackets on, or without the word Bearer, or into the wrong scope.
+ * and say what is left. The token is never shown, because nobody has to carry
+ * it anywhere, which is also why it cannot be pasted with its angle brackets
+ * on, or without the word Bearer, or into the wrong scope.
  *
- * Failures land in the row rather than in a toast that scrolls away, since
- * the row is where somebody will look next time they wonder whether it
- * worked.
+ * The outcome is a dialog somebody closes, not a toast. What it says is the
+ * one instruction that decides whether the connection works, and a message
+ * that clears itself after six seconds is the wrong carrier for it: the
+ * Codex advice below was missed exactly that way.
  */
 export async function connectEditorToKumi(vendor, rerender) {
   const bridge = window.KUMI_INSTALL;
@@ -225,64 +226,88 @@ export async function connectEditorToKumi(vendor, rerender) {
     return;
   }
   const label = VENDOR_LABEL[vendor] ?? vendor;
-  state.editorConnected = { ...state.editorConnected, [vendor]: "Connecting…" };
+  rememberEditor(vendor, "connecting", "Connecting");
   rerender();
+  let outcome;
   try {
     // Named for the editor and the machine, so the tokens list is something a
     // person can actually revoke from rather than a column of identical rows.
     const minted = await createEditorToken(`${label} on ${deviceLabel()}`);
     const written = await bridge.connectEditor(vendor, minted.token);
-    if (written?.ok !== true) {
-      const why = `Could not connect ${label}: ${written?.detail ?? "unknown error"}`;
-      state.editorConnected = { ...state.editorConnected, [vendor]: why };
-      // Said where the person is standing. The row below is on the Settings
-      // screen, and this is reached from the agents screen and from a
-      // channel's menu — so writing only to the row meant pressing Connect,
-      // watching the dialog close, and being told the outcome on a page
-      // nobody had opened.
-      toast(why, "error");
-      rerender();
-      return;
-    }
-    state.editorConnected = {
-      ...state.editorConnected,
-      [vendor]:
-        // Said first, because it changes what the connection can do. A
-        // viewer's editor can read the roster and follow a task and cannot
-        // file one, and finding that out by being refused mid-sentence is
-        // worse than being told now.
-        (minted.readOnly
-          ? "Connected read-only — your role cannot submit tasks, so this " +
-            "editor can follow work but not file it. An owner can grant you " +
-            "developer access. "
-          : "") +
-        (written.manual !== undefined
-          ? // Codex off Windows: the file is written and the variable is not,
-            // because a shell profile is the person's own file. Saying so
-            // beats reporting a job that is only half done.
-            `Config written. Add this to your shell, then reopen ${label}: ${written.manual}`
-          : vendor === "codex"
-            ? // Codex is the one vendor that reads its token from the
-              // environment rather than its config, and "restart Codex" is
-              // wrong advice for half of the people who will read it. The
-              // Store app is not restarted by closing its window: Windows
-              // suspends it and resumes the same process, still holding the
-              // environment it was launched with, so it never sees a variable
-              // set after that. The CLI in a fresh terminal sees it at once,
-              // which is exactly how this presents — working in one Codex and
-              // not the other.
-              `Connected. A new terminal will see it straight away. For the ` +
-              `Codex app, end it in Task Manager first — closing its window ` +
-              `only suspends it, so it keeps the environment it started with.`
-            : `Connected. Restart ${label} and ask it to have Kumi do something.`),
-    };
-    toast(state.editorConnected[vendor], "ok");
+    outcome =
+      written?.ok !== true
+        ? {
+            state: "failed",
+            message: `Could not connect ${label}. ${
+              written?.detail ?? "The app gave no reason."
+            }`,
+          }
+        : { state: "connected", message: editorNextStep(vendor, label, written, minted) };
   } catch (error) {
-    const why = `Could not connect ${label}: ${error.message}`;
-    state.editorConnected = { ...state.editorConnected, [vendor]: why };
-    toast(why, "error");
+    outcome = {
+      state: "failed",
+      message: `Could not connect ${label}. ${error.message}`,
+    };
   }
+  rememberEditor(vendor, outcome.state, outcome.message);
   rerender();
+  await showModal({
+    title:
+      outcome.state === "connected"
+        ? `${label} is connected`
+        : `${label} was not connected`,
+    subtitle:
+      outcome.state === "connected"
+        ? `${label} can now file work into Kumi.`
+        : "Nothing was written, and nothing on your account changed.",
+    body: `<p class="modal-hint">${esc(outcome.message)}</p>`,
+    confirm: "Close",
+    cancel: "",
+  });
+}
+
+/** Remembers what happened to one editor, for the rows that report it. */
+function rememberEditor(vendor, connectionState, message) {
+  state.editorConnected = {
+    ...state.editorConnected,
+    [vendor]: { state: connectionState, message },
+  };
+}
+
+/**
+ * What is left to do after the config is written, per editor.
+ *
+ * Only Codex gets the advice about the environment, and only Codex should:
+ * it is the one vendor that reads its token from a variable rather than from
+ * the file just written, so it is the one vendor where writing the file is
+ * not the end of the job. Telling somebody with Claude or Cursor to restart
+ * their computer is asking for a reboot that changes nothing.
+ */
+function editorNextStep(vendor, label, written, minted) {
+  // Said first, because it changes what the connection can do. A viewer's
+  // editor can read the roster and follow a task and cannot file one, and
+  // finding that out by being refused mid-sentence is worse than being told
+  // now.
+  const scope = minted.readOnly
+    ? "Connected read only. Your role cannot submit tasks, so this editor " +
+      "can follow work but not file it. An owner can grant you " +
+      "developer access. "
+    : "";
+  if (written.manual !== undefined) {
+    // Codex away from Windows: the file is written and the variable is not,
+    // because a shell profile is the person's own file. Saying so beats
+    // reporting a job that is only half done.
+    return `${scope}Config written. Add this line to your shell, then reopen ${label}: ${written.manual}`;
+  }
+  if (vendor === "codex") {
+    // Codex reads its token from the environment, and a running program keeps
+    // the environment it started with. Restarting the computer is the one
+    // instruction that is true for both the Codex app and every terminal;
+    // "close Codex" is not, because the Store build only suspends when its
+    // window closes and resumes holding the same environment.
+    return `${scope}Connected. Codex reads its token from your account's environment, and a program that is already running keeps the environment it started with. Restart your computer, then ask Codex to have Kumi do something.`;
+  }
+  return `${scope}Connected. Restart ${label}, then ask it to have Kumi do something.`;
 }
 
 /** This computer, as the tokens list should name it. */
@@ -404,9 +429,9 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
         mark: "wand",
         title: "Give Kumi's agents tools",
         badge: `Kumi → tools`,
-        note: `Approve a server — documentation, issues, a browser — and every
-          agent working on this repository can use it. Approving is recorded,
-          and each teammate's computer asks before running anything.`,
+        note: `Approve a server (documentation, issues, a browser) and every agent
+          working on this repository can use it. Approving is recorded, and
+          each teammate's computer asks before running anything.`,
       })}
     </fieldset>`,
   }, "mcpDirection");
@@ -425,7 +450,16 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
   // branch of this flow whose whole job is to take somebody somewhere, so
   // choosing it looked exactly like choosing nothing. `project-controls` is
   // the section that actually holds the card.
-  toast("Approve a server here, then it reaches every agent on this repository", "ok");
+  await showModal({
+    title: "Approve a tool server",
+    subtitle:
+      "Kumi is opening the place these are kept, in this project's settings.",
+    body: `<p class="modal-hint">Approve a server there and every agent working
+      on this repository can use it. Approving is recorded against you, and
+      each teammate's computer asks before it runs anything.</p>`,
+    confirm: "Close",
+    cancel: "",
+  });
   // Handed in rather than imported: the shell imports this module, so
   // reaching back into it would be a cycle. The caller owns navigation
   // anyway — this one owns the decision.
@@ -601,7 +635,7 @@ export async function installVendorCli(vendor, rerender) {
       `One thing left: sign in. Kumi uses this machine's own ${esc(vendor)} ` +
       "login, so it has to be done here, once.",
     body: `<p class="modal-hint">This opens a terminal already running
-      <code>${esc(plan.signIn)}</code>. Follow its sign-in, then come back —
+      <code>${esc(plan.signIn)}</code>. Follow its sign-in, then come back.
       Kumi picks it up on its own.</p>`,
     confirm: "Open the sign-in",
     cancel: "Later",
@@ -621,73 +655,219 @@ export async function installVendorCli(vendor, rerender) {
 /**
  * Connecting an agent where the machine, not the server, will run it.
  *
- * One sign-in: the CLI's own, which is the one that decides whether anything
- * works. The agent record is created first so it exists even if somebody
- * closes the installer — an agent that is there and grey is honest, and the
- * prompt on its first mention will offer the same setup again.
+ * Nothing is created until the machine has answered. This used to run the
+ * other way round — `createLocalAgent` first, so the agent and its call sign
+ * existed before a single question had been put to the computer, and the
+ * failure arrived afterwards as a toast: "Eris is yours, but Codex is not
+ * installed on this machine yet." Somebody was left holding a named agent, in
+ * every channel, that could not run, and the only thing that had ever said so
+ * was six seconds of a message in a corner.
+ *
+ * The argument for the old order was that an agent which is there and grey is
+ * honest. It is not: it is @mentionable, it is on every roster, and the first
+ * anybody else learns of the gap is a task that goes nowhere.
+ *
+ * So the order is: ask the machine, fix what is fixable, and only then coin
+ * the agent and its name. Every way out before that point leaves the account
+ * exactly as it was.
  */
 async function connectLocalAgent(providerId, rerender) {
+  const label = agentLabelOf(providerId);
   state.providerConnecting?.add(providerId);
   rerender();
+  let verdict;
+  try {
+    verdict = await verifyMachineFor(providerId, rerender);
+  } finally {
+    state.providerConnecting?.delete(providerId);
+    rerender();
+  }
+  if (verdict !== "ready") {
+    // Refused, and said in a dialog rather than a toast. This is the end of
+    // the flow somebody started, the reason is something they have to act on,
+    // and a message that clears itself in six seconds is the wrong carrier for
+    // the one sentence that explains why they have no agent.
+    await showModal({
+      title: `${label} was not connected`,
+      subtitle: REFUSAL[verdict]?.subtitle ?? "This machine could not be checked.",
+      body: `<p class="modal-hint">${REFUSAL[verdict]?.body ?? ""}</p>`,
+      confirm: "Close",
+      cancel: "",
+    });
+    return false;
+  }
+
   let agent;
   try {
     agent = await createLocalAgent(providerId);
   } catch (error) {
-    toast(
-      `Could not create the ${agentLabelOf(providerId)} agent — ${error.message}`,
-      "error",
-    );
+    toast(`Could not create the ${label} agent. ${error.message}`, "error");
     return false;
-  } finally {
-    state.providerConnecting?.delete(providerId);
   }
   await loadProviders();
-  // Drawn before the machine is touched, so the agent and its name are on
-  // screen while an install runs — that can take a minute, and a blank wait
-  // after pressing Connect reads as nothing having happened.
   rerender();
-
-  // The machine, *before* anything claims this worked.
-  //
-  // This used to run last, after a toast saying the agent was yours. So the
-  // success message was written before a single question had been asked of the
-  // machine, and it was the same message whether the CLI was installed and
-  // signed in or whether nothing on the computer could run the agent at all.
-  // Somebody connected three agents that way and was told three times that it
-  // had worked.
-  const ready = await finishLocalSetup(providerId, rerender);
-
   const failedRepositories = await addAgentToAllRepositories(providerId);
-  const name = agent?.callSign ?? agentLabelOf(providerId);
-  const vendor = PROVIDER_VENDOR[providerId] ?? agentLabelOf(providerId);
-  // One message, saying which of the things that had to happen actually did.
-  // The agent exists either way — that part is done and is worth saying, so
-  // nobody presses Connect again on an agent they already have.
-  const outcome =
-    failedRepositories.length > 0
-      ? {
-          text: `${name} is yours, but could not be added to every repository`,
-          tone: "error",
-        }
-      : ready === "ready"
-        ? { text: `${name} is yours`, tone: "ok" }
-        : ready === "missing"
-          ? {
-              text: `${name} is yours, but ${vendor} is not installed on this machine yet — it cannot run until it is`,
-              tone: "error",
-            }
-          : ready === "no-machine"
-            ? {
-                text: `${name} is yours. Open the Kumi app on the machine that will run it to finish setting it up`,
-                tone: "error",
-              }
-            : {
-                text: `${name} is yours, but this machine could not be checked — use Check the CLI on its row`,
-                tone: "error",
-              };
-  toast(outcome.text, outcome.tone);
+  const name = agent?.callSign ?? label;
+  toast(
+    failedRepositories.length === 0
+      ? `${name} is yours, and this machine can run it`
+      : `${name} is yours, but could not be added to every repository`,
+    failedRepositories.length === 0 ? "ok" : "error",
+  );
   rerender();
   return true;
+}
+
+/**
+ * Why an agent was not created, in words somebody can act on.
+ *
+ * One entry per verdict `verifyMachineFor` can return, so a state added there
+ * without a sentence here is visible immediately rather than surfacing as an
+ * empty dialog.
+ */
+const REFUSAL = {
+  "no-app": {
+    subtitle: "Kumi could not check this computer.",
+    repair: `Agents run on your own machine, so only the machine can say
+      whether this one is set up. Open Kumi's desktop app on the computer that
+      runs this agent.`,
+    body: `Agents run on your own machine, so Kumi has to see the CLI before it
+      creates one. Open Kumi's desktop app on the computer that will run this
+      agent and connect it there. Nothing was created here.`,
+  },
+  missing: {
+    subtitle: "The CLI is not installed on this machine.",
+    repair: `This agent cannot run until it is installed. Press Check the CLI
+      again and Kumi will offer to install it for you.`,
+    body: `An agent without its CLI cannot run, so none was created. Install it
+      and press Connect again. Kumi can do the install for you from the same
+      button.`,
+  },
+  "signed-out": {
+    subtitle: "The CLI is installed, but nobody is signed in to it.",
+    repair: `Kumi runs it under this machine's own login, so the sign-in has to
+      happen here. This agent stays where it is and starts working the moment
+      the login is live.`,
+    body: `Kumi runs it under this machine's own login, so the sign-in has to
+      happen here. Finish it and press Connect again. No agent was created, and
+      nothing on your account changed.`,
+  },
+  unknown: {
+    subtitle: "This machine could not be asked.",
+    repair: `The check did not complete, so this is not an answer about the
+      agent. Try again, and if it keeps happening restart the Kumi app.`,
+    body: `The check did not complete, so Kumi will not claim an agent works
+      when it has not established that it does. Try again, and if it keeps
+      happening restart the Kumi app.`,
+  },
+};
+
+/**
+ * What this machine can say about running one agent, before anything is made.
+ *
+ * Returns `"ready"` or the reason it is not. The install and the sign-in are
+ * offered along the way, because they are the whole remaining setup and the
+ * person is already standing here — but neither is *assumed* to have worked.
+ * Each is re-asked afterwards, since reporting a success because a remedy was
+ * offered is the same mistake this ordering exists to fix.
+ */
+async function verifyMachineFor(providerId, rerender) {
+  const bridge = window.KUMI_INSTALL;
+  const vendor = PROVIDER_VENDOR[providerId];
+  if (bridge?.detected === undefined || vendor === undefined) {
+    return "no-app";
+  }
+  const detected = await bridge.detected().catch(() => undefined);
+  if (detected === undefined) {
+    return "unknown";
+  }
+  if (!detected.includes(vendor)) {
+    await installVendorCli(vendor, rerender);
+    const after = await bridge.detected().catch(() => undefined);
+    if (after?.includes(vendor) !== true) {
+      return "missing";
+    }
+  }
+
+  // An app too old to answer this cannot be treated as a yes. It is the same
+  // build that created agents without checking anything, so believing it here
+  // would reinstate exactly the behaviour this replaces.
+  if (bridge.login === undefined) {
+    return "unknown";
+  }
+  const first = await bridge.login(vendor).catch(() => undefined);
+  const outcome = await settleLogin(first, vendor, bridge, providerId);
+  return outcome;
+}
+
+/**
+ * Reads a login verdict, offering the sign-in once and asking again after.
+ *
+ * `unknowable` is a pass, and deliberately. Cursor, Copilot and Kiro sign in
+ * through a browser session this deployment does not treat as a connection —
+ * the control plane reports them signed out by definition — so there is no
+ * login here to read. Refusing on that would make three agents permanently
+ * impossible to connect in order to enforce a question nobody can answer, so
+ * they are connected on what *is* established, which is that the CLI is
+ * there, and the dialog says which half was checked.
+ */
+async function settleLogin(verdict, vendor, bridge, providerId) {
+  if (verdict === undefined) {
+    return "unknown";
+  }
+  if (verdict.state === "signed-in" || verdict.state === "unknowable") {
+    return "ready";
+  }
+  if (verdict.state === "missing") {
+    return "missing";
+  }
+  if (verdict.state !== "signed-out") {
+    return "unknown";
+  }
+  const now = await showModal({
+    title: `${agentLabelOf(providerId)} is installed, but not signed in`,
+    subtitle:
+      `Kumi runs it under this machine's own ${esc(vendor)} login, so it has ` +
+      "to be signed in here before there is an agent to create.",
+    body: `<p class="modal-hint">This opens a terminal running the sign-in.
+      Finish it there, then come back. Kumi checks again rather than taking your
+      word for it, so nothing is created until it can see the login.</p>`,
+    confirm: "Open the sign-in",
+    cancel: "Not now",
+  });
+  if (now === undefined) {
+    return "signed-out";
+  }
+  const opened = await bridge.signIn?.(vendor).catch(() => false);
+  if (opened !== true) {
+    toast("Could not open a terminal for the sign-in", "error");
+    return "signed-out";
+  }
+  // Waited for deliberately: the terminal is a separate window and the sign-in
+  // is a browser round trip, so asking again immediately would always find the
+  // old answer. The person says when they are done.
+  const finished = await showModal({
+    title: "Finished signing in?",
+    subtitle: `Kumi will ask ${esc(vendor)} again before creating the agent.`,
+    body: `<p class="modal-hint">If the sign-in did not work, close this.
+      Nothing has been created and nothing on your account has changed.</p>`,
+    confirm: "I have signed in",
+    cancel: "Not yet",
+  });
+  if (finished === undefined) {
+    return "signed-out";
+  }
+  const again = await bridge.login(vendor).catch(() => undefined);
+  if (again === undefined) {
+    return "unknown";
+  }
+  return again.state === "signed-in" || again.state === "unknowable"
+    ? "ready"
+    : again.state === "missing"
+      ? "missing"
+      : again.state === "signed-out"
+        ? "signed-out"
+        : "unknown";
 }
 
 /**
@@ -737,7 +917,7 @@ export async function disconnectAgent(providerId, rerender) {
             will not be able to cancel it or reply to it by name.</p>`
         : "") +
       `<p class="modal-hint">Nothing is uninstalled, and your
-      ${esc(label)} account is untouched — you can connect it again whenever
+      ${esc(label)} account is untouched, so you can connect it again whenever
       you like.</p>`,
     confirm: "Disconnect",
     cancel: "Keep it",
@@ -750,7 +930,7 @@ export async function disconnectAgent(providerId, rerender) {
       method: "DELETE",
     });
   } catch (error) {
-    toast(`Could not disconnect ${label} — ${error.message}`, "error");
+    toast(`Could not disconnect ${label}. ${error.message}`, "error");
     return false;
   }
   forgetAgentInLoadedRosters(providerId);
@@ -804,10 +984,10 @@ export async function checkLocalCli(providerId, rerender) {
     // was found.
     toast(
       window.KUMI_SERVER === undefined
-        ? "Open the Kumi app on the machine that runs this agent — a browser " +
+        ? "Open the Kumi app on the machine that runs this agent. A browser " +
             "cannot see what is installed there."
         : "This copy of the Kumi app is too old to install or check a CLI. " +
-            "Download the latest version and open it again — your agents and " +
+            "Download the latest version and open it again. Your agents and " +
             "their names are kept.",
       "error",
     );
@@ -816,65 +996,36 @@ export async function checkLocalCli(providerId, rerender) {
   await finishLocalSetup(providerId, rerender);
 }
 
+/**
+ * Sorting the machine out for an agent that already exists.
+ *
+ * The same check the connect flow now runs before creating anything, so this
+ * button and that flow cannot disagree about whether an agent can run. It
+ * used to offer the sign-in and then answer "ready" regardless — the one
+ * control whose job is to say why an agent does not work, unable to tell a
+ * live login from an absent one.
+ *
+ * Spoken rather than returned: every caller of this awaits it and none reads
+ * the answer, because by here the agent exists and what is wanted is a
+ * sentence about the machine.
+ */
 async function finishLocalSetup(providerId, rerender) {
-  const bridge = window.KUMI_INSTALL;
-  if (bridge === undefined) {
-    // A browser, or an app too old to have the bridge. Either way nothing here
-    // can see the machine, and the caller has to say so rather than report a
-    // success it did not establish.
-    return "no-machine";
+  const verdict = await verifyMachineFor(providerId, rerender);
+  const label = agentLabelOf(providerId);
+  if (verdict === "ready") {
+    toast(`${label} can run on this machine`, "ok");
+    return;
   }
-  const vendor = PROVIDER_VENDOR[providerId];
-  if (vendor === undefined) {
-    return "unknown";
-  }
-  const detected = await bridge.detected().catch(() => undefined);
-  if (detected === undefined) {
-    // Asking the machine what it has can fail — a scan that threw, a channel
-    // closed under a reloading window — and returning here was silent. That is
-    // the whole of "I pressed Check the CLI and nothing happened": the one
-    // button whose job is to explain why an agent cannot work, explaining
-    // nothing.
-    toast(
-      `Could not ask this machine what is installed. Restart the Kumi app ` +
-        `and try again.`,
-      "error",
-    );
-    return "unknown";
-  }
-  if (!detected.includes(vendor)) {
-    // Nothing here can run it. `installVendorCli` shows what it will run,
-    // runs it, and opens the sign-in afterwards — the whole remaining setup,
-    // in the place somebody is already standing.
-    await installVendorCli(vendor, rerender);
-    // Asked again rather than assumed: the install may have been declined, or
-    // failed, and reporting a success because an installer was *offered* is
-    // the same mistake this ordering exists to fix.
-    const after = await bridge.detected().catch(() => undefined);
-    return after?.includes(vendor) === true ? "ready" : "missing";
-  }
-  // Installed, but nothing here can tell whether it is signed in — that lives
-  // inside the vendor's own config and reading it would be guessing at a
-  // format none of them promise. So it is offered rather than assumed, which
-  // is honest and costs one dismissed dialog for somebody already set up.
-  const now = await showModal({
-    title: `${agentLabelOf(providerId)} is installed on this machine`,
-    subtitle:
-      "One last thing: Kumi runs it under this machine's own login, so it " +
-      "has to be signed in here too.",
-    body: `<p class="modal-hint">Opens a terminal running the CLI. If it is
-      already signed in, close the window — nothing else to do.</p>`,
-    confirm: "Check the sign-in",
-    cancel: "Already done",
+  await showModal({
+    title: `${label} cannot run here yet`,
+    subtitle: REFUSAL[verdict]?.subtitle ?? "This machine could not be checked.",
+    // The agent already exists on this path, so the sentence about nothing
+    // having been created would be untrue — that half belongs to the connect
+    // flow and is deliberately not repeated here.
+    body: `<p class="modal-hint">${REFUSAL[verdict]?.repair ?? REFUSAL[verdict]?.body ?? ""}</p>`,
+    confirm: "Close",
+    cancel: "",
   });
-  if (now !== undefined) {
-    await bridge.signIn(vendor).catch(() => false);
-  }
-  // Installed, and the sign-in has been offered. Whether they completed it is
-  // the vendor's own business and cannot be read from here without guessing at
-  // a config format none of them promise — so "ready" means the machine has
-  // what it needs, not that every login is live.
-  return "ready";
 }
 
 async function signInAgent(providerId, mode, rerender) {
@@ -930,7 +1081,7 @@ async function signInAgent(providerId, mode, rerender) {
     tab?.close();
     // The caller offers a fresh attempt, and saying why beats silently
     // showing a credential form the user did not ask for.
-    toast(`${agentLabelOf(providerId)} sign-in unavailable — ${error.message}`, "error");
+    toast(`${agentLabelOf(providerId)} sign-in unavailable. ${error.message}`, "error");
     return false;
   }
   state.providerConnecting?.delete(providerId);
@@ -951,7 +1102,7 @@ async function signInAgent(providerId, mode, rerender) {
   const link =
     `<p class="modal-hint"><a class="link" target="_blank" rel="noopener noreferrer"
        href="${esc(flow.verificationUrl)}">Open the ${esc(agentLabelOf(providerId))} sign-in page</a>
-     — it opens in a new tab, on your own account.</p>`;
+     It opens in a new tab, on your own account.</p>`;
   // Whether the browser hands back a code varies by vendor and by how the
   // sign-in page resolves: approving in the browser is often enough on its
   // own, and the CLI exits without ever prompting. So the flow is polled
@@ -1126,10 +1277,10 @@ export async function connectAgent(providerId, rerender) {
         cancel: pasteable ? "Use a credential instead" : "Not now",
         body: `<p class="modal-hint">Nothing was saved, and nothing on your
           account changed. This is usually the sign-in tab being closed or
-          taking too long — starting it again is normally all it needs.${
+          taking too long, and starting it again is normally all it needs.${
             pasteable
               ? " If the message above says this account is not eligible, " +
-                "signing in again will not help — connect a credential instead."
+                "signing in again will not help, so connect a credential instead."
               : ""
           }</p>`,
       });
@@ -1192,8 +1343,8 @@ export async function connectAgent(providerId, rerender) {
           placeholder="Which account this is"></label>
       <label class="field"><span>Who can task it</span>
         <select class="input" name="visibility">
-          <option value="personal" selected>Personal — only you can task it</option>
-          <option value="org">Org-wide — anyone with access to a repository
+          <option value="personal" selected>Personal, only you can task it</option>
+          <option value="org">Org-wide, anyone with access to a repository
             it works in can @mention it there</option>
         </select></label>
       <p class="modal-hint">This agent will be added to every repository you
@@ -1206,7 +1357,7 @@ export async function connectAgent(providerId, rerender) {
       }
       <p class="modal-hint">Stored encrypted, never shown again, and never
         shared with anyone else on this deployment. "Org-wide" only changes
-        who may @mention this agent to submit work — the credential itself is
+        who may @mention this agent to submit work. The credential itself is
         still never shared.</p>`,
   });
   if (values === undefined) {
@@ -1311,7 +1462,7 @@ async function signInGitHub(rerender) {
     state.providerConnecting?.delete("github");
     rerender();
     tab?.close();
-    toast(`GitHub sign-in unavailable — ${error.message}`, "error");
+    toast(`GitHub sign-in unavailable. ${error.message}`, "error");
     return false;
   }
   state.providerConnecting?.delete("github");
@@ -1350,7 +1501,7 @@ async function signInGitHub(rerender) {
     confirm: "I've approved it",
     body: `<p class="modal-hint"><a class="link" target="_blank"
         rel="noopener noreferrer" href="${esc(flow.verificationUrl)}">Open
-        the GitHub sign-in page</a> — it opens in a new tab.</p>
+        the GitHub sign-in page</a>. It opens in a new tab.</p>
       <p class="modal-code">${esc(flow.userCode ?? "")}</p>
       <p class="modal-hint">Enter that code on the page, approve the
         access, then come back here. Pushes an agent runs for you will
@@ -1425,7 +1576,7 @@ export async function connectGitHubAccount(rerender) {
         confirm: "Try again",
         cancel: "Paste a token instead",
         body: `<p class="modal-hint">This is usually the sign-in tab being
-          closed or the code expiring — starting again is normally all it
+          closed or the code expiring, and starting again is normally all it
           needs. A pasted personal access token works too, and can be
           scoped to single repositories where the sign-in cannot.</p>`,
       });

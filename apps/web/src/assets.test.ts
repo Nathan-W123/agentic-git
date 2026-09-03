@@ -1151,13 +1151,27 @@ test("the editor connect card offers only what the app can write, and never a co
   assert.doesNotMatch(connect, /mcp add|claude\.json|config\.toml|https:/u);
 
   // Codex is the one vendor whose token lives in the environment rather than
-  // its config, and "restart Codex" is wrong advice for the Store app: closing
-  // its window suspends it, and the resumed process still holds the
-  // environment it launched with. It works in a fresh terminal and not in the
-  // app, which is the confusing half of the symptom.
+  // in the config just written, so it is the one vendor where writing the file
+  // is not the end of the job. A running program keeps the environment it
+  // started with, and restarting the computer is the single instruction that
+  // is true for both the Codex app and every terminal.
   assert.match(connect, /vendor === "codex"/u);
-  assert.match(connect, /Task Manager/u);
-  assert.match(connect, /suspends it/u);
+  assert.match(connect, /Restart your computer/u);
+  // And only Codex. Telling somebody with Claude or Cursor to restart their
+  // machine asks for a reboot that changes nothing, and the environment
+  // sentence is meaningless for an editor that reads its config file.
+  // Pinned on the returned strings rather than on a slice of the function,
+  // because the prose explaining the rule mentions the environment too and a
+  // looser assertion catches its own justification.
+  assert.match(
+    connect,
+    /return `\$\{scope\}Connected\. Restart \$\{label\}, then ask it to have Kumi do something\.`;/u,
+  );
+  const codexAdvice = connect.slice(connect.indexOf('if (vendor === "codex")'));
+  assert.match(codexAdvice, /Restart your computer/u);
+  // The advice somebody actually followed and it did not work is gone: closing
+  // Codex through Task Manager was true only for the Store build.
+  assert.doesNotMatch(connect, /Task Manager/u);
 
   // The token is minted for this editor on this machine, and is never shown:
   // nobody has to carry it anywhere, which is what makes every way of
@@ -1169,6 +1183,54 @@ test("the editor connect card offers only what the app can write, and never a co
   // registering as a worker, so an editor token carrying it could lease other
   // people's work.
   assert.match(data, /EDITOR_TOKEN_SCOPES = \["view", "submit_task"\]/u);
+});
+
+test("an agent row reports both of the connections it can have", async () => {
+  const app = await publicFile("app.js");
+  const row = sourceOf(app, "agentProviderRow", "integrationsSection");
+
+  // Two different things, and the row used to show one. Somebody connected
+  // Codex over MCP, was told it worked, and the row above the message went on
+  // saying "Not connected" — which is true of the CLI and says nothing about
+  // what they had just done.
+  assert.match(row, /state\.editorConnected\?\.\[PROVIDER_VENDOR\[agent\.id\]\]/u);
+  assert.match(row, /statusBadge\("ok", "MCP"/u);
+  assert.match(row, /statusBadge\("warn", "MCP failed"/u);
+  // Both badges reach the row, rather than the second replacing the first.
+  assert.match(row, /status: `\$\{status\}\$\{mcp\}`/u);
+
+  // Nothing is claimed for an editor nobody has tried: absent stays absent
+  // rather than rendering as a failure.
+  assert.match(row, /editor === undefined\s*\?\s*""/u);
+
+  // And the two badges say which connection each is about. "Not connected"
+  // beside a green MCP badge reads as a contradiction rather than as two
+  // answers to two different questions.
+  assert.match(row, /const cliLabel = mcp === "" \? "Not connected" : "No CLI"/u);
+});
+
+test("the connection pipeline is free of em dashes", async () => {
+  // Asked for, and worth pinning: the copy here is written and rewritten
+  // often, and a dash reintroduced by hand is invisible in review.
+  const agents = await publicFile("screen-agents.js");
+  const app = await publicFile("app.js");
+  const visible = (source: string): string[] =>
+    source
+      .split("\n")
+      .filter((line) => line.includes("\u2014"))
+      .filter((line) => !/^\s*(?:\*|\/\/|\/\*)/u.test(line))
+      .map((line) => line.trim());
+
+  assert.deepEqual(visible(agents), [], "screen-agents.js carries the whole flow");
+  for (const [name, from, to] of [
+    ["agentProviderRow", "function agentProviderRow", "function integrationsSection"],
+    ["editorMcpCard", "function editorMcpCard", "function projectControlsSection"],
+  ] as const) {
+    const start = app.indexOf(from);
+    const end = app.indexOf(to, start);
+    assert.ok(start !== -1 && end > start, `${name} was not found`);
+    assert.deepEqual(visible(app.slice(start, end)), [], name);
+  }
 });
 
 test("connecting an agent asks which of the three connections is meant", async () => {
@@ -1297,14 +1359,19 @@ test("a viewer can still connect an editor, read-only, and is told so", async ()
     agents.indexOf("function deviceLabel"),
   );
   assert.match(connect, /minted\.readOnly/u);
-  // And every outcome is said where the person is standing. The row it also
-  // writes is on the Settings screen, and this is reached from the agents
-  // screen and from a channel menu — so writing only to the row meant the
-  // dialog closing and nothing being reported anywhere they were looking.
-  assert.match(connect, /toast\([\s\S]{0,80}"ok"\)/u);
-  assert.equal((connect.match(/toast\(/gu) ?? []).length >= 3, true, "every outcome should say so");
-  assert.match(connect, /read-only/u);
+  // Every outcome is said where the person is standing, and said in something
+  // they close. A toast cleared itself after six seconds, which is the wrong
+  // carrier for the one instruction that decides whether the connection works
+  // — the Codex advice was missed exactly that way.
+  assert.match(connect, /await showModal\(/u);
+  assert.doesNotMatch(connect, /toast\(/u);
+  assert.match(connect, /confirm: "Close"/u);
+  assert.match(connect, /read only/u);
   assert.match(connect, /developer access/u);
+
+  // Both outcomes, not just the happy one.
+  assert.match(connect, /is connected`/u);
+  assert.match(connect, /was not connected`/u);
 });
 
 test("the catalogue pins every version and fills the form rather than creating", async () => {
@@ -2577,29 +2644,77 @@ test("a connected agent can have its CLI checked without disconnecting", async (
  * Somebody connected three agents that way and was told three times that it
  * had worked; every one of them then accepted work and did none of it.
  */
-test("connecting checks the machine before it reports success", async () => {
+test("nothing is created until the machine says it can run the agent", async () => {
   const agents = await publicFile("screen-agents.js");
   const connect = agents.slice(
     agents.indexOf("async function connectLocalAgent"),
+    agents.indexOf("const REFUSAL"),
+  );
+
+  // The order is the whole point, and it used to be the other way round: the
+  // agent and its call sign were minted the moment Connect was pressed, and
+  // the machine was asked afterwards. Somebody was left holding a named agent
+  // in every channel that could not run, told so by a toast that cleared
+  // itself in six seconds.
+  const asked = connect.indexOf("await verifyMachineFor(");
+  const made = connect.indexOf("await createLocalAgent(");
+  assert.notEqual(asked, -1, "the machine must be asked");
+  assert.notEqual(made, -1, "the agent is still created somewhere");
+  assert.ok(asked < made, "the machine must be asked before anything is created");
+
+  // And the refusal must actually stop. An ordering that asks first and
+  // creates anyway is the same bug with a longer wait in front of it.
+  const refused = connect.indexOf('if (verdict !== "ready")');
+  assert.ok(refused > asked && refused < made, "a refusal must return before creating");
+
+  // Said in a dialog, not a toast. This is the end of a flow somebody
+  // started, and the reason they have no agent is the one sentence they need
+  // — six seconds in a corner is the wrong carrier for it.
+  assert.match(connect.slice(refused, made), /showModal\(/u);
+
+  // Every verdict has something to say. A state added to the checker without
+  // a sentence here would surface as an empty dialog, which is worse than the
+  // toast it replaced.
+  const checker = agents.slice(
+    agents.indexOf("async function verifyMachineFor"),
+  );
+  const verdicts = new Set(
+    [...checker.matchAll(/return "([a-z-]+)";/gu)].map((match) => match[1]),
+  );
+  verdicts.delete("ready");
+  const refusals = agents.slice(agents.indexOf("const REFUSAL"));
+  for (const verdict of verdicts) {
+    assert.match(
+      refusals.slice(0, 2_400),
+      new RegExp(`["']?${verdict}["']?:`, "u"),
+      `${verdict} has no sentence in REFUSAL`,
+    );
+  }
+});
+
+test("the sign-in is offered, then checked rather than assumed", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const settle = agents.slice(
+    agents.indexOf("async function settleLogin"),
     agents.indexOf("export async function disconnectAgent"),
   );
 
-  // Order is the whole fix: the machine, then the message.
-  const setup = connect.indexOf("await finishLocalSetup(");
-  const said = connect.indexOf("toast(outcome.text");
-  assert.notEqual(setup, -1, "the machine must be checked during connect");
-  assert.ok(setup < said, "it must be checked before anything claims success");
+  // Offering a remedy is not evidence it worked. The old flow opened the
+  // sign-in terminal and returned "ready" whatever happened next — including
+  // when the person closed it untouched.
+  const offered = settle.indexOf("await bridge.signIn?.(");
+  const rechecked = settle.indexOf("await bridge.login(vendor)", offered);
+  assert.notEqual(offered, -1, "the sign-in must still be offered");
+  assert.ok(rechecked > offered, "the login must be re-read after the sign-in");
 
-  // And the message distinguishes the outcomes rather than always cheering.
-  assert.match(connect, /is not installed on this machine yet/u);
-  assert.match(connect, /Open the Kumi app on the machine that will run it/u);
-  assert.match(connect, /could not be added to every repository/u);
-
-  // The report is earned, not assumed: an install that was declined or failed
-  // must not come back as ready just because an installer was offered.
-  const finish = agents.slice(agents.indexOf("async function finishLocalSetup"));
-  assert.match(finish.slice(0, 2_600), /const after = await bridge\.detected\(\)/u);
-  assert.match(finish.slice(0, 2_600), /\? "ready" : "missing"/u);
+  // The three browser-session vendors pass on the strength of the CLI alone,
+  // and that is a decision rather than an oversight: their login state is not
+  // readable from here at all, so refusing on it would make them permanently
+  // impossible to connect.
+  assert.match(settle, /state === "unknowable"/u);
+  // "could not ask" is never folded into "the answer is no" — they send
+  // somebody to two different places.
+  assert.match(settle, /return "unknown"/u);
 });
 
 /**
@@ -2644,14 +2759,24 @@ test("a credential-less agent is listed in channels and offered to rooms", async
  * channel closed under a reloading window — and returning quietly is the whole
  * of "I pressed it and nothing happened".
  */
-test("check the CLI says something when the machine cannot be asked", async () => {
+test("check the CLI answers with the same check connecting uses", async () => {
   const agents = await publicFile("screen-agents.js");
-  const setup = agents.slice(agents.indexOf("async function finishLocalSetup"));
-  assert.match(setup.slice(0, 2_600), /detected === undefined/u);
-  assert.match(
-    setup.slice(0, 2_600),
-    /Could not ask this machine what is installed/u,
+  // A bounded window from the function's own start: `verifyMachineFor` is
+  // defined above this one, so slicing between them reads backwards and
+  // matches nothing at all.
+  const setup = agents.slice(
+    agents.indexOf("async function finishLocalSetup"),
+    agents.indexOf("async function finishLocalSetup") + 1_400,
   );
+  // One checker, so the button on a connected row and the flow that creates
+  // an agent cannot disagree about whether it can run. This used to offer the
+  // sign-in and then answer "ready" regardless — the one control whose job is
+  // to say why an agent does not work, unable to tell a live login from an
+  // absent one.
+  assert.match(setup, /await verifyMachineFor\(providerId, rerender\)/u);
+  assert.match(setup, /REFUSAL\[verdict\]/u);
+  // And it says the good news too, or a working machine answers with silence.
+  assert.match(setup, /can run on this machine/u);
 });
 
 test("a conversation is scoped to one user's own provider connection", async () => {
