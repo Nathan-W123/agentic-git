@@ -1147,7 +1147,7 @@ test("the editor connect card offers only what the app can write, and never a co
   // because that is where somebody deciding how to connect one is looking.
   const agents = await publicFile("screen-agents.js");
   const connect = sourceOf(agents, "connectEditorToKumi", "deviceLabel");
-  assert.match(connect, /bridge\.connectEditor\(vendor, token\)/u);
+  assert.match(connect, /bridge\.connectEditor\(vendor, minted\.token\)/u);
   assert.doesNotMatch(connect, /mcp add|claude\.json|config\.toml|https:/u);
 
   // Codex is the one vendor whose token lives in the environment rather than
@@ -1221,6 +1221,37 @@ test("connecting an agent asks which of the three connections is meant", async (
   assert.match(chooser, /const pending = showModal\(spec\)/u);
   assert.match(chooser, /addEventListener\("change", sync\)/u);
   assert.match(chooser, /removeEventListener\("change", sync\)/u);
+});
+
+test("a viewer can still connect an editor, read-only, and is told so", async () => {
+  const data = await publicFile("data.js");
+  const agents = await publicFile("screen-agents.js");
+
+  // A token must never grant what its owner does not have, so a viewer asking
+  // for `submit_task` is correctly refused. Refusing the whole connection on
+  // that basis was the mistake: reading the roster and following a task are
+  // exactly what a viewer may do, and they are most of what an editor is for.
+  const mint = data.slice(
+    data.indexOf("export async function createEditorToken"),
+    data.indexOf("export async function revokeApiToken"),
+  );
+  assert.notEqual(mint, "", "createEditorToken should be findable");
+  assert.match(mint, /scope_exceeds_role/u);
+  assert.match(mint, /scopes: \["view"\]/u);
+  assert.match(mint, /readOnly: true/u);
+  // Anything else still throws: only this one refusal has a narrower answer.
+  assert.match(mint, /if \(error\.code !== "scope_exceeds_role"\)[\s\S]{0,40}throw error/u);
+
+  // And it is said, not swallowed. A silent downgrade would be worse than the
+  // refusal it replaces, because the first sign would be an editor that
+  // cannot file work with no explanation.
+  const connect = agents.slice(
+    agents.indexOf("function connectEditorToKumi"),
+    agents.indexOf("function deviceLabel"),
+  );
+  assert.match(connect, /minted\.readOnly/u);
+  assert.match(connect, /read-only/u);
+  assert.match(connect, /developer access/u);
 });
 
 test("the catalogue pins every version and fills the form rather than creating", async () => {

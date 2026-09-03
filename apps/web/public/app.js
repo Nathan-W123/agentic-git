@@ -2141,6 +2141,9 @@ function agentProviderRow(agent) {
                 }>${icon("terminal")} ${checking ? "Checking…" : "Check CLI"}</button>`
             : ""
         }
+        <button type="button" role="menuitem" class="st-menu-item"
+          data-act="agent-connect" data-value="${esc(agent.id)}">
+          ${icon("robot")} Connect tools with MCP</button>
         <button type="button" role="menuitem" class="st-menu-item st-menu-danger"
           data-act="agent-disconnect" data-value="${esc(agent.id)}">
           ${icon("closeCircle")} Disconnect</button>
