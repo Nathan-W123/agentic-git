@@ -55,6 +55,22 @@ Losing that window to a restart is not a fault; presence lapses, which is what
 presence does. The first mention after a restart may say "nothing is running
 it yet" and the task simply waits in the queue until the editor asks for it.
 
+**Liveness has three answers, not two.** An editor is live in the sense the
+roster cares about, so it is folded into the one liveness answer this process
+gives. But a worker and an editor are not the same promise: a worker polls, so
+a task it can take starts within seconds, while an editor cannot be woken and
+picks work up the next time somebody asks it to. Anything that tells a room
+work has *begun* asks which it is talking to. A mention addressed to an agent
+that is only present in an editor is acknowledged with "I'll pick it up the
+next time I'm asked there" rather than "I'm working on it", which would be a
+lie for as long as nobody asks.
+
+That distinction has one sharp edge worth knowing about: an editor's `workers`
+row looks exactly like a desktop's, because it is one. It carries
+`EDITOR_WORKER_VERSION` so the two can be told apart, and the constant is
+shared rather than written twice — the first draft of this compared literals
+in two packages and the distinction quietly collapsed.
+
 **The worker row exists for the foreign key.** `work_leases.worker_id`
 references `workers(id)`, so a lease needs a row. One row per person per
 editor, reused across every task that editor does, and retired by the ordinary
@@ -98,6 +114,13 @@ Two details that fall out of this:
 
 `take_task` reads the editor the same way, so its `editor` argument is now a
 correction rather than a requirement.
+
+The rule that falls out of all of this, stated once: **work goes to whatever
+is actually present and able to start it now.** A prompt typed in an editor is
+that editor's, because the person is sitting in front of it. A mention typed
+in Kumi goes to the desktop, because the desktop is the thing that polls and
+nothing is watching an editor. Only when neither is there does a task wait,
+and then the room is told so.
 
 ## The base revision, and the bundle
 

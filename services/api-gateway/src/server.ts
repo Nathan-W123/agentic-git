@@ -77,6 +77,7 @@ import {
   FORCE_QUESTION_MARKER,
   KEEP_IT_SIMPLE_DIRECTIVE,
   localAgentsOnly,
+  EDITOR_WORKER_VERSION,
   mcpServersEnabled,
   projectBudgets,
   readsAsReportRequest,
@@ -16575,21 +16576,7 @@ export class ApiGateway {
     // per worker start, so reading the whole table and discarding most of it
     // made the commonest query in the product scale with how often people had
     // restarted their desktops.
-    const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
-    const workers = await this.options.store
-      .listWorkers({
-        ...(organizationId === undefined ? {} : { organizationId }),
-        seenAfter: cutoff,
-      })
-      .catch((): [] => []);
-    const live = new Map<string, Set<string>>();
-    for (const worker of workers) {
-      const advertised = live.get(worker.userId) ?? new Set<string>();
-      for (const adapter of worker.adapters) {
-        advertised.add(adapter);
-      }
-      live.set(worker.userId, advertised);
-    }
+    const live = await this.pollingOwners(organizationId);
     // Editors folded in here rather than asked about beside this. There is
     // one liveness answer in this process and this is it: a second source
     // consulted by the roster and not by dispatch is exactly how an agent
@@ -16607,6 +16594,75 @@ export class ApiGateway {
       live.set(userId, advertised);
     }
     return live;
+  }
+
+  /**
+   * Everyone with a machine that is actually polling for work.
+   *
+   * The workers half on its own, because two callers want different things
+   * from it: the roster wants it merged with editors, and the sentence that
+   * says whether work has *begun* wants it alone. One query builder rather
+   * than two, so "which workers count as live" is stated once.
+   */
+  private async pollingOwners(
+    organizationId?: string,
+  ): Promise<Map<string, Set<string>>> {
+    // The cutoff goes to the store, not to a loop here. This runs on every
+    // roster read and every @mention, and `registerWorker` writes a fresh row
+    // per worker start, so reading the whole table and discarding most of it
+    // made the commonest query in the product scale with how often people had
+    // restarted their desktops.
+    const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
+    const workers = await this.options.store
+      .listWorkers({
+        ...(organizationId === undefined ? {} : { organizationId }),
+        seenAfter: cutoff,
+      })
+      .catch((): [] => []);
+    const polling = new Map<string, Set<string>>();
+    for (const worker of workers) {
+      // An editor's row is not a machine that polls. It exists because a
+      // lease needs a foreign key, and counting it here is what made the
+      // distinction below collapse the first time it was written.
+      if (worker.version === EDITOR_WORKER_VERSION) {
+        continue;
+      }
+      const advertised = polling.get(worker.userId) ?? new Set<string>();
+      for (const adapter of worker.adapters) {
+        advertised.add(adapter);
+      }
+      polling.set(worker.userId, advertised);
+    }
+    return polling;
+  }
+
+  /**
+   * The same question, answered with *how* rather than only whether.
+   *
+   * Both are live, and for the roster that is the whole answer: an editor
+   * will do the work, so drawing it as available is right. But the two are
+   * not the same promise, and one sentence in this product depends on the
+   * difference. A worker polls, so a task it can take starts within seconds
+   * and "I've taken this and I'm working on it" is true. An editor cannot be
+   * woken: it picks work up the next time the person asks it to, and telling
+   * the room the work has begun would be a straight lie for as long as they
+   * do not.
+   */
+  private async agentLiveness(
+    projectId: string,
+    ownerId: string,
+    provider: string,
+  ): Promise<"worker" | "editor" | undefined> {
+    const project = await this.options.store
+      .getProject(projectId)
+      .catch(() => undefined);
+    const polling = await this.pollingOwners(project?.organizationId);
+    if (ApiGateway.agentIsLive(polling, ownerId, provider)) {
+      return "worker";
+    }
+    return ApiGateway.agentIsLive(this.editors.owners(), ownerId, provider)
+      ? "editor"
+      : undefined;
   }
 
   /**
@@ -18882,13 +18938,21 @@ export class ApiGateway {
       // Only asked on a deployment that executes nothing itself, because
       // only there can the answer be no. Everywhere else the control plane
       // takes the task the moment it lands and the present tense is true.
-      const waitingForAMachine =
-        localAgentsOnly() &&
-        !(await this.agentHasLiveMachine(
-          projectId,
-          candidate.userId,
-          candidate.provider,
-        ));
+      // Three answers, not two, and the third is the one this used to get
+      // wrong. An editor is live in the sense the roster cares about — it
+      // will do the work — but it cannot be woken, so it picks the task up
+      // the next time the person asks it to. Saying "I'm working on it"
+      // there is a lie for as long as they do not ask, and the room has no
+      // way to tell it from a run that has genuinely started.
+      const liveness = localAgentsOnly()
+        ? await this.agentLiveness(
+            projectId,
+            candidate.userId,
+            candidate.provider,
+          )
+        : "worker";
+      const waitingForAMachine = liveness === undefined;
+      const waitingForAnEditor = liveness === "editor";
       const acknowledgement = await this.appendChannelThreadReply({
         projectId,
         repositoryId,
@@ -18898,7 +18962,11 @@ export class ApiGateway {
           ? "I've filed this, but nothing is running it yet — my agents run " +
             "on my own machine and it isn't online. I'll start as soon as " +
             "it is."
-          : input.planOnly === true
+          : waitingForAnEditor
+            ? "I've filed this. I'm running inside an editor rather than on " +
+              "a machine that watches for work, so I'll pick it up the next " +
+              "time I'm asked to there."
+            : input.planOnly === true
             ? "I've taken this task and I'm working on the plan."
             : startsNow
               ? "I've taken this task and I'm working on it."

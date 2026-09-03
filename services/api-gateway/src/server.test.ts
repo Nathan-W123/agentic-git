@@ -21903,6 +21903,53 @@ test("extending a hold nobody holds is refused rather than invented", async (t) 
   );
 });
 
+test("an agent that is only in an editor is not said to be working on it", async (t) => {
+  // The gap the presence merge opened. An editor is live in the sense the
+  // roster cares about, so folding it in was right; but it cannot be woken,
+  // and the acknowledgement used to read the two the same way. Somebody
+  // whose desktop was closed and whose editor had taken work an hour ago was
+  // told "I've taken this task and I'm working on it" while nothing was.
+  withLocalAgentsOnly(t);
+  const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
+
+  // Presence, declared the only way it can be: by taking work.
+  const first = await seedTaskFor(runtime, repositoryId, user.id, "the first one");
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+  await work(
+    runtime.origin,
+    token,
+    "report_task",
+    { task_id: first.id, status: "released" },
+    2,
+  );
+
+  // Now a mention typed in Kumi, with no desktop worker anywhere.
+  const roster = await work(runtime.origin, token, "list_repositories", {}, 3);
+  const agent = /@(.+?) — /u.exec(roster.text)?.[1];
+  assert.ok(agent, roster.text);
+  assert.match(roster.text, /— online/u, "presence did not hold");
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`,
+    { method: "POST", body: { content: `@${agent} raise the retry ceiling` } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const after = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`,
+  );
+  const said = agentSpeech(after.data.messages)
+    .map((message: { content: string }) => message.content)
+    .join("\n");
+  assert.match(said, /pick it up the next time I'm asked/u);
+  // The two sentences that would each be untrue: nothing has begun, and it is
+  // not true either that no machine of theirs is online.
+  assert.doesNotMatch(said, /I'm working on it/u);
+  assert.doesNotMatch(said, /isn't online/u);
+});
+
 test("a misconfigured Authorization header says which way it is wrong", async (t) => {
   // Both of these were answered "Sign in is required" — a sentence about a
   // browser, sent to a CLI that has no cookies and was never going to get

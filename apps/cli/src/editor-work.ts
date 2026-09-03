@@ -39,11 +39,12 @@ import type {
   WorkerRecord,
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
-import type {
-  AgentPlan,
-  CanonicalVersion,
-  ChangeSet,
-  FilePatch,
+import {
+  EDITOR_WORKER_VERSION,
+  type AgentPlan,
+  type CanonicalVersion,
+  type ChangeSet,
+  type FilePatch,
 } from "@coord/shared-types";
 
 import type { CoordinatorProject } from "./project.js";
@@ -127,7 +128,9 @@ async function editorWorker(
     // is one agent, and a list that matched agents with no adapter set would
     // let a Claude Code window take work addressed to somebody's Codex.
     adapters: [input.vendor],
-    version: "editor",
+    // The marker that keeps this row from reading as a machine that polls.
+    // See `EDITOR_WORKER_VERSION`.
+    version: EDITOR_WORKER_VERSION,
   });
 }
 

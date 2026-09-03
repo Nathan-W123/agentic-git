@@ -3068,6 +3068,23 @@ export interface ResolvedMcpServer {
 export const MCP_LEASE_PROTOCOL_VERSION = 4;
 
 /**
+ * What a worker row minted for an editor records as its version.
+ *
+ * A lease needs a `workers` row, so an editor gets one — and that makes it
+ * indistinguishable, on the face of it, from a desktop that polls. The two
+ * are not the same promise. A worker takes a task within seconds of it being
+ * filed; an editor cannot be woken and picks work up the next time somebody
+ * asks it to. Anything that tells a room work has *started* has to know which
+ * it is talking to, or it says "I'm working on it" about a task nothing has
+ * touched.
+ *
+ * Named here because the row is written in the CLI and read in the gateway,
+ * and a literal in both places is a distinction that survives exactly until
+ * somebody changes one of them.
+ */
+export const EDITOR_WORKER_VERSION = "editor";
+
+/**
  * One stored MCP server, as the lease needs to read it.
  *
  * A structural subset of the persistence record rather than the record
