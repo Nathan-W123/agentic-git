@@ -85,6 +85,7 @@ import {
   uniqueStrings,
   withoutRoleContext,
   type ApprovalStatus,
+  type FilePatch,
   type FilePatchStatus,
   type McpServerTransport,
   type SequencedAuditEvent,
@@ -141,6 +142,8 @@ import {
   type McpRepository,
   type McpToolDeps,
 } from "./mcp-tools.js";
+import { createMcpWorkTools, type McpWorkDeps } from "./mcp-work.js";
+import { BundleTickets, EditorPresence } from "./editor-sessions.js";
 import {
   buildCatchUpDigest,
   catchUpSince,
@@ -4109,6 +4112,13 @@ export interface ApiOperations {
     // whether to post, and what. The body is still relayed whole to the
     // worker, so an implementation may return more than this names.
   }): Promise<{ accepted: boolean; answer?: string }>;
+  /**
+   * Work taken and reported by an editor rather than by a worker process.
+   *
+   * Absent on a deployment that cannot run tasks at all, which answers the
+   * three MCP work tools with 501 rather than with silence.
+   */
+  editorWork?: EditorWorkOperations;
   /** Dashboard overlay workspaces; absent on deployments without them. */
   workspace?: WorkspaceOperations;
   /** Direct provider chat (Anthropic/OpenAI/Google); absent when unsupported. */
@@ -4127,6 +4137,64 @@ export interface ApiOperations {
  * encrypted live in the implementation, and the token itself is never echoed
  * back in any response.
  */
+/**
+ * Doing a Kumi task from inside an editor, with no worker process anywhere.
+ *
+ * The three verbs are the whole of it: take one task and a hold on it, keep
+ * the hold while a long turn runs, file what came back. Everything they reach
+ * lives on the other side of this interface, exactly as leasing does, because
+ * the gateway routes work and decides none of it.
+ *
+ * The shape differs from {@link ApiOperations.leaseWork} in one way that
+ * matters: nothing here carries a workspace, a bundle, or an admitted plan.
+ * The agent already has the repository open, and its plan is written from the
+ * diff at report time rather than promised at take time. See
+ * `apps/cli/src/editor-work.ts` for why that is the only honest order.
+ */
+export interface EditorWorkOperations {
+  take(input: {
+    actorId: string;
+    organizationId: string;
+    projectId: string;
+    /** The repositories this caller may be handed work from. Never widened. */
+    repositoryIds: readonly string[];
+    /** Which CLI this editor is: `claude`, `codex`, `cursor` and so on. */
+    vendor: string;
+    /** How the editor's worker row is named. */
+    label: string;
+  }): Promise<
+    | {
+        leaseId: string;
+        taskId: string;
+        objective: string;
+        repositoryId: string;
+        branch: string;
+        baseRevision: string;
+        baseVersion: number;
+        expiresAt: string;
+        validationCommands: readonly string[];
+      }
+    | undefined
+  >;
+  report(input: {
+    leaseId: string;
+    actorId: string;
+    status: "completed" | "failed" | "released";
+    patches: readonly FilePatch[];
+    summary: string;
+    detail?: string;
+  }): Promise<
+    | { outcome: "accepted"; integrationStatus?: string; requeued?: boolean }
+    | { outcome: "refused"; reason: string }
+    | { outcome: "lease_lost"; reason: string }
+  >;
+  /** The new expiry, or `undefined` when the hold was already gone. */
+  extend(input: {
+    leaseId: string;
+    ttlMs: number;
+  }): Promise<string | undefined>;
+}
+
 export interface GitHubCredentialOperations {
   status(input: { userId: string }): Promise<unknown>;
   connect(input: { userId: string; token: string }): Promise<unknown>;
@@ -5671,6 +5739,16 @@ export class ApiGateway {
   private readonly stripeWebhookSecret: string | undefined;
   private readonly stripePriceId: string | undefined;
   private readonly appBaseUrl: string;
+  /**
+   * Editors that have taken work recently, and are therefore at a keyboard.
+   *
+   * In memory rather than in `workers`, because an editor is not a process
+   * that polls: it would read as dead three minutes into every session, and
+   * would mint a dead row per session besides. See `editor-sessions.ts`.
+   */
+  private readonly editors = new EditorPresence();
+  /** One-shot permission to fetch one lease's bundle. Same file, same reason. */
+  private readonly bundleTickets = new BundleTickets();
   /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
@@ -6333,8 +6411,20 @@ export class ApiGateway {
       const stripeWebhookPath =
         request.method === "POST" &&
         url.pathname === `${API_PREFIX}/stripe/webhook`;
+      // A bundle ticket is the credential, and it has to be: the caller is a
+      // `curl` on somebody's laptop pulling a file down before `git fetch`
+      // reads it, with no header to put a token in. The ticket is minted only
+      // by a `take_task` that authenticated normally, names one lease, is
+      // spent on first use and dies in ten minutes. Public here means "no
+      // cookie and no bearer", not "unauthenticated".
+      const bundleTicketPath =
+        request.method === "GET" &&
+        new RegExp(`^${API_PREFIX}/mcp/bundle/[A-Za-z0-9-]{1,80}$`, "u").test(
+          url.pathname,
+        );
       const isPublic =
         stripeWebhookPath ||
+        bundleTicketPath ||
         (request.method === "GET" && url.pathname === `${API_PREFIX}/health`) ||
         (request.method === "GET" && invitationPath) ||
         (passwordResetPath &&
@@ -7422,6 +7512,64 @@ export class ApiGateway {
         token: approved.token,
         name: approved.name,
       });
+      return;
+    }
+
+    // The bundle an editor was told to fetch, against the one-shot ticket
+    // `take_task` issued. Its own route rather than the worker's, because the
+    // worker's asks for `run_task` — the scope that also admits registering
+    // as a worker — and an editor holding one task must never be able to take
+    // everybody else's. The ticket is checked here, and then the lease is
+    // checked again behind it: a ticket is a name for one lease, never a
+    // permission that outlives it.
+    const bundleTicket = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/mcp/bundle/([A-Za-z0-9-]{1,80})$`, "u"),
+    );
+    if (bundleTicket !== undefined && method === "GET") {
+      const spent = this.bundleTickets.redeem(bundleTicket[0] ?? "");
+      if (spent === undefined) {
+        throw new HttpError(
+          404,
+          "not_found",
+          "That download link has been used already or has expired. Call " +
+            "extend_task to get another one.",
+        );
+      }
+      const bundleOperation = this.options.operations.leaseBundle;
+      if (bundleOperation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot serve repository bundles",
+        );
+      }
+      // The lease, not the ticket holder. A ticket is minted by the take that
+      // created the lease, so it can only ever name that person's own hold —
+      // re-checking the owner here would be a branch nothing can reach. What
+      // *can* change between minting and spending is the hold itself.
+      const lease = await this.options.store.getWorkLease(spent.leaseId);
+      if (lease === undefined || lease.status !== "active") {
+        throw new HttpError(
+          409,
+          "lease_lost",
+          "That hold is no longer active; take the task again",
+        );
+      }
+      const bundle = await bundleOperation(spent.leaseId);
+      if (bundle === undefined) {
+        throw new HttpError(
+          409,
+          "lease_lost",
+          "That hold is no longer active; take the task again",
+        );
+      }
+      response
+        .writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": bundle.byteLength,
+        })
+        .end(bundle);
       return;
     }
 
@@ -15300,15 +15448,266 @@ export class ApiGateway {
           : narrateTaskEvent(last.event.type, last.event.data);
       },
     };
-    return createMcpTools(deps);
+    return [...createMcpTools(deps), ...createMcpWorkTools(this.workDeps(principal))];
+  }
+
+  /**
+   * What the three work tools may do, bound to one caller.
+   *
+   * Every one of them is authorized the way `cancel_task` is rather than the
+   * way `POST /workers/leases` is: `submit_task` on the token, the project
+   * checked with `authorizeProject`, and the row itself owned by the caller.
+   * `run_task` is deliberately never asked for here, because it is the scope
+   * that admits worker registration, and a token handed to an editor to do
+   * one task must not be able to take everybody else's.
+   */
+  private workDeps(principal: AuthenticatedPrincipal): McpWorkDeps {
+    const operation = (): EditorWorkOperations => {
+      const editorWork = this.options.operations.editorWork;
+      if (editorWork === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot run tasks",
+        );
+      }
+      return editorWork;
+    };
+    /**
+     * The lease this caller is holding on a task, or a sentence saying why
+     * not.
+     *
+     * Ownership is checked against the worker row rather than against the
+     * task: two people may both be able to see a task, and only one of them
+     * is holding it. The lease route a desktop worker uses makes exactly this
+     * check, and for exactly this reason.
+     */
+    const heldLease = async (
+      taskId: string,
+    ): Promise<
+      | { lease: WorkLease; task: SubmittedTask; owner: WorkerRecord }
+      | { refusal: string }
+    > => {
+      const task = await this.options.store.getSubmittedTask(taskId);
+      if (task === undefined || task.projectId === undefined) {
+        return { refusal: `No task called "${taskId}".` };
+      }
+      await authorizeProject(
+        this.options.store,
+        principal,
+        task.projectId,
+        "submit_task",
+      );
+      const now = new Date().toISOString();
+      await this.options.store.expireWorkLeases(now);
+      const lease = (
+        await this.options.store.listWorkLeases({
+          status: "active",
+          projectId: task.projectId,
+        })
+      ).find((candidate) => candidate.taskId === taskId);
+      if (lease === undefined) {
+        return {
+          refusal:
+            `Nobody is holding ${taskId} right now. If you were, the hold ran ` +
+            "out and the task went back in the queue; call take_task to pick " +
+            "work up again.",
+        };
+      }
+      const owner = await this.options.store.getWorker(lease.workerId);
+      if (owner === undefined || owner.userId !== principal.user.id) {
+        return {
+          refusal: `${taskId} is being worked on by somebody else.`,
+        };
+      }
+      return { lease, task, owner };
+    };
+    return {
+      assertScope: (permission) => {
+        assertTokenScope(principal, permission as Permission);
+      },
+      take: async (input) => {
+        const reachable = await this.mcpReachable(principal);
+        const wanted =
+          input.repository === undefined
+            ? reachable
+            : reachable.filter(
+                (entry) =>
+                  entry.repository.id.toLowerCase() ===
+                  input.repository?.toLowerCase(),
+              );
+        if (input.repository !== undefined && wanted.length === 0) {
+          throw new HttpError(
+            404,
+            "repository_not_found",
+            `No repository called "${input.repository}".`,
+          );
+        }
+        // Grouped by project, because leasing is a per-project question and
+        // the repository narrowing has to travel with it: a collaborator
+        // reaches a project through repository grants alone, and handing the
+        // project id without the grant set would let one grant execute work
+        // from every repository beside it.
+        const byProject = new Map<string, string[]>();
+        for (const entry of wanted) {
+          const held = byProject.get(entry.projectId) ?? [];
+          held.push(entry.repository.id);
+          byProject.set(entry.projectId, held);
+        }
+        for (const [projectId, repositoryIds] of byProject) {
+          const { project } = await authorizeProject(
+            this.options.store,
+            principal,
+            projectId,
+            "submit_task",
+          ).catch(() => ({ project: undefined }));
+          if (project === undefined) {
+            continue;
+          }
+          const taken = await operation().take({
+            actorId: principal.user.id,
+            organizationId: project.organizationId,
+            projectId,
+            repositoryIds,
+            vendor: input.vendor,
+            label: input.label,
+          });
+          if (taken === undefined) {
+            continue;
+          }
+          // Declared here and nowhere else. Taking work is the one act that
+          // proves an editor is at the keyboard and will come back, which is
+          // exactly what a mention needs to know before it is dispatched.
+          this.editors.declare({
+            userId: principal.user.id,
+            vendor: input.vendor,
+          });
+          return {
+            taskId: taken.taskId,
+            objective: taken.objective,
+            repository: taken.repositoryId,
+            branch: taken.branch,
+            baseRevision: taken.baseRevision,
+            expiresAt: taken.expiresAt,
+            // Absolute, because the caller is a `git fetch` on somebody's
+            // laptop rather than a page on this origin. A deployment with no
+            // base URL configured still answers with the path, which is
+            // wrong for git and obvious rather than silent.
+            bundleUrl: `${this.appBaseUrl}${API_PREFIX}/mcp/bundle/${this.bundleTickets.issue(
+              { leaseId: taken.leaseId, userId: principal.user.id },
+            )}`,
+            validationCommands: taken.validationCommands,
+          };
+        }
+        return undefined;
+      },
+      report: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return { outcome: "not_held", reason: held.refusal };
+        }
+        const reported = await operation().report({
+          leaseId: held.lease.id,
+          actorId: principal.user.id,
+          status: input.status,
+          patches: input.patches,
+          summary: input.summary,
+          ...(input.detail === undefined ? {} : { detail: input.detail }),
+        });
+        if (reported.outcome === "lease_lost") {
+          return { outcome: "not_held", reason: reported.reason };
+        }
+        if (reported.outcome === "refused") {
+          return { outcome: "refused", reason: reported.reason };
+        }
+        if (input.status === "released") {
+          return {
+            outcome: "accepted",
+            note: `${input.taskId} is back in the queue for somebody else.`,
+          };
+        }
+        if (input.status === "failed") {
+          return {
+            outcome: "accepted",
+            note: `Recorded that ${input.taskId} could not be done, and said so in its thread.`,
+          };
+        }
+        if (reported.requeued === true) {
+          return {
+            outcome: "accepted",
+            note:
+              "Canonical moved on while you were working, so this went back " +
+              "in the queue to be redone against the newer revision. Call " +
+              "take_task to pick it up again.",
+          };
+        }
+        return {
+          outcome: "accepted",
+          note:
+            reported.integrationStatus === "integrated" ||
+            reported.integrationStatus === undefined
+              ? `Landed. ${input.taskId} is done and its thread says so.`
+              : `Filed, and integration reported ${reported.integrationStatus}. The thread has the detail.`,
+        };
+      },
+      extend: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return undefined;
+        }
+        const expiresAt = await operation().extend({
+          leaseId: held.lease.id,
+          ttlMs: input.minutes * 60 * 1000,
+        });
+        if (expiresAt === undefined) {
+          return undefined;
+        }
+        // Still working, so still here. The vendor comes off the row holding
+        // the lease rather than from the request: an editor cannot declare
+        // presence for an agent it is not the one running.
+        for (const vendor of held.owner.adapters) {
+          this.editors.declare({ userId: principal.user.id, vendor });
+        }
+        return {
+          expiresAt,
+          bundleUrl: `${this.appBaseUrl}${API_PREFIX}/mcp/bundle/${this.bundleTickets.issue(
+            { leaseId: held.lease.id, userId: principal.user.id },
+          )}`,
+        };
+      },
+    };
   }
 
   /** Every repository this principal can reach, with its default roster. */
   private async mcpRepositories(
     principal: AuthenticatedPrincipal,
   ): Promise<McpRepository[]> {
-    const organizations = await this.reachableOrganizations(principal);
     const found: McpRepository[] = [];
+    for (const entry of await this.mcpReachable(principal)) {
+      found.push({
+        projectId: entry.projectId,
+        repository: entry.repository,
+        agents: await this.mcpAgentsIn(entry.projectId, entry.repository.id),
+      });
+    }
+    return found;
+  }
+
+  /**
+   * Every repository this principal can reach, without the rosters.
+   *
+   * Split out because resolving a room's mentionable agents is the expensive
+   * half and only one caller wants it. `take_task` asks this on every poll
+   * and cares about nothing but which repositories it may be handed work
+   * from; paying for a roster read per repository to answer that was a cost
+   * with no reader.
+   */
+  private async mcpReachable(
+    principal: AuthenticatedPrincipal,
+  ): Promise<Array<{ projectId: string; repository: StoredRepository }>> {
+    const organizations = await this.reachableOrganizations(principal);
+    const found: Array<{ projectId: string; repository: StoredRepository }> =
+      [];
     for (const organization of organizations) {
       const projects = await this.options.store
         .listProjects(organization.id)
@@ -15334,11 +15733,7 @@ export class ApiGateway {
             ? all
             : all.filter((entry) => authorized.repositories?.has(entry.id));
         for (const repository of visible) {
-          found.push({
-            projectId: project.id,
-            repository,
-            agents: await this.mcpAgentsIn(project.id, repository.id),
-          });
+          found.push({ projectId: project.id, repository });
         }
       }
     }
@@ -15917,6 +16312,22 @@ export class ApiGateway {
         advertised.add(adapter);
       }
       live.set(worker.userId, advertised);
+    }
+    // Editors folded in here rather than asked about beside this. There is
+    // one liveness answer in this process and this is it: a second source
+    // consulted by the roster and not by dispatch is exactly how an agent
+    // comes to be drawn as available and then told nothing is running it.
+    //
+    // Not narrowed by organization, and it cannot be: an editor declares a
+    // person and a vendor, not a tenant. That is safe in the direction it is
+    // wrong in, because everything downstream asks "is this agent's owner
+    // live", and the owner is already the agent's own.
+    for (const [userId, vendors] of this.editors.owners()) {
+      const advertised = live.get(userId) ?? new Set<string>();
+      for (const vendor of vendors) {
+        advertised.add(vendor);
+      }
+      live.set(userId, advertised);
     }
     return live;
   }

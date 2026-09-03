@@ -1167,6 +1167,84 @@ async function startRuntime(
       );
       return { accepted: true };
     },
+    // Faithful in the three respects the gateway acts on: a real worker row
+    // (the lease's foreign key, and what ownership is checked against), one
+    // row per person per editor, and `claimableBy` so a take cannot reach
+    // another person's queue. Everything past that — admission, integration,
+    // canonical — is `apps/cli/src/editor-work.test.ts`, against real Git.
+    editorWork: {
+      async take(input) {
+        const existing = (
+          await store.listWorkers({ organizationId: input.organizationId })
+        ).find(
+          (worker) =>
+            worker.userId === input.actorId && worker.name === input.label,
+        );
+        const worker =
+          existing ??
+          (await store.registerWorker({
+            userId: input.actorId,
+            organizationId: input.organizationId,
+            name: input.label,
+            adapters: [input.vendor],
+            version: "editor",
+          }));
+        for (const repositoryId of input.repositoryIds) {
+          const leased = await store.leaseNextTask({
+            workerId: worker.id,
+            projectId: input.projectId,
+            repositoryId,
+            baseRevision: "a".repeat(40),
+            ttlMs: 30 * 60 * 1000,
+            claimableBy: input.actorId,
+            kinds: ["task"],
+          });
+          if (leased === undefined) {
+            continue;
+          }
+          return {
+            leaseId: leased.lease.id,
+            taskId: leased.task.id,
+            objective: leased.task.objective,
+            repositoryId: leased.task.repositoryId,
+            branch: "main",
+            baseRevision: leased.lease.baseRevision,
+            baseVersion: 1,
+            expiresAt: leased.lease.expiresAt,
+            validationCommands: [],
+          };
+        }
+        return undefined;
+      },
+      async report(input) {
+        const settled = await store.finishWorkLease(
+          input.leaseId,
+          input.status === "completed"
+            ? "completed"
+            : input.status === "failed"
+              ? "failed"
+              : "released",
+          new Date().toISOString(),
+          input.detail,
+        );
+        return settled
+          ? { outcome: "accepted" }
+          : { outcome: "lease_lost", reason: "the hold had already gone" };
+      },
+      async extend(input) {
+        const lease = await store.getWorkLease(input.leaseId);
+        if (lease === undefined || lease.status !== "active") {
+          return undefined;
+        }
+        const expiresAt = new Date(Date.now() + input.ttlMs).toISOString();
+        await store.heartbeatWorkLease(
+          input.leaseId,
+          new Date().toISOString(),
+          expiresAt,
+        );
+        return expiresAt;
+      },
+    },
   };
   if (options.withoutListAgents === true) {
     delete operations.listAgents;
@@ -21547,7 +21625,274 @@ test("an MCP client can hand-shake and see the tools", async (t) => {
       "task_status",
       "cancel_task",
       "answer_question",
+      "take_task",
+      "report_task",
+      "extend_task",
     ],
+  );
+});
+
+/**
+ * The other direction: the editor does the work itself.
+ *
+ * Everything about admission, integration and canonical is tested against a
+ * real repository in `apps/cli/src/editor-work.test.ts`. What is only
+ * testable here is the part that is about the wire: which scope these ask
+ * for, whose lease a caller may touch, and whether the bundle a `git fetch`
+ * needs can be reached without handing an editor a worker's permissions.
+ */
+async function seedTaskFor(
+  runtime: Awaited<ReturnType<typeof startRuntime>>,
+  repositoryId: string,
+  userId: string,
+  objective = "raise the retry ceiling",
+) {
+  return await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective,
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: userId,
+  });
+}
+
+async function work(
+  origin: string,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+  id = 1,
+) {
+  const answer = await rpc(origin, token, {
+    jsonrpc: "2.0",
+    id,
+    method: "tools/call",
+    params: { name, arguments: args },
+  });
+  return {
+    status: answer.status,
+    isError: answer.data.result?.isError as true | undefined,
+    text: String(answer.data.result?.content?.[0]?.text ?? ""),
+    raw: answer,
+  };
+}
+
+test("an editor takes a task, is told the revision, and reports it done", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+  assert.match(taken.text, /raise the retry ceiling/u);
+  assert.match(taken.text, new RegExp(task.id, "u"));
+  assert.match(taken.text, /a{40}/u);
+  // Off the queue while the editor has it, which is the whole reason a lease
+  // is taken at all: a desktop worker must not run the same objective.
+  assert.equal(
+    (await runtime.store.getSubmittedTask(task.id))?.status,
+    "claimed",
+  );
+
+  const filed = await work(
+    runtime.origin,
+    token,
+    "report_task",
+    { task_id: task.id, summary: "Raised it." },
+    2,
+  );
+  assert.equal(filed.isError, undefined, filed.text);
+  const leases = await runtime.store.listWorkLeases({});
+  assert.equal(leases.at(-1)?.status, "completed");
+});
+
+test("an editor cannot report on a hold that is somebody else's", async (t) => {
+  const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+  await work(runtime.origin, token, "take_task", { editor: "claude" });
+
+  // A second developer in the same organization, with a token of their own.
+  // Not an outsider: the point is that being able to *see* a task is not
+  // being able to touch the hold somebody else has on it.
+  const colleague = await runtime.store.createUser({
+    email: "colleague@example.com",
+    displayName: "Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  const intruder = new TestClient(runtime.origin);
+  await intruder.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "colleague@example.com", password: PASSWORD },
+  });
+  const theirToken = await intruder.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "editor", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(theirToken.status, 201, JSON.stringify(theirToken.data));
+  const stolen = await work(
+    runtime.origin,
+    theirToken.data.token as string,
+    "report_task",
+    { task_id: task.id, summary: "mine now" },
+    3,
+  );
+  assert.equal(stolen.isError, true);
+  assert.match(stolen.text, /somebody else/u);
+  // The hold is untouched, which is the half that matters: the refusal must
+  // not have settled the lease on its way out.
+  assert.equal((await runtime.store.listWorkLeases({})).at(-1)?.status, "active");
+  void owner;
+});
+
+test("the work tools refuse a token without submit_task", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t, ["view"]);
+  await seedTaskFor(runtime, repositoryId, user.id);
+  const refused = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /submit_task/u);
+  // Nothing was leased on the way to the refusal.
+  assert.deepEqual(await runtime.store.listWorkLeases({}), []);
+});
+
+test("the bundle link works once, and only for the person it was issued to", async (t) => {
+  const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
+  const first = await seedTaskFor(runtime, repositoryId, user.id);
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  const link = /(\/api\/v1\/mcp\/bundle\/[A-Za-z0-9-]+)/u.exec(taken.text)?.[1];
+  assert.ok(link, taken.text);
+
+  // No Authorization header at all: the caller is a `curl` on somebody's
+  // laptop, and the ticket in the path is what stands in for one.
+  const fetched = await fetch(`${runtime.origin}${link}`);
+  assert.equal(fetched.status, 200);
+  assert.equal(
+    fetched.headers.get("content-type"),
+    "application/octet-stream",
+  );
+  assert.ok((await fetched.arrayBuffer()).byteLength > 0);
+
+  // Spent. The URL travels through a model transcript and a shell history, so
+  // a second use has to be worth nothing.
+  assert.equal((await fetch(`${runtime.origin}${link}`)).status, 404);
+  // And an invented one is worth nothing either.
+  assert.equal(
+    (await fetch(`${runtime.origin}/api/v1/mcp/bundle/not-a-real-ticket`)).status,
+    404,
+  );
+
+  // A ticket for a hold that has since been settled is refused rather than
+  // served: the bundle is a snapshot of a lease, and a lease that is over is
+  // not a thing to hand anybody the repository for.
+  // Given back and taken again, so there is a fresh ticket to let go stale.
+  // A repository runs one lease at a time, so the first hold has to end
+  // before a second can begin.
+  await work(
+    runtime.origin,
+    token,
+    "report_task",
+    { task_id: first.id, status: "released" },
+    8,
+  );
+  const again = await work(
+    runtime.origin,
+    token,
+    "take_task",
+    { editor: "claude" },
+    9,
+  );
+  const stale = /(\/api\/v1\/mcp\/bundle\/[A-Za-z0-9-]+)/u.exec(again.text)?.[1];
+  assert.ok(stale, again.text);
+  const gave = await work(
+    runtime.origin,
+    token,
+    "report_task",
+    { task_id: first.id, status: "released" },
+    10,
+  );
+  assert.equal(gave.isError, undefined, gave.text);
+  assert.equal((await fetch(`${runtime.origin}${stale}`)).status, 409);
+  void owner;
+});
+
+test("an editor that took work reads as online to the room", async (t) => {
+  // Liveness is only a question this deployment asks: everywhere else the
+  // control plane can run an agent itself, so whether its owner is at a
+  // keyboard is not a fact worth acting on.
+  withLocalAgentsOnly(t);
+  const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
+  // Nobody has a machine listening: the agent is offline, and the room says
+  // so before anything is taken.
+  const before = await work(runtime.origin, token, "list_repositories", {}, 4);
+  assert.match(before.text, /@.+ — offline/u);
+
+  await seedTaskFor(runtime, repositoryId, user.id);
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+
+  // Taking work is the one act that proves an editor is at a keyboard and
+  // will come back, and liveness has to be answered in one place: the roster
+  // and dispatch read the same map, or an agent reads available here and
+  // "nothing is running it yet" there.
+  const after = await work(runtime.origin, token, "list_repositories", {}, 5);
+  assert.match(after.text, /@.+ — online/u);
+
+  // And it stays online past the point a worker would have gone quiet. This
+  // is the whole reason presence is declared rather than inferred from a
+  // heartbeat: an editor cannot be woken, so nothing beats on its behalf, and
+  // a window that lapsed after three minutes would make an agent read as
+  // offline while it was demonstrably running something.
+  for (const worker of await runtime.store.listWorkers({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+  })) {
+    await runtime.store.touchWorker(
+      worker.id,
+      new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    );
+  }
+  const later = await work(runtime.origin, token, "list_repositories", {}, 6);
+  assert.match(later.text, /@.+ — online/u);
+  void owner;
+});
+
+test("extending a hold nobody holds is refused rather than invented", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+  const missed = await work(
+    runtime.origin,
+    token,
+    "extend_task",
+    { task_id: task.id },
+    6,
+  );
+  assert.equal(missed.isError, true);
+  assert.match(missed.text, /take_task/u);
+
+  await work(runtime.origin, token, "take_task", { editor: "claude" }, 7);
+  const held = (await runtime.store.listWorkLeases({})).at(-1);
+  const pushed = await work(
+    runtime.origin,
+    token,
+    "extend_task",
+    { task_id: task.id, minutes: 45 },
+    8,
+  );
+  assert.equal(pushed.isError, undefined, pushed.text);
+  const now = (await runtime.store.getWorkLease(held?.id ?? ""))?.expiresAt;
+  assert.ok(
+    new Date(now ?? 0).getTime() > new Date(held?.expiresAt ?? 0).getTime(),
   );
 });
 

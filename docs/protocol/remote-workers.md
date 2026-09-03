@@ -9,6 +9,12 @@ Every endpoint is bearer-authenticated and requires the `run_task` scope, so a
 read-only token cannot pull work or return results. See
 [API tokens](api-tokens.md).
 
+There is a second way a task gets done, with no worker process at all: an
+editor connected over MCP takes it and does it in the checkout the person
+already has open. That path shares the lease, the admission and the
+integration described here, and differs in when the plan is admitted and how
+long a hold lasts. See [doing Kumi's work from an editor](editor-work.md).
+
 The protocol is versioned in both directions. Each assignment carries the
 control plane's `protocolVersion`, and a worker announces its own in the body
 of `POST /workers/leases`. This document describes **version 4**:
