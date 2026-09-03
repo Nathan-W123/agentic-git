@@ -21,15 +21,27 @@ async function publicFile(name: string): Promise<string> {
   return await readFile(path.join(defaultPublicDirectory(), name), "utf8");
 }
 
-/** The gateway's own source, which is where the caps are enforced. */
+/**
+ * The gateway's own source, which is where the caps are enforced.
+ *
+ * Two files, joined: the caps and the field readers that refuse against them
+ * live in `field-validation.ts`, while the routes that name a cap when they
+ * call one live in `server.ts`. What this test pins is that the numbers agree
+ * and that a refusal says which number it hit - neither of which cares which
+ * file a declaration sits in, so a later split must not read as a failure.
+ */
+const GATEWAY_SOURCES = [
+  "../../../services/api-gateway/src/server.ts",
+  "../../../services/api-gateway/src/field-validation.ts",
+];
+
 async function gatewaySource(): Promise<string> {
-  return await readFile(
-    path.join(
-      defaultPublicDirectory(),
-      "../../../services/api-gateway/src/server.ts",
+  const parts = await Promise.all(
+    GATEWAY_SOURCES.map(async (relative) =>
+      readFile(path.join(defaultPublicDirectory(), relative), "utf8"),
     ),
-    "utf8",
   );
+  return parts.join("\n");
 }
 
 /** The value of one `NAME = 1_234` constant, whichever file it is declared in. */
