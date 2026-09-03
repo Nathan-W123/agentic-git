@@ -138,6 +138,7 @@ import {
   normalizeMcpRepositoryIds,
   parseChangedFiles,
   repositoryConflicts,
+  WORKER_RETIREMENT_MS,
 } from "./store.js";
 import {
   DEFAULT_PROJECT_ID,
@@ -805,6 +806,13 @@ export class SqliteCoordinationStore implements CoordinationStore {
       registeredAt: now,
       lastSeenAt: now,
     };
+    // Before the insert, so the row just written is never a candidate.
+    this.retireFinishedWorkers(
+      input.userId,
+      input.organizationId,
+      input.name,
+      new Date(Date.now() - WORKER_RETIREMENT_MS).toISOString(),
+    );
     this.db
       .prepare(
         `INSERT INTO workers
@@ -827,21 +835,58 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   public async listWorkers(filter?: {
     organizationId?: string;
+    seenAfter?: string;
   }): Promise<WorkerRecord[]> {
     // `= ?` rather than a caller-side filter, so a legacy row with a NULL
     // organization never matches and cannot surface in a tenant's fleet.
-    const rows =
-      filter?.organizationId === undefined
-        ? (this.db
-            .prepare("SELECT * FROM workers ORDER BY last_seen_at DESC")
-            .all() as Row[])
-        : (this.db
-            .prepare(
-              `SELECT * FROM workers WHERE organization_id = ?
-               ORDER BY last_seen_at DESC`,
-            )
-            .all(filter.organizationId) as Row[]);
+    //
+    // `seenAfter` in the WHERE rather than in the caller, so
+    // `workers_by_organization (organization_id, last_seen_at DESC)` serves
+    // it. Filtering afterwards read every dead row on every roster load.
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (filter?.organizationId !== undefined) {
+      clauses.push("organization_id = ?");
+      values.push(filter.organizationId);
+    }
+    if (filter?.seenAfter !== undefined) {
+      clauses.push("last_seen_at > ?");
+      values.push(filter.seenAfter);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM workers${
+          clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`
+        } ORDER BY last_seen_at DESC`,
+      )
+      .all(...values) as Row[];
     return rows.map((row) => this.toWorker(row));
+  }
+
+  /**
+   * Deletes one machine's rows that can no longer be doing anything.
+   *
+   * `NOT EXISTS` over the leases rather than a status test: the column is a
+   * foreign key, so a row referenced by a lease of any status cannot be
+   * deleted at all, and asking only about active ones would turn this into an
+   * occasional constraint failure on the registration path.
+   */
+  private retireFinishedWorkers(
+    userId: string,
+    organizationId: string,
+    name: string,
+    deadBefore: string,
+  ): void {
+    this.db
+      .prepare(
+        `DELETE FROM workers
+          WHERE user_id = ? AND organization_id = ? AND name = ?
+            AND last_seen_at < ?
+            AND NOT EXISTS (
+              SELECT 1 FROM work_leases WHERE work_leases.worker_id = workers.id
+            )`,
+      )
+      .run(userId, organizationId, name, deadBefore);
   }
 
   public async getWorker(id: string): Promise<WorkerRecord | undefined> {

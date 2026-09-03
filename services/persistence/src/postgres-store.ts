@@ -139,6 +139,7 @@ import {
   normalizeMcpRepositoryIds,
   parseChangedFiles,
   repositoryConflicts,
+  WORKER_RETIREMENT_MS,
 } from "./store.js";
 import { DEFAULT_PROJECT_ID, sameLeaseIdSet } from "./store.js";
 
@@ -916,6 +917,24 @@ export class PostgresCoordinationStore implements CoordinationStore {
       registeredAt: now,
       lastSeenAt: now,
     };
+    // Before the insert, so the row just written is never a candidate. See
+    // `registerWorker` on the store interface for why only leaseless rows go:
+    // `work_leases.worker_id` is a foreign key, and a worker that ever took a
+    // task is history rather than litter.
+    await this.query(
+      `DELETE FROM workers
+        WHERE user_id = $1 AND organization_id = $2 AND name = $3
+          AND last_seen_at < $4
+          AND NOT EXISTS (
+            SELECT 1 FROM work_leases WHERE work_leases.worker_id = workers.id
+          )`,
+      [
+        input.userId,
+        input.organizationId,
+        input.name,
+        new Date(Date.now() - WORKER_RETIREMENT_MS).toISOString(),
+      ],
+    );
     await this.query(
       `INSERT INTO workers
          (id, user_id, organization_id, name, adapters_json, version,
@@ -937,17 +956,30 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
   public async listWorkers(filter?: {
     organizationId?: string;
+    seenAfter?: string;
   }): Promise<WorkerRecord[]> {
     // `= $1` rather than a caller-side filter, so a legacy row with a NULL
     // organization never matches and cannot surface in a tenant's fleet.
-    const rows =
-      filter?.organizationId === undefined
-        ? await this.rows("SELECT * FROM workers ORDER BY last_seen_at DESC")
-        : await this.rows(
-            `SELECT * FROM workers WHERE organization_id = $1
-             ORDER BY last_seen_at DESC`,
-            [filter.organizationId],
-          );
+    //
+    // `seenAfter` in the WHERE rather than in the caller, so
+    // `workers_by_organization (organization_id, last_seen_at DESC)` serves
+    // it. Filtering afterwards read every dead row on every roster load.
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (filter?.organizationId !== undefined) {
+      values.push(filter.organizationId);
+      clauses.push(`organization_id = $${values.length}`);
+    }
+    if (filter?.seenAfter !== undefined) {
+      values.push(filter.seenAfter);
+      clauses.push(`last_seen_at > $${values.length}`);
+    }
+    const rows = await this.rows(
+      `SELECT * FROM workers${
+        clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`
+      } ORDER BY last_seen_at DESC`,
+      values,
+    );
     return rows.map((row) => this.toWorker(row));
   }
 

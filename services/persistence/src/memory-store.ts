@@ -117,6 +117,7 @@ import {
   mcpSecretNames,
   normalizeMcpRepositoryIds,
   repositoryConflicts,
+  WORKER_RETIREMENT_MS,
 } from "./store.js";
 import {
   DEFAULT_ORGANIZATION_ID,
@@ -708,18 +709,39 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       registeredAt: now,
       lastSeenAt: now,
     };
+    // The same retirement the SQL stores make, so a test that proves the rule
+    // against this one is proving the rule. A row referenced by any lease is
+    // kept: the SQL stores could not delete it if they tried.
+    const deadBefore = new Date(Date.now() - WORKER_RETIREMENT_MS).toISOString();
+    const leased = new Set(
+      [...this.workLeases.values()].map((lease) => lease.workerId),
+    );
+    for (const [id, existing] of [...this.workers.entries()]) {
+      if (
+        existing.userId === input.userId &&
+        existing.organizationId === input.organizationId &&
+        existing.name === input.name &&
+        existing.lastSeenAt < deadBefore &&
+        !leased.has(id)
+      ) {
+        this.workers.delete(id);
+      }
+    }
     this.workers.set(worker.id, worker);
     return { ...worker, adapters: [...worker.adapters] };
   }
 
   public async listWorkers(filter?: {
     organizationId?: string;
+    seenAfter?: string;
   }): Promise<WorkerRecord[]> {
     return [...this.workers.values()]
       .filter(
         (worker) =>
-          filter?.organizationId === undefined ||
-          worker.organizationId === filter.organizationId,
+          (filter?.organizationId === undefined ||
+            worker.organizationId === filter.organizationId) &&
+          (filter?.seenAfter === undefined ||
+            worker.lastSeenAt > filter.seenAfter),
       )
       .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
       .map((worker) => ({ ...worker, adapters: [...worker.adapters] }));

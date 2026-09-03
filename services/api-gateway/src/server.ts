@@ -15873,17 +15873,20 @@ export class ApiGateway {
   private async liveWorkerOwners(
     organizationId?: string,
   ): Promise<Map<string, Set<string>>> {
-    const workers = await this.options.store
-      .listWorkers(
-        organizationId === undefined ? undefined : { organizationId },
-      )
-      .catch((): [] => []);
+    // The cutoff goes to the store, not to a loop here. This runs on every
+    // roster read and every @mention, and `registerWorker` writes a fresh row
+    // per worker start, so reading the whole table and discarding most of it
+    // made the commonest query in the product scale with how often people had
+    // restarted their desktops.
     const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
+    const workers = await this.options.store
+      .listWorkers({
+        ...(organizationId === undefined ? {} : { organizationId }),
+        seenAfter: cutoff,
+      })
+      .catch((): [] => []);
     const live = new Map<string, Set<string>>();
     for (const worker of workers) {
-      if (worker.lastSeenAt <= cutoff) {
-        continue;
-      }
       const advertised = live.get(worker.userId) ?? new Set<string>();
       for (const adapter of worker.adapters) {
         advertised.add(adapter);

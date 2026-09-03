@@ -540,6 +540,17 @@ export function normalizeMcpRepositoryIds(ids: readonly string[]): string[] {
   return [...new Set(ids)].sort();
 }
 
+/**
+ * How long a worker row must have been silent before it can be retired.
+ *
+ * Comfortably past both windows that matter: a worker stops counting as live
+ * after three minutes, and a lease it might have been holding expires after
+ * five. Thirty leaves a wide margin for a machine that is merely slow to poll,
+ * because deleting a row a live process is still using would fail its next
+ * lease with an unknown-worker error rather than anything legible.
+ */
+export const WORKER_RETIREMENT_MS = 30 * 60 * 1000;
+
 export interface WorkerRecord {
   id: string;
   /** The person whose credential registered the worker, and who may drive it. */
@@ -1844,6 +1855,22 @@ export interface CoordinationStore {
     repositoryId: string,
   ): Promise<boolean>;
 
+  /**
+   * Records a machine as available, and retires that machine's dead rows.
+   *
+   * A fresh id every time, deliberately: two processes on one machine must not
+   * share a row, or they share its lease accounting and whichever registered
+   * last decides which adapters the pair is said to have.
+   *
+   * The retirement is what stops the table growing with restarts. Only rows
+   * that are genuinely finished go: same owner, same organization, same
+   * machine name, no heartbeat for long enough that they cannot be live and
+   * cannot hold an unexpired lease, and no lease row pointing at them at all.
+   * That last condition is not optional. `work_leases.worker_id` is a foreign
+   * key, so a worker that ever took a task is part of the history and stays.
+   * What is deleted is exactly the accumulation this was leaking: a desktop
+   * opened, closed, and opened again without work ever arriving.
+   */
   registerWorker(input: {
     userId: UserId;
     organizationId: string;
@@ -1858,7 +1885,23 @@ export interface CoordinationStore {
    * rather than by the caller: an unfiltered call returns every worker on the
    * deployment, so anything serving a user must pass one.
    */
-  listWorkers(filter?: { organizationId?: string }): Promise<WorkerRecord[]>;
+  /**
+   * Registered workers, newest heartbeat first.
+   *
+   * `seenAfter` is not a convenience. Liveness is asked on every roster read
+   * and on every @mention, and answering it meant loading the whole table and
+   * filtering in memory: `registerWorker` writes a fresh row on every worker
+   * start with no upsert, so that table grows with restarts rather than with
+   * machines. Pushed into the query it is served by
+   * `workers_by_organization (organization_id, last_seen_at DESC)`, which
+   * already exists, and the cost of the hot path stops depending on how many
+   * dead rows are behind it.
+   */
+  listWorkers(filter?: {
+    organizationId?: string;
+    /** Only workers whose last heartbeat is strictly after this ISO instant. */
+    seenAfter?: string;
+  }): Promise<WorkerRecord[]>;
   getWorker(id: string): Promise<WorkerRecord | undefined>;
   touchWorker(id: string, at: string): Promise<void>;
 
