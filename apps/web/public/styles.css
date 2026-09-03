@@ -522,6 +522,118 @@ svg.ui-icon {
   text-align: right;
 }
 
+/* The returning-user path is deliberately one compact card: brand, task,
+   fields, and recovery all stay within a single reading order. The other
+   auth screens retain the shared shell above because their longer copy and
+   additional fields benefit from the looser layout. */
+.auth-login-shell {
+  padding: 24px;
+  background:
+    radial-gradient(circle at 50% 0%, var(--accent-wash), transparent 34rem),
+    var(--bg);
+}
+
+.auth-login {
+  width: 100%;
+  max-width: 408px;
+  display: grid;
+  gap: 18px;
+}
+
+.auth-login-header {
+  display: grid;
+  gap: 18px;
+  text-align: center;
+}
+
+.auth-login-brand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+.auth-login-header h1 {
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.auth-login-header p {
+  margin-top: 7px;
+  color: var(--text-3);
+  font-size: 14px;
+}
+
+.auth-login-card {
+  gap: 18px;
+  padding: 28px;
+  border-color: var(--border-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 20px 48px rgb(0 0 0 / 20%);
+}
+
+.auth-login-card .field {
+  gap: 8px;
+}
+
+.auth-login-card .input {
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 9px;
+}
+
+.auth-login-password {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-login-password .link-muted {
+  justify-self: end;
+}
+
+.auth-login-card .btn {
+  min-height: 44px;
+  margin-top: 2px;
+}
+
+.auth-login-card .form-msg {
+  margin: -4px 0;
+}
+
+.auth-login-footer {
+  padding-top: 17px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.auth-login-desktop {
+  justify-self: center;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.auth-login-desktop:hover {
+  color: var(--accent-bright);
+}
+
+@media (max-width: 480px) {
+  .auth-login-shell {
+    align-items: start;
+    padding: 32px 16px;
+  }
+
+  .auth-login-card {
+    padding: 22px;
+  }
+}
+
 /* ------------------------------------------------------------ buttons ---- */
 
 .btn {
