@@ -7,6 +7,7 @@ import {
   looksLikeTaskRequest,
 } from "./server.js";
 import {
+  PASSWORD,
   TestClient,
   addColleague,
   agentSpeech,
@@ -496,7 +497,10 @@ test("pausing somebody else's project is refused like every other task action", 
   await registerAccount(runtime.store, stranger, {
     email: "stranger-pause@example.com",
     displayName: "Stranger",
-    password: "correct horse battery staple",
+    // The harness password, not a literal: this one predated the policy
+    // requiring a digit, so the account was never created and the
+    // authorization assertion below never ran.
+    password: PASSWORD,
   });
   const refused = await stranger.request(`/api/v1/tasks/${task.id}/pause`, {
     method: "POST",

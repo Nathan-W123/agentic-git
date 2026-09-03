@@ -5658,11 +5658,17 @@ test("an invite link opened in a running session enters the invitation flow", as
   const body = app.slice(start, app.indexOf("\n/* ---", start));
   const invitation = body.indexOf("handleInviteLink");
   const signedOutShell = body.indexOf('const authRoot = $("#auth-root")');
-  const ordinaryRoute = body.indexOf("const route = window.location.hash");
+  const ordinaryRoute = body.indexOf("const route = (window.location.hash");
 
   assert.match(app, /addEventListener\("hashchange", applyHash\)/u);
   assert.match(body, /\^#invite\\\/\.\+\$/u);
-  assert.notEqual(invitation, -1);
+  // Each landmark asserted present before it is ordered against another: a
+  // missing one is -1, which sorts before everything and turns "this comes
+  // first" into a pass, or -- as here -- into a failure that reads as a
+  // behaviour change rather than as a renamed line.
+  assert.notEqual(invitation, -1, "applyHash should still take invite links");
+  assert.notEqual(signedOutShell, -1, "applyHash should still reach the signed-out shell");
+  assert.notEqual(ordinaryRoute, -1, "applyHash should still read the ordinary route");
   assert.ok(invitation < signedOutShell);
   assert.ok(invitation < ordinaryRoute);
 });
@@ -6295,6 +6301,8 @@ test("the run fills the agent working, at the front of the stack", async () => {
     "planTranscriptReplies",
     "threadReplyTurns",
     "channelAuthor",
+    "agentOwnerOffline",
+    "threadIsPaused",
     "agentFace",
     "avatar",
     "currentUserName",
@@ -6318,6 +6326,11 @@ test("the run fills the agent working, at the front of the stack", async () => {
       name: reply.author,
       agent: reply.agent === true ? { id: reply.author } : undefined,
     }),
+    // This test's premise is an agent that is working: its owner has a
+    // machine and the thread is not paused. `screen-chats.js` imports both
+    // for real; only this synthetic scope needs them handed in.
+    () => false,
+    () => false,
     (
       agent: { id: string },
       _size: number,
@@ -7604,10 +7617,15 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   // The sidebar answers from the tasks rather than the messages: only the open
   // channel has its messages loaded, so a badge read from those would be right
   // for the room already on screen and absent for every other.
-  const channelHeld = data.slice(
-    data.indexOf("export function channelAwaitsGoAhead"),
-    data.indexOf("/** Records a `channel-typing` frame from somebody else. */"),
-  );
+  // Bounded by the next declaration, not by a comment: this used to end at a
+  // one-line comment that has since been expanded into a block, so `indexOf`
+  // returned -1 and `slice(start, -1)` quietly took the whole rest of the
+  // file. The assertions below then described `data.js`, not this function.
+  const heldStart = data.indexOf("export function channelAwaitsGoAhead");
+  const heldEnd = data.indexOf("export function noteTyping", heldStart);
+  assert.notEqual(heldStart, -1, "channelAwaitsGoAhead should still exist");
+  assert.notEqual(heldEnd, -1, "channelAwaitsGoAhead should have a boundary");
+  const channelHeld = data.slice(heldStart, heldEnd);
   assert.match(channelHeld, /state\.tasks\.some/u);
   assert.equal(/channelMessagesFor/u.test(channelHeld), false);
 
