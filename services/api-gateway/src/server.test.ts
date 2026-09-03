@@ -21635,6 +21635,7 @@ test("an MCP client can hand-shake and see the tools", async (t) => {
       "take_task",
       "report_task",
       "extend_task",
+      "task_progress",
     ],
   );
 });
@@ -21948,6 +21949,89 @@ test("an agent that is only in an editor is not said to be working on it", async
   // not true either that no machine of theirs is online.
   assert.doesNotMatch(said, /I'm working on it/u);
   assert.doesNotMatch(said, /isn't online/u);
+});
+
+test("a run done in an editor narrates itself into the thread", async (t) => {
+  // The gap this closes: a desktop worker posts progress as it goes and an
+  // editor posted nothing, so a task done from Cursor showed "taken" and then
+  // silence until it was over. Twenty minutes of that is indistinguishable
+  // from a hang, which is the exact failure the worker's progress route was
+  // written to remove.
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+
+  // Shortened first, so the renewal below is something that can be seen. A
+  // hold taken seconds ago already runs for half an hour, and asserting
+  // against that would pass whether or not anything renewed it.
+  await work(
+    runtime.origin,
+    token,
+    "extend_task",
+    { task_id: task.id, minutes: 1 },
+    2,
+  );
+  const shortened = (await runtime.store.listWorkLeases({ status: "active" })).at(-1);
+  assert.ok(shortened);
+  assert.ok(
+    new Date(shortened.expiresAt).getTime() < Date.now() + 5 * 60 * 1000,
+  );
+
+  const posted = await work(
+    runtime.origin,
+    token,
+    "task_progress",
+    { task_id: task.id, message: "reading the redirect handler" },
+    3,
+  );
+  assert.equal(posted.isError, undefined, posted.text);
+
+  // The same event a worker writes, so the watcher narrates it into the
+  // thread without knowing which end produced it.
+  const events = await runtime.store.listAuditEvents({
+    taskId: task.id,
+    types: ["agent_progress"],
+  });
+  assert.equal(events.length, 1);
+  assert.equal(
+    events[0]?.event.data["message"],
+    "reading the redirect handler",
+  );
+  assert.equal(events[0]?.event.data["repositoryId"], repositoryId);
+
+  // And it renews the hold, because a line of progress is evidence of life.
+  // An editor narrating its work for thirty-five minutes must not lose the
+  // task at the half hour for want of a separate call.
+  const held = (await runtime.store.listWorkLeases({ status: "active" })).at(-1);
+  assert.ok(held, "the hold was not kept");
+  assert.ok(
+    new Date(held.expiresAt).getTime() > Date.now() + 25 * 60 * 1000,
+  );
+});
+
+test("progress on a task somebody else holds is refused", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+  // Nobody has taken it, so there is no run for a line to belong to.
+  const refused = await work(
+    runtime.origin,
+    token,
+    "task_progress",
+    { task_id: task.id, message: "pretending to work on this" },
+    3,
+  );
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /not holding/u);
+  assert.deepEqual(
+    await runtime.store.listAuditEvents({
+      taskId: task.id,
+      types: ["agent_progress"],
+    }),
+    [],
+  );
 });
 
 test("a misconfigured Authorization header says which way it is wrong", async (t) => {

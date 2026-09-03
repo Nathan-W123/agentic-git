@@ -143,6 +143,11 @@ export interface McpWorkDeps {
     taskId: string;
     minutes: number;
   }): Promise<{ expiresAt: string; bundleUrl: string } | undefined>;
+  /** Puts one line from this run into the task's thread. */
+  note(input: {
+    taskId: string;
+    message: string;
+  }): Promise<"recorded" | "not_held">;
 }
 
 /**
@@ -271,6 +276,12 @@ export function takenTaskBrief(taken: McpTakenTask): string {
     `  git fetch /tmp/kumi-${taken.taskId}.bundle`,
     "",
     "That link works once and expires; extend_task issues another.",
+    "",
+    "As you go, call task_progress with a line about what you are doing. " +
+      "The task has a thread in Kumi that the rest of the team is watching, " +
+      "and between taking the work and reporting it that thread shows " +
+      "nothing at all unless you say something. A run that goes quiet for " +
+      "twenty minutes is indistinguishable from one that has hung.",
     "",
     "Then do the work, and report it with:",
     `  report_task task_id="${taken.taskId}" diff="$(git diff ${taken.baseRevision})"`,
@@ -507,5 +518,49 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
     },
   };
 
-  return [takeTask, reportTask, extendTask];
+  const taskProgress: McpTool = {
+    name: "task_progress",
+    title: "Say what you are doing",
+    description:
+      "Puts one line into the thread of a task you took with take_task, so " +
+      "the people watching in Kumi can follow the work. Call it as you go: " +
+      "what you are reading, what you have decided, what you are about to " +
+      "change. This is the only thing that appears in that thread between " +
+      "taking the task and reporting it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "The id take_task gave you." },
+        message: {
+          type: "string",
+          description:
+            "One line, in your own words, addressed to the people watching. " +
+            "Not a status code and not a summary of the whole task.",
+        },
+      },
+      required: ["task_id", "message"],
+      additionalProperties: false,
+    },
+    async run(args) {
+      deps.assertScope("submit_task");
+      const taskId = requiredString(args, "task_id", 200);
+      // The same bound the worker's own progress route uses, so a line
+      // written from an editor and a line written from a desktop cannot be
+      // different lengths in the same thread.
+      const message = requiredString(args, "message", 2_000);
+      const noted = await deps.note({ taskId, message });
+      if (noted === "not_held") {
+        return mcpRefusal(
+          `You are not holding ${taskId}, so there is no run for that line ` +
+            "to belong to.",
+        );
+      }
+      // Deliberately terse. This is called repeatedly during a turn, and an
+      // answer worth reading would spend the model's attention on Kumi
+      // rather than on the work.
+      return mcpText("Posted.");
+    },
+  };
+
+  return [takeTask, reportTask, extendTask, taskProgress];
 }

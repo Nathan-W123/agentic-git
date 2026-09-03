@@ -130,9 +130,11 @@ test("text that is not a diff produces no patches at all", () => {
 function harness(overrides: Partial<McpWorkDeps> = {}): {
   deps: McpWorkDeps;
   reported: Array<Parameters<McpWorkDeps["report"]>[0]>;
+  noted: string[];
   scopes: string[];
 } {
   const reported: Array<Parameters<McpWorkDeps["report"]>[0]> = [];
+  const noted: string[] = [];
   const scopes: string[] = [];
   const deps: McpWorkDeps = {
     assertScope: (permission) => {
@@ -150,9 +152,13 @@ function harness(overrides: Partial<McpWorkDeps> = {}): {
       expiresAt: "2026-01-01T00:00:00.000Z",
       bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-2",
     }),
+    note: async (input) => {
+      noted.push(input.message);
+      return "recorded";
+    },
     ...overrides,
   };
-  return { deps, reported, scopes };
+  return { deps, reported, noted, scopes };
 }
 
 function toolNamed(deps: McpWorkDeps, name: string) {
@@ -167,13 +173,19 @@ test("the work tools ask for submit_task, never run_task", async () => {
     ["take_task", {}],
     ["report_task", { task_id: "t-1", diff: "", summary: "did it" }],
     ["extend_task", { task_id: "t-1" }],
+    ["task_progress", { task_id: "t-1", message: "reading the router" }],
   ] as const) {
     await toolNamed(deps, name).run(args);
   }
   // `run_task` is the scope `POST /workers/leases` requires. A token that
   // carried it could register as a worker and lease other people's tasks,
   // which is the whole reason these ask for something narrower.
-  assert.deepEqual(scopes, ["submit_task", "submit_task", "submit_task"]);
+  assert.deepEqual(scopes, [
+    "submit_task",
+    "submit_task",
+    "submit_task",
+    "submit_task",
+  ]);
 });
 
 test("a summary sent where a diff should be is refused, not filed as done", async () => {
@@ -344,4 +356,54 @@ test("the editor behind a request is read from the token, name as fallback", () 
     editorBehind({ editorVendor: "codex", name: "Claude Code on laptop" }),
     "codex",
   );
+});
+
+test("progress is one line, and only for a task you are holding", async () => {
+  const { deps, noted } = harness();
+  const said = await toolNamed(deps, "task_progress").run({
+    task_id: "t-1",
+    message: "reading the router before touching it",
+  });
+  assert.equal(said.isError, undefined);
+  assert.deepEqual(noted, ["reading the router before touching it"]);
+  // Terse on purpose: this is called repeatedly inside a turn, and an answer
+  // worth reading would spend the model's attention on Kumi rather than the
+  // work.
+  assert.equal(said.content[0]?.text, "Posted.");
+
+  // Empty is not a line. A blank reply in a thread reads as the agent having
+  // said something and it having been lost.
+  await assert.rejects(
+    async () =>
+      await toolNamed(deps, "task_progress").run({ task_id: "t-1", message: "  " }),
+    McpArgumentError,
+  );
+
+  const { deps: stranger } = harness({ note: async () => "not_held" });
+  const refused = await toolNamed(stranger, "task_progress").run({
+    task_id: "t-1",
+    message: "still going",
+  });
+  assert.equal(refused.isError, true);
+  assert.match(String(refused.content[0]?.text), /not holding/u);
+});
+
+test("take_task tells the agent the thread is empty unless it speaks", async () => {
+  const { deps } = harness({
+    take: async () => ({
+      taskId: "task-9",
+      objective: "Fix the login redirect",
+      repository: "payments",
+      branch: "main",
+      baseRevision: "a".repeat(40),
+      expiresAt: "2026-01-01T00:30:00.000Z",
+      bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+      validationCommands: [],
+    }),
+  });
+  const answer = await toolNamed(deps, "take_task").run({});
+  // The instruction has to be in the brief, not only in the tool's own
+  // description: a model reads the tool it just called, and nothing else
+  // will prompt it to narrate work nobody has asked it about.
+  assert.match(String(answer.content[0]?.text), /task_progress/u);
 });

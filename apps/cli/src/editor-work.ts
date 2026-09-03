@@ -40,6 +40,7 @@ import type {
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 import {
+  EDITOR_HOLD_MS,
   EDITOR_WORKER_VERSION,
   type AgentPlan,
   type CanonicalVersion,
@@ -57,18 +58,8 @@ import {
   type WorkResultServices,
 } from "./worker-operations.js";
 
-/**
- * How long an editor holds a task before it must say it is still there.
- *
- * Half an hour, against a worker's five minutes, and the difference is not a
- * safety margin — it is what a lease means here. A worker's lease is renewed
- * by a timer beside the process, so five minutes only ever asks "is that
- * process alive". An editor's is renewed by the agent choosing to call a
- * tool, and between two such calls a person can read a diff, go and look at
- * something, and come back. Anything short enough to catch an abandoned
- * editor quickly is short enough to take work away from one that is running.
- */
-export const EDITOR_LEASE_TTL_MS = 30 * 60 * 1000;
+/** Re-exported under this package's own name; see {@link EDITOR_HOLD_MS}. */
+export const EDITOR_LEASE_TTL_MS = EDITOR_HOLD_MS;
 
 /** The longest an editor may extend one hold to in a single request. */
 export const EDITOR_LEASE_MAX_EXTENSION_MS = 60 * 60 * 1000;

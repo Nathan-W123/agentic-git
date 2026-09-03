@@ -77,6 +77,7 @@ import {
   FORCE_QUESTION_MARKER,
   KEEP_IT_SIMPLE_DIRECTIVE,
   localAgentsOnly,
+  EDITOR_HOLD_MS,
   EDITOR_WORKER_VERSION,
   mcpServersEnabled,
   projectBudgets,
@@ -15820,6 +15821,40 @@ export class ApiGateway {
               ? `Landed. ${input.taskId} is done and its thread says so.`
               : `Filed, and integration reported ${reported.integrationStatus}. The thread has the detail.`,
         };
+      },
+      note: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return "not_held";
+        }
+        // The event a desktop worker writes, written the same way, so the
+        // watcher narrates it into the thread without knowing or caring
+        // which end produced it. A line from Cursor and a line from a laptop
+        // are the same line to everybody reading.
+        await this.options.store.appendAudit(undefined, {
+          type: "agent_progress",
+          taskId: held.lease.taskId,
+          data: {
+            projectId: held.lease.projectId,
+            repositoryId: held.lease.repositoryId,
+            workerId: held.lease.workerId,
+            leaseId: held.lease.id,
+            message: input.message,
+          },
+        });
+        // Evidence of life, so it renews the hold exactly as a worker's
+        // heartbeat does. An editor that has been narrating its work for
+        // thirty-five minutes is demonstrably alive, and losing its task at
+        // the half hour for want of a separate call would be punishing it
+        // for saying so. `extend_task` remains the way to ask for *longer*
+        // than the ordinary window; this only keeps the ordinary one.
+        await this.options.operations.editorWork
+          ?.extend({ leaseId: held.lease.id, ttlMs: EDITOR_HOLD_MS })
+          .catch(() => undefined);
+        for (const vendor of held.owner.adapters) {
+          this.editors.declare({ userId: principal.user.id, vendor });
+        }
+        return "recorded";
       },
       extend: async (input) => {
         const held = await heldLease(input.taskId);

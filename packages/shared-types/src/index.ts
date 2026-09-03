@@ -3085,6 +3085,23 @@ export const MCP_LEASE_PROTOCOL_VERSION = 4;
 export const EDITOR_WORKER_VERSION = "editor";
 
 /**
+ * How long an editor holds a task before it must say it is still there.
+ *
+ * Half an hour, against a worker's five minutes, and the difference is what a
+ * lease means at each end. A worker's is renewed by a timer beside the
+ * process, so a short window only ever asks "is that process alive". An
+ * editor's is renewed by an agent choosing to call a tool, and between two
+ * such calls a person can read a diff, go and look at something, and come
+ * back. Anything short enough to catch an abandoned editor quickly is short
+ * enough to take work away from one that is running.
+ *
+ * Here rather than beside the operation that issues it, because the gateway
+ * renews a hold too — a line of progress is evidence of life, and renewing to
+ * a different number there would mean two answers to how long a hold lasts.
+ */
+export const EDITOR_HOLD_MS = 30 * 60 * 1000;
+
+/**
  * One stored MCP server, as the lease needs to read it.
  *
  * A structural subset of the persistence record rather than the record

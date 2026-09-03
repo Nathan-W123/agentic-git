@@ -122,6 +122,39 @@ in Kumi goes to the desktop, because the desktop is the thing that polls and
 nothing is watching an editor. Only when neither is there does a task wait,
 and then the room is told so.
 
+## What the room sees
+
+A task done in an editor reads in its channel exactly like one done on a
+desktop, and that is the whole point: the person who filed it, and everybody
+else in the room, should not have to know or care which end ran it.
+
+| | Desktop worker | Editor |
+| --- | --- | --- |
+| The thread, and the message that opened it | yes | yes |
+| "I've taken this task…" | yes | yes |
+| Progress while it works | `POST …/progress` | `task_progress` |
+| The agent's own account at the end | yes | yes |
+| Diff, changed files, integration outcome | yes | yes |
+
+Progress is the one that had to be built rather than inherited. The worker's
+route asks for `run_task`, which an editor's token deliberately does not
+carry, so `task_progress` is its own tool authorized like the rest of them —
+and it writes the identical `agent_progress` event, so the watcher narrates it
+into the thread without knowing which end produced it. `take_task`'s brief
+tells the agent to use it, because nothing else will prompt a model to narrate
+work nobody has asked it about, and a run that goes quiet for twenty minutes
+is indistinguishable from one that has hung.
+
+A line of progress also renews the hold, exactly as a worker's heartbeat does:
+an editor that has been narrating its work for thirty-five minutes is
+demonstrably alive, and losing its task at the half hour for want of a
+separate call would be punishing it for saying so. `extend_task` remains the
+way to ask for *longer* than the ordinary window.
+
+One thing genuinely does not surface, on either path: an agent's reasoning.
+Thinking appears only in direct messages with an agent, never in a task
+thread, so this is not something the editor path is missing.
+
 ## The base revision, and the bundle
 
 Kumi's canonical branch diverges from `origin/main` the moment anything
