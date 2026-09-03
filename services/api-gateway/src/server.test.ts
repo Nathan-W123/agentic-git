@@ -18787,6 +18787,60 @@ test("an unmatched request goes to the sender's own agent, then to whoever is fr
  * chat the team is already in, and the second person to click it was told it
  * had already been used.
  */
+test("somebody invited to one repository can still make a token", async (t) => {
+  // A repository-scoped invitation grants that repository and deliberately no
+  // organization membership, which is the whole point of scoping it. But a
+  // token's scopes were bounded by memberships alone, so every person invited
+  // to a deployment — and the invitation route requires a repository, so that
+  // is all of them — was bounded by nothing at all. A developer on the only
+  // repository they can see was told their role granted not even `view`.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "shared-with-them");
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: { role: "developer", repositoryId: repo, projectId: DEFAULT_PROJECT_ID },
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+
+  const joiner = new TestClient(runtime.origin);
+  const accepted = await joiner.request(
+    `/api/v1/invitations/${invited.data.token as string}/accept`,
+    {
+      method: "POST",
+      body: {
+        email: "cofounder@example.com",
+        displayName: "Co-founder",
+        password: PASSWORD,
+      },
+    },
+  );
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  assert.deepEqual(accepted.data.memberships, [], "the grant is the only access");
+
+  // Developer on that repository grants `submit_task`, so the token an editor
+  // connection needs is exactly what this person may have.
+  const token = await joiner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "Codex on their laptop", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(token.status, 201, JSON.stringify(token.data));
+
+  // And the bound still holds: a developer cannot mint what a developer does
+  // not have, however the role reached them.
+  const beyond = await joiner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "greedy", scopes: ["manage_organization"] },
+  });
+  assert.equal(beyond.status, 403);
+  assert.equal(beyond.data.error.code, "scope_exceeds_role");
+});
+
 test("an invite link with no address admits more than one person", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
