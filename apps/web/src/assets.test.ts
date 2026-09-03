@@ -1070,12 +1070,16 @@ test("settings exposes theme and sound effect preferences", async () => {
   const data = await publicFile("data.js");
   const ui = await publicFile("ui.js");
 
-  assert.match(app, /data-act="settings-theme"/u);
-  assert.match(app, /\["system", "System"\]/u);
+  // The rows are built by `settingRow` and `segmentedControl` now, so the
+  // action arrives as a property those helpers turn into `data-act`, and
+  // each option carries an icon beside its label. Same two controls, same
+  // two actions.
+  assert.match(app, /act: "settings-theme"/u);
+  assert.match(app, /\{ value: "system", label: "System"/u);
   assert.match(data, /export function myThemePreference\(\)/u);
   assert.match(data, /prefers-color-scheme: light/u);
 
-  assert.match(app, /data-act="settings-sounds"/u);
+  assert.match(app, /act: "settings-sounds"/u);
   assert.match(app, /Quiet cues for sent and incoming messages/u);
   assert.match(app, /localStorage\.setItem\("ag\.messageSounds"/u);
   // The inline `=== "false"` early return inside `chime` became the
@@ -1800,7 +1804,7 @@ test("each roster is compact, unlabelled when empty, and folds on its heading", 
   // People and agents are drawn at the same, smaller face — the two rosters
   // must not disagree about how big somebody in the room is.
   assert.match(chats, /avatar\(name, 22, name, me \? myAvatar\(\) : undefined\)/u);
-  assert.match(chats, /agentFace\(agent, 22\)/u);
+  assert.match(chats, /statusAgentFace\(agent, 22/u);
   assert.match(css, /\.roster-row \.status-dot \{[\s\S]{0,80}width: 6px;/u);
   assert.match(css, /\.roster-row-main \{[\s\S]{0,120}padding: 4px 8px;/u);
 
@@ -1996,7 +2000,10 @@ test("the phone drawer closes when a sidebar destination opens", async () => {
   // through the helper before it renders, and the helper must still forget the
   // reply target and shut the drawer — a shell that stayed open over the
   // conversation it just opened is the failure this guards.
-  assert.match(dm, /openUserDirectMessage\(value\);\s*render\(\);/u);
+  assert.match(
+    dm,
+    /if \(!openUserDirectMessage\(value\)\) \{[\s\S]{0,40}\}[\s\S]{0,80}render\(\);/u,
+  );
   const openDm = app.slice(
     app.indexOf("function openUserDirectMessage"),
     app.indexOf("function showDirectMessageMenu"),
@@ -7707,7 +7714,13 @@ test("completed-work responses use an accessible inline pill while ordinary refe
   assert.match(row, /const completedReference =/u);
   assert.match(row, /completedReference === ""/u);
   assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
-  assert.match(row, /messageBodyWithIcons\(entry, repositoryId\)\}\$\{completedReference\}/u);
+  // The body is rewritten before it is drawn — the reference is lifted out
+  // of the text and rendered as the pill — so the entry reaches
+  // `messageBodyWithIcons` with its content replaced rather than whole.
+  assert.match(
+    row,
+    /messageBodyWithIcons\(\{ \.\.\.entry, content: shown \}, repositoryId\)\}\$\{completedReference\}/u,
+  );
 
   const pill = /\n\.cmsg-completed-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(pill, undefined, "completed work has its own inline treatment");
@@ -8380,10 +8393,14 @@ test("a provider with no model list still lets a model be named", async () => {
   // The agent panel's chips became labelled fields in the profile redesign, so
   // the slice is anchored on `field("Model", ...)` now. Same control, same
   // action, same question: what happens on a provider that lists nothing.
-  const chip = chats.slice(
-    chats.indexOf('field(\n      "Model"'),
-    chats.indexOf('field(\n      "Reasoning"'),
-  );
+  // Anchored on the function rather than on `field(\n      "Model"`, whose
+  // indentation is what actually moved. A slice bounded by whitespace is a
+  // slice that reformatting silently empties.
+  const zoneStart = chats.indexOf("function agentRuntimeZone(");
+  const zoneEnd = chats.indexOf('"Reasoning"', zoneStart);
+  assert.notEqual(zoneStart, -1, "the agent runtime zone should still exist");
+  assert.notEqual(zoneEnd, -1, "the model field should still precede reasoning");
+  const chip = chats.slice(zoneStart, zoneEnd);
   assert.match(chip, /customModel/u);
   assert.match(chip, /miniEditable\(\s*"channel-agent-model"/u);
   assert.match(chat, /providerAllowsCustomModel\(agent\?\.id\)/u);
