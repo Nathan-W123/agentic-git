@@ -5027,7 +5027,7 @@ test("a direct message can send image-only and mixed text/image content", async 
     /dm: \{[\s\S]*draft: "dmDraft",[\s\S]*counter: "dmAttaching",[\s\S]*input: "dm-input"/u,
   );
   assert.match(dmPanel, /draftText\(state\.dmDraft\)/u);
-  assert.match(dmPanel, /messageBody\([\s\S]{0,100}message\.content/u);
+  assert.match(dmPanel, /messageFoldClip\([\s\S]{0,120}message\.content,[\s\S]{0,80}messageBody\(shown/u);
   assert.match(submit, /const draft = state\.dmDraft\.trim\(\)/u);
   assert.match(submit, /draft\.length === 0/u);
   assert.match(submit, /sendDirectMessage\(other, draft, referencedMessageId\)/u);
@@ -6939,7 +6939,7 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   // The header counted the whole organization — and, before that had loaded,
   // only the reader. Both it and the sidebar now count this room.
   assert.match(chats, /function channelPeopleFor/u);
-  assert.match(chats, /const people = channelPeopleFor\(repositoryId\)/u);
+  assert.match(chats, /const people = channelPeopleFor\(activeRepositoryId\)/u);
   assert.match(chats, /const people = channelPeopleFor\(activeRepositoryId\)/u);
   assert.doesNotMatch(
     /function conversationHeader[\s\S]*?\n\}/u.exec(chats)?.[0] ?? "",

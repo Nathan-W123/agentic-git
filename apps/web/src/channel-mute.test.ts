@@ -105,11 +105,16 @@ test("mute sits with the other channel settings, and asks nobody's permission", 
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  // In the channel's own menu, beside rename / sync / delete.
-  assert.match(
-    app,
-    /case "channel-menu":[\s\S]{0,2000}act: "channel-mute",/u,
+  // In the channel's own menu, beside rename / sync / delete. The menu is a
+  // list `conversationMenuItems` returns now rather than markup built inside
+  // a `case`, so mute is an entry in it — same menu, same neighbours.
+  const menu = app.slice(
+    app.indexOf("function conversationMenuItems(repositoryId) {"),
+    app.indexOf("function copyConversationLink"),
   );
+  assert.notEqual(menu, "", "the conversation menu should still be built");
+  assert.match(menu, /act: "channel-mute",/u);
+  assert.match(menu, /act: "channel-info",/u);
   // And in the info popover, which is the other place those three live.
   assert.match(chats, /data-act="channel-mute"/u);
   assert.match(chats, /Mute this channel/u);
