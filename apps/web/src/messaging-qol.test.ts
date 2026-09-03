@@ -14,8 +14,32 @@ import { defaultPublicDirectory } from "./assets.js";
  * down to the newest messages, keep a draft in the room it was meant for, or
  * take a message's words with them.
  */
+/**
+ * The dashboard shell, which is three files.
+ *
+ * `app.js` used to hold the router, the motion system and the accent colour
+ * arithmetic together. Motion moved to `motion.js` and the colour maths to
+ * `colour.js`; what these tests pin - that the behaviour is there and has
+ * the shape it is meant to have - never cared which of the three a line sat
+ * in, so asking for "app.js" here still means the whole shell.
+ */
+const SHELL_MODULES = ["app.js", "motion.js", "colour.js"];
+
 async function publicFile(name: string): Promise<string> {
-  return await readFile(path.join(defaultPublicDirectory(), name), "utf8");
+  const wanted = name === "app.js" ? SHELL_MODULES : [name];
+  const parts = await Promise.all(
+    wanted.map(async (file) =>
+      readFile(path.join(defaultPublicDirectory(), file), "utf8"),
+    ),
+  );
+  if (name !== "app.js") {
+    return parts.join("\n");
+  }
+  // Only the shell, and only because several tests below slice a function out
+  // of it and run it: `export` is a syntax error outside a module, and the
+  // shell's own functions carry it now that two of its three files are
+  // imported rather than inlined.
+  return parts.join("\n").replaceAll(/^export /gmu, "");
 }
 
 /** One top-level function's source, from its declaration to the next one. */

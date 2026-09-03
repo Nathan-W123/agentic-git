@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
@@ -21,15 +21,37 @@ async function publicFile(name: string): Promise<string> {
   return await readFile(path.join(defaultPublicDirectory(), name), "utf8");
 }
 
-/** The gateway's own source, which is where the caps are enforced. */
+/**
+ * The gateway's own source, which is where the caps are enforced.
+ *
+ * Every non-test module of the gateway, joined: the caps and the readers
+ * that refuse against them live in `field-validation.ts`, and the routes
+ * that name a cap when they call one live under `routes/`. What this test
+ * pins is that the numbers agree and that a refusal says which number it
+ * hit - neither of which cares which file a declaration sits in, so reading
+ * the tree rather than a named file keeps a later split from reading as a
+ * failure here.
+ */
 async function gatewaySource(): Promise<string> {
-  return await readFile(
-    path.join(
-      defaultPublicDirectory(),
-      "../../../services/api-gateway/src/server.ts",
-    ),
-    "utf8",
+  const root = path.join(
+    defaultPublicDirectory(),
+    "../../../services/api-gateway/src",
   );
+  const found = await readdir(root, { recursive: true, withFileTypes: true });
+  const files = found
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        entry.name.endsWith(".ts") &&
+        !entry.name.endsWith(".test.ts"),
+    )
+    .map((entry) => path.join(entry.parentPath, entry.name))
+    .sort();
+  assert.ok(files.length > 0, "no gateway source was found to read");
+  const parts = await Promise.all(
+    files.map(async (file) => readFile(file, "utf8")),
+  );
+  return parts.join("\n");
 }
 
 /** The value of one `NAME = 1_234` constant, whichever file it is declared in. */
