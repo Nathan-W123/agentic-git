@@ -2577,29 +2577,77 @@ test("a connected agent can have its CLI checked without disconnecting", async (
  * Somebody connected three agents that way and was told three times that it
  * had worked; every one of them then accepted work and did none of it.
  */
-test("connecting checks the machine before it reports success", async () => {
+test("nothing is created until the machine says it can run the agent", async () => {
   const agents = await publicFile("screen-agents.js");
   const connect = agents.slice(
     agents.indexOf("async function connectLocalAgent"),
+    agents.indexOf("const REFUSAL"),
+  );
+
+  // The order is the whole point, and it used to be the other way round: the
+  // agent and its call sign were minted the moment Connect was pressed, and
+  // the machine was asked afterwards. Somebody was left holding a named agent
+  // in every channel that could not run, told so by a toast that cleared
+  // itself in six seconds.
+  const asked = connect.indexOf("await verifyMachineFor(");
+  const made = connect.indexOf("await createLocalAgent(");
+  assert.notEqual(asked, -1, "the machine must be asked");
+  assert.notEqual(made, -1, "the agent is still created somewhere");
+  assert.ok(asked < made, "the machine must be asked before anything is created");
+
+  // And the refusal must actually stop. An ordering that asks first and
+  // creates anyway is the same bug with a longer wait in front of it.
+  const refused = connect.indexOf('if (verdict !== "ready")');
+  assert.ok(refused > asked && refused < made, "a refusal must return before creating");
+
+  // Said in a dialog, not a toast. This is the end of a flow somebody
+  // started, and the reason they have no agent is the one sentence they need
+  // — six seconds in a corner is the wrong carrier for it.
+  assert.match(connect.slice(refused, made), /showModal\(/u);
+
+  // Every verdict has something to say. A state added to the checker without
+  // a sentence here would surface as an empty dialog, which is worse than the
+  // toast it replaced.
+  const checker = agents.slice(
+    agents.indexOf("async function verifyMachineFor"),
+  );
+  const verdicts = new Set(
+    [...checker.matchAll(/return "([a-z-]+)";/gu)].map((match) => match[1]),
+  );
+  verdicts.delete("ready");
+  const refusals = agents.slice(agents.indexOf("const REFUSAL"));
+  for (const verdict of verdicts) {
+    assert.match(
+      refusals.slice(0, 2_400),
+      new RegExp(`["']?${verdict}["']?:`, "u"),
+      `${verdict} has no sentence in REFUSAL`,
+    );
+  }
+});
+
+test("the sign-in is offered, then checked rather than assumed", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const settle = agents.slice(
+    agents.indexOf("async function settleLogin"),
     agents.indexOf("export async function disconnectAgent"),
   );
 
-  // Order is the whole fix: the machine, then the message.
-  const setup = connect.indexOf("await finishLocalSetup(");
-  const said = connect.indexOf("toast(outcome.text");
-  assert.notEqual(setup, -1, "the machine must be checked during connect");
-  assert.ok(setup < said, "it must be checked before anything claims success");
+  // Offering a remedy is not evidence it worked. The old flow opened the
+  // sign-in terminal and returned "ready" whatever happened next — including
+  // when the person closed it untouched.
+  const offered = settle.indexOf("await bridge.signIn?.(");
+  const rechecked = settle.indexOf("await bridge.login(vendor)", offered);
+  assert.notEqual(offered, -1, "the sign-in must still be offered");
+  assert.ok(rechecked > offered, "the login must be re-read after the sign-in");
 
-  // And the message distinguishes the outcomes rather than always cheering.
-  assert.match(connect, /is not installed on this machine yet/u);
-  assert.match(connect, /Open the Kumi app on the machine that will run it/u);
-  assert.match(connect, /could not be added to every repository/u);
-
-  // The report is earned, not assumed: an install that was declined or failed
-  // must not come back as ready just because an installer was offered.
-  const finish = agents.slice(agents.indexOf("async function finishLocalSetup"));
-  assert.match(finish.slice(0, 2_600), /const after = await bridge\.detected\(\)/u);
-  assert.match(finish.slice(0, 2_600), /\? "ready" : "missing"/u);
+  // The three browser-session vendors pass on the strength of the CLI alone,
+  // and that is a decision rather than an oversight: their login state is not
+  // readable from here at all, so refusing on it would make them permanently
+  // impossible to connect.
+  assert.match(settle, /state === "unknowable"/u);
+  // "could not ask" is never folded into "the answer is no" — they send
+  // somebody to two different places.
+  assert.match(settle, /return "unknown"/u);
 });
 
 /**
@@ -2644,14 +2692,24 @@ test("a credential-less agent is listed in channels and offered to rooms", async
  * channel closed under a reloading window — and returning quietly is the whole
  * of "I pressed it and nothing happened".
  */
-test("check the CLI says something when the machine cannot be asked", async () => {
+test("check the CLI answers with the same check connecting uses", async () => {
   const agents = await publicFile("screen-agents.js");
-  const setup = agents.slice(agents.indexOf("async function finishLocalSetup"));
-  assert.match(setup.slice(0, 2_600), /detected === undefined/u);
-  assert.match(
-    setup.slice(0, 2_600),
-    /Could not ask this machine what is installed/u,
+  // A bounded window from the function's own start: `verifyMachineFor` is
+  // defined above this one, so slicing between them reads backwards and
+  // matches nothing at all.
+  const setup = agents.slice(
+    agents.indexOf("async function finishLocalSetup"),
+    agents.indexOf("async function finishLocalSetup") + 1_400,
   );
+  // One checker, so the button on a connected row and the flow that creates
+  // an agent cannot disagree about whether it can run. This used to offer the
+  // sign-in and then answer "ready" regardless — the one control whose job is
+  // to say why an agent does not work, unable to tell a live login from an
+  // absent one.
+  assert.match(setup, /await verifyMachineFor\(providerId, rerender\)/u);
+  assert.match(setup, /REFUSAL\[verdict\]/u);
+  // And it says the good news too, or a working machine answers with silence.
+  assert.match(setup, /can run on this machine/u);
 });
 
 test("a conversation is scoped to one user's own provider connection", async () => {

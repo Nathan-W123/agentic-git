@@ -1926,7 +1926,16 @@ export function showModal({
           </div>
           ${body}
           <div class="modal-actions">
-            <button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>
+            ${
+              // An empty label means there is no second choice to offer —
+              // a dialog that only reports something has one button, and
+              // rendering the other one anyway leaves a blank pill beside it
+              // that looks like a control somebody failed to draw. Escape
+              // closes it either way, so nothing is lost by leaving it out.
+              cancel === ""
+                ? ""
+                : `<button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>`
+            }
             <button class="btn ${danger ? "btn-danger" : "btn-primary"}" value="confirm" type="submit">${esc(confirm)}</button>
           </div>
         </form>`;

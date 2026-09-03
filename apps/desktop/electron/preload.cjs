@@ -97,6 +97,16 @@ expose("KUMI_INSTALL", () => ({
   // the second sign-in unnecessary: the account is already signed in here.
   usage: async (vendor) => await ipcRenderer.invoke("kumi:agent-usage", vendor),
   /**
+   * Whether that CLI is signed in, asked before an agent is created.
+   *
+   * Separate from `usage`, and cheap where that one is not: the usage reading
+   * starts a real turn and can take a minute, which is not something to do on
+   * a button press to answer a yes/no question. Answers "signed-in",
+   * "signed-out", "missing", "unknowable" or "unknown" — the last two are not
+   * the same, and the page has to tell them apart to say anything useful.
+   */
+  login: async (vendor) => await ipcRenderer.invoke("kumi:vendor-login", vendor),
+  /**
    * Points one editor on this machine at this Kumi.
    *
    * The page passes a token it minted and the *vendor's name*, never a

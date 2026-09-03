@@ -52,7 +52,7 @@ import {
 // into "no answer", and the setup that answer gates — the CLI check, the
 // install offer, the sign-in — was skipped in silence. Agents connected,
 // looked connected, and could run nothing.
-import { detectAgents } from "./agents.mjs";
+import { detectAgents, findAgentCommand } from "./agents.mjs";
 import { CONNECTABLE, connectEditor } from "./editor-mcp.mjs";
 import {
   forgetMcpServers,
@@ -61,7 +61,8 @@ import {
   stopWorker,
   workerLogPath,
 } from "./worker.mjs";
-import { readVendorUsage } from "./usage.mjs";
+import { readVendorUsage, stopProcess } from "./usage.mjs";
+import { loginIsKnowable, readVendorLogin } from "./vendor-login.mjs";
 import {
   INSTALLABLE_VENDORS,
   VENDOR_LABELS,
@@ -70,6 +71,7 @@ import {
   openSignIn,
   runInstall,
   runNodeInstall,
+  runnable,
 } from "./installers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -861,6 +863,105 @@ ipcMain.handle("kumi:install-sign-in", (_event, vendor) => openSignIn(vendor));
 ipcMain.handle("kumi:agent-usage", async (_event, vendor) =>
   await readVendorUsage(vendor),
 );
+
+/**
+ * Whether one vendor's CLI on this machine is signed in.
+ *
+ * Asked before an agent is created, not after. The connect flow used to mint
+ * an agent and its call sign the moment somebody pressed Connect and consult
+ * the machine afterwards, so people ended up with named agents, in every
+ * channel, behind a CLI that had no login — and the only thing that ever said
+ * so was a toast.
+ *
+ * The probe runs *here* because here is the only place the answer exists. The
+ * control plane has a CLI too, and under local execution it is nobody's: a
+ * verdict from there is a confident sentence about a computer the reader has
+ * never seen.
+ *
+ * Cheap on purpose. The usage reading beside this starts a real turn and can
+ * take a minute; a status command costs nothing and spends no quota, which is
+ * what makes it safe to run on a button press.
+ */
+ipcMain.handle("kumi:vendor-login", async (_event, vendor) => {
+  const name = String(vendor);
+  const agents = await detectAgents();
+  const entry = agents[name];
+  if (entry === undefined && loginIsKnowable(name)) {
+    // Not installed. Said as its own answer rather than as a login failure,
+    // because the remedy is an install and not a sign-in.
+    return { state: "missing", vendor: name };
+  }
+  const executable = entry?.command ?? (await findAgentCommand(name)) ?? name;
+  const verdict = await readVendorLogin(name, {
+    home: app.getPath("home"),
+    join: (...parts) => path.join(...parts),
+    exists: async (file) =>
+      await readFile(file).then(
+        () => true,
+        () => false,
+      ),
+    readJson: async (file) =>
+      await readFile(file, "utf8").then(
+        (text) => JSON.parse(text),
+        () => undefined,
+      ),
+    run: async (args, options = {}) =>
+      await runStatus(executable, args, options.timeoutMs ?? 30_000),
+  });
+  return { ...verdict, vendor: name };
+});
+
+/**
+ * Runs one status command and reports both streams and the code.
+ *
+ * `spawnFailed` rather than a throw, because the caller distinguishes "could
+ * not ask" from "the answer is no" and a rejection collapses the two. Through
+ * `runnable` for the reason every other spawn here is: on Windows npm installs
+ * its global binaries as batch shims, and spawning one directly is EINVAL.
+ */
+function runStatus(executable, args, timeoutMs) {
+  return new Promise((resolve) => {
+    const plan = runnable(executable, args);
+    let child;
+    try {
+      child = spawn(plan.command, plan.args, {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      resolve({
+        spawnFailed: true,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (value) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        stopProcess(child);
+        resolve(value);
+      }
+    };
+    const timer = setTimeout(
+      () => finish({ spawnFailed: true, detail: "The CLI did not answer in time." }),
+      timeoutMs,
+    );
+    child.stdout?.on("data", (chunk) => {
+      stdout = `${stdout}${String(chunk)}`.slice(0, 65_536);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = `${stderr}${String(chunk)}`.slice(0, 65_536);
+    });
+    child.on("error", (error) =>
+      finish({ spawnFailed: true, detail: error.message }),
+    );
+    child.on("close", (code) => finish({ exitCode: code ?? 0, stdout, stderr }));
+  });
+}
 
 // What this machine actually has, asked for by the connect screen.
 //
