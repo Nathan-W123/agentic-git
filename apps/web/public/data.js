@@ -2376,11 +2376,19 @@ export const EDITOR_TOKEN_SCOPES = ["view", "submit_task"];
  * screen full of identical rows is a screen where nobody dares revoke
  * anything — which is what yours already looks like.
  */
-export async function createEditorToken(label) {
+export async function createEditorToken(label, vendor) {
   try {
     const response = await api("/auth/tokens", {
       method: "POST",
-      body: { name: label, scopes: [...EDITOR_TOKEN_SCOPES] },
+      // The vendor is recorded on the token, not only in its name. It is what
+      // lets Kumi answer a request from Codex as Codex, so a person who asks
+      // for work without naming anybody gets their own agent rather than
+      // whichever one the model picked off the roster.
+      body: {
+        name: label,
+        scopes: [...EDITOR_TOKEN_SCOPES],
+        ...(vendor === undefined ? {} : { editorVendor: vendor }),
+      },
     });
     await loadApiTokens();
     return { token: response.token, readOnly: false };
@@ -2398,7 +2406,11 @@ export async function createEditorToken(label) {
   // replaces.
   const response = await api("/auth/tokens", {
     method: "POST",
-    body: { name: `${label} (read-only)`, scopes: ["view"] },
+    body: {
+      name: `${label} (read-only)`,
+      scopes: ["view"],
+      ...(vendor === undefined ? {} : { editorVendor: vendor }),
+    },
   });
   await loadApiTokens();
   return { token: response.token, readOnly: true };

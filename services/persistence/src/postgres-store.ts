@@ -1859,8 +1859,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
     await this.query(
       `INSERT INTO api_tokens
          (id, user_id, organization_id, name, secret_hash, scopes_json,
-          created_at, created_by_session, created_by_token, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          created_at, created_by_session, created_by_token, editor_vendor,
+          expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         token.id,
         token.userId,
@@ -1871,6 +1872,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         token.createdAt,
         token.createdBySession ?? null,
         token.createdByToken ?? null,
+        token.editorVendor ?? null,
         token.expiresAt ?? null,
       ],
     );
@@ -1945,6 +1947,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
       createdBySession: optionalText(row, "created_by_session"),
       createdByToken: optionalText(row, "created_by_token"),
+      editorVendor: optionalText(row, "editor_vendor"),
       expiresAt: optionalText(row, "expires_at"),
       lastUsedAt: optionalText(row, "last_used_at"),
       lastUsedIp: optionalText(row, "last_used_ip"),

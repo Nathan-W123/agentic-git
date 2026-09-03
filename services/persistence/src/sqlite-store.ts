@@ -1791,8 +1791,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `INSERT INTO api_tokens
            (id, user_id, organization_id, name, secret_hash, scopes_json,
-            created_at, created_by_session, created_by_token, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            created_at, created_by_session, created_by_token, editor_vendor,
+            expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         token.id,
@@ -1804,6 +1805,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         token.createdAt,
         token.createdBySession ?? null,
         token.createdByToken ?? null,
+        token.editorVendor ?? null,
         token.expiresAt ?? null,
       );
   }
@@ -1892,6 +1894,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
       createdBySession: optionalText(row, "created_by_session"),
       createdByToken: optionalText(row, "created_by_token"),
+      editorVendor: optionalText(row, "editor_vendor"),
       expiresAt: optionalText(row, "expires_at"),
       lastUsedAt: optionalText(row, "last_used_at"),
       lastUsedIp: optionalText(row, "last_used_ip"),

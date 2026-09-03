@@ -85,6 +85,14 @@ export interface ApiTokenPrincipal {
   scopes: readonly string[];
   /** When set, the token may only act inside this organization. */
   organizationId: string | undefined;
+  /**
+   * The editor this token was minted for, when it was minted for one.
+   *
+   * Read by the MCP tools so a request from Codex is answered as Codex.
+   * Absent for every ordinary token, and for editor connections made before
+   * the column existed; the tools fall back to the token's name there.
+   */
+  editorVendor: string | undefined;
 }
 
 export interface AuthenticatedPrincipal {
@@ -1245,6 +1253,8 @@ export class AuthService {
      * Recorded so revocation cascades. See `ApiTokenRecord.createdByToken`.
      */
     createdByToken?: string;
+    /** The editor this is being minted for, when it is being minted for one. */
+    editorVendor?: string;
   }): Promise<IssuedApiToken> {
     const name = input.name.trim();
     if (name.length === 0 || name.length > 120) {
@@ -1290,6 +1300,7 @@ export class AuthService {
       createdAt: now.toISOString(),
       createdBySession: input.createdBySession,
       createdByToken: input.createdByToken,
+      editorVendor: input.editorVendor,
       expiresAt,
       lastUsedAt: undefined,
       lastUsedIp: undefined,
@@ -1358,6 +1369,7 @@ export class AuthService {
         name: token.name,
         scopes: token.scopes,
         organizationId: token.organizationId,
+        editorVendor: token.editorVendor,
       },
       memberships: await this.membershipsFor(user),
     };
@@ -1510,6 +1522,7 @@ export class AuthService {
         name: token.name,
         scopes: token.scopes,
         organizationId: token.organizationId,
+        editorVendor: token.editorVendor,
       },
       memberships: await this.membershipsFor(user),
     };

@@ -4,6 +4,7 @@ import test from "node:test";
 import { McpArgumentError } from "./mcp.js";
 import {
   createMcpWorkTools,
+  editorBehind,
   splitUnifiedDiff,
   type McpWorkDeps,
 } from "./mcp-work.js";
@@ -137,6 +138,9 @@ function harness(overrides: Partial<McpWorkDeps> = {}): {
     assertScope: (permission) => {
       scopes.push(permission);
     },
+    // What a connected editor answers. A test that wants the other case
+    // overrides it, which is what the "cannot tell" test does.
+    callerEditor: () => "claude",
     take: async () => undefined,
     report: async (input) => {
       reported.push(input);
@@ -160,7 +164,7 @@ function toolNamed(deps: McpWorkDeps, name: string) {
 test("the work tools ask for submit_task, never run_task", async () => {
   const { deps, scopes } = harness();
   for (const [name, args] of [
-    ["take_task", { editor: "claude" }],
+    ["take_task", {}],
     ["report_task", { task_id: "t-1", diff: "", summary: "did it" }],
     ["extend_task", { task_id: "t-1" }],
   ] as const) {
@@ -229,16 +233,39 @@ test("failing and giving back are different words to the control plane", async (
   // would only teach a model to invent some.
 });
 
-test("take_task without an editor says so rather than guessing one", async () => {
-  const { deps } = harness();
-  await assert.rejects(
-    async () => await toolNamed(deps, "take_task").run({}),
-    McpArgumentError,
-  );
+test("take_task reads the editor off the connection, not off the model", async () => {
+  const taken: string[] = [];
+  const { deps } = harness({
+    callerEditor: () => "codex",
+    take: async (input) => {
+      taken.push(input.vendor);
+      return undefined;
+    },
+  });
+  // No argument at all. The token this request arrived on already says which
+  // editor it belongs to, and asking the model to repeat that was asking it
+  // to report something it could get wrong.
+  await toolNamed(deps, "take_task").run({});
+  // And an explicit one still wins, for the connection Kumi cannot place.
+  await toolNamed(deps, "take_task").run({ editor: "claude" });
+  assert.deepEqual(taken, ["codex", "claude"]);
+
+  // A value outside the list is a mistake worth naming rather than a silent
+  // fall-back to whatever the connection said.
   await assert.rejects(
     async () => await toolNamed(deps, "take_task").run({ editor: "vim" }),
     McpArgumentError,
   );
+});
+
+test("a connection Kumi cannot place asks instead of picking an agent", async () => {
+  const { deps } = harness({ callerEditor: () => undefined });
+  const answer = await toolNamed(deps, "take_task").run({});
+  assert.equal(answer.isError, true);
+  // A hand-made token is the case: it names no editor, and guessing one would
+  // hand somebody's work to an agent they never chose.
+  assert.match(String(answer.content[0]?.text), /cannot tell which agent/u);
+  assert.match(String(answer.content[0]?.text), /claude, codex/u);
 });
 
 test("an empty queue is an answer, not a refusal", async () => {
@@ -290,4 +317,31 @@ test("minutes has to be a number of them", async () => {
       String(minutes),
     );
   }
+});
+
+test("the editor behind a request is read from the token, name as fallback", () => {
+  // Recorded at mint: exact, and what every connection made from now on has.
+  assert.equal(editorBehind({ editorVendor: "codex", name: "anything" }), "codex");
+  // The fallback, for editors connected before that column existed. The app
+  // mints "Claude Code on <device>", so the label is there to be read.
+  assert.equal(editorBehind({ name: "Claude Code on Nathan's MacBook" }), "claude");
+  assert.equal(editorBehind({ name: "Codex on desktop (read-only)" }), "codex");
+  assert.equal(editorBehind({ name: "cursor on laptop" }), "cursor");
+
+  // Anchored to the start, so a machine that happens to be called Claude is
+  // not read as an editor.
+  assert.equal(editorBehind({ name: "worker on Claude-the-laptop" }), undefined);
+  // An ordinary token names no editor, and that is a real answer: the tools
+  // ask who the work is for rather than picking somebody.
+  assert.equal(editorBehind({ name: "CI deploy key" }), undefined);
+  assert.equal(editorBehind({}), undefined);
+  assert.equal(editorBehind(), undefined);
+  // A stored value outside the list is not trusted into one.
+  assert.equal(editorBehind({ editorVendor: "vim", name: "CI" }), undefined);
+  // And a recorded vendor beats a name that disagrees, because the name is
+  // editable and the record is not.
+  assert.equal(
+    editorBehind({ editorVendor: "codex", name: "Claude Code on laptop" }),
+    "codex",
+  );
 });

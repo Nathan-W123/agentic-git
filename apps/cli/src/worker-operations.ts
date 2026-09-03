@@ -3926,6 +3926,7 @@ export function workerOperations(
         repositoryIds: readonly string[];
         vendor: string;
         label: string;
+        taskId?: string;
       }) => {
         const taken = await takeEditorWork(store, input, repositories, project);
         return taken === undefined

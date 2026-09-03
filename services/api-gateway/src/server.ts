@@ -142,7 +142,15 @@ import {
   type McpRepository,
   type McpToolDeps,
 } from "./mcp-tools.js";
-import { createMcpWorkTools, type McpWorkDeps } from "./mcp-work.js";
+import {
+  createMcpWorkTools,
+  editorBehind,
+  EDITOR_LABELS,
+  EDITOR_VENDORS,
+  type EditorVendor,
+  type McpTakenTask,
+  type McpWorkDeps,
+} from "./mcp-work.js";
 import {
   callProxiedTool,
   McpManifestCache,
@@ -4170,6 +4178,8 @@ export interface EditorWorkOperations {
     vendor: string;
     /** How the editor's worker row is named. */
     label: string;
+    /** One named task, for an editor taking back work it has just filed. */
+    taskId?: string;
   }): Promise<
     | {
         leaseId: string;
@@ -4934,6 +4944,19 @@ function mcpArgsField(value: unknown): string[] | undefined {
  * longer. The suffix is refused only on this deployment's own names, for the
  * case where it is mounted under a path prefix.
  */
+/**
+ * The editor a token is being minted for, or nothing.
+ *
+ * Anything unrecognised reads as "not an editor" rather than as an error: the
+ * value decides who does somebody's work, and an unknown one must fall back to
+ * asking rather than name an agent nobody has.
+ */
+function optionalEditorVendor(value: unknown): EditorVendor | undefined {
+  return typeof value === "string"
+    ? EDITOR_VENDORS.find((vendor) => vendor === value.trim().toLowerCase())
+    : undefined;
+}
+
 function mcpUrlLoopsBack(url: URL, ownHosts: readonly string[]): boolean {
   const pathname = url.pathname.replace(/\/+$/u, "");
   const endpoint = `${API_PREFIX}/mcp`;
@@ -8661,6 +8684,11 @@ export class ApiGateway {
         }
       }
 
+      // Which editor this is for, when it is for one. Validated against the
+      // fixed list rather than stored as typed: it decides who does somebody's
+      // work, so an unrecognised value must read as "not an editor" instead of
+      // as an agent nobody has.
+      const editorVendor = optionalEditorVendor(body["editorVendor"]);
       const expiresInDays = body["expiresInDays"];
       if (
         expiresInDays !== undefined &&
@@ -8689,6 +8717,10 @@ export class ApiGateway {
         // Recorded so revoking the parent revokes this too, which is the
         // whole of what makes minting from a token safe.
         ...(parent === undefined ? {} : { createdByToken: parent.id }),
+        // Recorded once, at mint, so the tools can tell which editor a
+        // request came from without asking the model to say. Read from the
+        // name otherwise, which is editable and therefore only a hint.
+        ...(editorVendor === undefined ? {} : { editorVendor }),
       });
       await this.options.store.appendAudit(undefined, {
         type: "api_token_issued",
@@ -15396,11 +15428,23 @@ export class ApiGateway {
         assertTokenScope(principal, permission as Permission);
       },
       listRepositories: async () => await this.mcpRepositories(principal),
+      callerEditor: () => editorBehind(principal.token),
+      takeFiledTask: async (taskId) => {
+        const vendor = editorBehind(principal.token);
+        return vendor === undefined
+          ? undefined
+          : await this.takeForEditor(principal, {
+              vendor,
+              label: `${EDITOR_LABELS[vendor]} (editor)`,
+              taskId,
+            });
+      },
       agentsIn: async (input) =>
         await this.mcpAgentsIn(
           input.projectId,
           input.repositoryId,
           input.channel,
+          principal.user.id,
         ),
       post: async (input) => {
         const channelId = await this.mcpChannelId(
@@ -15722,81 +15766,11 @@ export class ApiGateway {
       assertScope: (permission) => {
         assertTokenScope(principal, permission as Permission);
       },
-      take: async (input) => {
-        const reachable = await this.mcpReachable(principal);
-        const wanted =
-          input.repository === undefined
-            ? reachable
-            : reachable.filter(
-                (entry) =>
-                  entry.repository.id.toLowerCase() ===
-                  input.repository?.toLowerCase(),
-              );
-        if (input.repository !== undefined && wanted.length === 0) {
-          throw new HttpError(
-            404,
-            "repository_not_found",
-            `No repository called "${input.repository}".`,
-          );
-        }
-        // Grouped by project, because leasing is a per-project question and
-        // the repository narrowing has to travel with it: a collaborator
-        // reaches a project through repository grants alone, and handing the
-        // project id without the grant set would let one grant execute work
-        // from every repository beside it.
-        const byProject = new Map<string, string[]>();
-        for (const entry of wanted) {
-          const held = byProject.get(entry.projectId) ?? [];
-          held.push(entry.repository.id);
-          byProject.set(entry.projectId, held);
-        }
-        for (const [projectId, repositoryIds] of byProject) {
-          const { project } = await authorizeProject(
-            this.options.store,
-            principal,
-            projectId,
-            "submit_task",
-          ).catch(() => ({ project: undefined }));
-          if (project === undefined) {
-            continue;
-          }
-          const taken = await operation().take({
-            actorId: principal.user.id,
-            organizationId: project.organizationId,
-            projectId,
-            repositoryIds,
-            vendor: input.vendor,
-            label: input.label,
-          });
-          if (taken === undefined) {
-            continue;
-          }
-          // Declared here and nowhere else. Taking work is the one act that
-          // proves an editor is at the keyboard and will come back, which is
-          // exactly what a mention needs to know before it is dispatched.
-          this.editors.declare({
-            userId: principal.user.id,
-            vendor: input.vendor,
-          });
-          return {
-            taskId: taken.taskId,
-            objective: taken.objective,
-            repository: taken.repositoryId,
-            branch: taken.branch,
-            baseRevision: taken.baseRevision,
-            expiresAt: taken.expiresAt,
-            // Absolute, because the caller is a `git fetch` on somebody's
-            // laptop rather than a page on this origin. A deployment with no
-            // base URL configured still answers with the path, which is
-            // wrong for git and obvious rather than silent.
-            bundleUrl: `${this.appBaseUrl}${API_PREFIX}/mcp/bundle/${this.bundleTickets.issue(
-              { leaseId: taken.leaseId, userId: principal.user.id },
-            )}`,
-            validationCommands: taken.validationCommands,
-          };
-        }
-        return undefined;
-      },
+      // From the token this request arrived on, never from the model. See
+      // `editorBehind`: the connection already knows, and asking the caller
+      // to tell us was asking it to repeat something it could get wrong.
+      callerEditor: () => editorBehind(principal.token),
+      take: async (input) => await this.takeForEditor(principal, input),
       report: async (input) => {
         const held = await heldLease(input.taskId);
         if ("refusal" in held) {
@@ -15874,6 +15848,104 @@ export class ApiGateway {
     };
   }
 
+
+  /**
+   * Hands this caller one task to do in their editor.
+   *
+   * The one resolver, used by `take_task` and by `submit_task` when it gives
+   * an editor back the work it has just filed. Two copies of "which projects
+   * may this person be handed work from" is two answers, and the one that
+   * drifted would be the one deciding whose code runs on somebody's laptop.
+   */
+  private async takeForEditor(
+    principal: AuthenticatedPrincipal,
+    input: {
+      vendor: EditorVendor;
+      label: string;
+      repository?: string;
+      taskId?: string;
+    },
+  ): Promise<McpTakenTask | undefined> {
+    const editorWork = this.options.operations.editorWork;
+    if (editorWork === undefined) {
+      return undefined;
+    }
+    const reachable = await this.mcpReachable(principal);
+        const wanted =
+          input.repository === undefined
+            ? reachable
+            : reachable.filter(
+                (entry) =>
+                  entry.repository.id.toLowerCase() ===
+                  input.repository?.toLowerCase(),
+              );
+        if (input.repository !== undefined && wanted.length === 0) {
+          throw new HttpError(
+            404,
+            "repository_not_found",
+            `No repository called "${input.repository}".`,
+          );
+        }
+        // Grouped by project, because leasing is a per-project question and
+        // the repository narrowing has to travel with it: a collaborator
+        // reaches a project through repository grants alone, and handing the
+        // project id without the grant set would let one grant execute work
+        // from every repository beside it.
+        const byProject = new Map<string, string[]>();
+        for (const entry of wanted) {
+          const held = byProject.get(entry.projectId) ?? [];
+          held.push(entry.repository.id);
+          byProject.set(entry.projectId, held);
+        }
+        for (const [projectId, repositoryIds] of byProject) {
+          const { project } = await authorizeProject(
+            this.options.store,
+            principal,
+            projectId,
+            "submit_task",
+          ).catch(() => ({ project: undefined }));
+          if (project === undefined) {
+            continue;
+          }
+          const taken = await editorWork.take({
+            actorId: principal.user.id,
+            organizationId: project.organizationId,
+            projectId,
+            repositoryIds,
+            vendor: input.vendor,
+            label: input.label,
+            ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+          });
+          if (taken === undefined) {
+            continue;
+          }
+          // Declared here and nowhere else. Taking work is the one act that
+          // proves an editor is at the keyboard and will come back, which is
+          // exactly what a mention needs to know before it is dispatched.
+          this.editors.declare({
+            userId: principal.user.id,
+            vendor: input.vendor,
+          });
+          return {
+            taskId: taken.taskId,
+            objective: taken.objective,
+            repository: taken.repositoryId,
+            branch: taken.branch,
+            baseRevision: taken.baseRevision,
+            expiresAt: taken.expiresAt,
+            // Absolute, because the caller is a `git fetch` on somebody's
+            // laptop rather than a page on this origin. A deployment with no
+            // base URL configured still answers with the path, which is
+            // wrong for git and obvious rather than silent.
+            bundleUrl: `${this.appBaseUrl}${API_PREFIX}/mcp/bundle/${this.bundleTickets.issue(
+              { leaseId: taken.leaseId, userId: principal.user.id },
+            )}`,
+            validationCommands: taken.validationCommands,
+          };
+        }
+        return undefined;
+  }
+
   /** Every repository this principal can reach, with its default roster. */
   private async mcpRepositories(
     principal: AuthenticatedPrincipal,
@@ -15941,6 +16013,8 @@ export class ApiGateway {
     projectId: string,
     repositoryId: string,
     channel?: string,
+    /** Whose agents these are, so the roster can say which are the caller's. */
+    ownerId?: string,
   ): Promise<McpAgent[]> {
     const channelId = await this.mcpChannelId(repositoryId, channel);
     const [candidates, project] = await Promise.all([
@@ -15950,6 +16024,13 @@ export class ApiGateway {
     const live = await this.liveWorkerOwners(project?.organizationId);
     return candidates.map((candidate) => ({
       name: candidate.name,
+      // The CLI behind it and whether it is the caller's own. Together these
+      // are what let `submit_task` answer "who did the person mean" without
+      // making a model guess from a list of names.
+      ...(PROVIDER_TO_VENDOR[candidate.provider] === undefined
+        ? {}
+        : { vendor: PROVIDER_TO_VENDOR[candidate.provider] }),
+      mine: ownerId !== undefined && candidate.userId === ownerId,
       // Only meaningful where this deployment refuses to execute on its own
       // behalf; everywhere else the control plane answers regardless and an
       // offline owner is not a fact worth acting on.

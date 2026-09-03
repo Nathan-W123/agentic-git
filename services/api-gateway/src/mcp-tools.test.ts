@@ -15,8 +15,10 @@ import { createMcpTools, type McpAgent, type McpToolDeps } from "./mcp-tools.js"
  */
 
 const AGENTS: McpAgent[] = [
-  { name: "Claude (Nathan)", online: false, owner: "Nathan" },
-  { name: "Codex (Sam)", online: true, owner: "Sam" },
+  // Nathan's own, and somebody else's. Two of them, so a tool that has to
+  // pick one has a real choice to get wrong.
+  { name: "Claude (Nathan)", online: false, owner: "Nathan", vendor: "claude", mine: true },
+  { name: "Codex (Sam)", online: true, owner: "Sam", vendor: "codex", mine: false },
 ];
 
 function deps(overrides: Partial<McpToolDeps> = {}): {
@@ -29,6 +31,9 @@ function deps(overrides: Partial<McpToolDeps> = {}): {
     deps: {
       store: {} as CoordinationStore,
       assertScope: () => undefined,
+      // No editor unless a test says otherwise: an ordinary token, which is
+      // the case where the tools must ask rather than assume.
+      callerEditor: () => undefined,
       listRepositories: async () => [
         {
           projectId: "project_local",
@@ -147,7 +152,9 @@ test("an offline agent that came back is simply used", async () => {
   // the second call. Somebody who opened their laptop while being asked should
   // not have their work queued for a machine that is now listening.
   const { run } = tool("submit_task", {
-    agentsIn: async () => [{ name: "Claude (Nathan)", online: true, owner: "Nathan" }],
+    agentsIn: async () => [
+      { name: "Claude (Nathan)", online: true, owner: "Nathan", vendor: "claude", mine: true },
+    ],
   });
   const said = await run({ ...submit, agent: "Claude (Nathan)", when_offline: "queue" });
   assert.match(said.content[0]?.text ?? "", /running on their machine now/u);
@@ -315,4 +322,120 @@ test("answer_question passes choices and words through in order", async () => {
     requestId: "ask_7",
     answers: [{ chosen: 1 }, { text: "only on the payments route" }],
   });
+});
+
+
+/**
+ * Who does the work when the person named nobody.
+ *
+ * The tool used to require an agent, so a person who named none had the model
+ * fill the field in from a roster it had no business choosing from: work typed
+ * into Codex was run by Claude, and nothing anywhere made that decision on
+ * purpose. These are the four answers that replaced the guess.
+ */
+test("an editor's own prompt goes to its own agent, unasked", async () => {
+  const taken: string[] = [];
+  const { run, posted } = tool("submit_task", {
+    callerEditor: () => "codex",
+    agentsIn: async () => [
+      { name: "Claude", online: true, owner: "Nathan", vendor: "claude", mine: true },
+      { name: "Codex", online: true, owner: "Nathan", vendor: "codex", mine: true },
+    ],
+    takeFiledTask: async (taskId) => {
+      taken.push(taskId);
+      return {
+        taskId,
+        objective: "fix the login redirect",
+        repository: "payments",
+        branch: "main",
+        baseRevision: "a".repeat(40),
+        expiresAt: "2026-01-01T00:30:00.000Z",
+        bundleUrl: "https://kumi.example/api/v1/mcp/bundle/t",
+        validationCommands: [],
+      };
+    },
+  });
+  const said = await run({
+    repository: "payments",
+    objective: "fix the login redirect",
+  });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  // Addressed to Codex, though Claude was first on the roster and both belong
+  // to this person. The connection decided, not the model.
+  assert.match(posted[0]?.content ?? "", /^@Codex /u);
+  // And taken straight back, so the same turn does the work rather than
+  // leaving it for whatever polls first.
+  assert.equal(taken.length, 1);
+  assert.match(String(said.content[0]?.text), /taken by you/u);
+  assert.match(String(said.content[0]?.text), /report_task/u);
+});
+
+test("naming somebody else still sends it to them", async () => {
+  const taken: string[] = [];
+  const { run, posted } = tool("submit_task", {
+    callerEditor: () => "codex",
+    takeFiledTask: async (taskId) => {
+      taken.push(taskId);
+      return undefined;
+    },
+  });
+  const said = await run({
+    repository: "payments",
+    agent: "Codex (Sam)",
+    objective: "fix the login redirect",
+  });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  assert.match(posted[0]?.content ?? "", /^@Codex \(Sam\) /u);
+  // Sam's agent, not this person's, so it is not taken back however much the
+  // vendor happens to match.
+  assert.deepEqual(taken, []);
+});
+
+test("no editor and a room full of agents asks rather than picks", async () => {
+  const { run, posted } = tool("submit_task", { callerEditor: () => undefined });
+  const said = await run({
+    repository: "payments",
+    objective: "fix the login redirect",
+  });
+  // Not an error: the model has something to do about it, which is to ask.
+  assert.equal(said.isError, undefined);
+  assert.match(String(said.content[0]?.text), /Who should do this/u);
+  assert.match(String(said.content[0]?.text), /@Claude \(Nathan\)/u);
+  assert.match(String(said.content[0]?.text), /@Codex \(Sam\)/u);
+  // And nothing was filed while the question is outstanding.
+  assert.deepEqual(posted, []);
+});
+
+test("one agent in the room is not a guess", async () => {
+  const { run, posted } = tool("submit_task", {
+    callerEditor: () => undefined,
+    agentsIn: async () => [
+      { name: "Claude", online: true, owner: "Nathan", vendor: "claude", mine: true },
+    ],
+  });
+  const said = await run({
+    repository: "payments",
+    objective: "fix the login redirect",
+  });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  assert.match(posted[0]?.content ?? "", /^@Claude /u);
+});
+
+test("an editor's own agent is never told its machine is offline", async () => {
+  // Presence is only declared once an editor takes work, so on the first
+  // prompt of a session this agent reads offline. Sending that down the
+  // offline exchange would tell somebody their machine is not listening
+  // while they are typing into it.
+  const { run, posted } = tool("submit_task", {
+    callerEditor: () => "codex",
+    agentsIn: async () => [
+      { name: "Codex", online: false, owner: "Nathan", vendor: "codex", mine: true },
+    ],
+  });
+  const said = await run({
+    repository: "payments",
+    objective: "fix the login redirect",
+  });
+  assert.doesNotMatch(String(said.content[0]?.text), /offline/u);
+  assert.equal(posted.length, 1);
 });

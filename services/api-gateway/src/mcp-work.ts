@@ -60,6 +60,46 @@ export const EDITOR_LABELS: Record<EditorVendor, string> = {
   kiro: "Kiro",
 };
 
+/**
+ * Which editor is on the other end of this request.
+ *
+ * Recorded on the token at mint, so it needs no cooperation from the model
+ * and cannot be got wrong by one. The name is the fallback, because every
+ * editor connected before that column existed has only a name — the app
+ * writes "Codex on <device>", so the label is there to be read. A name is
+ * editable, which is exactly why it is the fallback rather than the source.
+ *
+ * Answering `undefined` is a real answer and the tools treat it as one: it
+ * means "an ordinary token, not an editor", and the right response to that is
+ * to ask who the work is for rather than to guess.
+ */
+export function editorBehind(token?: {
+  readonly name?: string | undefined;
+  readonly editorVendor?: string | undefined;
+}): EditorVendor | undefined {
+  const recorded = EDITOR_VENDORS.find(
+    (vendor) => vendor === token?.editorVendor,
+  );
+  if (recorded !== undefined) {
+    return recorded;
+  }
+  const name = (token?.name ?? "").toLowerCase();
+  if (name === "") {
+    return undefined;
+  }
+  // Matched on the label the app writes rather than the vendor id, and
+  // anchored to the start, because that is the shape it mints: "Claude Code
+  // on <device>". Substring matching anywhere in the string would read a
+  // laptop called "Claude" as an editor.
+  const matched = EDITOR_VENDORS.filter((vendor) =>
+    name.startsWith(EDITOR_LABELS[vendor].toLowerCase()),
+  );
+  // "Claude Code" and "Codex" cannot both prefix one name, but a future label
+  // that prefixed another would make this ambiguous, and guessing between two
+  // agents is the fault this whole function exists to remove.
+  return matched.length === 1 ? matched[0] : undefined;
+}
+
 /** What `take_task` found, in the terms the tool has to describe it in. */
 export interface McpTakenTask {
   readonly taskId: string;
@@ -76,11 +116,15 @@ export interface McpTakenTask {
 export interface McpWorkDeps {
   /** Refuses unless the caller's token carries this permission. */
   assertScope(permission: string): void;
+  /** Which editor is calling, from its own token. See {@link editorBehind}. */
+  callerEditor(): EditorVendor | undefined;
   /** Takes one queued task for this editor, or answers that there is none. */
   take(input: {
     vendor: EditorVendor;
     label: string;
     repository?: string;
+    /** One named task, when the caller has just filed it. */
+    taskId?: string;
   }): Promise<McpTakenTask | undefined>;
   /** Files a result against the hold this caller has on a task. */
   report(input: {
@@ -199,6 +243,53 @@ function pathOf(body: readonly string[]): string | undefined {
   return header?.[2];
 }
 
+/**
+ * What an editor is told when a task becomes its own to do.
+ *
+ * Written once and used twice: by `take_task`, and by `submit_task` when the
+ * work was filed by the very editor that will do it. Two copies of these
+ * instructions would drift, and the half that drifted would be the one
+ * telling somebody how to reach a revision they cannot otherwise get.
+ */
+export function takenTaskBrief(taken: McpTakenTask): string {
+  const lines = [
+    `Task ${taken.taskId} is yours until ${taken.expiresAt}.`,
+    "",
+    taken.objective,
+    "",
+    `Repository: ${taken.repository} (branch ${taken.branch})`,
+    `Start from revision ${taken.baseRevision}.`,
+    "",
+    "Before you change anything, make sure your checkout has that " +
+      `revision: run \`git cat-file -e ${taken.baseRevision}^{commit}\`. ` +
+      "If that fails, Kumi is holding work your remote has never seen, " +
+      "and this is the only place to get it:",
+    // A bundle is a file, not a Git server, so it is downloaded and then
+    // fetched from on disk. `git fetch <https url>` would try to speak
+    // the smart-HTTP protocol to it and fail with something unhelpful.
+    `  curl -fsSL "${taken.bundleUrl}" -o /tmp/kumi-${taken.taskId}.bundle`,
+    `  git fetch /tmp/kumi-${taken.taskId}.bundle`,
+    "",
+    "That link works once and expires; extend_task issues another.",
+    "",
+    "Then do the work, and report it with:",
+    `  report_task task_id="${taken.taskId}" diff="$(git diff ${taken.baseRevision})"`,
+  ];
+  if (taken.validationCommands.length > 0) {
+    lines.push(
+      "",
+      "This repository expects these to pass before anything lands:",
+      ...taken.validationCommands.map((command) => `  ${command}`),
+    );
+  }
+  lines.push(
+    "",
+    "If you cannot do this one, call report_task with status=\"released\" " +
+      "so somebody else can.",
+  );
+  return lines.join("\n");
+}
+
 function positiveMinutes(value: unknown, fallback: number): number {
   if (value === undefined) {
     return fallback;
@@ -228,8 +319,9 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
           type: "string",
           enum: [...EDITOR_VENDORS],
           description:
-            "Which agent you are. Only tasks addressed to this agent are " +
-            "handed over.",
+            "Which agent you are. Usually unnecessary: Kumi knows which " +
+            "editor is calling from the connection itself. Only pass this if " +
+            "Kumi says it could not tell.",
         },
         repository: {
           type: "string",
@@ -238,7 +330,6 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
             "list_repositories reports.",
         },
       },
-      required: ["editor"],
       additionalProperties: false,
     },
     async run(args) {
@@ -246,10 +337,17 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
       // `POST /workers/leases`, so a token given to an editor for doing its
       // own work could register as a worker and take everybody else's.
       deps.assertScope("submit_task");
-      const vendor = optionalChoice(args, "editor", EDITOR_VENDORS);
+      // The connection first, the argument second. Kumi knows which editor
+      // holds this token, so asking the model to tell us was asking it to
+      // report something we already had and could get wrong.
+      const vendor = optionalChoice(args, "editor", EDITOR_VENDORS) ??
+        deps.callerEditor();
       if (vendor === undefined) {
-        throw new McpArgumentError(
-          `"editor" must be one of: ${EDITOR_VENDORS.join(", ")}`,
+        return mcpRefusal(
+          "Kumi cannot tell which agent this connection is for. That happens " +
+            "when the token was made by hand rather than by connecting an " +
+            "editor from Kumi's settings. Call take_task again with " +
+            `editor set to one of: ${EDITOR_VENDORS.join(", ")}.`,
         );
       }
       const repository = optionalString(args, "repository", 200);
@@ -264,42 +362,7 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
             "agent will be here next time you ask.",
         );
       }
-      const lines = [
-        `Task ${taken.taskId} is yours until ${taken.expiresAt}.`,
-        "",
-        taken.objective,
-        "",
-        `Repository: ${taken.repository} (branch ${taken.branch})`,
-        `Start from revision ${taken.baseRevision}.`,
-        "",
-        "Before you change anything, make sure your checkout has that " +
-          `revision: run \`git cat-file -e ${taken.baseRevision}^{commit}\`. ` +
-          "If that fails, Kumi is holding work your remote has never seen, " +
-          "and this is the only place to get it:",
-        // A bundle is a file, not a Git server, so it is downloaded and then
-        // fetched from on disk. `git fetch <https url>` would try to speak
-        // the smart-HTTP protocol to it and fail with something unhelpful.
-        `  curl -fsSL "${taken.bundleUrl}" -o /tmp/kumi-${taken.taskId}.bundle`,
-        `  git fetch /tmp/kumi-${taken.taskId}.bundle`,
-        "",
-        "That link works once and expires; extend_task issues another.",
-        "",
-        "Then do the work, and report it with:",
-        `  report_task task_id="${taken.taskId}" diff="$(git diff ${taken.baseRevision})"`,
-      ];
-      if (taken.validationCommands.length > 0) {
-        lines.push(
-          "",
-          "This repository expects these to pass before anything lands:",
-          ...taken.validationCommands.map((command) => `  ${command}`),
-        );
-      }
-      lines.push(
-        "",
-        "If you cannot do this one, call report_task with status=\"released\" " +
-          "so somebody else can.",
-      );
-      return mcpText(lines.join("\n"));
+      return mcpText(takenTaskBrief(taken));
     },
   };
 

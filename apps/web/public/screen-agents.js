@@ -232,7 +232,7 @@ export async function connectEditorToKumi(vendor, rerender) {
   try {
     // Named for the editor and the machine, so the tokens list is something a
     // person can actually revoke from rather than a column of identical rows.
-    const minted = await createEditorToken(`${label} on ${deviceLabel()}`);
+    const minted = await createEditorToken(`${label} on ${deviceLabel()}`, vendor);
     const written = await bridge.connectEditor(vendor, minted.token);
     outcome =
       written?.ok !== true

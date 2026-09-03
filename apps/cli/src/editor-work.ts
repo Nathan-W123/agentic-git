@@ -152,6 +152,14 @@ export async function takeEditorWork(
     vendor: string;
     /** How the row is named, e.g. `Claude Code (editor)`. */
     label: string;
+    /**
+     * One named task rather than whatever is oldest.
+     *
+     * For the editor that has just filed work and is taking it straight back.
+     * Still narrowed by everything below: naming a task is a preference, not
+     * a way past the repository grant or the ownership clamp.
+     */
+    taskId?: string;
     ttlMs?: number;
   },
   repositories = new RepositoryService(),
@@ -169,6 +177,7 @@ export async function takeEditorWork(
     })
   ).filter(
     (task) =>
+      (input.taskId === undefined || task.id === input.taskId) &&
       reachable.has(task.repositoryId) &&
       // Pre-filtered as well as clamped in the store's own clause below. It
       // saves a canonical resolve per task somebody else owns, and it keeps

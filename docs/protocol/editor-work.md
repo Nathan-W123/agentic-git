@@ -60,6 +60,45 @@ references `workers(id)`, so a lease needs a row. One row per person per
 editor, reused across every task that editor does, and retired by the ordinary
 sweep once it has been idle and holds nothing.
 
+## Who does the work when nobody was named
+
+`submit_task` used to *require* an agent name. That looked like a small piece
+of strictness and was in fact a decision made in the wrong place: a person who
+names nobody has expressed no preference, so the model — forced to fill the
+field in — picked one off the roster. Work typed into Codex was run by Claude,
+and nothing anywhere had chosen that on purpose.
+
+The name is optional now, and the connection answers instead. Kumi knows which
+editor holds the token: it is recorded on the token at mint (migration 57),
+with the token's name as the fallback for connections made before that column
+existed. So, in the order a person means them:
+
+1. **They named an agent** — that one, always.
+2. **They named nobody and the caller is a known editor** — that person's own
+   agent for that editor. A prompt typed in Codex is Codex's work.
+3. **They named nobody and the room has exactly one agent** — that one. Not a
+   guess.
+4. **Anything else** — the roster comes back with "who should do this?" and
+   nothing is filed until somebody answers.
+
+When the answer is (2), the task is filed *and taken back in the same call*:
+the channel message is posted first, so the room sees the work and the thread
+follows it exactly as before, and then the lease goes to the editor that asked
+rather than to whatever polls first. The reply is the same brief `take_task`
+gives, so the turn continues straight into doing the work.
+
+Two details that fall out of this:
+
+- An editor's own agent is never sent down the offline exchange. Presence is
+  only declared once an editor takes work, so on the first prompt of a session
+  it reads offline — and telling somebody their machine is not listening while
+  they are typing into it is nonsense.
+- If something else wins the race to the lease, that is not an error. The task
+  is real and filed; the answer says where it went.
+
+`take_task` reads the editor the same way, so its `editor` argument is now a
+correction rather than a requirement.
+
 ## The base revision, and the bundle
 
 Kumi's canonical branch diverges from `origin/main` the moment anything

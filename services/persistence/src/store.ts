@@ -394,6 +394,16 @@ export interface ApiTokenRecord {
    * break — and it is why only a token with none of its own may mint.
    */
   createdByToken: string | undefined;
+  /**
+   * The editor this token was minted for, when it was minted for one.
+   *
+   * Recorded at mint rather than read back off the name, which the app writes
+   * as "Codex on <device>" and a person is free to change. It is what lets
+   * `submit_task` know a request came from Codex and address that person's
+   * Codex agent, instead of making the model invent an assignment from a
+   * roster it has no business choosing from.
+   */
+  editorVendor: string | undefined;
   expiresAt: string | undefined;
   lastUsedAt: string | undefined;
   lastUsedIp: string | undefined;

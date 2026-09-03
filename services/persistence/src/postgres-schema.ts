@@ -1269,4 +1269,28 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ADD COLUMN IF NOT EXISTS editor_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
     ],
   },
+  {
+    /**
+     * Which editor a token was minted for, when it was minted for one.
+     *
+     * So the control plane can tell that a request came from Codex rather
+     * than from Claude Code, without asking the model to say so. That matters
+     * because `submit_task` used to require an agent name, which meant an
+     * editor asking Kumi to do something had to *invent* the assignment: a
+     * person who named nobody had their work sent to whichever agent the
+     * model picked off the roster, which is how a prompt typed in Codex came
+     * to be run by Claude.
+     *
+     * The token name already carries this — the app mints "Codex on <device>"
+     * — and reading it back is the fallback for every connection made before
+     * this column existed. A name is editable, though, and a person renaming
+     * their token in settings must not quietly change who does their work.
+     * So it is recorded once, at mint, where nothing can drift.
+     */
+    version: 57,
+    name: "editor-tokens-name-their-editor",
+    statements: [
+      `ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS editor_vendor TEXT`,
+    ],
+  },
 ];
