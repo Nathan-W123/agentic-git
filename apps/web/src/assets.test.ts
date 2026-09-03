@@ -285,8 +285,12 @@ test("every module the dashboard imports is itself served", async () => {
       continue;
     }
     const source = asset.body.toString("utf8");
+    // `[^;]*?` rather than `[\s\S]*?`: an import's `from` is inside its own
+    // statement, so it can never be reached across a semicolon. Spanning
+    // freely made any exported declaration followed by prose quoting
+    // `from "..."` read as an import of that sentence.
     for (const match of source.matchAll(
-      /(?:^|\n)\s*(?:import|export)[\s\S]*?from\s+"([^"]+)"/gu,
+      /(?:^|\n)\s*(?:import|export)[^;]*?from\s+"([^"]+)"/gu,
     )) {
       const specifier = match[1] ?? "";
       assert.equal(
@@ -762,8 +766,32 @@ async function browserSource(): Promise<string> {
   return await readFile(path.join(packageRoot, "public", "app.js"), "utf8");
 }
 
+/**
+ * The dashboard shell, which is three files.
+ *
+ * `app.js` used to hold the router, the motion system and the accent colour
+ * arithmetic together. Motion moved to `motion.js` and the colour maths to
+ * `colour.js`; what these tests pin - that the behaviour is there and has
+ * the shape it is meant to have - never cared which of the three a line sat
+ * in, so asking for "app.js" here still means the whole shell.
+ */
+const SHELL_MODULES = ["app.js", "motion.js", "colour.js"];
+
 async function publicFile(name: string): Promise<string> {
-  return await readFile(path.join(packageRoot, "public", name), "utf8");
+  const wanted = name === "app.js" ? SHELL_MODULES : [name];
+  const parts = await Promise.all(
+    wanted.map(async (file) =>
+      readFile(path.join(defaultPublicDirectory(), file), "utf8"),
+    ),
+  );
+  if (name !== "app.js") {
+    return parts.join("\n");
+  }
+  // Only the shell, and only because several tests below slice a function out
+  // of it and run it: `export` is a syntax error outside a module, and the
+  // shell's own functions carry it now that two of its three files are
+  // imported rather than inlined.
+  return parts.join("\n").replaceAll(/^export /gmu, "");
 }
 
 /** Lifts one self-contained top-level function out of the browser bundle. */
@@ -3993,12 +4021,13 @@ test("the theme is driven by custom properties rather than per-component colour"
  * default accent read at 2:1 and a chosen yellow at 1.1:1.
  */
 test("accent text is legible on the light theme's own paper, whatever the accent", async () => {
-  const app = await browserSource();
-  const start = app.indexOf("function channels");
-  const end = app.indexOf("\nfunction currentAgent", start);
-  assert.notEqual(start, -1, "the colour helpers were not found in app.js");
-  assert.notEqual(end, -1, "currentAgent no longer follows the colour helpers");
-  const block = app.slice(start, end);
+  // The whole of `colour.js`, which is exactly the helpers this needs. It
+  // used to be sliced out of `app.js` between two neighbouring functions,
+  // which meant an unrelated reordering could silently empty the block.
+  const block = (
+    await readFile(path.join(packageRoot, "public", "colour.js"), "utf8")
+  ).replaceAll(/^export /gmu, "");
+  assert.match(block, /function channels\(/u, "colour.js lost its helpers");
   const lift = <T>(name: string): T =>
     new Function(`${block}\nreturn ${name};`)() as T;
   const readableOn = lift<(a: string, g: string, t: number) => string>(
