@@ -229,8 +229,8 @@ export async function connectEditorToKumi(vendor, rerender) {
   try {
     // Named for the editor and the machine, so the tokens list is something a
     // person can actually revoke from rather than a column of identical rows.
-    const token = await createEditorToken(`${label} on ${deviceLabel()}`);
-    const written = await bridge.connectEditor(vendor, token);
+    const minted = await createEditorToken(`${label} on ${deviceLabel()}`);
+    const written = await bridge.connectEditor(vendor, minted.token);
     if (written?.ok !== true) {
       state.editorConnected = {
         ...state.editorConnected,
@@ -242,7 +242,16 @@ export async function connectEditorToKumi(vendor, rerender) {
     state.editorConnected = {
       ...state.editorConnected,
       [vendor]:
-        written.manual !== undefined
+        // Said first, because it changes what the connection can do. A
+        // viewer's editor can read the roster and follow a task and cannot
+        // file one, and finding that out by being refused mid-sentence is
+        // worse than being told now.
+        (minted.readOnly
+          ? "Connected read-only — your role cannot submit tasks, so this " +
+            "editor can follow work but not file it. An owner can grant you " +
+            "developer access. "
+          : "") +
+        (written.manual !== undefined
           ? // Codex off Windows: the file is written and the variable is not,
             // because a shell profile is the person's own file. Saying so
             // beats reporting a job that is only half done.
@@ -260,7 +269,7 @@ export async function connectEditorToKumi(vendor, rerender) {
               `Connected. A new terminal will see it straight away. For the ` +
               `Codex app, end it in Task Manager first — closing its window ` +
               `only suspends it, so it keeps the environment it started with.`
-            : `Connected. Restart ${label} and ask it to have Kumi do something.`,
+            : `Connected. Restart ${label} and ask it to have Kumi do something.`),
     };
   } catch (error) {
     state.editorConnected = {
@@ -296,7 +305,7 @@ function deviceLabel() {
  * kind of thing pointing different ways, and flattening them reads as three
  * unrelated options.
  */
-async function connectProviderSomehow(providerId, rerender) {
+export async function connectProviderSomehow(providerId, rerender) {
   const label = agentLabelOf(providerId);
   const vendor = PROVIDER_VENDOR[providerId];
   const bridge = window.KUMI_INSTALL;

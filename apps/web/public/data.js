@@ -2377,12 +2377,31 @@ export const EDITOR_TOKEN_SCOPES = ["view", "submit_task"];
  * anything — which is what yours already looks like.
  */
 export async function createEditorToken(label) {
+  try {
+    const response = await api("/auth/tokens", {
+      method: "POST",
+      body: { name: label, scopes: [...EDITOR_TOKEN_SCOPES] },
+    });
+    await loadApiTokens();
+    return { token: response.token, readOnly: false };
+  } catch (error) {
+    if (error.code !== "scope_exceeds_role") {
+      throw error;
+    }
+  }
+  // A viewer cannot submit tasks, and a token must never grant what its owner
+  // does not have. But refusing outright made connecting an editor an
+  // owner-only act, which it is not: reading the roster and following a task
+  // are exactly what a viewer may do, and they are most of what an editor is
+  // for. So the connection is made read-only rather than refused, and the
+  // caller says so — a silent downgrade would be worse than the refusal it
+  // replaces.
   const response = await api("/auth/tokens", {
     method: "POST",
-    body: { name: label, scopes: [...EDITOR_TOKEN_SCOPES] },
+    body: { name: `${label} (read-only)`, scopes: ["view"] },
   });
   await loadApiTokens();
-  return response.token;
+  return { token: response.token, readOnly: true };
 }
 
 export async function revokeApiToken(id) {

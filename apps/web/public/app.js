@@ -232,8 +232,8 @@ import {
   TERMINAL_TASK_STATUS,
   cancelTask,
   checkLocalCli,
-  connectAgent,
   connectEditorToKumi,
+  connectProviderSomehow,
   disconnectAgent,
   installVendorCli,
   connectGitHubAccount,
@@ -2141,6 +2141,9 @@ function agentProviderRow(agent) {
                 }>${icon("terminal")} ${checking ? "Checking…" : "Check CLI"}</button>`
             : ""
         }
+        <button type="button" role="menuitem" class="st-menu-item"
+          data-act="agent-connect" data-value="${esc(agent.id)}">
+          ${icon("robot")} Connect tools with MCP</button>
         <button type="button" role="menuitem" class="st-menu-item st-menu-danger"
           data-act="agent-disconnect" data-value="${esc(agent.id)}">
           ${icon("closeCircle")} Disconnect</button>
@@ -11265,7 +11268,11 @@ document.addEventListener("click", (event) => {
       return;
     /* Agent connections */
     case "agent-connect":
-      void connectAgent(value, render);
+      // The chooser, not the CLI path straight off. This is the button on the
+      // agents screen, which is where somebody deciding how to connect one
+      // actually is — routing it past the question left the whole flow
+      // reachable only from a channel's plus menu.
+      void connectProviderSomehow(value, render);
       return;
     case "agent-check-cli":
       // The machine half of an agent, on demand. Connecting used to be the
