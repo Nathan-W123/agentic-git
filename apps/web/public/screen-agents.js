@@ -30,6 +30,7 @@ import {
 import {
   agentLabelOf,
   esc,
+  icon,
   showModal,
   toast,
   VENDOR_LABEL,
@@ -321,36 +322,40 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
     vendor !== undefined &&
     (bridge.connectable ?? ["claude", "codex", "cursor"]).includes(vendor);
 
+  // One option per row, each with a mark, a heading, the badge that carries
+  // the jargon, and a sentence. `showModal` resolves a radio group to its
+  // checked value on its own, so there is no hidden mirror field to keep in
+  // step with it any more.
   const kind = await chooseFrom({
     title: `Connect ${label}`,
-    subtitle:
-      "Two different things are called connecting, and they do not replace " +
-      "each other. Which do you want?",
+    subtitle: "Two different things share the name. Which one do you want?",
     confirm: "Continue",
     cancel: "Not now",
-    body: `<fieldset class="agent-provider-picker">
+    body: `<fieldset class="choice-list">
       <legend class="sr-only">Connection kind</legend>
-      <label class="agent-provider-choice">
-        <input type="radio" name="connectionKind" value="cli" checked>
-        <span class="agent-provider-copy">
-          <strong>CLI — run agents on this computer</strong>
-          <small>Installs ${esc(label)}'s command-line tool and signs it in, so
-            you can @mention this agent and it does the work here. This is the
-            one that makes the agent exist. Nothing to do with MCP.</small>
-        </span>
-      </label>
-      <label class="agent-provider-choice">
-        <input type="radio" name="connectionKind" value="mcp">
-        <span class="agent-provider-copy">
-          <strong>MCP — connect tools</strong>
-          <small>Separate from the CLI, and it does not replace it. Either let
-            ${esc(label)} send work to Kumi, or give Kumi's agents tools to use
-            while they work.</small>
-        </span>
-      </label>
-    </fieldset>
-    <input type="hidden" name="kind" value="cli">`,
-  }, "connectionKind", "kind");
+      ${choiceRow({
+        group: "connectionKind",
+        value: "cli",
+        checked: true,
+        mark: "terminal",
+        title: "Run agents on this computer",
+        badge: "CLI",
+        note: `Installs ${esc(label)}'s command-line tool and signs it in. This
+          is the one that makes the agent exist: @mention it and the work
+          happens here, on your machine, on your own subscription.`,
+      })}
+      ${choiceRow({
+        group: "connectionKind",
+        value: "mcp",
+        mark: "link",
+        title: "Connect tools",
+        badge: "MCP",
+        note: `A separate thing, and it does not replace the CLI. Either send
+          work to Kumi from ${esc(label)}, or give Kumi's agents tools to use
+          while they work.`,
+      })}
+    </fieldset>`,
+  }, "connectionKind");
   if (kind === undefined) {
     return;
   }
@@ -359,45 +364,52 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
     return;
   }
 
+  // The direction badges are the point of this dialog. "MCP goes both ways"
+  // is a sentence somebody has to hold in their head; `Codex → Kumi` and
+  // `Kumi → Codex` are the same fact, readable at a glance, and they make two
+  // opposite options impossible to confuse.
   const direction = await chooseFrom({
-    title: "Which way?",
-    subtitle: "MCP goes both ways, and they do opposite things.",
+    title: `Connect ${label} over MCP`,
+    subtitle: "MCP runs in both directions, and they do opposite things.",
     confirm: "Set it up",
     cancel: "Back",
-    body: `<fieldset class="agent-provider-picker">
+    body: `<fieldset class="choice-list">
       <legend class="sr-only">Direction</legend>
-      <label class="agent-provider-choice${editorable ? "" : " is-disabled"}">
-        <input type="radio" name="mcpDirection" value="editor"${
-          editorable ? " checked" : " disabled"
-        }>
-        <span class="agent-provider-copy">
-          <strong>Ask Kumi for work from ${esc(label)}</strong>
-          <small>${
-            editorable
-              ? `Type "have Kumi fix the login redirect" in ${esc(label)} and it
-                 files the task here, with a thread following it. Kumi writes
-                 the config on this computer.`
-              : bridge?.connectEditor === undefined
-                ? "Open Kumi's desktop app to set this up — it writes a file on the computer the editor runs on."
-                : `Kumi cannot write ${esc(label)}'s config yet.`
-          }</small>
-        </span>
-      </label>
-      <label class="agent-provider-choice">
-        <input type="radio" name="mcpDirection" value="tools"${
-          editorable ? "" : " checked"
-        }>
-        <span class="agent-provider-copy">
-          <strong>Give Kumi's agents tools</strong>
-          <small>Approve a server — documentation, issues, a browser — and
-            every agent working on this repository can use it. Approving is
-            recorded, and each teammate's computer asks before running
-            anything.</small>
-        </span>
-      </label>
-    </fieldset>
-    <input type="hidden" name="way" value="${editorable ? "editor" : "tools"}">`,
-  }, "mcpDirection", "way");
+      ${choiceRow({
+        group: "mcpDirection",
+        value: "editor",
+        checked: editorable,
+        disabled: !editorable,
+        mark: "send",
+        title: `Send work to Kumi from ${esc(label)}`,
+        badge: `${esc(label)} → Kumi`,
+        blocked: editorable
+          ? undefined
+          : bridge?.connectEditor === undefined
+            ? "Needs the desktop app"
+            : "Not supported yet",
+        note: editorable
+          ? `Type "have Kumi fix the login redirect" in ${esc(label)} and the
+             task is filed here, with a thread following it. Kumi writes the
+             config on this computer.`
+          : bridge?.connectEditor === undefined
+            ? `This writes a file on the computer ${esc(label)} runs on, so it
+               has to be set up from Kumi's desktop app rather than a browser.`
+            : `Kumi cannot write ${esc(label)}'s config yet.`,
+      })}
+      ${choiceRow({
+        group: "mcpDirection",
+        value: "tools",
+        checked: !editorable,
+        mark: "wand",
+        title: "Give Kumi's agents tools",
+        badge: `Kumi → tools`,
+        note: `Approve a server — documentation, issues, a browser — and every
+          agent working on this repository can use it. Approving is recorded,
+          and each teammate's computer asks before running anything.`,
+      })}
+    </fieldset>`,
+  }, "mcpDirection");
   if (direction === undefined) {
     return;
   }
@@ -421,36 +433,61 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
 }
 
 /**
- * A modal whose radio group actually reports the chosen option.
+ * One option in a decision dialog.
  *
- * `showModal` collects ordinary form fields, and a group of radios hands back
- * the last one in document order rather than the checked one — so every
- * chooser here would answer with its final option no matter what was picked.
- * A hidden field carries the real answer, kept in step by a listener that has
- * to be attached *while the dialog is open*, which means starting the modal
- * and awaiting it separately. The provider picker above does this by hand;
- * this is the same thing, named.
+ * A mark, a heading, a badge, and a sentence — laid out by `.choice`, which
+ * exists because these used to borrow `.agent-provider-picker`. That is a
+ * two-column grid built for the four short agent tiles, and two columns of a
+ * 448px dialog left each option's prose about ten characters wide: the
+ * headings wrapped one word per line and the explanations became ribbons.
+ *
+ * `badge` carries the jargon — "CLI", "MCP", or a direction like
+ * `Codex → Kumi` — so the heading can be plain English. `blocked` replaces it
+ * when an option cannot be chosen here, because a row at reduced opacity says
+ * only that something is wrong, never what.
  */
-async function chooseFrom(spec, group, field) {
-  const pending = showModal(spec);
-  const dialog = document.querySelector("#modal");
-  const sync = (event) => {
-    const input = event.target;
-    if (!(input instanceof HTMLInputElement) || input.name !== group) {
-      return;
-    }
-    const hidden = dialog?.querySelector(`[name="${field}"]`);
-    if (hidden instanceof HTMLInputElement) {
-      hidden.value = input.value;
-    }
-  };
-  dialog?.addEventListener("change", sync);
-  try {
-    const values = await pending;
-    return values === undefined ? undefined : String(values[field] ?? "");
-  } finally {
-    dialog?.removeEventListener("change", sync);
-  }
+function choiceRow({
+  group,
+  value,
+  mark,
+  title,
+  badge,
+  note,
+  blocked,
+  checked = false,
+  disabled = false,
+}) {
+  return `<label class="choice${disabled ? " is-disabled" : ""}">
+    <input type="radio" name="${esc(group)}" value="${esc(value)}"${
+      checked ? " checked" : ""
+    }${disabled ? " disabled" : ""}>
+    <span class="choice-mark">${icon(mark)}</span>
+    <span class="choice-head">
+      <span class="choice-title">${title}</span>
+      ${
+        blocked === undefined
+          ? badge === undefined
+            ? ""
+            : `<span class="choice-badge">${badge}</span>`
+          : `<span class="choice-badge is-blocked">${esc(blocked)}</span>`
+      }
+    </span>
+    <span class="choice-tick" aria-hidden="true"></span>
+    <span class="choice-note">${note}</span>
+  </label>`;
+}
+
+/**
+ * Asks a dialog full of `choiceRow`s and answers with what was picked.
+ *
+ * `showModal` reads a radio group's checked value itself, so this no longer
+ * mirrors the answer into a hidden field on every change — that workaround
+ * was written when the modal took the last radio in document order instead of
+ * the chosen one, and it outlived the bug.
+ */
+async function chooseFrom(spec, group) {
+  const values = await showModal(spec);
+  return values === undefined ? undefined : String(values[group] ?? "");
 }
 
 /**

@@ -10996,6 +10996,209 @@ dialog.modal[open]::backdrop {
   padding: 12px 0;
 }
 
+/* ── Decision cards ──────────────────────────────────────────────────────
+   A dialog that asks somebody to choose between two things they have to
+   read about first. Not `.agent-provider-picker`, which these borrowed and
+   which is a two-column grid built for the four short agent tiles: each
+   option's prose ended up in a column about ten characters wide, so
+   "CLI — run agents on this computer" wrapped to six lines and the sentence
+   under it became a ribbon. Nobody could read either choice, which is a poor
+   way to ask a question.
+
+   So: one option per row, the full width of the dialog, sized for a
+   sentence. The dialog itself widens to fit — `.modal-card` is 448px, which
+   is right for a name and two buttons and cramped for a decision. */
+.modal-card:has(.choice-list) {
+  width: 552px;
+}
+
+.choice-list {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.choice {
+  position: relative;
+  display: grid;
+  /* Icon, prose, tick. The prose column is `minmax(0, 1fr)` so a long word
+     wraps instead of widening the row past the dialog. */
+  grid-template-columns: 30px minmax(0, 1fr) 18px;
+  align-items: start;
+  gap: 0 13px;
+  padding: 14px 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  cursor: pointer;
+  transition:
+    background var(--motion-pop) ease,
+    border-color var(--motion-pop) ease;
+}
+
+.choice:hover:not(.is-disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.choice:has(input:checked) {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+
+.choice:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.choice-mark {
+  /* Every cell placed explicitly. Auto-placement cannot do this: two of the
+     four children span both rows, and letting the grid guess put the heading
+     in the 18px tick column and the tick in the middle of the row. */
+  grid-column: 1;
+  grid-row: 1 / 3;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  color: var(--accent-bright);
+}
+
+.choice:has(input:checked) .choice-mark {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.choice-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* The heading row: what this option does, then a badge naming it. The badge
+   carries the jargon so the heading does not have to — "CLI", "MCP", or the
+   direction an MCP connection actually runs in, which is the one fact that
+   makes two opposite options tell themselves apart at a glance. */
+.choice-head {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.choice-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.choice-badge {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.choice:has(input:checked) .choice-badge {
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
+/* Says why an option cannot be picked, in the option itself. A row at 0.7
+   opacity says only that something is wrong with it. */
+.choice-badge.is-blocked {
+  border-color: var(--border-soft);
+  color: var(--text-4);
+}
+
+.choice-note {
+  grid-column: 2;
+  grid-row: 2;
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* The radio, drawn. Selection used to be a background tint alone, which on a
+   pre-checked first option reads as "already done" rather than "this is what
+   you are about to do". */
+.choice-tick {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  align-self: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  background: var(--bg-card);
+}
+
+.choice:has(input:checked) .choice-tick {
+  border-color: var(--accent);
+  border-width: 5px;
+  background: var(--bg-card);
+}
+
+.choice.is-disabled {
+  cursor: default;
+  background: var(--bg-card);
+  border-color: var(--border-soft);
+}
+
+.choice.is-disabled .choice-mark {
+  color: var(--text-4);
+}
+
+.choice.is-disabled .choice-title,
+.choice.is-disabled .choice-note {
+  color: var(--text-4);
+}
+
+.choice.is-disabled .choice-tick {
+  border-color: var(--border-soft);
+}
+
+@media (max-width: 560px) {
+  .choice {
+    grid-template-columns: 30px minmax(0, 1fr);
+    gap: 0 12px;
+  }
+
+  /* The tick is the first thing to go: on a narrow dialog the row's own
+     highlight already says which is chosen, and the prose needs the width
+     more than the dot does. */
+  .choice-tick {
+    display: none;
+  }
+
+  .choice-head,
+  .choice-note {
+    grid-column: 2;
+  }
+}
+
 @media (max-width: 520px) {
   .agent-provider-picker {
     grid-template-columns: 1fr;
