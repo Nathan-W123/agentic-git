@@ -394,6 +394,14 @@ export class WorkerClient {
       body: {
         workerId,
         projectId,
+        // What this build can be handed. A lease can carry things an older
+        // worker does not know how to run — MCP servers, most recently — and
+        // handing them to one that ignores them is a task that runs without
+        // its tools and reports as if it had them. Announced here, on the
+        // request that decides what is handed over, so a control plane that
+        // reads it can withhold what this worker could not honour; one that
+        // does not read it ignores an unknown field, exactly as before.
+        protocolVersion: WORKER_PROTOCOL_VERSION,
         ...(repositoryId === undefined ? {} : { repositoryId }),
         ...(kinds === undefined ? {} : { kinds }),
       },

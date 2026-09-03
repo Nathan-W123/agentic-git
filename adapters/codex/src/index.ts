@@ -28,6 +28,7 @@ import {
   type AgentPlan,
   type ChangeSet,
   type ReplanRequest,
+  type ResolvedMcpServer,
   type ScopeChangeDecision,
 } from "@coord/shared-types";
 import {
@@ -357,6 +358,18 @@ export interface CodexAdapterOptions {
    * `workspace-write` at all; see {@link CodexWriteDeniedError}.
    */
   executionSandbox?: CodexExecutionSandbox;
+  /**
+   * MCP servers this run may use, already allowed by the machine owner and
+   * with every secret opened.
+   *
+   * Carried as `-c mcp_servers.<name>.…` overrides on every invocation,
+   * because that is the surface Codex offers for a server that is not in
+   * its config file — and `--ignore-user-config`, which every task run
+   * passes, leaves `-c` overrides in force while it skips the file. Nothing
+   * is written under `CODEX_HOME`: Codex authenticates from the real one,
+   * and a config written there would outlive the task.
+   */
+  mcpServers?: readonly ResolvedMcpServer[];
   runner?: CodexProcessRunner;
 }
 
@@ -582,6 +595,137 @@ function safeAdditionalArgs(values: readonly string[]): string[] {
     resolved.push(flag, value);
   }
   return resolved;
+}
+
+/** What Codex's config will call the server: a bare TOML key, nothing else. */
+const MCP_SERVER_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
+
+/** A TOML basic string. Backslash and quote escaped, control characters too. */
+function tomlString(value: string): string {
+  let escaped = "";
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (character === "\\") {
+      escaped += "\\\\";
+    } else if (character === '"') {
+      escaped += '\\"';
+    } else if (character === "\n") {
+      escaped += "\\n";
+    } else if (character === "\r") {
+      escaped += "\\r";
+    } else if (character === "\t") {
+      escaped += "\\t";
+    } else if (code < 0x20 || code === 0x7f) {
+      escaped += `\\u${code.toString(16).padStart(4, "0")}`;
+    } else {
+      escaped += character;
+    }
+  }
+  return `"${escaped}"`;
+}
+
+function tomlStringArray(values: readonly string[]): string {
+  return `[${values.map(tomlString).join(",")}]`;
+}
+
+/** An inline table of strings; keys quoted unless TOML lets them stand bare. */
+function tomlStringTable(values: Readonly<Record<string, string>>): string {
+  return `{${Object.entries(values)
+    .map(
+      ([key, value]) =>
+        `${/^[A-Za-z0-9_-]+$/u.test(key) ? key : tomlString(key)}=${tomlString(value)}`,
+    )
+    .join(",")}}`;
+}
+
+/**
+ * The `-c` overrides that put one set of MCP servers in front of Codex, and
+ * the environment the process has to be started with for them to work.
+ *
+ * A stdio server travels whole on argv: command, args, and its `env` table —
+ * secrets included, because Codex documents no indirection for a stdio
+ * server's environment the way it does for an HTTP bearer token. That is
+ * visible to every process the machine owner runs, and it is accepted for
+ * this build for one reason: this is their laptop, their agent, and a secret
+ * they were handed to run this server with. What it is not is visible to any
+ * other person, and it is never written to disk. An HTTP server's token
+ * takes the documented route instead — `bearer_token_env_var` names a
+ * variable, the variable goes into the process environment, and argv carries
+ * only the name. Any other header shape is refused here rather than folded
+ * into argv, because Codex has no way to carry it and a server started
+ * without its credential fails later and less clearly.
+ */
+function codexMcpOverrides(
+  servers: readonly ResolvedMcpServer[],
+): { args: string[]; env: Record<string, string> } {
+  const args: string[] = [];
+  const env: Record<string, string> = {};
+  const seen = new Set<string>();
+  // Which server each variable was minted for. Names are unique, but the
+  // variable folds a dash and an underscore together, so `linear-a` and
+  // `linear_a` would otherwise share one — and the second write would hand
+  // the first server's URL the second server's token, silently.
+  const variables = new Map<string, string>();
+  for (const server of servers) {
+    if (!MCP_SERVER_NAME.test(server.name)) {
+      throw new Error(
+        `MCP server name ${JSON.stringify(server.name)} is not a valid Codex ` +
+          "config key: use lower-case letters, digits, dash and underscore, " +
+          "starting with a letter or digit",
+      );
+    }
+    if (seen.has(server.name)) {
+      throw new Error(`MCP server ${server.name} is offered twice`);
+    }
+    seen.add(server.name);
+    const key = `mcp_servers.${server.name}`;
+    if (server.transport === "stdio") {
+      if (server.command === undefined || server.command.trim().length === 0) {
+        throw new Error(`MCP server ${server.name} is stdio but names no command`);
+      }
+      args.push("-c", `${key}.command=${tomlString(server.command)}`);
+      if (server.args !== undefined) {
+        args.push("-c", `${key}.args=${tomlStringArray(server.args)}`);
+      }
+      if (server.env !== undefined && Object.keys(server.env).length > 0) {
+        args.push("-c", `${key}.env=${tomlStringTable(server.env)}`);
+      }
+      continue;
+    }
+    if (server.url === undefined || server.url.trim().length === 0) {
+      throw new Error(`MCP server ${server.name} is http but names no url`);
+    }
+    args.push("-c", `${key}.url=${tomlString(server.url)}`);
+    const headers = Object.entries(server.headers ?? {});
+    if (headers.length === 0) {
+      continue;
+    }
+    const bearer =
+      headers.length === 1 && headers[0]?.[0].toLowerCase() === "authorization"
+        ? /^Bearer\s+(\S+)$/u.exec(headers[0][1])
+        : null;
+    if (bearer === null || bearer[1] === undefined) {
+      throw new Error(
+        `MCP server ${server.name} carries headers Codex cannot be given: ` +
+          "Codex reads only a bearer token, from an environment variable " +
+          "named by bearer_token_env_var, and this server's headers are " +
+          `${headers.map(([name]) => name).join(", ")}`,
+      );
+    }
+    const variable = `KUMI_MCP_${server.name.toUpperCase().replace(/-/gu, "_")}_TOKEN`;
+    const holder = variables.get(variable);
+    if (holder !== undefined) {
+      throw new Error(
+        `MCP servers ${holder} and ${server.name} would both carry their ` +
+          `bearer token in ${variable}: rename one so the two differ by ` +
+          "more than a dash or underscore",
+      );
+    }
+    variables.set(variable, server.name);
+    args.push("-c", `${key}.bearer_token_env_var=${tomlString(variable)}`);
+    env[variable] = bearer[1];
+  }
+  return { args, env };
 }
 
 /**
@@ -1196,6 +1340,10 @@ export class CodexAdapter implements AgentAdapter {
   private readonly windowsSandbox: CodexWindowsSandbox;
   private readonly platform: NodeJS.Platform;
   private readonly additionalArgs: string[];
+  /** `-c` overrides for the lease's MCP servers; empty when it carries none. */
+  private readonly mcpArgs: string[];
+  /** Bearer tokens the overrides name by variable; see `codexMcpOverrides`. */
+  private readonly mcpEnv: Record<string, string>;
   private readonly effort: string | undefined;
   private readonly planningTimeoutMs: number;
   private readonly executionTimeoutMs: number;
@@ -1212,6 +1360,9 @@ export class CodexAdapter implements AgentAdapter {
       environmentPath(options.env),
     );
     this.additionalArgs = safeAdditionalArgs(options.args ?? []);
+    const mcp = codexMcpOverrides(options.mcpServers ?? []);
+    this.mcpArgs = mcp.args;
+    this.mcpEnv = mcp.env;
     this.effort = safeEffort(options.effort);
     this.planningTimeoutMs = positiveInteger(
       options.planningTimeoutMs,
@@ -2251,6 +2402,7 @@ export class CodexAdapter implements AgentAdapter {
       ...(this.options.ignoreUserConfig ?? true
         ? ["--ignore-user-config"]
         : []),
+      ...this.mcpArgs,
       ...(this.platform === "win32"
         ? ["-c", `windows.sandbox="${this.windowsSandbox}"`]
         : []),
@@ -2281,6 +2433,11 @@ export class CodexAdapter implements AgentAdapter {
             resume,
             "-c",
             `sandbox_mode="${sandbox}"`,
+            // On the resumed turn as much as the first. A `-c` override
+            // lasts one process, not one thread, so a resume without these
+            // is a conversation whose tools were there on turn one and gone
+            // on turn two.
+            ...this.mcpArgs,
             ...(this.platform === "win32"
               ? ["-c", `windows.sandbox="${this.windowsSandbox}"`]
               : []),
@@ -2411,10 +2568,18 @@ export class CodexAdapter implements AgentAdapter {
         pendingJsonLine = pendingJsonLine.slice(-64 * 1024);
       }
     };
+    // A bearer token is named on argv and carried here, in the environment
+    // Codex reads it from. Starting from the caller's environment when one
+    // was given and from this process's otherwise is the same base the
+    // runner would have used, so adding to it changes nothing but the token.
+    const env =
+      Object.keys(this.mcpEnv).length === 0
+        ? this.options.env
+        : { ...(this.options.env ?? process.env), ...this.mcpEnv };
     const active = this.runner(this.command, argv, {
       cwd: workingDirectory,
       input: prompt,
-      ...(this.options.env === undefined ? {} : { env: this.options.env }),
+      ...(env === undefined ? {} : { env }),
       timeoutMs,
       maxOutputBytes: this.maxOutputBytes,
       // JSON event output can be verbose, but usage and completion arrive at

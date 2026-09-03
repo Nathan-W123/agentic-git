@@ -71,7 +71,7 @@ test("the account menu carries account destinations", async () => {
   assert.match(agentMenu, /"Connect another agent"[\s\S]{0,80}"View agent connections"/u);
   assert.match(
     app,
-    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render\);/u,
+    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render, openSettingsSearchResult\);/u,
   );
   // Still not a second product route for agent connections.
   assert.doesNotMatch(agentMenu, /value: "agents"/u);

@@ -33,7 +33,15 @@ import os from "node:os";
 import path from "node:path";
 
 import { detectAgents, ensureProject, exists } from "./agents.mjs";
+import { askDialog } from "./dialog.mjs";
 import { treeKill } from "./installers.mjs";
+import { discoverTenancy } from "./tenancy.mjs";
+import {
+  allowMcpServers,
+  forgetMcpAllow,
+  missingMcpServers,
+  readAllowedMcp,
+} from "./mcp-consent.mjs";
 
 /**
  * Backoff between restarts, and the point at which restarting is pointless.
@@ -82,6 +90,21 @@ let busy = false;
 let stayAwake = false;
 let failures = 0;
 let restartTimer;
+/**
+ * The MCP servers this process has already asked about, and whether it is
+ * asking right now.
+ *
+ * A worker runs several tasks at once and says what it withheld on every one
+ * of them, so a project with one unallowed server on a busy afternoon would
+ * put the same question up a dozen times — and a person who answered "not
+ * now" once has answered. Remembered for the process's lifetime and no
+ * longer: quitting the app is a reasonable way to be asked again, and the
+ * "yes" side is written to disk, so it is only the "no" that is forgotten.
+ */
+const askedMcp = new Set();
+let askingMcp = false;
+/** What the project is called, for the question. */
+let projectLabel = "This project";
 
 /** Where the worker keeps its own project, worktrees and scratch space. */
 function workerRoot() {
@@ -109,35 +132,6 @@ async function getJson(server, token, route) {
     throw new Error(`${route} answered ${response.status}`);
   }
   return await response.json();
-}
-
-/**
- * The organization and project this machine should poll.
- *
- * Asked of the server rather than configured, because the app already holds a
- * credential that can answer it and a person should not have to know their own
- * organization's id to run an agent. A deployment with several is served by
- * the first, which is the only one a single-tenant install has.
- */
-async function discoverTenancy(server, token) {
-  const orgs = await getJson(server, token, "/api/v1/organizations");
-  const organizationId = orgs?.organizations?.[0]?.id;
-  if (typeof organizationId !== "string" || organizationId === "") {
-    throw new Error("This account is not a member of any organization");
-  }
-  let projectId;
-  try {
-    const projects = await getJson(
-      server,
-      token,
-      `/api/v1/organizations/${encodeURIComponent(organizationId)}/projects`,
-    );
-    projectId = projects?.projects?.[0]?.id;
-  } catch {
-    // Optional: the worker falls back to the default project, which is the
-    // only one most deployments have.
-  }
-  return { organizationId, projectId };
 }
 
 function scheduleRestart(here, session, onEvent, ranForMs) {
@@ -210,11 +204,24 @@ async function startWorkerOnce(here, session, onEvent) {
 
   let tenancy;
   try {
-    tenancy = await discoverTenancy(session.server, session.token);
+    tenancy = await discoverTenancy(session.server, session.token, getJson);
   } catch (error) {
     onEvent?.({ state: "stopped", detail: describe(error) });
     return;
   }
+
+  if (typeof tenancy.projectName === "string" && tenancy.projectName !== "") {
+    projectLabel = tenancy.projectName;
+  }
+  // Named out loud. Which tenant a machine joined decides whether its owner's
+  // agents are reachable at all, and until now nothing said it anywhere — so
+  // a worker in the wrong one looked exactly like a worker in the right one.
+  onEvent?.({
+    state: "running",
+    detail:
+      `Joined ${tenancy.projectName ?? tenancy.projectId ?? "the default project"} ` +
+      `(${tenancy.organizationId}).`,
+  });
 
   const root = workerRoot();
   await mkdir(root, { recursive: true });
@@ -270,6 +277,10 @@ async function startWorkerOnce(here, session, onEvent) {
     } else if (message?.type === "idle") {
       busy = false;
       reconsiderAwake();
+    } else if (message?.type === "mcp-offered") {
+      // The child ran without these and has said so to the room; the one
+      // thing it cannot do is ask the person whose machine this is.
+      void offerMcpConsent(message.servers, here, session, onEvent);
     }
   });
 
@@ -290,6 +301,114 @@ async function startWorkerOnce(here, session, onEvent) {
     state: "running",
     detail: `Running ${Object.keys(agents).join(", ")} on this machine.`,
   });
+}
+
+/**
+ * Asks the machine's owner whether a project's MCP servers may run here.
+ *
+ * The project has already said yes; that is why the lease carried them. But
+ * "yes" from a project is a decision about its agents, and what is being
+ * decided here is whether programs it chose start on this computer under
+ * this person's account — which is theirs alone to say. The worker reads
+ * the answer from its config once, at start, so a "yes" is followed by a
+ * restart: otherwise the person would allow the servers and watch the next
+ * ten tasks run without them anyway.
+ *
+ * Asked once per set of names, and never while a question is already up.
+ * The list on disk is consulted every time rather than cached, because the
+ * settings window can change it between two leases and asking about a
+ * server that was allowed a minute ago would be asking twice.
+ */
+async function offerMcpConsent(servers, here, session, onEvent) {
+  if (askingMcp || !Array.isArray(servers)) {
+    return;
+  }
+  const root = workerRoot();
+  let missing;
+  try {
+    missing = missingMcpServers(await readAllowedMcp(root), servers);
+  } catch {
+    return;
+  }
+  const key = missing.map((server) => `${server.name}@${server.digest}`).join("\n");
+  if (missing.length === 0 || askedMcp.has(key)) {
+    return;
+  }
+  askedMcp.add(key);
+  askingMcp = true;
+  let allowed = false;
+  try {
+    // What each one is, not just what it is called: the owner is agreeing
+    // to a program or a URL, and a server that was allowed before and has
+    // since been redefined is said to have changed, so a yes given to the
+    // old definition is not mistaken for one given to the new.
+    const lines = missing
+      .map((server) => `• ${server.summary}${server.changed ? " (changed since you allowed it)" : ""}`)
+      .join("\n");
+    const choice = await askDialog({
+      kind: "question",
+      title: "Kumi",
+      heading: "This project wants to run tools on this computer",
+      body:
+        `${projectLabel} has approved MCP servers for its agents:\n\n${lines}\n\n` +
+        "Allowing them starts those programs on this computer, under your " +
+        "account, whenever one of your agents runs a task here. To take " +
+        "this back later, use Agents → Forget Allowed MCP Servers.",
+      buttons: ["Allow these", "Not now"],
+      cancelId: 1,
+    });
+    allowed = choice === 0;
+  } catch {
+    // A dialog that could not be shown is a question not asked; the set is
+    // left remembered so a broken window does not become a loop.
+  } finally {
+    askingMcp = false;
+  }
+  if (!allowed) {
+    return;
+  }
+  try {
+    await allowMcpServers(root, missing);
+  } catch (error) {
+    onEvent?.({
+      state: "running",
+      detail: `Could not save the MCP allowlist: ${describe(error)}`,
+    });
+    return;
+  }
+  await restartForMcp(here, session, onEvent);
+}
+
+/**
+ * The restart a change to the allowlist needs.
+ *
+ * `stopWorker` lets go of the stay-awake offer along with everything else,
+ * because it is what a quit calls. This is not a quit, and the person's
+ * answer to "keep this machine up for work" has not changed.
+ */
+async function restartForMcp(here, session, onEvent) {
+  const keepAwake = stayAwake;
+  stopWorker();
+  await startWorker(here, session, onEvent);
+  setStayAwake(keepAwake);
+}
+
+/**
+ * Withdraws every MCP server this computer has allowed.
+ *
+ * The menu's half of the consent: a yes that could not be taken back from
+ * the same app would be a yes given once and kept forever. The worker reads
+ * the list at start, so it is restarted if it is running; the "not now"
+ * answers this process remembered are forgotten too, so the next lease that
+ * offers a server asks again.
+ */
+export async function forgetMcpServers(here, session, onEvent) {
+  await forgetMcpAllow(workerRoot());
+  askedMcp.clear();
+  if (child === undefined) {
+    return;
+  }
+  await restartForMcp(here, session, onEvent);
 }
 
 /**

@@ -19,7 +19,9 @@ import {
   type CoordinationStore,
 } from "@coord/persistence";
 
-import { AGENT_ACCOUNT_PREFIX } from "@coord/shared-types";
+import { AGENT_ACCOUNT_PREFIX, mcpServersForLease } from "@coord/shared-types";
+import { createSecretSealer, type SecretSealer } from "@coord/workspace-manager";
+import type { ProxyDial } from "./mcp-proxy.js";
 
 import type { StripeClient } from "./stripe.js";
 import { effectiveRole, subscriptionAllowsWork } from "./billing.js";
@@ -41,6 +43,7 @@ import {
   previewBaseHref,
   previewProxyHeaders,
   readsAsEchoOfRequest,
+  readsAsQuestion,
   reportedFreshTokens,
   requestFromObjective,
   rewritePreviewHtml,
@@ -52,10 +55,10 @@ import {
   summariseThreadTitle,
   textOverlap,
   truncateToTokens,
-  withRoleContext,
   type ApiOperations,
   type ChannelMemoThread,
   type StaticAsset,
+  withRoleContext,
 } from "./server.js";
 import { hashPassword, hashSecret } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
@@ -411,6 +414,8 @@ async function startRuntime(
     threadReconcileIntervalMs?: number;
     /** How long a held `/plan` waits before it lapses. */
     planHoldTtlMs?: number;
+    /** How long a task waits unclaimed before the room is told nothing took it. */
+    stalledTaskMs?: number;
     /** How long the audit log keeps an event. Zero keeps everything. */
     auditRetentionDays?: number;
     /** How often the retention sweep runs, so a test need not wait hours. */
@@ -422,6 +427,17 @@ async function startRuntime(
      * deployment without billing configured looks like.
      */
     stripe?: StripeClient;
+    /**
+     * Seals MCP secrets, standing in for the credential store. Absent for
+     * every test that is not about tools, which is also what a deployment
+     * with no credential store looks like to the routes that need one.
+     */
+    secretSealer?: SecretSealer;
+    /**
+     * Stands in for the socket when an approved MCP server is dialled, so a
+     * test can assert what travelled rather than what a hostname resolved to.
+     */
+    mcpDial?: ProxyDial;
     /**
      * Drops the optional `listAgents` operation, as a deployment that does
      * not implement it does — the fallback path for anything that joins
@@ -451,6 +467,10 @@ async function startRuntime(
       };
       explanation: string;
     };
+    /** The dashboard's per-minute budget, for the bucket-isolation test. */
+    rateLimitPerMinute?: number;
+    /** The MCP endpoint's own per-minute budget, which must be separate. */
+    mcpRateLimitPerMinute?: number;
     /** Consecutive direct push results, for a conflict followed by its retry. */
     pushOutcomes?: Array<{
       outcome: "done" | "refused";
@@ -1059,19 +1079,53 @@ async function startRuntime(
       return { stub: true, projectId: input.projectId };
     },
     async leaseWork(input) {
-      const leased = await store.leaseNextTask({
-        workerId: input.workerId,
-        projectId: input.projectId,
-        baseRevision: "a".repeat(40),
-        ttlMs: 5 * 60 * 1000,
-        ...(input.repositoryId === undefined
-          ? {}
-          : { repositoryId: input.repositoryId }),
-      });
+      // The real `leaseWork` narrows its candidate list by `repositories`
+      // before it leases anything, so a fake that leased first and answered
+      // afterwards would test the gateway's backstop instead of the rule.
+      // Asking per allowed repository is the same narrowing the store's own
+      // clause can express.
+      const allowed =
+        input.repositories === undefined
+          ? [input.repositoryId]
+          : input.repositoryId === undefined
+            ? [...input.repositories]
+            : input.repositories.has(input.repositoryId)
+              ? [input.repositoryId]
+              : [];
+      let leased: Awaited<ReturnType<typeof store.leaseNextTask>>;
+      for (const repositoryId of allowed) {
+        leased = await store.leaseNextTask({
+          workerId: input.workerId,
+          projectId: input.projectId,
+          baseRevision: "a".repeat(40),
+          ttlMs: 5 * 60 * 1000,
+          ...(repositoryId === undefined ? {} : { repositoryId }),
+        });
+        if (leased !== undefined) {
+          break;
+        }
+      }
       if (leased === undefined) {
         return undefined;
       }
+      // The same gate the real `leaseWork` runs, on the same store, with
+      // the sealer this runtime was given: what the gateway sends a worker
+      // is decided there, and a fake that skipped it would prove nothing
+      // about the wire.
+      const worker = await store.getWorker(input.workerId);
+      const mcpServers = await mcpServersForLease(store, {
+        opener: options.secretSealer,
+        projectId: input.projectId,
+        repositoryId: leased.task.repositoryId,
+        taskId: leased.task.id,
+        taskSubmittedBy: leased.task.submittedBy,
+        workerId: input.workerId,
+        workerUserId: worker?.userId ?? "",
+        workerProtocolVersion: input.protocolVersion,
+        leaseId: leased.lease.id,
+      });
       return {
+        ...(mcpServers === undefined ? {} : { mcpServers }),
         lease: leased.lease,
         task: leased.task,
         repository: { id: leased.task.repositoryId, branch: "main" },
@@ -1119,6 +1173,84 @@ async function startRuntime(
       );
       return { accepted: true };
     },
+    // Faithful in the three respects the gateway acts on: a real worker row
+    // (the lease's foreign key, and what ownership is checked against), one
+    // row per person per editor, and `claimableBy` so a take cannot reach
+    // another person's queue. Everything past that — admission, integration,
+    // canonical — is `apps/cli/src/editor-work.test.ts`, against real Git.
+    editorWork: {
+      async take(input) {
+        const existing = (
+          await store.listWorkers({ organizationId: input.organizationId })
+        ).find(
+          (worker) =>
+            worker.userId === input.actorId && worker.name === input.label,
+        );
+        const worker =
+          existing ??
+          (await store.registerWorker({
+            userId: input.actorId,
+            organizationId: input.organizationId,
+            name: input.label,
+            adapters: [input.vendor],
+            version: "editor",
+          }));
+        for (const repositoryId of input.repositoryIds) {
+          const leased = await store.leaseNextTask({
+            workerId: worker.id,
+            projectId: input.projectId,
+            repositoryId,
+            baseRevision: "a".repeat(40),
+            ttlMs: 30 * 60 * 1000,
+            claimableBy: input.actorId,
+            kinds: ["task"],
+          });
+          if (leased === undefined) {
+            continue;
+          }
+          return {
+            leaseId: leased.lease.id,
+            taskId: leased.task.id,
+            objective: leased.task.objective,
+            repositoryId: leased.task.repositoryId,
+            branch: "main",
+            baseRevision: leased.lease.baseRevision,
+            baseVersion: 1,
+            expiresAt: leased.lease.expiresAt,
+            validationCommands: [],
+          };
+        }
+        return undefined;
+      },
+      async report(input) {
+        const settled = await store.finishWorkLease(
+          input.leaseId,
+          input.status === "completed"
+            ? "completed"
+            : input.status === "failed"
+              ? "failed"
+              : "released",
+          new Date().toISOString(),
+          input.detail,
+        );
+        return settled
+          ? { outcome: "accepted" }
+          : { outcome: "lease_lost", reason: "the hold had already gone" };
+      },
+      async extend(input) {
+        const lease = await store.getWorkLease(input.leaseId);
+        if (lease === undefined || lease.status !== "active") {
+          return undefined;
+        }
+        const expiresAt = new Date(Date.now() + input.ttlMs).toISOString();
+        await store.heartbeatWorkLease(
+          input.leaseId,
+          new Date().toISOString(),
+          expiresAt,
+        );
+        return expiresAt;
+      },
+    },
   };
   if (options.withoutListAgents === true) {
     delete operations.listAgents;
@@ -1129,7 +1261,14 @@ async function startRuntime(
   const gateway = new ApiGateway({
     store,
     operations,
+    ...(options.mcpDial === undefined ? {} : { mcpDial: options.mcpDial }),
     bootstrapToken: BOOTSTRAP_TOKEN,
+    ...(options.rateLimitPerMinute === undefined
+      ? {}
+      : { rateLimitPerMinute: options.rateLimitPerMinute }),
+    ...(options.mcpRateLimitPerMinute === undefined
+      ? {}
+      : { mcpRateLimitPerMinute: options.mcpRateLimitPerMinute }),
     chatterFilter: {
       readsAsChatter: async (text: string) => localChatter(text),
       // The mirror the local-agents path reads. Anything the stub does not
@@ -1168,6 +1307,9 @@ async function startRuntime(
     ...(options.threadReconcileIntervalMs === undefined
       ? {}
       : { threadReconcileIntervalMs: options.threadReconcileIntervalMs }),
+    ...(options.stalledTaskMs === undefined
+      ? {}
+      : { stalledTaskMs: options.stalledTaskMs }),
     ...(options.auditRetentionDays === undefined
       ? {}
       : { auditRetentionDays: options.auditRetentionDays }),
@@ -1180,6 +1322,9 @@ async function startRuntime(
     ...(options.planHoldTtlMs === undefined
       ? {}
       : { planHoldTtlMs: options.planHoldTtlMs }),
+    ...(options.secretSealer === undefined
+      ? {}
+      : { secretSealer: options.secretSealer }),
     ...(options.codexUsageReader === undefined
       ? {}
       : { codexUsageReader: options.codexUsageReader }),
@@ -1925,6 +2070,253 @@ async function bearer(
   };
 }
 
+test("an editor polling over MCP cannot spend the dashboard's rate limit", async (t) => {
+  // Both arrive from one IP and look identical to a per-IP limiter: the
+  // person's browser and the model in their editor sit behind the same office
+  // NAT. On a shared bucket a model polling `task_status` in a loop throttles
+  // the human watching the thread, which is the wrong client to punish and
+  // reads as "Kumi is down".
+  const runtime = await startRuntime(t, {
+    rateLimitPerMinute: 2,
+    mcpRateLimitPerMinute: 2,
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  // Spend the MCP budget to nothing.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await client.request("/api/v1/mcp", {
+      method: "POST",
+      body: { jsonrpc: "2.0", id: attempt, method: "ping" },
+    });
+  }
+  const exhausted = await client.request("/api/v1/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 99, method: "ping" },
+  });
+  assert.equal(exhausted.status, 429);
+
+  // The dashboard's budget is untouched by any of it.
+  const dashboard = await client.request("/api/v1/health");
+  assert.notEqual(dashboard.status, 429);
+});
+
+test("somebody invited to one repository can run a worker, and only on that repository", async (t) => {
+  // The whole local-execution premise depends on this: agents run on the
+  // machines of the people who own them. A collaborator invited to a single
+  // repository owns a machine like anybody else, but `POST /workers/register`
+  // authorized through memberships alone, so their worker was refused on its
+  // very first call — "You do not have permission to perform this action" in
+  // a log file, over and over, every few minutes. Nothing they could do about
+  // it and nothing anywhere saying what was wrong. Their agent then read as
+  // permanently offline in every channel, which looked like a second,
+  // unrelated bug.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const shared = await invitableRepository(owner, "fleet-shared");
+  const private_ = await invitableRepository(owner, "fleet-private");
+
+  const guest = await runtime.store.createUser({
+    email: "fleet-guest@example.com",
+    displayName: "Guest",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: shared,
+    userId: guest.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    comped: false,
+    createdAt: new Date().toISOString(),
+  });
+
+  const guestClient = new TestClient(runtime.origin);
+  await guestClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: guest.email, password: PASSWORD },
+  });
+  // Minted from the grant, which is the fix one layer down: the token route
+  // reads grants too, so a collaborator can carry `run_task` at all.
+  const minted = await guestClient.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "guest machine", scopes: ["view", "run_task"] },
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.data.token as string;
+
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "guest-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(registered.status, 201);
+  const workerId = registered.data.id as string;
+
+  // Work in the repository they were actually given.
+  const mine = await runtime.store.submitTask({
+    repositoryId: shared,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "fix the login redirect",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
+  });
+  assert.equal(leased.status, 200);
+  assert.equal(leased.data.task.id, mine.id);
+
+  // And work in a repository beside it, which they were not. Admitting the
+  // worker must not have widened what it may be handed: the grant covers one
+  // repository, and a lease is an arbitrary agent run on this person's own
+  // laptop against their own vendor subscription. 204, the same answer an
+  // empty queue gives, because from where they stand the queue is empty.
+  await runtime.store.submitTask({
+    repositoryId: private_,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rotate the signing key",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  const withheld = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    { method: "POST", body: { workerId, projectId: DEFAULT_PROJECT_ID } },
+  );
+  assert.equal(withheld.status, 204);
+
+  // The fleet is the company's, not theirs. They see the machine they run —
+  // that is how anybody knows whether their own agent will answer — and not
+  // how much infrastructure the organization operates.
+  const ownerWorker = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    (
+      await owner.request("/api/v1/auth/tokens", {
+        method: "POST",
+        body: { name: "owner machine", scopes: ["view", "run_task"] },
+      })
+    ).data.token as string,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "owner-desktop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(ownerWorker.status, 201);
+
+  const fleet = await bearer(
+    runtime.origin,
+    `/api/v1/workers?organizationId=${DEFAULT_ORGANIZATION_ID}`,
+    token,
+  );
+  assert.equal(fleet.status, 200);
+  assert.deepEqual(
+    (fleet.data.workers as { name: string }[]).map((worker) => worker.name),
+    ["guest-laptop"],
+  );
+
+  // A stranger holding neither a membership nor a grant is refused exactly as
+  // before. Widening this to grants must not have widened it to everybody.
+  const stranger = await runtime.store.createUser({
+    email: "fleet-stranger@example.com",
+    displayName: "Stranger",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const strangerClient = new TestClient(runtime.origin);
+  await strangerClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: stranger.email, password: PASSWORD },
+  });
+  const refused = await strangerClient.request("/api/v1/workers/register", {
+    method: "POST",
+    body: {
+      organizationId: DEFAULT_ORGANIZATION_ID,
+      name: "stranger-laptop",
+      adapters: ["codex"],
+      version: "1.0.0",
+    },
+  });
+  assert.equal(refused.status, 403);
+  // And refused in words, because a worker log is the only place this is ever
+  // read. "You do not have permission to perform this action", alone in a
+  // file, is what sent two people hunting through networks and reinstalls.
+  assert.match(String(refused.data.error?.message), /invite you to it/u);
+});
+
+test("a token may mint a narrower one, which dies with it", async (t) => {
+  // The desktop app authenticates with a token, so the rule that only a
+  // session may mint left it unable to create the narrow credential an editor
+  // needs — from the one place that can actually write that editor's config.
+  // The rule was right, though: a token refreshing itself forever would put
+  // revocation out of reach. So the exception keeps the invariant instead of
+  // trading it away.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const desktop = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "desktop", scopes: ["view", "run_task", "submit_task"] },
+  });
+  assert.equal(desktop.status, 201);
+  const parentId = desktop.data.id as string;
+  const parentToken = desktop.data.token as string;
+
+  // Narrower: allowed, and it works.
+  const minted = await bearer(runtime.origin, "/api/v1/auth/tokens", parentToken, {
+    method: "POST",
+    body: { name: "Claude Code on Windows", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(minted.status, 201, JSON.stringify(minted.data));
+  const child = minted.data.token as string;
+  assert.equal(
+    (await bearer(runtime.origin, "/api/v1/auth/tokens", child)).status,
+    200,
+    "the minted token should authenticate",
+  );
+
+  // Wider than the token doing the minting: refused, even though the *person*
+  // holds the scope — this account is a system administrator and could have
+  // asked for it from a session. A credential must not escalate itself just
+  // because its owner could have asked for more.
+  const wider = await bearer(runtime.origin, "/api/v1/auth/tokens", parentToken, {
+    method: "POST",
+    body: { name: "greedy", scopes: ["view", "manage_organization"] },
+  });
+  assert.equal(wider.status, 403);
+  assert.equal(wider.data.error.code, "scope_exceeds_token");
+
+  // And the invariant the original rule protected: revoking the parent takes
+  // the child with it, so revocation still reaches everything.
+  const revoked = await client.request(
+    `/api/v1/auth/tokens/${encodeURIComponent(parentId)}`,
+    { method: "DELETE" },
+  );
+  assert.equal(revoked.status, 200);
+  assert.equal(
+    (await bearer(runtime.origin, "/api/v1/auth/tokens", child)).status,
+    401,
+    "a token outlived the one that minted it",
+  );
+});
+
 test("api tokens authenticate headless clients without cookies or CSRF", async (t) => {
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
@@ -2054,7 +2446,13 @@ test("a token cannot be granted more than its owner's role allows", async (t) =>
   assert.equal(elsewhere.status, 403);
 });
 
-test("a token cannot mint another token", async (t) => {
+test("a minted token cannot mint further, so the chain stays one link long", async (t) => {
+  // A token may now mint one narrower token, because the desktop app needs to
+  // and it authenticates with a token. What keeps that from becoming "a
+  // leaked credential refreshes itself forever" is the cascade — revoking the
+  // parent revokes the child — and the cascade is one level deep. So the
+  // chain has to be one link long, or its tail would outlive revoking its
+  // head.
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
   await bootstrap(client);
@@ -2065,14 +2463,20 @@ test("a token cannot mint another token", async (t) => {
   });
   const token = created.data.token as string;
 
-  // Otherwise a leaked credential could refresh itself forever and revocation
-  // would mean nothing.
-  const minted = await bearer(runtime.origin, "/api/v1/auth/tokens", token, {
+  const child = await bearer(runtime.origin, "/api/v1/auth/tokens", token, {
     method: "POST",
     body: { name: "child", scopes: ["view"] },
   });
-  assert.equal(minted.status, 403);
-  assert.equal(minted.data.error.code, "session_required");
+  assert.equal(child.status, 201);
+
+  const grandchild = await bearer(
+    runtime.origin,
+    "/api/v1/auth/tokens",
+    child.data.token as string,
+    { method: "POST", body: { name: "grandchild", scopes: ["view"] } },
+  );
+  assert.equal(grandchild.status, 403);
+  assert.equal(grandchild.data.error.code, "session_required");
 });
 
 test("revoking a token stops it immediately", async (t) => {
@@ -6724,6 +7128,32 @@ test("a request that names no verb this list knows is still work when an agent i
  * "this is a greenfield project… can you get started" is a request to get
  * started, and the first clause is background.
  */
+test("a polite request is work unless it actually asks whether", () => {
+  // "can you …" opens an instruction as often as a question. The verb list
+  // cannot settle it — the verbs people use for interface work (condense,
+  // tailor, tidy) are open-ended — so the question mark does: asking whether
+  // something is possible gets one, telling an agent what to do does not.
+  for (const request of [
+    "@Cronus can you take reference from slack to vertically condense the top bar",
+    "could you tidy the settings page so it reads like Linear's",
+    "please can you reword the empty state on the runs screen",
+    "Would you tailor the top bar for the chat experience",
+  ]) {
+    assert.equal(readsAsQuestion(request), false, request);
+  }
+  for (const question of [
+    "can you see the payments repo?",
+    "could you explain how the queue works?",
+    "what are you working on",
+    "is the release checklist done",
+    "@Cronus summarise the codebase",
+  ]) {
+    assert.equal(readsAsQuestion(question), true, question);
+  }
+  // A real task verb still wins with or without the question mark.
+  assert.equal(readsAsQuestion("can we make a chess game?"), false);
+});
+
 test("an opening line summarises the request rather than repeating it", () => {
   assert.equal(
     summariseObjective("please create the initial skeleton for a browser chess game"),
@@ -8313,6 +8743,130 @@ test("a thread carries what its task changed, and keeps it", async (t) => {
     );
     return message?.changedFiles?.length === 1;
   }, "the final changeset never replaced the live summary");
+});
+
+test("a task nobody picks up is said so in its thread, once", async (t) => {
+  // `waitingForAMachine` is decided once, at dispatch. A machine that was live
+  // at that instant and then went away leaves the thread saying "I've taken
+  // this task and I'm working on it" in front of a row nothing will ever
+  // claim. The offline exchange cannot reach this: it runs strictly before
+  // dispatch and answers the case where the agent already reads as offline.
+  const runtime = await startRuntime(t, {
+    threadReconcileIntervalMs: 40,
+    stalledTaskMs: 0,
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "nobody-home");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) rename the button" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(task?.status, "submitted");
+
+  const noticesFor = async (): Promise<string[]> => {
+    const messages = await runtime.store.listChannelMessages(
+      repositoryId,
+      ownerId,
+    );
+    const root = messages.find((message) => message.taskId === task?.id);
+    return (root?.replies ?? [])
+      .filter((reply) => reply.kind === "system")
+      .map((reply) => reply.content);
+  };
+
+  // Two full sweeps. The second is the point: the notice is recorded against
+  // the task rather than in memory, so it is said once however often the
+  // reconciler runs — and a restart does not say it again either.
+  await waitFor(
+    async () => (await noticesFor()).length > 0,
+    "the sweep never said anything about a task nobody claimed",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  const notices = await noticesFor();
+  assert.equal(notices.length, 1, notices.join(" | "));
+  assert.match(notices[0] ?? "", /Nothing has picked this up/u);
+  // Not a cancellation. The work is still good and still runs if the machine
+  // comes back; what was missing was anybody saying it had not started.
+  const [after] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(after?.status, "submitted");
+  assert.equal(
+    (await runtime.store.listAuditEvents({ taskId: task?.id, types: ["task_stalled"] }))
+      .length,
+    1,
+  );
+});
+
+test("a task that is merely waiting its turn is left alone", async (t) => {
+  // Two ways a queued row is fine, and the sweep must recognise both or it
+  // narrates ordinary work as a fault every minute.
+  const runtime = await startRuntime(t, {
+    threadReconcileIntervalMs: 40,
+    stalledTaskMs: 0,
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "busy-room");
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) the first thing" },
+  });
+  const [queued] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.ok(queued !== undefined);
+
+  // A live lease anywhere in this repository means work is moving and this
+  // row is behind it.
+  const worker = await runtime.store.registerWorker({
+    userId: ownerId,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    name: "a-machine",
+    adapters: ["claude"],
+    version: "1",
+  });
+  const busy = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "work that is actually running",
+    agentId: "claude",
+    validationCommands: [],
+  });
+  const leased = await runtime.store.leaseNextTask({
+    workerId: worker.id,
+    taskId: busy.id,
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    baseRevision: "b".repeat(40),
+    ttlMs: 60_000,
+  });
+  assert.ok(leased !== undefined, "the second task should have been leased");
+
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  const messages = await runtime.store.listChannelMessages(repositoryId, ownerId);
+  const root = messages.find((message) => message.taskId === queued.id);
+  assert.deepEqual(
+    (root?.replies ?? [])
+      .filter((reply) => reply.kind === "system")
+      .map((reply) => reply.content),
+    [],
+    "a room with work in flight should say nothing about the queue behind it",
+  );
 });
 
 test("a command and a mention work together, and /plan holds the run", async (t) => {
@@ -18773,6 +19327,60 @@ test("an unmatched request goes to the sender's own agent, then to whoever is fr
  * chat the team is already in, and the second person to click it was told it
  * had already been used.
  */
+test("somebody invited to one repository can still make a token", async (t) => {
+  // A repository-scoped invitation grants that repository and deliberately no
+  // organization membership, which is the whole point of scoping it. But a
+  // token's scopes were bounded by memberships alone, so every person invited
+  // to a deployment — and the invitation route requires a repository, so that
+  // is all of them — was bounded by nothing at all. A developer on the only
+  // repository they can see was told their role granted not even `view`.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "shared-with-them");
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: { role: "developer", repositoryId: repo, projectId: DEFAULT_PROJECT_ID },
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+
+  const joiner = new TestClient(runtime.origin);
+  const accepted = await joiner.request(
+    `/api/v1/invitations/${invited.data.token as string}/accept`,
+    {
+      method: "POST",
+      body: {
+        email: "cofounder@example.com",
+        displayName: "Co-founder",
+        password: PASSWORD,
+      },
+    },
+  );
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  assert.deepEqual(accepted.data.memberships, [], "the grant is the only access");
+
+  // Developer on that repository grants `submit_task`, so the token an editor
+  // connection needs is exactly what this person may have.
+  const token = await joiner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "Codex on their laptop", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(token.status, 201, JSON.stringify(token.data));
+
+  // And the bound still holds: a developer cannot mint what a developer does
+  // not have, however the role reached them.
+  const beyond = await joiner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "greedy", scopes: ["manage_organization"] },
+  });
+  assert.equal(beyond.status, 403);
+  assert.equal(beyond.data.error.code, "scope_exceeds_role");
+});
+
 test("an invite link with no address admits more than one person", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -21061,4 +21669,1593 @@ test("creating an agent twice keeps the name it was dealt", async (t) => {
     body: {},
   });
   assert.equal(again.data.agent.callSign, first.data.agent.callSign);
+});
+
+/**
+ * Kumi over MCP: the endpoint a co-founder adds to Claude Code or Cursor.
+ *
+ * These go through real HTTP with a real bearer token, because the three
+ * things most likely to break are not in the protocol layer: the token path,
+ * the absence of an `Origin` header, and whether a tool's answer is a sentence
+ * a model can act on.
+ */
+async function mcpRuntime(t: TestContext, scopes: string[] = ["view", "submit_task"]) {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "payments");
+  runtime.chatConnections.set(bootstrapped.user.id, [{ provider: "anthropic" }]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const created = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "editor", scopes },
+  });
+  assert.equal(created.status, 201);
+  return {
+    runtime,
+    owner,
+    user: bootstrapped.user,
+    repositoryId,
+    token: created.data.token as string,
+  };
+}
+
+/** One JSON-RPC message over the MCP route, cookie-less like a real client. */
+async function rpc(
+  origin: string,
+  token: string,
+  message: Record<string, unknown>,
+) {
+  return await bearer(origin, "/api/v1/mcp", token, {
+    method: "POST",
+    body: message,
+  });
+}
+
+test("an MCP client can hand-shake and see the tools", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+
+  const hello = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {} },
+  });
+  assert.equal(hello.status, 200);
+  assert.deepEqual(hello.data.result.capabilities, { tools: {} });
+  assert.equal(hello.data.result.serverInfo.name, "kumi");
+
+  // No Origin header is sent, which is what every non-browser client does.
+  // The gateway's origin check must let that through or nothing works.
+  const listed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/list",
+  });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(
+    (listed.data.result.tools as Array<{ name: string }>).map((tool) => tool.name),
+    [
+      "list_repositories",
+      "submit_task",
+      "task_status",
+      "cancel_task",
+      "answer_question",
+      "take_task",
+      "report_task",
+      "extend_task",
+      "task_progress",
+    ],
+  );
+});
+
+/**
+ * The other direction: the editor does the work itself.
+ *
+ * Everything about admission, integration and canonical is tested against a
+ * real repository in `apps/cli/src/editor-work.test.ts`. What is only
+ * testable here is the part that is about the wire: which scope these ask
+ * for, whose lease a caller may touch, and whether the bundle a `git fetch`
+ * needs can be reached without handing an editor a worker's permissions.
+ */
+async function seedTaskFor(
+  runtime: Awaited<ReturnType<typeof startRuntime>>,
+  repositoryId: string,
+  userId: string,
+  objective = "raise the retry ceiling",
+) {
+  return await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective,
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: userId,
+  });
+}
+
+async function work(
+  origin: string,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+  id = 1,
+) {
+  const answer = await rpc(origin, token, {
+    jsonrpc: "2.0",
+    id,
+    method: "tools/call",
+    params: { name, arguments: args },
+  });
+  return {
+    status: answer.status,
+    isError: answer.data.result?.isError as true | undefined,
+    text: String(answer.data.result?.content?.[0]?.text ?? ""),
+    raw: answer,
+  };
+}
+
+test("an editor takes a task, is told the revision, and reports it done", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+  assert.match(taken.text, /raise the retry ceiling/u);
+  assert.match(taken.text, new RegExp(task.id, "u"));
+  assert.match(taken.text, /a{40}/u);
+  // Off the queue while the editor has it, which is the whole reason a lease
+  // is taken at all: a desktop worker must not run the same objective.
+  assert.equal(
+    (await runtime.store.getSubmittedTask(task.id))?.status,
+    "claimed",
+  );
+
+  const filed = await work(
+    runtime.origin,
+    token,
+    "report_task",
+    { task_id: task.id, summary: "Raised it." },
+    2,
+  );
+  assert.equal(filed.isError, undefined, filed.text);
+  const leases = await runtime.store.listWorkLeases({});
+  assert.equal(leases.at(-1)?.status, "completed");
+});
+
+test("an editor cannot report on a hold that is somebody else's", async (t) => {
+  const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+  await work(runtime.origin, token, "take_task", { editor: "claude" });
+
+  // A second developer in the same organization, with a token of their own.
+  // Not an outsider: the point is that being able to *see* a task is not
+  // being able to touch the hold somebody else has on it.
+  const colleague = await runtime.store.createUser({
+    email: "colleague@example.com",
+    displayName: "Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  const intruder = new TestClient(runtime.origin);
+  await intruder.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "colleague@example.com", password: PASSWORD },
+  });
+  const theirToken = await intruder.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "editor", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(theirToken.status, 201, JSON.stringify(theirToken.data));
+  const stolen = await work(
+    runtime.origin,
+    theirToken.data.token as string,
+    "report_task",
+    { task_id: task.id, summary: "mine now" },
+    3,
+  );
+  assert.equal(stolen.isError, true);
+  assert.match(stolen.text, /somebody else/u);
+  // The hold is untouched, which is the half that matters: the refusal must
+  // not have settled the lease on its way out.
+  assert.equal((await runtime.store.listWorkLeases({})).at(-1)?.status, "active");
+  void owner;
+});
+
+test("the work tools refuse a token without submit_task", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t, ["view"]);
+  await seedTaskFor(runtime, repositoryId, user.id);
+  const refused = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /submit_task/u);
+  // Nothing was leased on the way to the refusal.
+  assert.deepEqual(await runtime.store.listWorkLeases({}), []);
+});
+
+test("the bundle link works once, and only for the person it was issued to", async (t) => {
+  const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
+  const first = await seedTaskFor(runtime, repositoryId, user.id);
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  const link = /(\/api\/v1\/mcp\/bundle\/[A-Za-z0-9-]+)/u.exec(taken.text)?.[1];
+  assert.ok(link, taken.text);
+
+  // No Authorization header at all: the caller is a `curl` on somebody's
+  // laptop, and the ticket in the path is what stands in for one.
+  const fetched = await fetch(`${runtime.origin}${link}`);
+  assert.equal(fetched.status, 200);
+  assert.equal(
+    fetched.headers.get("content-type"),
+    "application/octet-stream",
+  );
+  assert.ok((await fetched.arrayBuffer()).byteLength > 0);
+
+  // Spent. The URL travels through a model transcript and a shell history, so
+  // a second use has to be worth nothing.
+  assert.equal((await fetch(`${runtime.origin}${link}`)).status, 404);
+  // And an invented one is worth nothing either.
+  assert.equal(
+    (await fetch(`${runtime.origin}/api/v1/mcp/bundle/not-a-real-ticket`)).status,
+    404,
+  );
+
+  // A ticket for a hold that has since been settled is refused rather than
+  // served: the bundle is a snapshot of a lease, and a lease that is over is
+  // not a thing to hand anybody the repository for.
+  // Given back and taken again, so there is a fresh ticket to let go stale.
+  // A repository runs one lease at a time, so the first hold has to end
+  // before a second can begin.
+  await work(
+    runtime.origin,
+    token,
+    "report_task",
+    { task_id: first.id, status: "released" },
+    8,
+  );
+  const again = await work(
+    runtime.origin,
+    token,
+    "take_task",
+    { editor: "claude" },
+    9,
+  );
+  const stale = /(\/api\/v1\/mcp\/bundle\/[A-Za-z0-9-]+)/u.exec(again.text)?.[1];
+  assert.ok(stale, again.text);
+  const gave = await work(
+    runtime.origin,
+    token,
+    "report_task",
+    { task_id: first.id, status: "released" },
+    10,
+  );
+  assert.equal(gave.isError, undefined, gave.text);
+  assert.equal((await fetch(`${runtime.origin}${stale}`)).status, 409);
+  void owner;
+});
+
+test("an editor that took work reads as online to the room", async (t) => {
+  // Liveness is only a question this deployment asks: everywhere else the
+  // control plane can run an agent itself, so whether its owner is at a
+  // keyboard is not a fact worth acting on.
+  withLocalAgentsOnly(t);
+  const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
+  // Nobody has a machine listening: the agent is offline, and the room says
+  // so before anything is taken.
+  const before = await work(runtime.origin, token, "list_repositories", {}, 4);
+  assert.match(before.text, /@.+ — offline/u);
+
+  await seedTaskFor(runtime, repositoryId, user.id);
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+
+  // Taking work is the one act that proves an editor is at a keyboard and
+  // will come back, and liveness has to be answered in one place: the roster
+  // and dispatch read the same map, or an agent reads available here and
+  // "nothing is running it yet" there.
+  const after = await work(runtime.origin, token, "list_repositories", {}, 5);
+  assert.match(after.text, /@.+ — online/u);
+
+  // And it stays online past the point a worker would have gone quiet. This
+  // is the whole reason presence is declared rather than inferred from a
+  // heartbeat: an editor cannot be woken, so nothing beats on its behalf, and
+  // a window that lapsed after three minutes would make an agent read as
+  // offline while it was demonstrably running something.
+  for (const worker of await runtime.store.listWorkers({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+  })) {
+    await runtime.store.touchWorker(
+      worker.id,
+      new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    );
+  }
+  const later = await work(runtime.origin, token, "list_repositories", {}, 6);
+  assert.match(later.text, /@.+ — online/u);
+  void owner;
+});
+
+test("extending a hold nobody holds is refused rather than invented", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+  const missed = await work(
+    runtime.origin,
+    token,
+    "extend_task",
+    { task_id: task.id },
+    6,
+  );
+  assert.equal(missed.isError, true);
+  assert.match(missed.text, /take_task/u);
+
+  await work(runtime.origin, token, "take_task", { editor: "claude" }, 7);
+  const held = (await runtime.store.listWorkLeases({})).at(-1);
+  const pushed = await work(
+    runtime.origin,
+    token,
+    "extend_task",
+    { task_id: task.id, minutes: 45 },
+    8,
+  );
+  assert.equal(pushed.isError, undefined, pushed.text);
+  const now = (await runtime.store.getWorkLease(held?.id ?? ""))?.expiresAt;
+  assert.ok(
+    new Date(now ?? 0).getTime() > new Date(held?.expiresAt ?? 0).getTime(),
+  );
+});
+
+test("an agent that is only in an editor is not said to be working on it", async (t) => {
+  // The gap the presence merge opened. An editor is live in the sense the
+  // roster cares about, so folding it in was right; but it cannot be woken,
+  // and the acknowledgement used to read the two the same way. Somebody
+  // whose desktop was closed and whose editor had taken work an hour ago was
+  // told "I've taken this task and I'm working on it" while nothing was.
+  withLocalAgentsOnly(t);
+  const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
+
+  // Presence, declared the only way it can be: by taking work.
+  const first = await seedTaskFor(runtime, repositoryId, user.id, "the first one");
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+  await work(
+    runtime.origin,
+    token,
+    "report_task",
+    { task_id: first.id, status: "released" },
+    2,
+  );
+
+  // Now a mention typed in Kumi, with no desktop worker anywhere.
+  const roster = await work(runtime.origin, token, "list_repositories", {}, 3);
+  const agent = /@(.+?) — /u.exec(roster.text)?.[1];
+  assert.ok(agent, roster.text);
+  assert.match(roster.text, /— online/u, "presence did not hold");
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`,
+    { method: "POST", body: { content: `@${agent} raise the retry ceiling` } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const after = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`,
+  );
+  const said = agentSpeech(after.data.messages)
+    .map((message: { content: string }) => message.content)
+    .join("\n");
+  assert.match(said, /pick it up the next time I'm asked/u);
+  // The two sentences that would each be untrue: nothing has begun, and it is
+  // not true either that no machine of theirs is online.
+  assert.doesNotMatch(said, /I'm working on it/u);
+  assert.doesNotMatch(said, /isn't online/u);
+});
+
+test("a run done in an editor narrates itself into the thread", async (t) => {
+  // The gap this closes: a desktop worker posts progress as it goes and an
+  // editor posted nothing, so a task done from Cursor showed "taken" and then
+  // silence until it was over. Twenty minutes of that is indistinguishable
+  // from a hang, which is the exact failure the worker's progress route was
+  // written to remove.
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+
+  // Shortened first, so the renewal below is something that can be seen. A
+  // hold taken seconds ago already runs for half an hour, and asserting
+  // against that would pass whether or not anything renewed it.
+  await work(
+    runtime.origin,
+    token,
+    "extend_task",
+    { task_id: task.id, minutes: 1 },
+    2,
+  );
+  const shortened = (await runtime.store.listWorkLeases({ status: "active" })).at(-1);
+  assert.ok(shortened);
+  assert.ok(
+    new Date(shortened.expiresAt).getTime() < Date.now() + 5 * 60 * 1000,
+  );
+
+  const posted = await work(
+    runtime.origin,
+    token,
+    "task_progress",
+    { task_id: task.id, message: "reading the redirect handler" },
+    3,
+  );
+  assert.equal(posted.isError, undefined, posted.text);
+
+  // The same event a worker writes, so the watcher narrates it into the
+  // thread without knowing which end produced it.
+  const events = await runtime.store.listAuditEvents({
+    taskId: task.id,
+    types: ["agent_progress"],
+  });
+  assert.equal(events.length, 1);
+  assert.equal(
+    events[0]?.event.data["message"],
+    "reading the redirect handler",
+  );
+  assert.equal(events[0]?.event.data["repositoryId"], repositoryId);
+
+  // And it renews the hold, because a line of progress is evidence of life.
+  // An editor narrating its work for thirty-five minutes must not lose the
+  // task at the half hour for want of a separate call.
+  const held = (await runtime.store.listWorkLeases({ status: "active" })).at(-1);
+  assert.ok(held, "the hold was not kept");
+  assert.ok(
+    new Date(held.expiresAt).getTime() > Date.now() + 25 * 60 * 1000,
+  );
+});
+
+test("progress on a task somebody else holds is refused", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await seedTaskFor(runtime, repositoryId, user.id);
+  // Nobody has taken it, so there is no run for a line to belong to.
+  const refused = await work(
+    runtime.origin,
+    token,
+    "task_progress",
+    { task_id: task.id, message: "pretending to work on this" },
+    3,
+  );
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /not holding/u);
+  assert.deepEqual(
+    await runtime.store.listAuditEvents({
+      taskId: task.id,
+      types: ["agent_progress"],
+    }),
+    [],
+  );
+});
+
+test("a misconfigured Authorization header says which way it is wrong", async (t) => {
+  // Both of these were answered "Sign in is required" — a sentence about a
+  // browser, sent to a CLI that has no cookies and was never going to get
+  // any. Between them they are most of what goes wrong setting this up, and
+  // neither is a fact about anybody's account, so both can be said plainly.
+  const { runtime, token } = await mcpRuntime(t);
+  const send = async (authorization: string) => {
+    const response = await fetch(`${runtime.origin}/api/v1/mcp`, {
+      method: "POST",
+      headers: { Authorization: authorization, "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    });
+    return {
+      status: response.status,
+      challenge: response.headers.get("www-authenticate"),
+      message: String(
+        ((await response.json()) as { error?: { message?: string } }).error
+          ?.message ?? "",
+      ),
+    };
+  };
+
+  // The scheme left off entirely.
+  const bare = await send(token);
+  assert.equal(bare.status, 401);
+  assert.match(bare.message, /must read "Bearer <token>"/u);
+
+  // The placeholder pasted with its brackets still on.
+  const wrapped = await send(`Bearer <${token}>`);
+  assert.equal(wrapped.status, 401);
+  assert.match(wrapped.message, /angle brackets/u);
+
+  // A well-formed header carrying a token that is simply wrong stays
+  // uniform: "invalid" and nothing more, or the answer becomes an oracle.
+  const wrong = await send("Bearer coord_pat_aaaaaaaa.bbbbbbbb");
+  assert.equal(wrong.status, 401);
+  assert.match(wrong.message, /API token is invalid/u);
+
+  // Every 401 on this route carries the challenge, which is how an MCP
+  // client tells "wants a token" from "server is broken".
+  for (const answer of [bare, wrapped, wrong]) {
+    assert.match(answer.challenge ?? "", /^Bearer\b/u, "no WWW-Authenticate");
+  }
+
+  // And the working case is untouched.
+  const ok = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "ping",
+  });
+  assert.equal(ok.status, 200);
+});
+
+test("a GET is refused in a shape an MCP client can read", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const probed = await bearer(runtime.origin, "/api/v1/mcp", token);
+  assert.equal(probed.status, 405);
+  // Not the gateway's own error envelope: a client probing for a stream has to
+  // read "does not stream", not "transport failed".
+  assert.equal(probed.data.jsonrpc, "2.0");
+  assert.equal(probed.data.error.code, -32600);
+});
+
+test("list_repositories names the room's agents and whether they are live", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const listed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  const text = listed.data.result.content[0].text as string;
+  assert.match(text, /payments/u);
+  // The roster travels with the repository because there is no `list_agents`,
+  // and without it a model cannot answer the question submit_task asks it.
+  assert.match(text, /@.+ — (online|offline)/u);
+});
+
+test("a token without the scope is told which scope, not that the server broke", async (t) => {
+  const { runtime, token } = await mcpRuntime(t, ["view"]);
+  const refused = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "x", objective: "do it" },
+    },
+  });
+  assert.equal(refused.status, 200);
+  assert.equal(refused.data.error, undefined, "sent as a protocol error");
+  assert.equal(refused.data.result.isError, true);
+  assert.match(refused.data.result.content[0].text, /submit_task/u);
+});
+
+test("submit_task names the repositories it can reach when given a wrong one", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const missed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 5,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "nonesuch", agent: "x", objective: "do it" },
+    },
+  });
+  assert.equal(missed.data.result.isError, true);
+  assert.match(missed.data.result.content[0].text, /No repository called/u);
+  assert.match(missed.data.result.content[0].text, /payments/u);
+});
+
+test("submit_task refuses a channel command and the everyone broadcast", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  // Both would post a message and start nothing, and the route would answer
+  // 201 — success for work that will never run.
+  const command = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 6,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "x", objective: "/push" },
+    },
+  });
+  assert.equal(command.data.result.isError, true);
+  assert.match(command.data.result.content[0].text, /channel command/u);
+
+  const broadcast = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent: "agents", objective: "do it" },
+    },
+  });
+  assert.equal(broadcast.data.result.isError, true);
+  assert.match(broadcast.data.result.content[0].text, /does not start work/u);
+});
+
+test("task_status says where a task got to", async (t) => {
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "raise the retry ceiling",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: user.id,
+  });
+
+  const queued = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 8,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: task.id } },
+  });
+  assert.match(queued.data.result.content[0].text, /raise the retry ceiling/u);
+  assert.match(queued.data.result.content[0].text, /queued/iu);
+
+  await runtime.store.cancelSubmittedTask(task.id);
+  const stopped = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 9,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: task.id } },
+  });
+  // It follows the row rather than snapshotting it.
+  assert.doesNotMatch(
+    stopped.data.result.content[0].text as string,
+    /Status: queued/iu,
+  );
+
+  const missing = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 10,
+    method: "tools/call",
+    params: { name: "task_status", arguments: { task_id: "task_nope" } },
+  });
+  assert.equal(missing.data.result.isError, true);
+});
+
+test("submit_task posts into the channel and hands back a task id", async (t) => {
+  const { runtime, token, repositoryId } = await mcpRuntime(t);
+  const roster = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 20,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  // Address whoever the roster actually named, so the test does not encode a
+  // display-name format that is allowed to change.
+  const agent = /@(.+?) — /u.exec(
+    roster.data.result.content[0].text as string,
+  )?.[1];
+  assert.ok(agent, "no agent in the roster to address");
+
+  const sent = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 21,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the retry ceiling",
+      },
+    },
+  });
+  assert.equal(sent.data.result.isError, undefined, sent.data.result.content[0].text);
+  const said = sent.data.result.content[0].text as string;
+  assert.match(said, /Task task_/u);
+
+  // The message is really in the room — this is the half that makes a task
+  // dispatched from an editor visible to everybody else.
+  const messages = await runtime.store.listChannelMessages(repositoryId, "", {});
+  assert.ok(
+    messages.some((message) => message.content.includes("raise the retry ceiling")),
+    "nothing was posted into the channel",
+  );
+
+  // And the id it quoted names a real task, which is what task_status needs.
+  const quoted = /Task (task_[\w-]+)/u.exec(said)?.[1] ?? "";
+  assert.ok(await runtime.store.getSubmittedTask(quoted), "quoted a task id that does not exist");
+});
+
+/**
+ * The offline exchange, which is the popup translated for a tool.
+ *
+ * The room asks before it sends — queue, reroute, or cancel — because a task
+ * filed against a machine that is not listening will sit there. An editor has
+ * no room to ask in, so the tool refuses to write anything, states the three
+ * choices, and waits to be called again. The rule it must never break is that
+ * the first call leaves *nothing* behind: no message, no task.
+ */
+test("submit_task asks before filing work against a machine that is off", async (t) => {
+  const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
+  process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_AGENTS_ONLY"];
+    } else {
+      process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
+    }
+  });
+
+  const { runtime, token, repositoryId } = await mcpRuntime(t);
+  const roster = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 30,
+    method: "tools/call",
+    params: { name: "list_repositories", arguments: {} },
+  });
+  const agent = /@(.+?) — /u.exec(
+    roster.data.result.content[0].text as string,
+  )?.[1];
+  assert.ok(agent);
+  // Nobody has registered a worker, so no machine is listening for anyone.
+  assert.match(roster.data.result.content[0].text as string, /— offline/u);
+
+  const asked = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 31,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: { repository: "payments", agent, objective: "raise the ceiling" },
+    },
+  });
+  const question = asked.data.result.content[0].text as string;
+  assert.match(question, /offline/u);
+  assert.match(question, /queue/u);
+  assert.match(question, /reroute/u);
+  assert.match(question, /cancel/u);
+  assert.match(question, /when_offline/u);
+
+  // Nothing was written. This is the assertion the whole design turns on.
+  assert.deepEqual(await runtime.store.listSubmittedTasks({ repositoryId }), []);
+  assert.deepEqual(
+    (await runtime.store.listChannelMessages(repositoryId, "", {})).filter(
+      (message) => message.content.includes("raise the ceiling"),
+    ),
+    [],
+  );
+
+  // Cancelling is a call that writes nothing either.
+  const dropped = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 32,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the ceiling",
+        when_offline: "cancel",
+      },
+    },
+  });
+  assert.match(dropped.data.result.content[0].text as string, /Nothing was submitted/u);
+  assert.deepEqual(await runtime.store.listSubmittedTasks({ repositoryId }), []);
+
+  // Answering "queue" files it, and says so rather than implying it started.
+  const queued = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 33,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        agent,
+        objective: "raise the ceiling",
+        when_offline: "queue",
+      },
+    },
+  });
+  const filed = queued.data.result.content[0].text as string;
+  assert.equal(queued.data.result.isError, undefined, filed);
+  assert.match(filed, /Queued/u);
+  assert.match(filed, /machine comes back/u);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).length,
+    1,
+  );
+});
+
+
+/**
+ * Turns the MCP switch on for one test and puts it back afterwards, so a
+ * test that proves the switch holds and a test that needs it open cannot
+ * leave the environment set for whichever runs next.
+ */
+function withMcpServersEnabled(
+  t: { after: (fn: () => void) => void },
+  enabled = true,
+): void {
+  const previous = process.env["COORD_MCP_ENABLED"];
+  if (enabled) {
+    process.env["COORD_MCP_ENABLED"] = "1";
+  } else {
+    delete process.env["COORD_MCP_ENABLED"];
+  }
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_MCP_ENABLED"];
+    } else {
+      process.env["COORD_MCP_ENABLED"] = previous;
+    }
+  });
+}
+
+const MCP_TEST_SECRET = "Bearer lin_api_the_plaintext_nobody_should_see";
+
+/** An HTTP server with one secret header, the way a settings screen posts it. */
+function mcpHttpServerBody(
+  name = "linear",
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    name,
+    transport: "http",
+    url: "https://mcp.linear.app/mcp",
+    values: { "X-Team": "platform" },
+    secrets: { Authorization: MCP_TEST_SECRET },
+    ...overrides,
+  };
+}
+
+/**
+ * The project's approved servers, re-offered to an editor as Kumi's own tools.
+ *
+ * The module's own behaviour — namespacing, the cache, what a broken reply
+ * costs — is in `mcp-proxy.test.ts`. What only this file can show is the
+ * wiring: which servers qualify, whose secrets travel with the call, and
+ * whether the key ever reaches the editor.
+ */
+async function proxyRuntime(t: TestContext) {
+  withMcpServersEnabled(t);
+  const dialled: Array<{ url: string; headers: Record<string, string>; body: unknown }> =
+    [];
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+    mcpDial: async (input) => {
+      dialled.push({
+        url: input.url,
+        headers: { ...input.headers },
+        body: input.body,
+      });
+      const method = (input.body as { method?: string }).method;
+      return method === "tools/list"
+        ? {
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              tools: [
+                {
+                  name: "list_issues",
+                  description: "Lists open issues",
+                  inputSchema: { type: "object", properties: {} },
+                },
+              ],
+            },
+          }
+        : {
+            jsonrpc: "2.0",
+            id: 1,
+            result: { content: [{ type: "text", text: "two issues" }] },
+          };
+    },
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "payments");
+  const created = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const token = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "editor", scopes: ["view", "submit_task"] },
+  });
+  return {
+    runtime,
+    owner,
+    repositoryId,
+    dialled,
+    serverId: created.data.server.id as string,
+    token: token.data.token as string,
+  };
+}
+
+async function listedTools(origin: string, token: string, id = 90) {
+  const listed = await rpc(origin, token, {
+    jsonrpc: "2.0",
+    id,
+    method: "tools/list",
+  });
+  return (listed.data.result.tools as Array<{ name: string }>).map(
+    (tool) => tool.name,
+  );
+}
+
+test("approving a server for agents does not put it in an editor's hands", async (t) => {
+  const { runtime, owner, token, serverId, dialled } = await proxyRuntime(t);
+
+  // Approved to run beside agents on teammates' machines. That is one
+  // decision; having the control plane dial it for whoever is typing in
+  // Cursor is another, and this is the state between them.
+  const approved = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(approved.status, 200);
+  assert.equal(approved.data.server.editorEnabled, false);
+  assert.equal(
+    (await listedTools(runtime.origin, token)).includes("linear__list_issues"),
+    false,
+    "an approval alone put the server in the tool list",
+  );
+  assert.deepEqual(dialled, [], "dialled a server nobody opted in");
+
+  const opened = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(opened.status, 200, JSON.stringify(opened.data));
+  assert.equal(opened.data.server.editorEnabled, true);
+  assert.ok(
+    (await listedTools(runtime.origin, token, 91)).includes("linear__list_issues"),
+  );
+});
+
+test("a proxied call carries the project's secret and the editor never sees it", async (t) => {
+  const { runtime, owner, token, serverId, dialled } = await proxyRuntime(t);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+
+  const called = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 92,
+    method: "tools/call",
+    params: {
+      name: "linear__list_issues",
+      arguments: { state: "open" },
+    },
+  });
+  assert.equal(called.status, 200);
+  assert.equal(called.data.result.isError, undefined, JSON.stringify(called.data));
+  assert.equal(called.data.result.content[0].text, "two issues");
+
+  const call = dialled.at(-1);
+  // The public header and the opened secret both travel, and the far end is
+  // asked for the name it knows rather than the namespaced one.
+  assert.equal(call?.headers["X-Team"], "platform");
+  assert.equal(call?.headers["Authorization"], MCP_TEST_SECRET);
+  assert.deepEqual((call?.body as { params?: unknown }).params, {
+    name: "list_issues",
+    arguments: { state: "open" },
+  });
+
+  // And none of it came back down the wire. This is the whole point of
+  // proxying rather than handing an editor the server's address and key.
+  const answered = JSON.stringify(called.data);
+  assert.equal(answered.includes(MCP_TEST_SECRET), false, "secret leaked");
+  assert.equal(
+    (await listedTools(runtime.origin, token, 93)).length > 0 &&
+      JSON.stringify(await listedTools(runtime.origin, token, 94)).includes(
+        MCP_TEST_SECRET,
+      ),
+    false,
+  );
+
+  // The call is on the record: "was Linear reachable during that afternoon"
+  // has to be answerable afterwards.
+  const audited = await runtime.store.listAuditEvents({
+    types: ["project_changed"],
+  });
+  assert.ok(
+    audited.some((entry) => entry.event.data["action"] === "mcp_tool_called"),
+    "a proxied call left no trace",
+  );
+});
+
+test("withdrawing the approval takes the tools away at once", async (t) => {
+  const { runtime, owner, token, serverId } = await proxyRuntime(t);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.ok(
+    (await listedTools(runtime.origin, token, 95)).includes("linear__list_issues"),
+  );
+
+  const withdrawn = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: false } },
+  );
+  assert.equal(withdrawn.data.server.editorEnabled, false);
+  // On the next request, not in five minutes when a cache lapses. Somebody
+  // switching a server off expects it to be off.
+  assert.equal(
+    (await listedTools(runtime.origin, token, 96)).includes("linear__list_issues"),
+    false,
+  );
+  // And it cannot be handed back to editors while the approval is off.
+  const reopened = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(reopened.status, 409);
+});
+
+test("a command cannot be offered to an editor, and says why", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const created = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    {
+      method: "POST",
+      body: {
+        name: "files",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem@1.0.0"],
+      },
+    },
+  );
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${created.data.server.id}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  const refused = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${created.data.server.id}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  // Refused up front rather than stored and quietly ignored. A stdio server
+  // is a process, and the control plane starting one chosen by a project
+  // admin is what this architecture keeps out.
+  assert.equal(refused.status, 400);
+  assert.match(String(refused.data.error.message), /over a URL/u);
+});
+
+test("with the switch off no server reaches an editor, whatever is stored", async (t) => {
+  const { runtime, owner, token, serverId, dialled } = await proxyRuntime(t);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/editor-access`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.ok(
+    (await listedTools(runtime.origin, token, 97)).includes("linear__list_issues"),
+  );
+
+  // The switch is a fence rather than a suggestion: turning it off has to
+  // stop the control plane dialling anything, not merely stop new rows.
+  withMcpServersEnabled(t, false);
+  const before = dialled.length;
+  assert.equal(
+    (await listedTools(runtime.origin, token, 98)).includes("linear__list_issues"),
+    false,
+  );
+  assert.equal(dialled.length, before);
+});
+
+test("an MCP server is stored sealed, listed by secret name only, and scoped to its project", async (t) => {
+  withMcpServersEnabled(t);
+  const sealer = createSecretSealer(randomBytes(32));
+  const runtime = await startRuntime(t, { secretSealer: sealer });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const server = created.data.server;
+  assert.equal(server.name, "linear");
+  assert.equal(server.enabled, false);
+  assert.deepEqual(server.secretNames, ["Authorization"]);
+  assert.equal(server.values["X-Team"], "platform");
+  assert.equal("secrets" in server, false);
+
+  // The ciphertext is in the store and only there. Every JSON the routes
+  // answer with is searched for it — and for the plaintext — because the
+  // record type keeping secrets out is the design, and this is the proof.
+  const sealed = await runtime.store.getMcpServerSecrets(server.id);
+  const ciphertext = sealed?.["Authorization"]?.ciphertext ?? "";
+  assert.ok(ciphertext.length > 0);
+  assert.equal(sealer.open(sealed!["Authorization"]!), MCP_TEST_SECRET);
+  const listed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+  );
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.enabled, true);
+  assert.deepEqual(listed.data.servers.map((entry: any) => entry.name), ["linear"]);
+  assert.deepEqual(listed.data.servers[0].secretNames, ["Authorization"]);
+  const fetched = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${server.id}`,
+  );
+  assert.equal(fetched.status, 200);
+  for (const body of [created.data, listed.data, fetched.data]) {
+    const raw = JSON.stringify(body);
+    assert.equal(raw.includes(ciphertext), false, "ciphertext leaked");
+    assert.equal(raw.includes(MCP_TEST_SECRET), false, "plaintext leaked");
+  }
+
+  // The same name again is a collision, not a second row.
+  const again = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(again.status, 409);
+  assert.equal(again.data.error.code, "name_taken");
+
+  // A server id is only addressable under the project it belongs to.
+  const other = await client.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/projects`,
+    { method: "POST", body: { slug: "other", name: "Other" } },
+  );
+  assert.equal(other.status, 201, JSON.stringify(other.data));
+  const otherId = other.data.project.id as string;
+  const crossed = await client.request(
+    `/api/v1/projects/${otherId}/mcp-servers/${server.id}`,
+  );
+  assert.equal(crossed.status, 404);
+  const crossedApproval = await client.request(
+    `/api/v1/projects/${otherId}/mcp-servers/${server.id}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(crossedApproval.status, 404);
+  const otherList = await client.request(`/api/v1/projects/${otherId}/mcp-servers`);
+  assert.deepEqual(otherList.data.servers, []);
+
+  // A repository-scoped server has to name repositories of this project.
+  const foreign = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    {
+      method: "POST",
+      body: mcpHttpServerBody("scoped", {
+        scope: "repository",
+        repositoryIds: ["not-a-repo"],
+      }),
+    },
+  );
+  assert.equal(foreign.status, 400);
+  assert.equal(foreign.data.error.code, "unknown_repository");
+
+  // A stdio command is an executable name or an absolute path, never a shell.
+  const shell = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    {
+      method: "POST",
+      body: { name: "shelly", transport: "stdio", command: "npx foo; rm -rf /" },
+    },
+  );
+  assert.equal(shell.status, 400);
+  assert.equal(shell.data.error.code, "invalid_command");
+
+  const removed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${server.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 204);
+  assert.equal(await runtime.store.getMcpServer(server.id), undefined);
+});
+
+test("an MCP server pointing at Kumi's own MCP endpoint is refused as a loop", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  for (const url of [
+    "https://kumi.example.com/api/v1/mcp",
+    "https://kumi.example.com/api/v1/mcp/",
+    "http://localhost:3000/api/v1/mcp",
+  ]) {
+    const refused = await client.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+      { method: "POST", body: mcpHttpServerBody("self", { url }) },
+    );
+    assert.equal(refused.status, 400, url);
+    assert.equal(refused.data.error.code, "mcp_loop", url);
+  }
+  // Plain http anywhere but loopback would put the secret header on the wire.
+  const plain = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody("plain", { url: "http://mcp.example.com/" }) },
+  );
+  assert.equal(plain.status, 400);
+  assert.equal(plain.data.error.code, "invalid_url");
+  // Somebody else's server, over https, is exactly what this is for.
+  const fine = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody("fine") },
+  );
+  assert.equal(fine.status, 201);
+});
+
+test("with the MCP switch off nothing can be stored or armed, and the listing says so", async (t) => {
+  withMcpServersEnabled(t, false);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 501);
+  assert.equal(created.data.error.code, "mcp_disabled");
+  assert.match(created.data.error.message, /COORD_MCP_ENABLED/u);
+
+  // A row that got in while the switch was on cannot be approved once it is
+  // off, and the listing still reads.
+  const seeded = await runtime.store.createMcpServer({
+    id: "mcp_seeded",
+    projectId: DEFAULT_PROJECT_ID,
+    scope: "project",
+    name: "seeded",
+    transport: "http",
+    url: "https://mcp.example.com/",
+    createdBy: "owner",
+    createdAt: new Date().toISOString(),
+  });
+  const approval = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${seeded.id}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(approval.status, 501);
+  assert.equal(approval.data.error.code, "mcp_disabled");
+  const listed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+  );
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.enabled, false);
+  assert.equal(listed.data.servers.length, 1);
+  assert.equal(listed.data.servers[0].enabled, false);
+});
+
+test("with the switch on but no credential store the MCP routes name what is missing", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 501);
+  assert.equal(created.data.error.code, "mcp_disabled");
+  assert.match(created.data.error.message, /COORD_CREDENTIAL_KEY/u);
+  const listed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+  );
+  assert.equal(listed.data.enabled, false);
+});
+
+test("approving an MCP server records who, is audited, and an edit takes it back", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const client = new TestClient(runtime.origin);
+  const setup = await bootstrap(client);
+  const ownerId = setup.user.id as string;
+
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 201);
+  const serverId = created.data.server.id as string;
+
+  const approved = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  assert.equal(approved.data.server.enabled, true);
+  assert.equal(approved.data.server.approvedBy, ownerId);
+  assert.ok(approved.data.server.approvedAt);
+  const enabledEvents = (
+    await runtime.store.listAuditEvents({ types: ["project_changed"] })
+  ).filter((entry) => entry.event.data["action"] === "mcp_server_enabled");
+  assert.equal(enabledEvents.length, 1);
+  assert.equal(enabledEvents[0]?.event.data["serverId"], serverId);
+  assert.equal(enabledEvents[0]?.event.data["actorId"], ownerId);
+  assert.equal(enabledEvents[0]?.event.data["name"], "linear");
+
+  // What was approved is a specific URL with specific secrets. Changing
+  // either is a new thing that nobody has approved yet.
+  const edited = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { values: { "X-Team": "infra" } } },
+  );
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+  assert.equal(edited.data.reapprovalRequired, true);
+  assert.equal(edited.data.server.enabled, false);
+  assert.equal(edited.data.server.approvedBy, undefined);
+  assert.equal(edited.data.server.values["X-Team"], "infra");
+  // The secret survived an edit that did not mention it.
+  assert.deepEqual(edited.data.server.secretNames, ["Authorization"]);
+
+  // An edit to a disabled server is just an edit; null removes a secret.
+  const trimmed = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { secrets: { Authorization: null, "X-Other": "s3cret" } } },
+  );
+  assert.equal(trimmed.status, 200);
+  assert.equal(trimmed.data.reapprovalRequired, false);
+  assert.deepEqual(trimmed.data.server.secretNames, ["X-Other"]);
+
+  // The transport is fixed at creation: the stores never change it, and a
+  // 200 that left the row as it was would be a lie — worse, the secrets
+  // sealed for a header would start travelling as a child's environment.
+  // Saying the same transport back is not a change.
+  const switched = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { transport: "stdio", command: "npx" } },
+  );
+  assert.equal(switched.status, 400, JSON.stringify(switched.data));
+  assert.equal(switched.data.error.code, "transport_fixed");
+  const same = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}`,
+    { method: "PATCH", body: { transport: "http" } },
+  );
+  assert.equal(same.status, 200, JSON.stringify(same.data));
+  assert.equal(same.data.server.transport, "http");
+
+  const disabled = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    { method: "POST", body: { enabled: false } },
+  );
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.data.server.enabled, false);
+});
+
+test("a view-only token can list MCP servers but neither create nor approve one", async (t) => {
+  withMcpServersEnabled(t);
+  const runtime = await startRuntime(t, {
+    secretSealer: createSecretSealer(randomBytes(32)),
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(created.status, 201);
+  const serverId = created.data.server.id as string;
+
+  const readOnly = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "read-only", scopes: ["view"] },
+  });
+  const token = readOnly.data.token as string;
+  const listed = await bearer(
+    runtime.origin,
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    token,
+  );
+  assert.equal(listed.status, 200);
+  const denied = await bearer(
+    runtime.origin,
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    token,
+    { method: "POST", body: mcpHttpServerBody("second") },
+  );
+  assert.equal(denied.status, 403);
+  const deniedApproval = await bearer(
+    runtime.origin,
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${serverId}/approval`,
+    token,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(deniedApproval.status, 403);
+  assert.equal(
+    (await runtime.store.getMcpServer(serverId))?.enabled,
+    false,
+  );
+});
+
+test("a lease carries approved MCP servers opened, only to a current worker owned by the task's submitter", async (t) => {
+  withMcpServersEnabled(t);
+  const sealer = createSecretSealer(randomBytes(32));
+  const runtime = await startRuntime(t, { secretSealer: sealer });
+  const client = new TestClient(runtime.origin);
+  const setup = await bootstrap(client);
+  const ownerId = setup.user.id as string;
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "fleet", scopes: ["view", "run_task"] },
+  });
+  const token = created.data.token as string;
+  const registered = await bearer(runtime.origin, "/api/v1/workers/register", token, {
+    method: "POST",
+    body: {
+      organizationId: DEFAULT_ORGANIZATION_ID,
+      name: "worker-a",
+      adapters: ["codex"],
+      version: "1.0.0",
+    },
+  });
+  assert.equal(registered.status, 201);
+  const workerId = registered.data.id as string;
+  await runtime.store.saveRepository({
+    id: "repo_tools",
+    path: "/canonical/tools.git",
+    branch: "main",
+  });
+
+  const server = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers`,
+    { method: "POST", body: mcpHttpServerBody() },
+  );
+  assert.equal(server.status, 201);
+  const approved = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/mcp-servers/${server.data.server.id}/approval`,
+    { method: "POST", body: { enabled: true } },
+  );
+  assert.equal(approved.status, 200);
+
+  const submit = async (submittedBy: string) =>
+    await runtime.store.submitTask({
+      repositoryId: "repo_tools",
+      projectId: DEFAULT_PROJECT_ID,
+      objective: "file the ticket",
+      agentId: "codex",
+      validationCommands: [],
+      submittedBy,
+    });
+  // Each lease is completed before the next is asked for: a repository
+  // admits one active lease at a time, and every case below is a fresh
+  // lease on a fresh task. Completed rather than released, because a
+  // released task goes back to the front of the queue.
+  const lease = async (body: Record<string, unknown>) => {
+    const answer = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+      method: "POST",
+      body: { workerId, projectId: DEFAULT_PROJECT_ID, ...body },
+    });
+    if (answer.status === 200) {
+      await runtime.store.finishWorkLease(
+        answer.data.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+    }
+    return answer;
+  };
+
+  // A current worker, the owner's own task: the secret arrives in the open.
+  const own = await submit(ownerId);
+  const current = await lease({ protocolVersion: 4 });
+  assert.equal(current.status, 200, JSON.stringify(current.data));
+  assert.equal(current.data.task.id, own.id);
+  assert.equal(current.data.mcpServers.length, 1);
+  assert.equal(current.data.mcpServers[0].name, "linear");
+  assert.equal(current.data.mcpServers[0].transport, "http");
+  assert.equal(current.data.mcpServers[0].url, "https://mcp.linear.app/mcp");
+  assert.equal(current.data.mcpServers[0].headers.Authorization, MCP_TEST_SECRET);
+  assert.equal(current.data.mcpServers[0].headers["X-Team"], "platform");
+
+  // A version-3 worker never sees the field, and the thread is told why.
+  const stale = await submit(ownerId);
+  const old = await lease({ protocolVersion: 3 });
+  assert.equal(old.status, 200);
+  assert.equal(old.data.task.id, stale.id);
+  assert.equal("mcpServers" in old.data, false);
+  const withheld = await runtime.store.listAuditEvents({
+    taskId: stale.id,
+    types: ["mcp_servers_withheld"],
+  });
+  assert.equal(withheld.length, 1);
+  assert.equal(withheld[0]?.event.data["reason"], "stale_worker");
+  const told = await runtime.store.listAuditEvents({
+    taskId: stale.id,
+    types: ["agent_progress"],
+  });
+  assert.equal(told.length, 1);
+  assert.match(String(told[0]?.event.data["message"]), /linear/u);
+  assert.match(String(told[0]?.event.data["message"]), /version 3/u);
+  // Absent is the oldest version, not the newest.
+  const unversioned = await submit(ownerId);
+  const silent = await lease({});
+  assert.equal(silent.data.task.id, unversioned.id);
+  assert.equal("mcpServers" in silent.data, false);
+
+  // Somebody else's task on this machine gets nothing, whatever the version.
+  // The claim pins ownership so this cannot happen through the real lease;
+  // the fake here does not, which is what lets the gate be seen holding.
+  const somebodyElse = await runtime.store.createUser({
+    email: "else@example.com",
+    displayName: "Somebody Else",
+    passwordDigest: "digest",
+  });
+  const foreign = await submit(somebodyElse.id);
+  const notOwner = await lease({ protocolVersion: 4 });
+  assert.equal(notOwner.status, 200);
+  assert.equal(notOwner.data.task.id, foreign.id);
+  assert.equal("mcpServers" in notOwner.data, false);
+  const refused = await runtime.store.listAuditEvents({
+    taskId: foreign.id,
+    types: ["mcp_servers_withheld"],
+  });
+  assert.equal(refused[0]?.event.data["reason"], "not_owner");
+
+  // The switch, off, attaches nothing regardless of what is approved.
+  delete process.env["COORD_MCP_ENABLED"];
+  const later = await submit(ownerId);
+  const off = await lease({ protocolVersion: 4 });
+  assert.equal(off.data.task.id, later.id);
+  assert.equal("mcpServers" in off.data, false);
+  process.env["COORD_MCP_ENABLED"] = "1";
+
+  // A secret sealed under some other key leaves its server out, and says so,
+  // without costing the lease.
+  const otherKey = createSecretSealer(randomBytes(32));
+  await runtime.store.createMcpServer({
+    id: "mcp_rekeyed",
+    projectId: DEFAULT_PROJECT_ID,
+    scope: "project",
+    name: "rekeyed",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "some-mcp"],
+    secrets: { TOKEN: otherKey.seal("unreadable") },
+    createdBy: ownerId,
+    createdAt: new Date().toISOString(),
+  });
+  await runtime.store.setMcpServerApproval("mcp_rekeyed", {
+    enabled: true,
+    approvedBy: ownerId,
+    approvedAt: new Date().toISOString(),
+  });
+  const last = await submit(ownerId);
+  const partial = await lease({ protocolVersion: 4 });
+  assert.equal(partial.data.task.id, last.id);
+  assert.deepEqual(
+    partial.data.mcpServers.map((entry: { name: string }) => entry.name),
+    ["linear"],
+  );
+  const unopenable = await runtime.store.listAuditEvents({
+    taskId: last.id,
+    types: ["mcp_server_unopenable"],
+  });
+  assert.equal(unopenable[0]?.event.data["name"], "rekeyed");
+  assert.equal(unopenable[0]?.event.data["secretName"], "TOKEN");
 });

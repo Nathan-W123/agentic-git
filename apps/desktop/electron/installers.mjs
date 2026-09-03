@@ -159,6 +159,15 @@ export function wellKnownBinDirectories(platform = process.platform) {
       // CLIs land — so this is the one that decides whether an install this
       // app just ran is visible to it.
       ...(appData === "" ? [] : [path.join(appData, "npm")]),
+      // And where a *native* installer puts one. Claude Code's installs
+      // `claude.exe` under the home directory rather than through npm, and
+      // this list had it on every platform except the one people run it on
+      // most. The consequence was not a missing feature but a silent one:
+      // `detectAgents` found no Claude, the worker registered without the
+      // `claude` adapter, and the control plane — which decides an agent is
+      // reachable by exactly that list — drew a live machine's Claude as
+      // offline and offered to install a CLI that was already there.
+      ...(home === "" ? [] : [path.join(home, ".local", "bin")]),
     ];
   }
   return [

@@ -52,6 +52,7 @@ import {
   setMyTheme,
   myAgents,
   notifications,
+  PROVIDER_VENDOR,
   persist,
   isFavourite,
   flushChannelDrafts,
@@ -174,6 +175,7 @@ import {
   badge,
   relativeTime,
   showModal,
+  VENDOR_LABEL,
   toast,
   armChime,
   chime,
@@ -231,7 +233,8 @@ import {
   TERMINAL_TASK_STATUS,
   cancelTask,
   checkLocalCli,
-  connectAgent,
+  connectEditorToKumi,
+  connectProviderSomehow,
   disconnectAgent,
   installVendorCli,
   connectGitHubAccount,
@@ -260,6 +263,13 @@ import {
   invitationLink,
   createApiToken,
   loadApiTokens,
+  approveMcpServer,
+  shareMcpServerWithEditors,
+  createMcpServer,
+  deleteMcpServer,
+  ensureMcpServers,
+  parseMcpArgs,
+  parseMcpSecrets,
   loadInvitations,
   revokeApiToken,
   loadPendingQuestions,
@@ -2084,6 +2094,31 @@ function agentProviderRow(agent) {
   const localAgent =
     state.localAgentsOnly === true && agent.exists === true && !agent.mine;
   const connecting = state.providerConnecting?.has(agent.id) === true;
+  // The second connection this row can have, and it is a different thing from
+  // the first. The CLI is what makes the agent run here; MCP is what lets that
+  // editor file work into Kumi. A row that showed only the first said "Not
+  // connected" about a Codex somebody had just connected over MCP, because the
+  // two were never the same question.
+  const editor = state.editorConnected?.[PROVIDER_VENDOR[agent.id]];
+  const mcp =
+    editor === undefined
+      ? ""
+      : editor.state === "connected"
+        ? statusBadge("ok", "MCP", {
+            iconName: "link",
+            title: "This editor can file work into Kumi",
+          })
+        : editor.state === "connecting"
+          ? statusBadge("info", "MCP", { iconName: "link", title: "Connecting" })
+          : statusBadge("warn", "MCP failed", {
+              iconName: "alert",
+              title: editor.message ?? "",
+            });
+  // Named once there are two of them. "Not connected" beside a green MCP badge
+  // reads as a contradiction rather than as two answers to two questions, so
+  // the CLI badge says which connection it is talking about exactly when
+  // something else is standing next to it.
+  const cliLabel = mcp === "" ? "Not connected" : "No CLI";
   const status = agent.needsReconnect
     ? statusBadge("warn", "Sign-in expired", { iconName: "alert" })
     : agent.mine
@@ -2092,15 +2127,15 @@ function agentProviderRow(agent) {
         ? statusBadge("ok", "Connected", { iconName: "checkCircle" })
         : agent.hostAccount
           ? statusBadge("info", "Available", { iconName: "info" })
-          : statusBadge("idle", "Not connected", { iconName: "minusCircle" });
+          : statusBadge("idle", cliLabel, { iconName: "minusCircle" });
   const detail = agent.needsReconnect
-    ? "Sign in again — every task given to this agent will fail until you do."
+    ? "Sign in again. Every task given to this agent will fail until you do."
     : agent.mine
       ? agent.hasName === true
         ? `as ${callSign}`
         : "as you"
       : localAgent
-        ? `as ${callSign} — runs on this machine`
+        ? `as ${callSign}, runs on this machine`
         : agent.hostAccount
           ? "using this machine's account"
           : "";
@@ -2147,6 +2182,9 @@ function agentProviderRow(agent) {
                 }>${icon("terminal")} ${checking ? "Checking…" : "Check CLI"}</button>`
             : ""
         }
+        <button type="button" role="menuitem" class="st-menu-item"
+          data-act="agent-connect" data-value="${esc(agent.id)}">
+          ${icon("robot")} Connect tools with MCP</button>
         <button type="button" role="menuitem" class="st-menu-item st-menu-danger"
           data-act="agent-disconnect" data-value="${esc(agent.id)}">
           ${icon("closeCircle")} Disconnect</button>
@@ -2165,7 +2203,7 @@ function agentProviderRow(agent) {
     row: `agent-${agent.id}`,
     mark: vendorMark(agent.id),
     name: agentLabelOf(agent.id),
-    status,
+    status: `${status}${mcp}`,
     detail,
     controls,
     busy: connecting,
@@ -2482,7 +2520,7 @@ function apiTokensCard() {
         : `<div class="st-token-secret" role="status">
             <div class="st-row-label">Copy this now</div>
             <p class="st-row-help">It is shown once. Kumi keeps only a
-              fingerprint, so nobody — including us — can read it back.</p>
+              fingerprint, so nobody, including us, can read it back.</p>
             <code class="token-secret">${esc(minted)}</code>
             <span class="st-token-secret-actions">
               <button type="button" class="btn btn-sm" data-act="token-copy">Copy</button>
@@ -2523,6 +2561,258 @@ function apiTokensCard() {
   });
 }
 
+/**
+ * MCP servers the project's agents may reach while they work.
+ *
+ * Approving one here does not start anything: it records that somebody with
+ * the standing to say so said yes, and each teammate's computer still asks
+ * before it runs the program. So the list shows who approved and when, the
+ * way an audit line would, rather than a bare switch. Secrets are write-only
+ * — the row shows how many there are and never what they are, because the
+ * list route never has them to give.
+ */
+/**
+ * Servers worth offering by name, so adding one is a pick rather than a form.
+ *
+ * The form underneath stays for everything not on this list — it is a short
+ * list on purpose, not an attempt at a registry. What it removes is the class
+ * of mistake the form invites: a command typed slightly wrong, a package name
+ * misremembered, and above all a missing version, which means every teammate
+ * downloads whatever was published that morning and runs it under their own
+ * account. Every entry here is pinned for that reason.
+ *
+ * `secret` names the one credential the server needs, or is absent when it
+ * needs none. `note` is what a person needs to know before agreeing to run it.
+ */
+const MCP_CATALOGUE = [
+  {
+    id: "context7",
+    label: "Context7",
+    note: "Current documentation for whatever library your agents are using. No account needed.",
+    server: { name: "context7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp@1.0.14"] },
+  },
+  {
+    id: "playwright",
+    label: "Playwright",
+    note: "Drives a real browser, so an agent can check the page it just changed.",
+    server: { name: "playwright", transport: "stdio", command: "npx", args: ["-y", "@playwright/mcp@0.0.41"] },
+  },
+  {
+    id: "github",
+    label: "GitHub",
+    note: "Issues and pull requests. Needs a personal access token.",
+    secret: "a GitHub personal access token",
+    server: { name: "github", transport: "http", url: "https://api.githubcopilot.com/mcp/" },
+  },
+  {
+    id: "sentry",
+    label: "Sentry",
+    note: "The errors your users are actually hitting. Needs a Sentry auth token.",
+    secret: "a Sentry auth token",
+    server: { name: "sentry", transport: "http", url: "https://mcp.sentry.dev/mcp" },
+  },
+];
+
+function mcpServersCard() {
+  const servers = state.mcpServers ?? [];
+  const enabled = state.mcpServersEnabled;
+  const heading = {
+    id: "mcp-servers",
+    heading: "MCP servers",
+    description:
+      "Programs your agents can reach while they work — a Linear or Sentry server, say. Approving one starts it on each teammate's own computer when their agent runs here, so approval is a recorded act and each computer still gets to say yes.",
+  };
+  if (enabled === false) {
+    return settingsSectionBlock({
+      ...heading,
+      body: settingRow({
+        row: "mcp-servers",
+        label: "Switched off on this deployment",
+        description:
+          "Whoever runs this control plane has not enabled MCP servers. Setting <code>COORD_MCP_ENABLED=1</code> on it turns this section on.",
+      }),
+    });
+  }
+  const scopeOf = (server) =>
+    server.scope === "repository" ? "this repository" : "every repository";
+  const approvalOf = (server) =>
+    server.enabled === true && server.approvedBy !== undefined
+      ? `approved by ${esc(memberName(server.approvedBy) ?? server.approvedBy)} ${esc(
+          relativeTime(server.approvedAt),
+        )}`
+      : "not approved";
+  // Said in the row rather than left to the button, because the two states
+  // read very differently: one is a program on a teammate's laptop, the
+  // other is Kumi calling out with the project's key for anybody in an
+  // editor.
+  const reachOf = (server) =>
+    server.editorEnabled === true ? "also in editors" : "agents only";
+  const secretsOf = (server) => {
+    const count = (server.secretNames ?? []).length;
+    return `${String(count)} secret${count === 1 ? "" : "s"}`;
+  };
+  return settingsSectionBlock({
+    ...heading,
+    body: `${settingRow({
+      row: "mcp-servers",
+      label: "Add a known one",
+      description:
+        "Fills the form below with a pinned version, so every teammate runs the same program rather than whatever was published this morning.",
+      stacked: true,
+      control: `<div class="st-mcp-picks">${MCP_CATALOGUE.map(
+        (entry) => `<button type="button" class="btn btn-sm" data-act="mcp-pick"
+          data-value="${esc(entry.id)}" title="${esc(entry.note)}">${esc(entry.label)}</button>`,
+      ).join("")}</div>`,
+    })}${settingRow({
+      row: "mcp-servers",
+      label: "New server",
+      description:
+        "Name it the way your agents will hear it. A stdio server is a command started on the agent's machine; an http server is a URL it talks to.",
+      stacked: true,
+      control: `<div class="st-mcp-form">
+        <input class="input input-sm" data-mcp-name placeholder="linear"
+          aria-label="Server name">
+        <select class="input input-sm" data-mcp-transport data-act="mcp-transport"
+          aria-label="Transport">
+          <option value="stdio">stdio — a command</option>
+          <option value="http">http — a URL</option>
+        </select>
+        <div data-mcp-stdio>
+          <input class="input input-sm" data-mcp-command placeholder="npx"
+            aria-label="Command">
+          <input class="input input-sm" data-mcp-args placeholder="-y @linear/mcp-server"
+            aria-label="Arguments, space-separated">
+        </div>
+        <div data-mcp-http hidden>
+          <input class="input input-sm" data-mcp-url placeholder="https://mcp.example.com/mcp"
+            aria-label="Server URL">
+          <input class="input input-sm" data-mcp-token type="password" autocomplete="off"
+            placeholder="Bearer token, if the server needs one" aria-label="Bearer token">
+        </div>
+        <textarea class="input st-textarea" rows="3" data-mcp-secrets data-mcp-stdio-only
+          placeholder="LINEAR_API_KEY=lin_api_…"
+          aria-label="Environment for the command, one per line as NAME=value"></textarea>
+        <select class="input input-sm" data-mcp-scope aria-label="Scope">
+          <option value="repository">This repository</option>
+          <option value="project">Every repository</option>
+        </select>
+        <span>
+          <button type="button" class="btn btn-sm btn-primary" data-act="mcp-create">Create</button>
+        </span>
+      </div>`,
+    })}${
+      servers.length === 0
+        ? `<div class="st-inline-empty">${icon("lock")}<span>No servers yet.</span></div>`
+        : servers
+            .map((server) =>
+              settingRow({
+                label: server.name ?? "Unnamed",
+                description: `${esc(server.transport ?? "stdio")} · ${scopeOf(server)} · ${secretsOf(
+                  server,
+                )} · ${approvalOf(server)} · ${reachOf(server)}`,
+                control: `<button type="button" class="btn btn-sm${
+                  server.enabled === true ? "" : " btn-primary"
+                }" data-act="mcp-approve" data-value="${esc(server.id)}">${
+                  server.enabled === true ? "Disable" : "Approve"
+                }</button>${
+                  // Only for http servers, and only once approved. A stdio
+                  // server is a command, and Kumi will not start one; a
+                  // server nobody approved has nothing to share.
+                  server.transport === "http" && server.enabled === true
+                    ? `<button type="button" class="btn btn-sm"
+                        data-act="mcp-editors" data-value="${esc(server.id)}">${
+                        server.editorEnabled === true
+                          ? "Take out of editors"
+                          : "Offer in editors"
+                      }</button>`
+                    : ""
+                }
+                <button type="button" class="btn btn-sm btn-danger"
+                  data-act="mcp-remove" data-value="${esc(server.id)}">Remove</button>`,
+              }),
+            )
+            .join("")
+    }`,
+  });
+}
+
+/**
+ * Pointing the editors on this computer at Kumi.
+ *
+ * The reverse of the MCP servers card below it: that one gives Kumi's agents
+ * tools, this one makes Kumi a tool inside Claude Code, Codex or Cursor, so
+ * "have Kumi fix the login redirect" typed in an editor lands in a channel
+ * here.
+ *
+ * A button rather than a command to copy, because the commands are not
+ * stable and every way of getting one wrong fails silently — the wrong
+ * scope binds the server to one folder, a pasted placeholder keeps its
+ * angle brackets, the word Bearer goes missing, and all three arrive as an
+ * unexplained 401 hours later. The app writes the file instead.
+ *
+ * In a browser there is no bridge to write anything, so the command comes
+ * back — the same fall-back the CLI install row takes.
+ */
+/**
+ * What this computer actually has, so the connect rows offer only editors
+ * that are here.
+ *
+ * The same scan the worker registers from, so the card and the worker cannot
+ * disagree about what this machine can run. Absent in a browser, where the
+ * card says to open the app instead; a failed scan leaves the answer unknown,
+ * which the card reads as "offer it" rather than greying out a row because a
+ * lookup did not finish.
+ */
+async function loadMachineAgents() {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge?.detected === undefined) {
+    return;
+  }
+  state.machineAgents = await bridge.detected().catch(() => undefined);
+}
+
+function editorMcpCard() {
+  const bridge = typeof window === "undefined" ? undefined : window.KUMI_INSTALL;
+  const heading = {
+    id: "editor-mcp",
+    heading: "Use Kumi from your editor",
+    description:
+      "Ask Kumi for work from inside Claude Code, Codex or Cursor. It files the task in a channel here and the thread follows it, the same as if you had typed it in Kumi.",
+  };
+  if (bridge?.connectEditor === undefined) {
+    return settingsSectionBlock({
+      ...heading,
+      body: settingRow({
+        row: "editor-mcp",
+        label: "Open Kumi's desktop app to connect an editor",
+        description:
+          "Connecting writes a config file on the computer the editor runs on, so it happens in the app rather than in a browser tab.",
+      }),
+    });
+  }
+  // Asked once when Settings opens and remembered; `undefined` means the
+  // question has not been answered yet, which reads as "offer it" rather than
+  // "greyed out" — a row disabled because a scan has not finished is a row
+  // that looks broken.
+  const detected = state.machineAgents;
+  const rows = (bridge.connectable ?? ["claude", "codex", "cursor"]).map((vendor) => {
+    const here = detected === undefined || detected.includes(vendor);
+    const done = state.editorConnected?.[vendor]?.message;
+    return settingRow({
+      label: VENDOR_LABEL[vendor] ?? vendor,
+      description: here
+        ? (done ?? "Writes its config on this computer and mints a token that can file work and nothing else.")
+        : "Not installed on this computer.",
+      control: `<button type="button" class="btn btn-sm${
+        here ? " btn-primary" : ""
+      }" data-act="editor-connect" data-value="${esc(vendor)}"${
+        here ? "" : " disabled"
+      }>Connect</button>`,
+    });
+  });
+  return settingsSectionBlock({ ...heading, body: rows.join("") });
+}
+
 /** Repository, approval policy and app tokens — the project-wide controls. */
 function projectControlsSection() {
   return `${settingsSectionBlock({
@@ -2532,7 +2822,7 @@ function projectControlsSection() {
       "Canonical state is owned by the control plane. Publishing it to a remote branch is /push in the channel.",
     body: `<div data-settings-row="repository" id="settings-row-repository"
       tabindex="-1">${repositoryDefinitionList()}</div>`,
-  })}${approvalPolicySection()}${apiTokensCard()}`;
+  })}${approvalPolicySection()}${apiTokensCard()}${editorMcpCard()}${mcpServersCard()}`;
 }
 
 /** Everything the person who runs this deployment looks after. */
@@ -4701,10 +4991,37 @@ function billingBanner() {
       started.</span>${upgrade}</div>`;
 }
 
+/**
+ * Kumi has been redeployed under a page that is still running.
+ *
+ * Offered rather than done. A reload throws away whatever is on the screen —
+ * a half-typed message, an open thread, a scroll position — and doing that to
+ * somebody mid-sentence because an unrelated deploy landed is worse than
+ * showing them yesterday's build for another minute. The one case where the
+ * old page is genuinely broken is a shape this cannot detect anyway.
+ *
+ * Placed under the billing lines because those describe work that has stopped
+ * and this describes work that is merely dated.
+ */
+function updateBanner() {
+  if (state.updateAvailable !== true) {
+    return "";
+  }
+  return `<div class="banner" role="status">${icon("refresh")}
+    <span>A new version of Kumi is available.</span>
+    <span class="spacer"></span>
+    <button class="btn btn-sm btn-primary" data-act="reload-app">
+      Reload</button></div>`;
+}
+
 function banner() {
   const billingLine = billingBanner();
   if (billingLine !== "") {
     return billingLine;
+  }
+  const updateLine = updateBanner();
+  if (updateLine !== "") {
+    return updateLine;
   }
   if (state.refreshing === true && state.loadError === undefined) {
     return `<div class="banner banner-busy" role="status">
@@ -8438,6 +8755,162 @@ async function revokeApiTokenConfirmed(id) {
 }
 
 /**
+ * Removing an MCP server, after the same confirmation a token revoke gets.
+ *
+ * Removal reaches further than disabling: an agent mid-task on somebody's
+ * machine loses the tools it was told it had, and the sealed secrets go with
+ * the record. Disable is the reversible button beside it, so this one asks.
+ */
+async function removeMcpServerConfirmed(id) {
+  const server = (state.mcpServers ?? []).find((entry) => entry.id === id);
+  const confirmed = await confirmDestructive({
+    title: `Remove ${server?.name ?? "this server"}?`,
+    subtitle:
+      "Agents stop being offered it on their next run, and its secrets are " +
+      "deleted with it. Disable it instead to keep the record.",
+    confirm: "Remove server",
+    cancel: "Keep it",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await deleteMcpServer(state.projectId, id);
+    toast("Server removed", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Reads the new-server form and registers it.
+ *
+ * The form is read at click time rather than mirrored into state as it is
+ * typed, the way the token form is: nothing else on the page needs the draft,
+ * and a half-typed secret has no business in a render cycle. Errors are the
+ * server's own words in the same toast a token error uses — a name already
+ * taken, a deployment with the feature off, a server that points back at
+ * this control plane.
+ */
+/**
+ * The one header an http MCP server can be given from the form.
+ *
+ * "Bearer " is prepended here so the person pastes the token as their
+ * provider showed it; a token already carrying the prefix is left alone
+ * rather than doubled.
+ */
+function mcpBearerHeader(token) {
+  const trimmed = String(token ?? "").trim();
+  if (trimmed === "") {
+    return {};
+  }
+  return {
+    Authorization: /^Bearer\s/iu.test(trimmed) ? trimmed : `Bearer ${trimmed}`,
+  };
+}
+
+/**
+ * Puts one catalogue entry into the form, and leaves it there to be read.
+ *
+ * Deliberately not "create on click". What is being agreed to is that this
+ * program starts on every teammate's computer, and a person should see the
+ * command and the version before they approve that — the form is the last
+ * place it is legible, and approval is a second, separate act after it.
+ */
+function fillMcpFormFrom(id) {
+  const entry = MCP_CATALOGUE.find((candidate) => candidate.id === id);
+  if (entry === undefined) {
+    return;
+  }
+  const set = (selector, value) => {
+    const field = document.querySelector(selector);
+    if (field) {
+      field.value = value;
+    }
+  };
+  const http = entry.server.transport === "http";
+  set("[data-mcp-name]", entry.server.name);
+  set("[data-mcp-transport]", entry.server.transport);
+  set("[data-mcp-command]", entry.server.command ?? "");
+  set("[data-mcp-args]", (entry.server.args ?? []).join(" "));
+  set("[data-mcp-url]", entry.server.url ?? "");
+  // The transport picker's own handler shows and hides the right half, and
+  // setting `value` in script does not fire it.
+  const form = document.querySelector(".st-mcp-form");
+  for (const field of form?.querySelectorAll("[data-mcp-stdio], [data-mcp-stdio-only]") ?? []) {
+    field.hidden = http;
+  }
+  const httpFields = form?.querySelector("[data-mcp-http]");
+  if (httpFields) {
+    httpFields.hidden = !http;
+  }
+  const credential = document.querySelector(http ? "[data-mcp-token]" : "[data-mcp-secrets]");
+  toast(
+    entry.secret === undefined
+      ? `${entry.label} filled in — check it, then Create.`
+      : `${entry.label} filled in — paste ${entry.secret}, then Create.`,
+    "ok",
+  );
+  credential?.focus();
+}
+
+function createMcpServerFromForm() {
+  const read = (selector) =>
+    (document.querySelector(selector)?.value ?? "").trim();
+  const name = read("[data-mcp-name]");
+  if (name === "") {
+    toast("Name the server the way your agents will hear it", "error");
+    return;
+  }
+  const transport = read("[data-mcp-transport]") === "http" ? "http" : "stdio";
+  const scope = read("[data-mcp-scope]") === "project" ? "project" : "repository";
+  if (scope === "repository" && !state.repositoryId) {
+    toast("Open a repository first, or pick every repository", "error");
+    return;
+  }
+  const input = { name, transport, scope };
+  if (transport === "stdio") {
+    const command = read("[data-mcp-command]");
+    if (command === "") {
+      toast("A stdio server needs a command to start", "error");
+      return;
+    }
+    input.command = command;
+    input.args = parseMcpArgs(read("[data-mcp-args]"));
+  } else {
+    const url = read("[data-mcp-url]");
+    if (url === "") {
+      toast("An http server needs a URL", "error");
+      return;
+    }
+    input.url = url;
+  }
+  // A stdio server's secrets are its environment, typed as NAME=value. An
+  // http server's are its headers, and the only header shape every vendor's
+  // CLI can be handed is one bearer token — Codex reads nothing else — so the
+  // form asks for the token alone and builds the header itself. A server
+  // that needs some other header is created through the API, and runs only
+  // on a Claude agent.
+  const secrets =
+    transport === "stdio"
+      ? parseMcpSecrets(document.querySelector("[data-mcp-secrets]")?.value ?? "")
+      : mcpBearerHeader(read("[data-mcp-token]"));
+  if (Object.keys(secrets).length > 0) {
+    input.secrets = secrets;
+  }
+  if (scope === "repository") {
+    input.repositoryIds = [state.repositoryId];
+  }
+  void createMcpServer(state.projectId, input)
+    .then(() => {
+      toast(`${name} added — approve it when you are ready`, "ok");
+      render();
+    })
+    .catch((error) => toast(error.message, "error"));
+}
+
+/**
  * Scrolls a row into view and puts focus on it.
  *
  * Focus lands on the row, not on the control inside it: the person searched
@@ -8502,11 +8975,12 @@ function openSettings(section = "general") {
     state.settingsPushedEntry = true;
   }
   // Fetched on open rather than at boot: nobody who never opens settings
-  // needs their token list, and the section renders its skeleton until it
-  // arrives.
-  void loadApiTokens()
-    .then(() => render())
-    .catch(() => undefined);
+  // needs these lists. Settled, so one failing still renders the other.
+  void Promise.allSettled([
+    loadApiTokens(),
+    ensureMcpServers(state.projectId),
+    loadMachineAgents(),
+  ]).then(() => render());
   state.settingsAgentsLoading = state.providers.length === 0;
   void loadProviders()
     .catch(() => undefined)
@@ -10869,7 +11343,11 @@ document.addEventListener("click", (event) => {
       return;
     /* Agent connections */
     case "agent-connect":
-      void connectAgent(value, render);
+      // The chooser, not the CLI path straight off. This is the button on the
+      // agents screen, which is where somebody deciding how to connect one
+      // actually is — routing it past the question left the whole flow
+      // reachable only from a channel's plus menu.
+      void connectProviderSomehow(value, render, openSettingsSearchResult);
       return;
     case "agent-check-cli":
       // The machine half of an agent, on demand. Connecting used to be the
@@ -10896,7 +11374,7 @@ document.addEventListener("click", (event) => {
       return;
     case "agent-add":
       closePopover();
-      void startAddAgentFlow(render);
+      void startAddAgentFlow(render, openSettingsSearchResult);
       return;
     case "agent-disconnect":
       // Asks before it destroys, and removes the agent rather than only its
@@ -10943,6 +11421,16 @@ document.addEventListener("click", (event) => {
     // that said "no session has recorded rate limits yet" would otherwise go
     // on saying it for the rest of the session, including after the run that
     // produced some.
+    /**
+     * Take the new build.
+     *
+     * `location.reload()` and nothing else: every asset is already served
+     * `no-cache` with an ETag, so an ordinary reload revalidates and picks up
+     * the new script. The cache was never the problem — see `noticeBuild`.
+     */
+    case "reload-app":
+      location.reload();
+      return;
     case "agent-usage-refresh":
       // The owner rides on the button, because the roster shows other
       // people's agents too and a refresh must ask about the same account the
@@ -11440,6 +11928,45 @@ document.addEventListener("click", (event) => {
     case "token-revoke":
       void revokeApiTokenConfirmed(value);
       return;
+    case "mcp-create":
+      createMcpServerFromForm();
+      return;
+    case "mcp-pick":
+      fillMcpFormFrom(value);
+      return;
+    case "editor-connect":
+      void connectEditorToKumi(value, render);
+      return;
+    case "mcp-approve": {
+      const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
+      const enabled = server?.enabled !== true;
+      void approveMcpServer(state.projectId, value, enabled)
+        .then(() => {
+          toast(enabled ? "Server approved" : "Server disabled", "ok");
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "mcp-editors": {
+      const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
+      const enabled = server?.editorEnabled !== true;
+      void shareMcpServerWithEditors(state.projectId, value, enabled)
+        .then(() => {
+          toast(
+            enabled
+              ? "Offered to editors connected to Kumi"
+              : "Taken out of editors",
+            "ok",
+          );
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "mcp-remove":
+      void removeMcpServerConfirmed(value);
+      return;
     case "invite-revoke":
       void revokeInvitation(value)
         .then(() => {
@@ -11772,6 +12299,23 @@ document.addEventListener("change", (event) => {
   // the keyboard fires no click at all.
   if (picker?.dataset?.act === "offline-target") {
     setOfflineTarget(picker.value, render);
+    return;
+  }
+  // Which fields a new MCP server needs depends on its transport. Toggled in
+  // place rather than re-rendered: a render would throw away the name and the
+  // secrets somebody has already typed into the same form.
+  if (picker?.dataset?.act === "mcp-transport") {
+    const http = picker.value === "http";
+    const form = picker.closest(".st-mcp-form");
+    for (const stdioField of form?.querySelectorAll(
+      "[data-mcp-stdio], [data-mcp-stdio-only]",
+    ) ?? []) {
+      stdioField.hidden = http;
+    }
+    const httpFields = form?.querySelector("[data-mcp-http]");
+    if (httpFields) {
+      httpFields.hidden = !http;
+    }
     return;
   }
   if (picker?.dataset?.act === "channel-picture-pick") {

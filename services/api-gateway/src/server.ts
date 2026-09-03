@@ -27,6 +27,8 @@ import type {
   ChannelMessage,
   ChannelReply,
   CoordinationStore,
+  McpServerRecord,
+  McpServerScope,
   SubChannel,
   SubChannelVisibility,
   Organization,
@@ -75,15 +77,23 @@ import {
   FORCE_QUESTION_MARKER,
   KEEP_IT_SIMPLE_DIRECTIVE,
   localAgentsOnly,
+  EDITOR_HOLD_MS,
+  EDITOR_WORKER_VERSION,
+  mcpServersEnabled,
   projectBudgets,
   readsAsReportRequest,
   requestFromObjective,
   ROLE_CONTEXT_PREFIX,
+  uniqueStrings,
   withoutRoleContext,
   type ApprovalStatus,
+  type FilePatch,
   type FilePatchStatus,
+  type McpServerTransport,
   type SequencedAuditEvent,
+  type WorkAssignment as SharedWorkAssignment,
 } from "@coord/shared-types";
+import type { SecretSealer } from "@coord/workspace-manager";
 import {
   AuthService,
   AuthenticationError,
@@ -117,6 +127,7 @@ import {
 } from "@coord/local-triage";
 import {
   authorizeOrganization,
+  authorizeOrganizationOrGrant,
   authorizeProject,
   authorizeRepository,
   canAssignRole,
@@ -126,6 +137,31 @@ import {
   permissionsForRole,
   type Permission,
 } from "./authorization.js";
+import { handleMcpMessage, mcpRefusal, type McpTool } from "./mcp.js";
+import {
+  createMcpTools,
+  type McpAgent,
+  type McpRepository,
+  type McpToolDeps,
+} from "./mcp-tools.js";
+import {
+  createMcpWorkTools,
+  editorBehind,
+  EDITOR_LABELS,
+  EDITOR_VENDORS,
+  type EditorVendor,
+  type McpTakenTask,
+  type McpWorkDeps,
+} from "./mcp-work.js";
+import {
+  callProxiedTool,
+  McpManifestCache,
+  proxiedTools,
+  type ProxyDial,
+  type ProxyTarget,
+} from "./mcp-proxy.js";
+import { dialMcp } from "./mcp-dialer.js";
+import { BundleTickets, EditorPresence } from "./editor-sessions.js";
 import {
   buildCatchUpDigest,
   catchUpSince,
@@ -1714,6 +1750,20 @@ const AUDIT_THREAD_TITLE = "Audit log";
 const THREAD_RECONCILE_INTERVAL_MS = 60_000;
 
 /**
+ * How long a task waits unclaimed before the room is told nothing took it.
+ *
+ * Longer than it needs to be, on purpose. A lease is five minutes and a worker
+ * polls every five seconds, so anything genuinely being picked up is picked up
+ * inside one of those. Ten leaves room for a machine that is merely slow to
+ * wake without narrating a delay nobody would otherwise have noticed, and the
+ * notice is not urgent: it corrects a sentence, it does not stop anything.
+ */
+const STALLED_TASK_MS = 10 * 60 * 1000;
+
+/** Marks a coordinator line about work that never started. See `reportStalledTasks`. */
+const CHANNEL_STALLED_PREFIX = "\u23f3";
+
+/**
  * How often the seat count on every paying subscription is checked against
  * the people who can actually work.
  *
@@ -2356,6 +2406,26 @@ export function resolveChannelAgentPresentation(
  * saves. A word list that refuses tasks has to be much more certain than one
  * that merely routes them.
  */
+/**
+ * What this process was built from, decided once.
+ *
+ * Sent on every JSON reply so a page that is already running can notice it has
+ * been outlived. The dashboard is a single-page app: once loaded it never
+ * fetches its own script again, and a phone does not reload it either — iOS
+ * freezes a tab or a home-screen app and restores it, so returning to Kumi
+ * resumes the same JavaScript that was loaded days ago. Every asset is served
+ * `no-cache` with an ETag and would fetch correctly, but nothing was ever
+ * asking. A deploy landed, was live and correct, and could not be seen.
+ *
+ * `startedAt` is the fallback for the same reason the health route gives: a
+ * redeploy moves the process start whether or not the container was told
+ * which commit it was built from, so a restart is visible on its own.
+ */
+export const BUILD_IDENTITY =
+  process.env["COORD_BUILD_SHA"] ??
+  process.env["RAILWAY_GIT_COMMIT_SHA"] ??
+  `started-${new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString()}`;
+
 const SYSTEM_PACKAGE_INSTALL_RE =
   /\b(?:apt(?:-get)?|apk|yum|dnf|pacman|brew|choco)\s+(?:-\w+\s+)*install\b|\bsudo\s+(?:apt|apt-get|yum|dnf|apk)\b/iu;
 
@@ -2548,6 +2618,23 @@ const INTERROGATIVE_RE =
   /^(what|why|how|when|who|where|which|is|are|was|were|do|does|did|can|could|would|will|should|have|has|any)\b/iu;
 
 /**
+ * A polite request: "can you condense the top bar" is an instruction with
+ * manners, not a question about whether the agent is able to.
+ *
+ * Openers alone cannot tell the two apart — "can you" starts both — and the
+ * task-verb list cannot either, because the verbs people reach for
+ * (condense, tailor, tidy, reword) are open-ended. What separates them is
+ * the question mark: a person asking whether something is possible writes
+ * one, and a person telling an agent what to do does not. So a message that
+ * opens this way and does not end in "?" is work. "Can you take reference
+ * from Slack to condense the top bar" was being answered in the channel,
+ * three minutes later, by an agent describing what it would do instead of
+ * doing it — and when that answer failed, by nothing at all.
+ */
+const POLITE_REQUEST_RE =
+  /^(?:please\s+)?(?:can|could|would|will)\s+(?:you|u|ya)\b/iu;
+
+/**
  * Terse requests whose answer is the deliverable, even though they are not
  * phrased as questions.
  *
@@ -2576,12 +2663,15 @@ const ANSWER_REQUEST_RE =
  * A question containing a real task verb ("can we make a chess game?") is
  * still work; the question mark is grammar, not intent.
  */
-function readsAsQuestion(content: string): boolean {
+export function readsAsQuestion(content: string): boolean {
   const text = withoutMentions(content);
   if (text.length === 0) {
     return false;
   }
   if (TASK_VERB_RE.test(text)) {
+    return false;
+  }
+  if (POLITE_REQUEST_RE.test(text) && !text.endsWith("?")) {
     return false;
   }
   return (
@@ -3568,6 +3658,21 @@ interface ChannelCommandResponse {
   result: RepositoryPushResult;
 }
 
+/**
+ * What posting one message into a channel actually started.
+ *
+ * `taskIds` exists for callers that are not looking at the room. A person who
+ * posts in the channel watches the thread appear and needs nothing back; a
+ * client dispatching from somebody's editor has no thread to watch, and
+ * without an id it can only tell them "sent" and hope. The ids were always in
+ * hand here — `dispatchOneMention` holds each task it submits — and were
+ * simply dropped on the floor.
+ */
+interface ChannelDispatch {
+  response?: ChannelCommandResponse;
+  taskIds: readonly string[];
+}
+
 interface SlashCommandDispatch {
   handled: boolean;
   response?: ChannelCommandResponse;
@@ -3932,8 +4037,20 @@ export interface ApiOperations {
     projectId: string;
     actorId: string;
     repositoryId?: string;
+    /**
+     * The only repositories this caller may be handed work from, when the
+     * caller reaches the project through repository grants rather than an
+     * organization role. Absent means every repository in the project.
+     */
+    repositories?: ReadonlySet<string>;
     /** What this worker can execute. Absent means work alone. */
     kinds?: readonly ("task" | "question")[];
+    /**
+     * The protocol version the worker announced. Read off the request
+     * rather than assumed, because the lease decides by it what the other
+     * end can be trusted to look at — see `mcpServersForLease`.
+     */
+    protocolVersion?: number;
   }): Promise<WorkAssignment | undefined>;
   leaseBundle?(
     leaseId: string,
@@ -4013,6 +4130,13 @@ export interface ApiOperations {
     // whether to post, and what. The body is still relayed whole to the
     // worker, so an implementation may return more than this names.
   }): Promise<{ accepted: boolean; answer?: string }>;
+  /**
+   * Work taken and reported by an editor rather than by a worker process.
+   *
+   * Absent on a deployment that cannot run tasks at all, which answers the
+   * three MCP work tools with 501 rather than with silence.
+   */
+  editorWork?: EditorWorkOperations;
   /** Dashboard overlay workspaces; absent on deployments without them. */
   workspace?: WorkspaceOperations;
   /** Direct provider chat (Anthropic/OpenAI/Google); absent when unsupported. */
@@ -4031,6 +4155,66 @@ export interface ApiOperations {
  * encrypted live in the implementation, and the token itself is never echoed
  * back in any response.
  */
+/**
+ * Doing a Kumi task from inside an editor, with no worker process anywhere.
+ *
+ * The three verbs are the whole of it: take one task and a hold on it, keep
+ * the hold while a long turn runs, file what came back. Everything they reach
+ * lives on the other side of this interface, exactly as leasing does, because
+ * the gateway routes work and decides none of it.
+ *
+ * The shape differs from {@link ApiOperations.leaseWork} in one way that
+ * matters: nothing here carries a workspace, a bundle, or an admitted plan.
+ * The agent already has the repository open, and its plan is written from the
+ * diff at report time rather than promised at take time. See
+ * `apps/cli/src/editor-work.ts` for why that is the only honest order.
+ */
+export interface EditorWorkOperations {
+  take(input: {
+    actorId: string;
+    organizationId: string;
+    projectId: string;
+    /** The repositories this caller may be handed work from. Never widened. */
+    repositoryIds: readonly string[];
+    /** Which CLI this editor is: `claude`, `codex`, `cursor` and so on. */
+    vendor: string;
+    /** How the editor's worker row is named. */
+    label: string;
+    /** One named task, for an editor taking back work it has just filed. */
+    taskId?: string;
+  }): Promise<
+    | {
+        leaseId: string;
+        taskId: string;
+        objective: string;
+        repositoryId: string;
+        branch: string;
+        baseRevision: string;
+        baseVersion: number;
+        expiresAt: string;
+        validationCommands: readonly string[];
+      }
+    | undefined
+  >;
+  report(input: {
+    leaseId: string;
+    actorId: string;
+    status: "completed" | "failed" | "released";
+    patches: readonly FilePatch[];
+    summary: string;
+    detail?: string;
+  }): Promise<
+    | { outcome: "accepted"; integrationStatus?: string; requeued?: boolean }
+    | { outcome: "refused"; reason: string }
+    | { outcome: "lease_lost"; reason: string }
+  >;
+  /** The new expiry, or `undefined` when the hold was already gone. */
+  extend(input: {
+    leaseId: string;
+    ttlMs: number;
+  }): Promise<string | undefined>;
+}
+
 export interface GitHubCredentialOperations {
   status(input: { userId: string }): Promise<unknown>;
   connect(input: { userId: string; token: string }): Promise<unknown>;
@@ -4239,27 +4423,15 @@ export type ChatStreamEvent =
   | { type: "done"; reply: unknown }
   | { type: "error"; message: string; code: string };
 
-/** Everything a worker needs to execute one task without further lookups. */
-export interface WorkAssignment {
-  lease: WorkLease;
-  task: SubmittedTask;
-  repository: { id: string; branch: string };
-  canonicalVersion: {
-    sequence: number;
-    revision: string;
-    branch: string;
-    createdAt: string;
-  };
-  /** Fetch the workspace contents from here, then clone it. */
-  bundleUrl: string;
-  /** Branch to check out from the bundle. */
-  bundleRef: string;
-  heartbeatIntervalMs: number;
-  /** Remote worker protocol version this control plane speaks. */
-  protocolVersion: number;
-  /** Submit the agent's plan here for admission before executing. */
-  planUrl: string;
-}
+/**
+ * Everything a worker needs to execute one task without further lookups.
+ *
+ * The shared definition with this side's rows named; the control plane's
+ * `leaseWork` builds the same alias from the same definition, so what it
+ * returns and what this gateway sends are one type rather than two that
+ * happened to agree.
+ */
+export type WorkAssignment = SharedWorkAssignment<WorkLease, SubmittedTask>;
 
 export interface ApiGatewayOptions {
   store: CoordinationStore;
@@ -4275,6 +4447,16 @@ export interface ApiGatewayOptions {
   staticAssets?: ReadonlyMap<string, StaticAsset>;
   requestBodyLimit?: number;
   rateLimitPerMinute?: number;
+  /**
+   * The MCP endpoint's own budget, separate from the dashboard's.
+   *
+   * Not a tighter cap — the same generosity, out of a different pool. An
+   * editor's model polling `task_status` and a browser loading the dashboard
+   * arrive from one office's IP looking identical to a per-IP limiter, so on
+   * a shared bucket the polling starves the person watching the thread. They
+   * are different clients doing different work and they get different budgets.
+   */
+  mcpRateLimitPerMinute?: number;
   authRateLimitPerMinute?: number;
   /** Event poll cadence; exposed for deterministic embedded runtimes/tests. */
   webSocketPollIntervalMs?: number;
@@ -4298,6 +4480,16 @@ export interface ApiGatewayOptions {
    */
   stripe?: StripeClient;
   /**
+   * Seals the secrets a project gives its MCP servers before they are stored,
+   * and is the same sealer the lease opens them with. The hosting process
+   * passes `UserCredentialStore#sealer()`, so an MCP secret is protected by
+   * exactly the key that already protects every stored provider credential.
+   * Absent — no credential store — every route that would store or arm a
+   * server answers 501, the way billing does without Stripe: a deployment
+   * that cannot keep the secret must not accept it.
+   */
+  secretSealer?: SecretSealer;
+  /**
    * Whether this deployment takes money at all.
    *
    * Defaults to `KUMI_PAYMENTS_ENABLED`, which is off. With it off there is
@@ -4319,6 +4511,15 @@ export interface ApiGatewayOptions {
    * return has to land somewhere real that then hands back to the app.
    */
   appBaseUrl?: string;
+  /**
+   * How an approved MCP server is actually dialled.
+   *
+   * {@link dialMcp} in every deployment; a fixture in the tests that are
+   * about what gets sent rather than about the socket. Injectable because
+   * the interesting part of the proxy is which secrets travel with which
+   * request, and that cannot be asserted through a real hostname.
+   */
+  mcpDial?: ProxyDial;
   /**
    * The local first pass over unaddressed channel messages.
    *
@@ -4390,6 +4591,12 @@ export interface ApiGatewayOptions {
    * {@link PLAN_HOLD_TTL_MS}.
    */
   planHoldTtlMs?: number;
+  /**
+   * How long a task waits unclaimed before the room is told. Overridable for
+   * the same reason `planHoldTtlMs` is: a test cannot wait ten minutes, and a
+   * sweep nobody can reach in a test is a sweep nobody has run.
+   */
+  stalledTaskMs?: number;
 }
 
 interface RequestContext {
@@ -4610,6 +4817,351 @@ function objectBody(value: unknown): Record<string, unknown> {
 }
 
 /**
+ * What a vendor config will call an MCP server: a bare key in Codex's TOML
+ * and in Claude's JSON, nothing that needs quoting in either. The same
+ * expression the Codex adapter applies again before writing the file, so a
+ * name this route accepts is one the adapter will not refuse later, when the
+ * person who typed it is no longer looking.
+ */
+const MCP_SERVER_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
+
+/**
+ * A stdio server's executable, in the two shapes `spawn` resolves without a
+ * shell: a bare name looked up on the worker's PATH, or an absolute path.
+ * A relative path with a directory in it is refused — it would resolve
+ * against whatever working directory the worker happened to have, which is
+ * a workspace the agent writes to.
+ */
+const MCP_BARE_EXECUTABLE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$/u;
+const MCP_ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/])/u;
+/**
+ * Nothing that means something to a shell or to cmd.exe. The worker never
+ * starts a shell, but a `.cmd` shim on Windows does — the process runner
+ * refuses the same tokens at spawn time for exactly that reason — and a
+ * command that would be refused on the machine it was meant for should be
+ * refused here, where the person configuring it can still read the answer.
+ */
+const MCP_UNSAFE_COMMAND_TOKEN = /[\0\r\n\t"'`$&|;<>^%!(){}[\]*?#~]/u;
+
+/** An environment variable or HTTP header name, as either side will take it. */
+const MCP_VALUE_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/u;
+
+const MCP_MAX_ARGS = 32;
+const MCP_MAX_ARG_LENGTH = 512;
+const MCP_MAX_VALUES = 32;
+const MCP_MAX_VALUE_LENGTH = 4_096;
+const MCP_MAX_SECRETS = 16;
+const MCP_MAX_SECRET_LENGTH = 4_096;
+const MCP_MAX_REPOSITORIES = 64;
+
+function mcpServerNameField(value: unknown): string {
+  const name = stringField(value, "name", { max: 64 }) ?? "";
+  if (!MCP_SERVER_NAME.test(name)) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      "name must be lower-case letters, digits, dash, or underscore, " +
+        "starting with a letter or digit, up to 64 characters",
+    );
+  }
+  return name;
+}
+
+function mcpTransportField(
+  value: unknown,
+  optional: boolean,
+): McpServerTransport | undefined {
+  if (value === undefined && optional) {
+    return undefined;
+  }
+  if (value !== "stdio" && value !== "http") {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      'transport must be "stdio" or "http"',
+    );
+  }
+  return value;
+}
+
+/** `null` clears the field on an edit; absent leaves it alone. */
+function mcpCommandField(value: unknown): string | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  const command = stringField(value, "command", { max: 1_024, optional: true });
+  if (command === undefined) {
+    return undefined;
+  }
+  if (
+    MCP_UNSAFE_COMMAND_TOKEN.test(command) ||
+    !(MCP_BARE_EXECUTABLE.test(command) || MCP_ABSOLUTE_PATH.test(command))
+  ) {
+    throw new HttpError(
+      400,
+      "invalid_command",
+      "command must be a bare executable name or an absolute path, with no " +
+        "quotes, spaces in a bare name, or shell control characters",
+    );
+  }
+  return command;
+}
+
+function mcpArgsField(value: unknown): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > MCP_MAX_ARGS) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `args must be an array of at most ${MCP_MAX_ARGS} strings`,
+    );
+  }
+  return value.map((entry) => {
+    if (
+      typeof entry !== "string" ||
+      entry.length > MCP_MAX_ARG_LENGTH ||
+      entry.includes("\0")
+    ) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `each arg must be a string of at most ${MCP_MAX_ARG_LENGTH} characters`,
+      );
+    }
+    return entry;
+  });
+}
+
+/**
+ * Whether a URL is Kumi's own MCP endpoint, on this deployment or another.
+ *
+ * An agent handed this deployment's MCP server could submit work to itself:
+ * a task that dispatches a task that dispatches a task, each on a teammate's
+ * laptop, each billed. The exact path is refused on every host, because a
+ * host name is not an identity — the same deployment answers on every name
+ * that resolves to it, on loopback from its own machine, and behind whatever
+ * a proxy calls it — and another Kumi's endpoint is the same loop one hop
+ * longer. The suffix is refused only on this deployment's own names, for the
+ * case where it is mounted under a path prefix.
+ */
+/**
+ * The editor a token is being minted for, or nothing.
+ *
+ * Anything unrecognised reads as "not an editor" rather than as an error: the
+ * value decides who does somebody's work, and an unknown one must fall back to
+ * asking rather than name an agent nobody has.
+ */
+function optionalEditorVendor(value: unknown): EditorVendor | undefined {
+  return typeof value === "string"
+    ? EDITOR_VENDORS.find((vendor) => vendor === value.trim().toLowerCase())
+    : undefined;
+}
+
+function mcpUrlLoopsBack(url: URL, ownHosts: readonly string[]): boolean {
+  const pathname = url.pathname.replace(/\/+$/u, "");
+  const endpoint = `${API_PREFIX}/mcp`;
+  if (pathname === endpoint) {
+    return true;
+  }
+  return (
+    pathname.endsWith(endpoint) && ownHosts.includes(url.host.toLowerCase())
+  );
+}
+
+function mcpUrlField(
+  value: unknown,
+  ownHosts: readonly string[],
+): string | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  const raw = stringField(value, "url", { max: 2_048, optional: true });
+  if (raw === undefined) {
+    return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new HttpError(400, "invalid_url", "url must be an absolute URL");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new HttpError(
+      400,
+      "invalid_url",
+      "url must not carry credentials; put them in secrets as a header",
+    );
+  }
+  // Plain HTTP only to the worker's own machine. A secret header travels on
+  // every request to this URL, and a loopback listener is the one place it
+  // cannot be read off the wire.
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
+    url.hostname.toLowerCase(),
+  );
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new HttpError(
+      400,
+      "invalid_url",
+      "url must use https, or http to localhost only",
+    );
+  }
+  if (mcpUrlLoopsBack(url, ownHosts)) {
+    throw new HttpError(
+      400,
+      "mcp_loop",
+      "url is Kumi's own MCP endpoint; an agent given it could dispatch " +
+        "work to itself",
+    );
+  }
+  return url.toString();
+}
+
+/** Plain, non-secret environment or header values. */
+function mcpValuesField(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const record = objectBody(value);
+  const entries = Object.entries(record);
+  if (entries.length > MCP_MAX_VALUES) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `values may hold at most ${MCP_MAX_VALUES} entries`,
+    );
+  }
+  const values: Record<string, string> = {};
+  for (const [name, entry] of entries) {
+    if (!MCP_VALUE_NAME.test(name)) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `${name} is not a valid environment variable or header name`,
+      );
+    }
+    if (
+      typeof entry !== "string" ||
+      entry.length > MCP_MAX_VALUE_LENGTH ||
+      /[\0\r\n]/u.test(entry)
+    ) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `values.${name} must be a single-line string of at most ` +
+          `${MCP_MAX_VALUE_LENGTH} characters`,
+      );
+    }
+    values[name] = entry;
+  }
+  return values;
+}
+
+/**
+ * Secrets as they arrive: plaintext, to be sealed before anything stores
+ * them. `null` removes one on an edit and is refused on create, where there
+ * is nothing to remove.
+ */
+function mcpSecretsField(
+  value: unknown,
+  options: { allowNull: boolean },
+): Record<string, string | null> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const record = objectBody(value);
+  const entries = Object.entries(record);
+  if (entries.length > MCP_MAX_SECRETS) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `secrets may hold at most ${MCP_MAX_SECRETS} entries`,
+    );
+  }
+  const secrets: Record<string, string | null> = {};
+  for (const [name, entry] of entries) {
+    if (!MCP_VALUE_NAME.test(name)) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `${name} is not a valid environment variable or header name`,
+      );
+    }
+    if (entry === null && options.allowNull) {
+      secrets[name] = null;
+      continue;
+    }
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > MCP_MAX_SECRET_LENGTH ||
+      /[\0\r\n]/u.test(entry)
+    ) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `secrets.${name} must be a non-empty single-line string of at most ` +
+          `${MCP_MAX_SECRET_LENGTH} characters`,
+      );
+    }
+    secrets[name] = entry;
+  }
+  return secrets;
+}
+
+function mcpScopeField(value: unknown): McpServerScope | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "project" && value !== "repository") {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      'scope must be "project" or "repository"',
+    );
+  }
+  return value;
+}
+
+function mcpRepositoryIdsField(value: unknown): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > MCP_MAX_REPOSITORIES) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `repositoryIds must be an array of at most ${MCP_MAX_REPOSITORIES} ids`,
+    );
+  }
+  return uniqueStrings(
+    value.map((entry) => stringField(entry, "repositoryIds[]", { max: 200 }) ?? ""),
+  );
+}
+
+/**
+ * The secrets in a create or edit body must not also be plain values, and
+ * the other way round. Both end up in the same environment or header set,
+ * secrets winning — so a name in both is a value that silently does nothing,
+ * and the person who set it would find out on a machine they cannot see.
+ */
+function assertMcpNamesDisjoint(
+  values: Record<string, string> | undefined,
+  secrets: Record<string, string | null> | undefined,
+): void {
+  for (const name of Object.keys(secrets ?? {})) {
+    if (values !== undefined && name in values) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `${name} cannot be both a value and a secret`,
+      );
+    }
+  }
+}
+
+/**
  * Whether `viewerId` is behind this channel author.
  *
  * A channel has two kinds of author id: a user id, and an agent's
@@ -4813,6 +5365,21 @@ function safeEqual(left: string, right: string): boolean {
  * bucket. Capped because a chain longer than this is not a deployment
  * topology, it is a forged header.
  */
+/**
+ * A positive whole number from the environment, or nothing.
+ *
+ * Nothing rather than a fallback, so the caller's own default stays the one
+ * documented default: a typo'd setting should leave the shipped value in
+ * place, not silently install a different one.
+ */
+function positiveInteger(configured: string | undefined): number | undefined {
+  if (configured === undefined || configured.trim() === "") {
+    return undefined;
+  }
+  const parsed = Number(configured);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function trustedProxyHops(configured: string | undefined): number {
   const parsed = Number(configured ?? "");
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
@@ -4954,6 +5521,7 @@ export class ApiGateway {
   public readonly workerEvents: WorkerEventHub;
   private readonly auth: AuthService;
   private readonly limiter: RateLimiter;
+  private readonly mcpLimiter: RateLimiter;
   private readonly authLimiter: RateLimiter;
   private readonly activeRuns = new Set<string>();
   /**
@@ -5234,6 +5802,24 @@ export class ApiGateway {
   private readonly stripeWebhookSecret: string | undefined;
   private readonly stripePriceId: string | undefined;
   private readonly appBaseUrl: string;
+  /**
+   * Editors that have taken work recently, and are therefore at a keyboard.
+   *
+   * In memory rather than in `workers`, because an editor is not a process
+   * that polls: it would read as dead three minutes into every session, and
+   * would mint a dead row per session besides. See `editor-sessions.ts`.
+   */
+  private readonly editors = new EditorPresence();
+  /** One-shot permission to fetch one lease's bundle. Same file, same reason. */
+  private readonly bundleTickets = new BundleTickets();
+  /**
+   * What each approved MCP server offers, so a handshake does not dial them.
+   *
+   * `tools/list` runs at the start of every editor session. Without this,
+   * three approved servers would put three round trips to somebody else's
+   * infrastructure in front of every one of them.
+   */
+  private readonly manifests = new McpManifestCache();
   /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
@@ -5352,6 +5938,12 @@ export class ApiGateway {
     });
     this.authLimiter = new RateLimiter({
       capacity: options.authRateLimitPerMinute ?? 10,
+    });
+    this.mcpLimiter = new RateLimiter({
+      capacity:
+        options.mcpRateLimitPerMinute ??
+        positiveInteger(process.env["COORD_MCP_RATE_LIMIT_PER_MINUTE"]) ??
+        240,
     });
     this.server = createServer((request, response) => {
       void this.handle(request, response);
@@ -5498,10 +6090,15 @@ export class ApiGateway {
     // longer here. Its clock is the row's own timestamp rather than a timer
     // in memory, so the wait ends whether or not anything survived.
     void this.lapseStalePlanHolds().catch(() => undefined);
+    // And the fourth: work nobody ever picked up. Its clock is the row's own
+    // `submittedAt`, so like the hold sweep it does not care which process
+    // was running when the task was filed.
+    void this.reportStalledTasks().catch(() => undefined);
     this.threadReconcileTimer = setInterval(() => {
       void this.reconcileFinishedThreads().catch(() => undefined);
       void this.reconcileArbitrationNotices().catch(() => undefined);
       void this.lapseStalePlanHolds().catch(() => undefined);
+      void this.reportStalledTasks().catch(() => undefined);
     }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
   }
@@ -5824,9 +6421,18 @@ export class ApiGateway {
         // mail to an address the caller chose, so an unthrottled one is a way
         // to make this deployment relay a stranger's messages.
         url.pathname.startsWith(`${API_PREFIX}/auth/password-reset`);
-      const rate = (authRoute ? this.authLimiter : this.limiter).consume(
-        `${ip}:${authRoute ? "auth" : "api"}`,
-      );
+      // Its own bucket, and its own key, so neither can spend the other's.
+      // See `mcpRateLimitPerMinute`: an editor polling and a browser reading
+      // are one IP to a per-IP limiter and must not share a budget.
+      const mcpRoute = url.pathname === `${API_PREFIX}/mcp`;
+      const bucket = authRoute ? "auth" : mcpRoute ? "mcp" : "api";
+      const rate = (
+        authRoute
+          ? this.authLimiter
+          : mcpRoute
+            ? this.mcpLimiter
+            : this.limiter
+      ).consume(`${ip}:${bucket}`);
       response.setHeader("RateLimit-Limit", String(rate.limit));
       response.setHeader("RateLimit-Remaining", String(rate.remaining));
       response.setHeader(
@@ -5876,8 +6482,20 @@ export class ApiGateway {
       const stripeWebhookPath =
         request.method === "POST" &&
         url.pathname === `${API_PREFIX}/stripe/webhook`;
+      // A bundle ticket is the credential, and it has to be: the caller is a
+      // `curl` on somebody's laptop pulling a file down before `git fetch`
+      // reads it, with no header to put a token in. The ticket is minted only
+      // by a `take_task` that authenticated normally, names one lease, is
+      // spent on first use and dies in ten minutes. Public here means "no
+      // cookie and no bearer", not "unauthenticated".
+      const bundleTicketPath =
+        request.method === "GET" &&
+        new RegExp(`^${API_PREFIX}/mcp/bundle/[A-Za-z0-9-]{1,80}$`, "u").test(
+          url.pathname,
+        );
       const isPublic =
         stripeWebhookPath ||
+        bundleTicketPath ||
         (request.method === "GET" && url.pathname === `${API_PREFIX}/health`) ||
         (request.method === "GET" && invitationPath) ||
         (passwordResetPath &&
@@ -5918,17 +6536,47 @@ export class ApiGateway {
           url.pathname.endsWith("/accept") &&
           invitationPath);
       if (!isPublic) {
-        const bearer = parseBearer(
+        const authorization =
           typeof request.headers.authorization === "string"
-            ? request.headers.authorization
-            : undefined,
-        );
+            ? request.headers.authorization.trim()
+            : "";
+        const bearer = parseBearer(authorization);
         if (bearer !== undefined) {
+          // The placeholder, pasted with its brackets still on. Every
+          // instruction for this writes the token as `<token>` to mean "your
+          // value here", and a person following it literally gets a token
+          // that fails for a reason no message mentioned. Named here rather
+          // than left to `authenticateToken`, whose answer is deliberately
+          // the same for every bad token and so cannot say this.
+          if (bearer.startsWith("<") && bearer.endsWith(">")) {
+            throw new AuthenticationError(
+              "The token in the Authorization header still has the angle " +
+                "brackets around it; those mark where your own token goes " +
+                "and are not part of it",
+            );
+          }
           // Headless client. No CSRF check: a browser never attaches a bearer
           // token on its own, so there is no cross-site request to forge.
           context.principal = await this.auth.authenticateToken(
             bearer,
             this.remoteAddress(request),
+          );
+        } else if (authorization !== "") {
+          // A header that is present and not `Bearer <token>` used to fall
+          // through to the cookie path and be answered "Sign in is
+          // required" — a sentence about a browser, sent to something that
+          // has no cookies and was never going to get any. What it actually
+          // means is that this header is malformed, and the two ways to
+          // malform it are worth naming: the scheme left off entirely, and a
+          // placeholder pasted with its angle brackets still around it.
+          //
+          // Safe to say out loud, because it describes the caller's own
+          // request rather than anything about an account. `authenticateToken`
+          // stays deliberately uniform below.
+          throw new AuthenticationError(
+            'The Authorization header must read "Bearer <token>" — the word ' +
+              "Bearer, one space, then the token itself with no angle " +
+              "brackets around it",
           );
         } else {
           context.principal = await this.auth.authenticate(
@@ -5947,6 +6595,23 @@ export class ApiGateway {
       }
       await this.route(context);
     } catch (error) {
+      // The challenge an MCP client is looking for.
+      //
+      // RFC 9110 says a 401 carries `WWW-Authenticate`, and MCP clients read
+      // it to tell "this server wants a token" from "this server is broken".
+      // Without it the Claude CLI reports a rejected header and leaves the
+      // person guessing which header, and why.
+      if (
+        url.pathname === `${API_PREFIX}/mcp` &&
+        (error instanceof AuthenticationError
+          ? error.statusCode
+          : error instanceof HttpError
+            ? error.status
+            : 500) === 401 &&
+        !response.headersSent
+      ) {
+        response.setHeader("WWW-Authenticate", 'Bearer realm="kumi"');
+      }
       this.sendError(response, requestId, error);
     }
   }
@@ -6921,7 +7586,126 @@ export class ApiGateway {
       return;
     }
 
+    // The bundle an editor was told to fetch, against the one-shot ticket
+    // `take_task` issued. Its own route rather than the worker's, because the
+    // worker's asks for `run_task` — the scope that also admits registering
+    // as a worker — and an editor holding one task must never be able to take
+    // everybody else's. The ticket is checked here, and then the lease is
+    // checked again behind it: a ticket is a name for one lease, never a
+    // permission that outlives it.
+    const bundleTicket = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/mcp/bundle/([A-Za-z0-9-]{1,80})$`, "u"),
+    );
+    if (bundleTicket !== undefined && method === "GET") {
+      const spent = this.bundleTickets.redeem(bundleTicket[0] ?? "");
+      if (spent === undefined) {
+        throw new HttpError(
+          404,
+          "not_found",
+          "That download link has been used already or has expired. Call " +
+            "extend_task to get another one.",
+        );
+      }
+      const bundleOperation = this.options.operations.leaseBundle;
+      if (bundleOperation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot serve repository bundles",
+        );
+      }
+      // The lease, not the ticket holder. A ticket is minted by the take that
+      // created the lease, so it can only ever name that person's own hold —
+      // re-checking the owner here would be a branch nothing can reach. What
+      // *can* change between minting and spending is the hold itself.
+      const lease = await this.options.store.getWorkLease(spent.leaseId);
+      if (lease === undefined || lease.status !== "active") {
+        throw new HttpError(
+          409,
+          "lease_lost",
+          "That hold is no longer active; take the task again",
+        );
+      }
+      const bundle = await bundleOperation(spent.leaseId);
+      if (bundle === undefined) {
+        throw new HttpError(
+          409,
+          "lease_lost",
+          "That hold is no longer active; take the task again",
+        );
+      }
+      response
+        .writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": bundle.byteLength,
+        })
+        .end(bundle);
+      return;
+    }
+
     const principal = this.requirePrincipal(context);
+
+    // Kumi as an MCP server: one route, JSON-RPC 2.0 over a single POST.
+    //
+    // Placed first because it is the whole of a protocol rather than one more
+    // endpoint, and because everything it can do is in `mcp-tools.ts` where it
+    // can be read in one sitting. See `mcp.ts` for why this is hand-rolled and
+    // why it answers in JSON rather than opening a stream.
+    if (path === `${API_PREFIX}/mcp`) {
+      if (method !== "POST") {
+        // Clients probe for an SSE stream on GET. Answering in the JSON-RPC
+        // shape rather than the gateway's own error envelope is what makes a
+        // client say "this server does not stream" instead of "transport
+        // failed".
+        this.sendJson(response, 405, {
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32600,
+            message: "This endpoint accepts POST only; it does not stream",
+          },
+        });
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = await this.readJson(request);
+      } catch {
+        this.sendJson(response, 200, {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32700, message: "Body was not valid JSON" },
+        });
+        return;
+      }
+      // Resolved only for the two methods that read a tool list. `initialize`
+      // and `notifications/initialized` arrive first and would otherwise pay
+      // for a manifest fetch before the session has asked for anything.
+      const asked =
+        typeof payload === "object" && payload !== null
+          ? (payload as Record<string, unknown>)["method"]
+          : undefined;
+      const needsTools = asked === "tools/list" || asked === "tools/call";
+      const reply = await handleMcpMessage({
+        payload,
+        tools: [
+          ...this.mcpTools(principal),
+          ...(needsTools ? await this.proxyTools(principal) : []),
+        ],
+        serverName: "kumi",
+        serverVersion: BUILD_IDENTITY,
+      });
+      if (reply.body === undefined) {
+        // A notification. No body at all — see `mcp.ts`.
+        response.writeHead(reply.status, { "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
+      this.sendJson(response, reply.status, reply.body);
+      return;
+    }
+
     if (method === "POST" && path === `${API_PREFIX}/auth/logout`) {
       // A bearer token has no session to end; revoking it is a separate,
       // explicit action so a stray logout cannot disable a running worker.
@@ -7002,16 +7786,49 @@ export class ApiGateway {
         stringField(body["organizationId"], "organizationId", { max: 120 }) ??
         "";
       // The tenant is decided here, once, and every later read of this worker
-      // is filtered by it. `authorizeOrganization` is what enforces it: it
-      // rejects a token bound elsewhere before consulting the caller's role,
-      // so a credential confined to one organization cannot enrol a worker
-      // into another even if its owner is a member of both.
-      await authorizeOrganization(
+      // is filtered by it. `authorizeOrganizationOrGrant` is what enforces it:
+      // it rejects a token bound elsewhere before consulting the caller's
+      // role, so a credential confined to one organization cannot enrol a
+      // worker into another even if its owner is a member of both.
+      //
+      // Grants count, and they have to. Somebody invited to one repository
+      // has no organization membership at all, so the membership-only check
+      // this used to make refused them outright: install the app, sign in,
+      // and be told "You do not have permission to perform this action" by
+      // the first call the worker ever makes. Their machine never registered,
+      // so it never appeared online, so their agent was unmentionable —
+      // "nothing is running it yet" — with nothing anywhere saying why.
+      //
+      // Nothing is widened by admitting them: what the worker may then be
+      // *handed* is decided per lease by `authorizeProject`, which narrows to
+      // the repositories the grant actually covers.
+      await authorizeOrganizationOrGrant(
         this.options.store,
         principal,
         organizationId,
         "run_task",
-      );
+      ).catch((error: unknown) => {
+        // Said properly, because of where it is read. This is the first call
+        // a worker ever makes and the only place its failure appears is a
+        // log file on somebody's own machine, with no page around it to
+        // explain anything. The generic "You do not have permission to
+        // perform this action" sent two people hunting through networks,
+        // reinstalls and vendor logins for a problem that was an unfinished
+        // invitation.
+        if (
+          error instanceof AuthenticationError &&
+          error.code === "forbidden"
+        ) {
+          throw new HttpError(
+            403,
+            "forbidden",
+            "This account cannot run agents in that workspace. Ask an " +
+              "administrator to invite you to it, or to a repository in it, " +
+              "as a developer or above — view-only access cannot run work.",
+          );
+        }
+        throw error;
+      });
       const adapters = body["adapters"];
       if (
         !Array.isArray(adapters) ||
@@ -7043,8 +7860,14 @@ export class ApiGateway {
       // The organization is required rather than defaulted. These are counts,
       // but a platform-wide count still reports how busy other tenants are,
       // which is not this caller's to know.
-      const { organizationId } = await this.authorizeFleet(principal, url);
-      const { workers, active } = await this.organizationFleet(organizationId);
+      const { organizationId, wholeFleet } = await this.authorizeFleet(
+        principal,
+        url,
+      );
+      const { workers, active } = await this.organizationFleet(
+        organizationId,
+        wholeFleet ? undefined : principal.user.id,
+      );
       const byWorker = new Map<string, number>();
       for (const lease of active) {
         byWorker.set(lease.workerId, (byWorker.get(lease.workerId) ?? 0) + 1);
@@ -7063,8 +7886,20 @@ export class ApiGateway {
       // the tenant boundary — not the registering user — is what makes that
       // safe: `authorizeFleet` requires membership of the organization being
       // asked about, and the store filters on the same id.
-      const { organizationId } = await this.authorizeFleet(principal, url);
-      const { workers, active } = await this.organizationFleet(organizationId);
+      //
+      // Except for somebody who reaches this organization only through a
+      // repository grant. They are not on the team; they were handed one
+      // repository. They still need to see their own machine — that is how
+      // anybody knows whether their agent will answer — so they get exactly
+      // that and no more.
+      const { organizationId, wholeFleet } = await this.authorizeFleet(
+        principal,
+        url,
+      );
+      const { workers, active } = await this.organizationFleet(
+        organizationId,
+        wholeFleet ? undefined : principal.user.id,
+      );
       const leasesByWorker = new Map<string, typeof active>();
       for (const lease of active) {
         const bucket = leasesByWorker.get(lease.workerId) ?? [];
@@ -7099,7 +7934,14 @@ export class ApiGateway {
       }
       const projectId =
         stringField(body["projectId"], "projectId", { max: 120 }) ?? "";
-      const { project } = await authorizeProject(
+      // `repositories` is not decoration. A collaborator invited to one
+      // repository has no organization role, reaches this project through
+      // that grant alone, and `authorizeProject` folds every grant they hold
+      // here into one role to answer "can they reach the project at all".
+      // That answer must not become "and may therefore run anything in it":
+      // the narrowing is passed down to the lease, which is the only place
+      // that decides what a machine is handed.
+      const { project, repositories } = await authorizeProject(
         this.options.store,
         principal,
         projectId,
@@ -7139,6 +7981,18 @@ export class ApiGateway {
         (kind): kind is "task" | "question" =>
           kind === "task" || kind === "question",
       );
+      // Read, not trusted, and absent stays absent: a worker built before
+      // this was sent reports nothing, and the lease reads nothing as the
+      // oldest version rather than the newest. Anything that is not a whole
+      // positive number is treated the same way, so a malformed value can
+      // only ever narrow what the worker is handed.
+      const announced = body["protocolVersion"];
+      const protocolVersion =
+        typeof announced === "number" &&
+        Number.isInteger(announced) &&
+        announced >= 1
+          ? announced
+          : undefined;
       const leaseOperation = this.options.operations.leaseWork;
       if (leaseOperation === undefined) {
         throw new HttpError(
@@ -7152,7 +8006,9 @@ export class ApiGateway {
         projectId,
         actorId: principal.user.id,
         ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(repositories === undefined ? {} : { repositories }),
         ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
+        ...(protocolVersion === undefined ? {} : { protocolVersion }),
       });
       if (assignment === undefined) {
         // 204 rather than an empty 200 so a polling worker can branch on the
@@ -7160,6 +8016,13 @@ export class ApiGateway {
         response.writeHead(204).end();
         return;
       }
+      // Checked again on the way out, against the same two bounds the
+      // request was authorized on. `leaseWork` is an operation a deployment
+      // supplies, and an authorization that only holds because one
+      // implementation remembered to apply it is not an authorization. The
+      // repository half matters most: it is the only thing standing between a
+      // grant on one repository and an agent run from the repository beside
+      // it, on this person's laptop, with their vendor login.
       if (
         assignment.task.projectId !== projectId ||
         assignment.lease.projectId !== projectId
@@ -7174,6 +8037,22 @@ export class ApiGateway {
           500,
           "invalid_assignment",
           "Worker assignment escaped its authorized project",
+        );
+      }
+      if (
+        repositories !== undefined &&
+        !repositories.has(assignment.task.repositoryId)
+      ) {
+        await this.options.store.finishWorkLease(
+          assignment.lease.id,
+          "released",
+          new Date().toISOString(),
+          "control-plane repository mismatch",
+        );
+        throw new HttpError(
+          500,
+          "invalid_assignment",
+          "Worker assignment escaped its authorized repositories",
         );
       }
       this.sendJson(response, 200, assignment);
@@ -7331,6 +8210,19 @@ export class ApiGateway {
           }
         }
 
+        // Before the lease is checked, because the two facts are unrelated and
+        // conflating them is what put a live machine's light out.
+        //
+        // A request arriving here is proof the worker is running and can reach
+        // this server — that is the whole of what `lastSeenAt` records. Whether
+        // the lease it is beating for is still alive says nothing about the
+        // machine. Behind the check, a worker whose leases had expired during a
+        // network change went on beating every few seconds, was answered 409
+        // every time, and touched nothing: after three minutes of demonstrably
+        // talking to this server it read as offline, and the roster stopped
+        // offering it work. Switching networks was enough to do it, and the
+        // only recovery was restarting the app.
+        await this.options.store.touchWorker(lease.workerId, now.toISOString());
         const extended = await this.options.store.heartbeatWorkLease(
           leaseId,
           now.toISOString(),
@@ -7344,7 +8236,6 @@ export class ApiGateway {
             "This lease is no longer active; stop work and re-lease",
           );
         }
-        await this.options.store.touchWorker(lease.workerId, now.toISOString());
         this.sendJson(response, 200, {
           ...extended,
           ...(await this.claimTraffic(lease, beat)),
@@ -7699,10 +8590,21 @@ export class ApiGateway {
     }
 
     if (path === `${API_PREFIX}/auth/tokens` && method === "POST") {
-      // A token may only be minted from an interactive session. Allowing a
-      // token to mint another would make revocation meaningless: a leaked
-      // credential could silently refresh itself forever.
-      if (principal.credential !== "session") {
+      // A token minting another would make revocation meaningless — a leaked
+      // credential could silently refresh itself forever — so ordinarily only
+      // an interactive session may mint.
+      //
+      // The desktop app is the exception, and it had to be: it authenticates
+      // with a token, so connecting an editor on the machine it runs on was
+      // impossible from the one place that can actually write that editor's
+      // config. What makes it safe is that the exception does not touch the
+      // invariant. A minted token carries strictly fewer scopes than the one
+      // that minted it, so nothing escalates; it is recorded against its
+      // parent and revoked with it, so revocation still reaches everything;
+      // and it may not mint in turn, so the chain is one link long.
+      const parent =
+        principal.credential === "api_token" ? principal.token : undefined;
+      if (principal.credential !== "session" && parent === undefined) {
         throw new HttpError(
           403,
           "session_required",
@@ -7750,6 +8652,23 @@ export class ApiGateway {
             allowed.add(permission);
           }
         }
+        // Repository grants count too, and leaving them out made this refuse
+        // everybody it was meant to serve. A repository-scoped invitation
+        // grants that one repository and deliberately no organization
+        // membership — which is the whole point of scoping it — and the
+        // invitation route requires a repository, so in practice *every*
+        // person invited to a deployment arrives with grants and no
+        // memberships. Bounding a token by memberships alone therefore
+        // bounded it by nothing: a developer on the only repository they can
+        // see was told their role granted not even `view`, and could create
+        // no token at all.
+        for (const grant of await this.options.store
+          .listGrantsForUser(principal.user.id)
+          .catch((): [] => [])) {
+          for (const permission of permissionsForRole(grant.role)) {
+            allowed.add(permission);
+          }
+        }
       }
       const exceeded = requested.filter((scope) => !allowed.has(scope));
       if (exceeded.length > 0) {
@@ -7759,7 +8678,40 @@ export class ApiGateway {
           `Your role does not grant: ${exceeded.join(", ")}`,
         );
       }
+      if (parent !== undefined) {
+        // One link, and one only. A minted token that could mint would grow a
+        // chain whose tail survives revoking the head — the cascade below is
+        // a single level, deliberately, because a recursive one is a loop
+        // over attacker-controlled depth. Refusing here is what keeps the two
+        // in step.
+        const holder = await this.options.store.getApiToken(parent.id);
+        if (holder?.createdByToken !== undefined) {
+          throw new HttpError(
+            403,
+            "session_required",
+            "This token was itself minted by another, and cannot mint further",
+          );
+        }
+        // Narrower than the token doing the minting, always. Bounding by the
+        // person's role alone would let a token that carries `view` mint one
+        // that carries everything its owner could — an escalation from a
+        // credential rather than from a person, which is the whole thing this
+        // exception must not become.
+        const beyond = requested.filter((scope) => !parent.scopes.includes(scope));
+        if (beyond.length > 0) {
+          throw new HttpError(
+            403,
+            "scope_exceeds_token",
+            `This token cannot grant what it does not hold: ${beyond.join(", ")}`,
+          );
+        }
+      }
 
+      // Which editor this is for, when it is for one. Validated against the
+      // fixed list rather than stored as typed: it decides who does somebody's
+      // work, so an unrecognised value must read as "not an editor" instead of
+      // as an agent nobody has.
+      const editorVendor = optionalEditorVendor(body["editorVendor"]);
       const expiresInDays = body["expiresInDays"];
       if (
         expiresInDays !== undefined &&
@@ -7785,6 +8737,13 @@ export class ApiGateway {
         ...(principal.sessionId === undefined
           ? {}
           : { createdBySession: principal.sessionId }),
+        // Recorded so revoking the parent revokes this too, which is the
+        // whole of what makes minting from a token safe.
+        ...(parent === undefined ? {} : { createdByToken: parent.id }),
+        // Recorded once, at mint, so the tools can tell which editor a
+        // request came from without asking the model to say. Read from the
+        // name otherwise, which is editable and therefore only a hint.
+        ...(editorVendor === undefined ? {} : { editorVendor }),
       });
       await this.options.store.appendAudit(undefined, {
         type: "api_token_issued",
@@ -8511,6 +9470,380 @@ export class ApiGateway {
         this.sendJson(response, 200, { project });
         return;
       }
+    }
+
+    // A project's MCP servers: what its agents are handed as tools.
+    //
+    // Three patterns rather than one with optional groups, because matchPath
+    // decodes every group and an absent one arrives as the string
+    // "undefined". Reads need `view`; everything that changes a row needs
+    // `manage_project`, and everything that stores or arms one also needs
+    // the deployment switch and a sealer — see `requireMcpServers`.
+    const mcpServersMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/mcp-servers$`, "u"),
+    );
+    const mcpServerMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/mcp-servers/([^/]+)$`, "u"),
+    );
+    const mcpApprovalMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/mcp-servers/([^/]+)/approval$`,
+        "u",
+      ),
+    );
+    // Its own route beside `approval`, and for the same reason `approval` is
+    // not part of `PATCH`: this is a security decision with its own answer,
+    // and one thing to grep for when asking who opened a server to editors.
+    const mcpEditorAccessMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/mcp-servers/([^/]+)/editor-access$`,
+        "u",
+      ),
+    );
+    if (
+      mcpServersMatch !== undefined ||
+      mcpServerMatch !== undefined ||
+      mcpApprovalMatch !== undefined ||
+      mcpEditorAccessMatch !== undefined
+    ) {
+      const projectId =
+        mcpServersMatch?.[0] ??
+        mcpServerMatch?.[0] ??
+        mcpApprovalMatch?.[0] ??
+        mcpEditorAccessMatch?.[0] ??
+        "";
+      const serverId =
+        mcpServerMatch?.[1] ?? mcpApprovalMatch?.[1] ?? mcpEditorAccessMatch?.[1];
+      const { project } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        method === "GET" ? "view" : "manage_project",
+      );
+      const audit = async (
+        action: string,
+        server: McpServerRecord,
+      ): Promise<void> => {
+        await this.options.store.appendAudit(undefined, {
+          type: "project_changed",
+          data: {
+            organizationId: project.organizationId,
+            projectId,
+            action,
+            serverId: server.id,
+            name: server.name,
+            actorId: principal.user.id,
+          },
+        });
+      };
+      // Looked up by id and then checked against the project in the path,
+      // so a server id from one project answers 404 under another rather
+      // than being edited across the boundary the path was meant to draw.
+      const existing = async (): Promise<McpServerRecord> => {
+        const server =
+          serverId === undefined
+            ? undefined
+            : await this.options.store.getMcpServer(serverId);
+        if (server === undefined || server.projectId !== projectId) {
+          throw new HttpError(404, "not_found", "MCP server was not found");
+        }
+        return server;
+      };
+      const validateRepositories = async (
+        repositoryIds: readonly string[],
+      ): Promise<void> => {
+        for (const repositoryId of repositoryIds) {
+          if (
+            !(await this.options.store.projectHasRepository(
+              projectId,
+              repositoryId,
+            ))
+          ) {
+            throw new HttpError(
+              400,
+              "unknown_repository",
+              `${repositoryId} is not a repository of this project`,
+            );
+          }
+        }
+      };
+      /** A repository-scoped server with no repositories attaches nowhere. */
+      const assertScopeAttaches = (
+        scope: McpServerScope,
+        repositoryIds: readonly string[],
+      ): void => {
+        if (scope === "repository" && repositoryIds.length === 0) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "a repository-scoped server needs at least one repositoryId",
+          );
+        }
+      };
+      const assertTransportComplete = (
+        transport: McpServerTransport,
+        command: string | undefined,
+        url: string | undefined,
+      ): void => {
+        if (transport === "stdio" && command === undefined) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "a stdio server needs a command",
+          );
+        }
+        if (transport === "http" && url === undefined) {
+          throw new HttpError(400, "invalid_request", "an http server needs a url");
+        }
+      };
+
+      if (mcpServersMatch !== undefined && method === "GET") {
+        const servers = await this.options.store.listMcpServers(projectId);
+        this.sendJson(response, 200, {
+          servers,
+          // Whether anything here will reach an agent: the switch and the
+          // sealer together, so a screen can say "configured but off" rather
+          // than let somebody approve a server that will never start.
+          enabled: this.mcpServersAvailable(),
+        });
+        return;
+      }
+      if (mcpServerMatch !== undefined && method === "GET") {
+        this.sendJson(response, 200, { server: await existing() });
+        return;
+      }
+      if (mcpServerMatch !== undefined && method === "DELETE") {
+        // Allowed with the switch off: removing a row is the one write that
+        // can only leave less armed than before.
+        const server = await existing();
+        await this.options.store.deleteMcpServer(server.id);
+        await audit("mcp_server_deleted", server);
+        response.writeHead(204).end();
+        return;
+      }
+
+      const sealer = this.requireMcpServers();
+      const ownHosts = this.ownHosts();
+
+      if (mcpServersMatch !== undefined && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const name = mcpServerNameField(body["name"]);
+        // Required on create — the field refuses an absent transport above —
+        // so the fallback only narrows the type, never a request.
+        const transport = mcpTransportField(body["transport"], false) ?? "stdio";
+        const command = mcpCommandField(body["command"]) ?? undefined;
+        const args = mcpArgsField(body["args"]);
+        const url = mcpUrlField(body["url"], ownHosts) ?? undefined;
+        const values = mcpValuesField(body["values"]);
+        const secrets = mcpSecretsField(body["secrets"], { allowNull: false });
+        const scope = mcpScopeField(body["scope"]) ?? "project";
+        const repositoryIds = mcpRepositoryIdsField(body["repositoryIds"]) ?? [];
+        assertTransportComplete(transport, command, url);
+        assertMcpNamesDisjoint(values, secrets);
+        assertScopeAttaches(scope, repositoryIds);
+        await validateRepositories(repositoryIds);
+        const sealed = Object.fromEntries(
+          Object.entries(secrets ?? {}).map(([key, plaintext]) => [
+            key,
+            sealer.seal(plaintext ?? ""),
+          ]),
+        );
+        let server: McpServerRecord;
+        try {
+          server = await this.options.store.createMcpServer({
+            id: createId("mcp"),
+            projectId,
+            name,
+            transport,
+            ...(command === undefined ? {} : { command }),
+            ...(args === undefined ? {} : { args }),
+            ...(url === undefined ? {} : { url }),
+            ...(values === undefined ? {} : { values }),
+            secrets: sealed,
+            scope,
+            repositoryIds,
+            createdBy: principal.user.id,
+            createdAt: new Date().toISOString(),
+          });
+        } catch (error) {
+          if (error instanceof Error && /already/u.test(error.message)) {
+            throw new HttpError(
+              409,
+              "name_taken",
+              `This project already has an MCP server named ${name}`,
+            );
+          }
+          throw error;
+        }
+        await audit("mcp_server_created", server);
+        this.sendJson(response, 201, { server });
+        return;
+      }
+
+      if (mcpServerMatch !== undefined && method === "PATCH") {
+        const current = await existing();
+        const body = objectBody(await this.readJson(request));
+        const name =
+          body["name"] === undefined
+            ? undefined
+            : mcpServerNameField(body["name"]);
+        const transport = mcpTransportField(body["transport"], true);
+        // Fixed at creation. The stores keep it that way — a secret sealed
+        // as a header must not turn up in a child process's environment
+        // because somebody flipped one field — so accepting the change here
+        // and dropping it there would answer 200 to an edit that never
+        // happened. Said outright instead.
+        if (transport !== undefined && transport !== current.transport) {
+          throw new HttpError(
+            400,
+            "transport_fixed",
+            `This server is ${current.transport}; to change how it is reached, ` +
+              "remove it and create it again",
+          );
+        }
+        const command = mcpCommandField(body["command"]);
+        const args = mcpArgsField(body["args"]);
+        const url = mcpUrlField(body["url"], ownHosts);
+        const values = mcpValuesField(body["values"]);
+        const secrets = mcpSecretsField(body["secrets"], { allowNull: true });
+        const scope = mcpScopeField(body["scope"]);
+        const repositoryIds = mcpRepositoryIdsField(body["repositoryIds"]);
+        // Validated as the row will be after the edit, not as the edit alone:
+        // switching transport without supplying what the new one needs, or
+        // clearing the command a stdio server runs, leaves a row nothing can
+        // start.
+        const effectiveTransport = current.transport;
+        const effectiveCommand =
+          command === null ? undefined : (command ?? current.command);
+        const effectiveUrl = url === null ? undefined : (url ?? current.url);
+        assertTransportComplete(
+          effectiveTransport,
+          effectiveCommand,
+          effectiveUrl,
+        );
+        assertMcpNamesDisjoint(values ?? current.values, secrets);
+        assertScopeAttaches(
+          scope ?? current.scope,
+          repositoryIds ?? current.repositoryIds,
+        );
+        if (repositoryIds !== undefined) {
+          await validateRepositories(repositoryIds);
+        }
+        const sealed =
+          secrets === undefined
+            ? undefined
+            : Object.fromEntries(
+                Object.entries(secrets).map(([key, plaintext]) => [
+                  key,
+                  plaintext === null ? null : sealer.seal(plaintext),
+                ]),
+              );
+        let server: McpServerRecord;
+        try {
+          server = await this.options.store.updateMcpServer(current.id, {
+            ...(name === undefined ? {} : { name }),
+            ...(command === undefined ? {} : { command }),
+            ...(args === undefined ? {} : { args }),
+            ...(url === undefined ? {} : { url }),
+            ...(values === undefined ? {} : { values }),
+            ...(sealed === undefined ? {} : { secrets: sealed }),
+            ...(scope === undefined ? {} : { scope }),
+            ...(repositoryIds === undefined ? {} : { repositoryIds }),
+            updatedAt: new Date().toISOString(),
+          });
+        } catch (error) {
+          if (error instanceof Error && /already/u.test(error.message)) {
+            throw new HttpError(
+              409,
+              "name_taken",
+              `This project already has an MCP server named ${name ?? ""}`,
+            );
+          }
+          throw error;
+        }
+        // An edit to an enabled server disarms it. What was approved is no
+        // longer what is stored, and the approval — a decision about a
+        // specific command line with specific secrets — does not carry over
+        // to a different one. Said in the response so the screen can ask
+        // for it again rather than leave the row looking approved.
+        const reapprovalRequired = current.enabled;
+        if (reapprovalRequired) {
+          server = await this.options.store.setMcpServerApproval(server.id, {
+            enabled: false,
+            approvedBy: principal.user.id,
+            approvedAt: new Date().toISOString(),
+          });
+          await audit("mcp_server_disabled", server);
+        }
+        await audit("mcp_server_updated", server);
+        this.sendJson(response, 200, { server, reapprovalRequired });
+        return;
+      }
+
+      if (mcpApprovalMatch !== undefined && method === "POST") {
+        const current = await existing();
+        const body = objectBody(await this.readJson(request));
+        const enabled = booleanField(body["enabled"], "enabled", false) ?? false;
+        const server = await this.options.store.setMcpServerApproval(
+          current.id,
+          {
+            enabled,
+            approvedBy: principal.user.id,
+            approvedAt: new Date().toISOString(),
+          },
+        );
+        await audit(
+          enabled ? "mcp_server_enabled" : "mcp_server_disabled",
+          server,
+        );
+        this.sendJson(response, 200, { server });
+        return;
+      }
+      if (mcpEditorAccessMatch !== undefined && method === "POST") {
+        const current = await existing();
+        const body = objectBody(await this.readJson(request));
+        const enabled = booleanField(body["enabled"], "enabled", false) ?? false;
+        if (enabled && current.transport !== "http") {
+          // Refused up front rather than stored and silently ignored. A
+          // stdio server is a process, and the control plane starting one
+          // chosen by a project admin is what this whole architecture keeps
+          // out; there is no way to honour this switch for one.
+          throw new HttpError(
+            400,
+            "invalid_request",
+            `${current.name} runs as a command on the machine that uses it, ` +
+              "so Kumi cannot offer it to an editor. Only servers reached " +
+              "over a URL can be shared this way.",
+          );
+        }
+        let server: McpServerRecord;
+        try {
+          server = await this.options.store.setMcpServerEditorAccess(
+            current.id,
+            enabled,
+            new Date().toISOString(),
+          );
+        } catch (error) {
+          throw new HttpError(
+            409,
+            "not_approved",
+            error instanceof Error
+              ? error.message
+              : "That server could not be opened to editors",
+          );
+        }
+        await audit(
+          enabled ? "mcp_server_editor_opened" : "mcp_server_editor_closed",
+          server,
+        );
+        this.sendJson(response, 200, { server });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Method not allowed");
     }
 
     const agentsMatch = matchPath(
@@ -11127,75 +12460,16 @@ export class ApiGateway {
           stringField(body["content"], "content", {
             max: CHANNEL_MESSAGE_MAX_CHARS,
           }) ?? "";
-        const channel = await this.authorizeSubChannel({
+        const posted = await this.postChannelMessageAndDispatch({
           projectId,
           repositoryId,
           channelId: this.requestedChannelId(url, body),
+          content,
           principal,
         });
-        // Reading and posting come apart in an open room: anybody in the
-        // project can follow it, only its members can speak in it. 403 here
-        // rather than 404 — the caller can already see this room, so there
-        // is nothing left to conceal by pretending it is absent.
-        if (
-          !(await this.canPostInSubChannel(
-            channel,
-            principal.user.id,
-            await this.isRepositoryAdmin(principal, projectId, repositoryId),
-          ))
-        ) {
-          throw new HttpError(
-            403,
-            "not_a_member",
-            "You are not a member of this channel",
-          );
-        }
-        const message = await this.options.store.appendChannelMessage({
-          repositoryId,
-          channelId: channel.id,
-          projectId,
-          kind: "user",
-          authorId: principal.user.id,
-          content,
-        });
-        await this.options.store.appendAudit(undefined, {
-          type: "channel_message_posted",
-          data: {
-            projectId,
-            repositoryId,
-            channelId: channel.id,
-            messageId: message.id,
-          },
-        });
-        // Best-effort and after the user's own message is durably posted: a
-        // mention that fails to dispatch must not un-send what they typed.
-        // Errors from an individual mention are already turned into a system
-        // message inside `dispatchChannelMentions`; nothing should escape it,
-        // but a broad catch here keeps a bug in that path from 500ing what is
-        // otherwise a successful post.
-        let command: ChannelCommandResponse | undefined;
-        try {
-          command = await this.dispatchChannelMentions({
-            projectId,
-            repositoryId,
-            channelId: channel.id,
-            content,
-            senderId: principal.user.id,
-            referencedMessageId: message.id,
-          });
-        } catch (error) {
-          // Still swallowed for the response — a mention that fails to
-          // dispatch must not un-send what the user typed — but no longer
-          // silent. A bare catch here meant every failure in the dispatch
-          // path presented as "nothing happened", which is the hardest
-          // possible symptom to diagnose and the one this feature actually
-          // shipped with.
-          process.stderr.write(
-            `[channel] dispatch failed for ${repositoryId}: ${
-              error instanceof Error ? (error.stack ?? error.message) : String(error)
-            }\n`,
-          );
-        }
+        const channel = posted.channel;
+        const message = posted.message;
+        const command = posted.response;
         const [mentionAgents, mentionPeople] = await Promise.all([
           this.resolveChannelMentionCandidates(
             projectId,
@@ -14163,6 +15437,693 @@ export class ApiGateway {
     return grants;
   }
 
+  /**
+   * The tools this caller may drive over MCP.
+   *
+   * Built per request because every one of them closes over the principal: a
+   * tool has no session and no state of its own, so the token that arrived is
+   * the only thing that says who is asking.
+   */
+  private mcpTools(principal: AuthenticatedPrincipal): McpTool[] {
+    const deps: McpToolDeps = {
+      store: this.options.store,
+      assertScope: (permission) => {
+        assertTokenScope(principal, permission as Permission);
+      },
+      listRepositories: async () => await this.mcpRepositories(principal),
+      callerEditor: () => editorBehind(principal.token),
+      takeFiledTask: async (taskId) => {
+        const vendor = editorBehind(principal.token);
+        return vendor === undefined
+          ? undefined
+          : await this.takeForEditor(principal, {
+              vendor,
+              label: `${EDITOR_LABELS[vendor]} (editor)`,
+              taskId,
+            });
+      },
+      agentsIn: async (input) =>
+        await this.mcpAgentsIn(
+          input.projectId,
+          input.repositoryId,
+          input.channel,
+          principal.user.id,
+        ),
+      post: async (input) => {
+        const channelId = await this.mcpChannelId(
+          input.repositoryId,
+          input.channel,
+        );
+        const posted = await this.postChannelMessageAndDispatch({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          channelId,
+          content: input.content,
+          principal,
+          // The caller is in an editor with only this return value to go on.
+          // Reporting "sent" for work that threw on its way to being started
+          // is the one answer it must never give.
+          rethrowDispatchErrors: true,
+        });
+        return {
+          taskIds: posted.taskIds,
+          channelSlug: posted.channel.slug,
+        };
+      },
+      describeState: (status) => describeTaskState(status),
+      progressFor: async (taskId, limit) => {
+        const events = await this.options.store
+          .listAuditEvents({ taskId, types: ["agent_progress"] })
+          .catch(() => []);
+        return events
+          .slice(-limit)
+          .map((entry) => narrateTaskEvent(entry.event.type, entry.event.data))
+          .filter((line): line is string => line !== undefined);
+      },
+      pendingQuestionFor: async (taskId) => {
+        for (const [requestId, pending] of this.pendingAgentQuestions) {
+          // Only the person the question was put to. A question is a decision
+          // about somebody's own request; anyone else answering it turns one
+          // person's choice into a race.
+          if (
+            pending.taskId === taskId &&
+            pending.submitterId === principal.user.id
+          ) {
+            return {
+              requestId,
+              questions: pending.questions.map((question) => ({
+                question: question.question,
+                options: [...question.options],
+                ...(question.recommended === undefined
+                  ? {}
+                  : { recommended: question.recommended }),
+              })),
+            };
+          }
+        }
+        return undefined;
+      },
+      answerQuestion: async (input) => {
+        const pending = this.pendingAgentQuestions.get(input.requestId);
+        if (pending === undefined || pending.submitterId !== principal.user.id) {
+          // The same answer for "already answered", "gave up waiting" and
+          // "not yours": from out here they are one situation, and the caller's
+          // move is the same either way.
+          return "not_waiting";
+        }
+        const answers: QuestionChoice[] = pending.questions.map(
+          (question, index) => {
+            const entry = input.answers[index] ?? {};
+            const chosen = entry.chosen;
+            const text = entry.text?.slice(0, 2_000);
+            if (
+              typeof chosen === "number" &&
+              Number.isInteger(chosen) &&
+              chosen >= 0 &&
+              chosen < question.options.length
+            ) {
+              return { chosen };
+            }
+            if (text !== undefined && text.trim().length > 0) {
+              return { text: text.trim() };
+            }
+            // Skipping is a real answer — "your call" — which is what makes
+            // several questions cheap to put to somebody.
+            return { skipped: true };
+          },
+        );
+        pending.settle(answers);
+        return "answered";
+      },
+      cancelTask: async (taskId) => {
+        const task = await this.options.store.getSubmittedTask(taskId);
+        if (task === undefined || task.projectId === undefined) {
+          return "not_found";
+        }
+        // The dashboard's cancel route authorises with `run_task`. That scope
+        // also admits `POST /workers/leases`, so a token given to an editor
+        // for stopping work would be able to register as a worker and take
+        // other people's tasks. Ownership instead, checked against the row.
+        if (task.submittedBy !== principal.user.id) {
+          return "not_yours";
+        }
+        await authorizeProject(
+          this.options.store,
+          principal,
+          task.projectId,
+          "submit_task",
+        );
+        const operation = this.options.operations.cancelTasks;
+        if (operation === undefined) {
+          await this.options.store.cancelSubmittedTask(taskId).catch(() => {
+            throw new HttpError(409, "not_cancellable", "already finished");
+          });
+          await this.options.store.appendAudit(undefined, {
+            type: "task_cancelled",
+            taskId,
+            data: { projectId: task.projectId, actorId: principal.user.id },
+          });
+          return "cancelled";
+        }
+        const { cancelled } = await operation({
+          projectId: task.projectId,
+          repositoryId: task.repositoryId,
+          taskIds: [taskId],
+          reason: "Stopped from an editor",
+          actorId: principal.user.id,
+        });
+        return cancelled.length === 0 ? "already_finished" : "cancelled";
+      },
+      outcomeFor: async (taskId) => {
+        const events = await this.options.store
+          .listAuditEvents({
+            taskId,
+            types: ["canonical_promoted", "task_reported", "task_failed"],
+          })
+          .catch(() => []);
+        const last = events.at(-1);
+        return last === undefined
+          ? undefined
+          : narrateTaskEvent(last.event.type, last.event.data);
+      },
+    };
+    return [...createMcpTools(deps), ...createMcpWorkTools(this.workDeps(principal))];
+  }
+
+  /**
+   * The project's approved servers, re-offered as tools this endpoint owns.
+   *
+   * Answers an empty list rather than throwing whenever anything is missing:
+   * the switch is off, no credential store was opened, nobody has opted a
+   * server in. An editor's handshake must not fail because a feature nobody
+   * turned on is not turned on.
+   */
+  private async proxyTools(
+    principal: AuthenticatedPrincipal,
+  ): Promise<McpTool[]> {
+    const sealer = this.options.secretSealer;
+    if (!mcpServersEnabled() || sealer === undefined) {
+      return [];
+    }
+    const targets: ProxyTarget[] = [];
+    const seen = new Set<string>();
+    for (const entry of await this.mcpReachable(principal)) {
+      if (seen.has(entry.projectId)) {
+        continue;
+      }
+      seen.add(entry.projectId);
+      const servers = await this.options.store
+        .listMcpServers(entry.projectId, { editorEnabledOnly: true })
+        .catch((): [] => []);
+      for (const server of servers) {
+        // http only. A stdio server is a process, and the control plane
+        // starting a process chosen by a project admin is the one thing this
+        // architecture has refused throughout. Those keep running where they
+        // already do: on the machine that consented, beside an agent.
+        if (server.transport !== "http" || server.url === undefined) {
+          continue;
+        }
+        const opened: Record<string, string> = {};
+        const sealed = await this.options.store
+          .getMcpServerSecrets(server.id)
+          .catch(() => undefined);
+        let readable = true;
+        for (const [name, secret] of Object.entries(sealed ?? {})) {
+          try {
+            opened[name] = sealer.open(secret);
+          } catch {
+            // A secret this deployment's key cannot open means the server
+            // would be dialled without its credential and answer 401. Drop
+            // the whole server rather than offer tools that cannot work.
+            readable = false;
+            break;
+          }
+        }
+        if (!readable) {
+          continue;
+        }
+        targets.push({
+          serverId: server.id,
+          serverName: server.name,
+          projectId: entry.projectId,
+          url: server.url,
+          headers: { ...server.values, ...opened },
+          // The manifest is believed only while the row has not changed.
+          revision: server.updatedAt,
+        });
+      }
+    }
+    if (targets.length === 0) {
+      return [];
+    }
+    const byId = new Map(targets.map((target) => [target.serverId, target]));
+    const dial: ProxyDial =
+      this.options.mcpDial ?? (async (input) => await dialMcp(input));
+    const { tools } = await proxiedTools(targets, dial, this.manifests);
+    return tools.map((tool) => ({
+      name: tool.name,
+      title: `${tool.remoteName} (${tool.serverName})`,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      run: async (args: Readonly<Record<string, unknown>>) => {
+        // `view`, not `submit_task`: reaching a tool the workspace already
+        // approved is reading the workspace's own capabilities, and a token
+        // that may see the project may use them. What the tool then does is
+        // the far end's business, which is why opting a server in is the
+        // decision that matters and it is made by an administrator.
+        assertTokenScope(principal, "view");
+        const target = byId.get(tool.serverId);
+        if (target === undefined) {
+          return mcpRefusal(
+            `${tool.serverName} is no longer available to this account.`,
+          );
+        }
+        await this.options.store.appendAudit(undefined, {
+          type: "project_changed",
+          data: {
+            projectId: tool.projectId,
+            action: "mcp_tool_called",
+            serverId: tool.serverId,
+            name: tool.serverName,
+            tool: tool.remoteName,
+            actorId: principal.user.id,
+          },
+        });
+        return await callProxiedTool({ tool, target, args: { ...args }, dial });
+      },
+    }));
+  }
+
+  /**
+   * What the three work tools may do, bound to one caller.
+   *
+   * Every one of them is authorized the way `cancel_task` is rather than the
+   * way `POST /workers/leases` is: `submit_task` on the token, the project
+   * checked with `authorizeProject`, and the row itself owned by the caller.
+   * `run_task` is deliberately never asked for here, because it is the scope
+   * that admits worker registration, and a token handed to an editor to do
+   * one task must not be able to take everybody else's.
+   */
+  private workDeps(principal: AuthenticatedPrincipal): McpWorkDeps {
+    const operation = (): EditorWorkOperations => {
+      const editorWork = this.options.operations.editorWork;
+      if (editorWork === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot run tasks",
+        );
+      }
+      return editorWork;
+    };
+    /**
+     * The lease this caller is holding on a task, or a sentence saying why
+     * not.
+     *
+     * Ownership is checked against the worker row rather than against the
+     * task: two people may both be able to see a task, and only one of them
+     * is holding it. The lease route a desktop worker uses makes exactly this
+     * check, and for exactly this reason.
+     */
+    const heldLease = async (
+      taskId: string,
+    ): Promise<
+      | { lease: WorkLease; task: SubmittedTask; owner: WorkerRecord }
+      | { refusal: string }
+    > => {
+      const task = await this.options.store.getSubmittedTask(taskId);
+      if (task === undefined || task.projectId === undefined) {
+        return { refusal: `No task called "${taskId}".` };
+      }
+      await authorizeProject(
+        this.options.store,
+        principal,
+        task.projectId,
+        "submit_task",
+      );
+      const now = new Date().toISOString();
+      await this.options.store.expireWorkLeases(now);
+      const lease = (
+        await this.options.store.listWorkLeases({
+          status: "active",
+          projectId: task.projectId,
+        })
+      ).find((candidate) => candidate.taskId === taskId);
+      if (lease === undefined) {
+        return {
+          refusal:
+            `Nobody is holding ${taskId} right now. If you were, the hold ran ` +
+            "out and the task went back in the queue; call take_task to pick " +
+            "work up again.",
+        };
+      }
+      const owner = await this.options.store.getWorker(lease.workerId);
+      if (owner === undefined || owner.userId !== principal.user.id) {
+        return {
+          refusal: `${taskId} is being worked on by somebody else.`,
+        };
+      }
+      return { lease, task, owner };
+    };
+    return {
+      assertScope: (permission) => {
+        assertTokenScope(principal, permission as Permission);
+      },
+      // From the token this request arrived on, never from the model. See
+      // `editorBehind`: the connection already knows, and asking the caller
+      // to tell us was asking it to repeat something it could get wrong.
+      callerEditor: () => editorBehind(principal.token),
+      take: async (input) => await this.takeForEditor(principal, input),
+      report: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return { outcome: "not_held", reason: held.refusal };
+        }
+        const reported = await operation().report({
+          leaseId: held.lease.id,
+          actorId: principal.user.id,
+          status: input.status,
+          patches: input.patches,
+          summary: input.summary,
+          ...(input.detail === undefined ? {} : { detail: input.detail }),
+        });
+        if (reported.outcome === "lease_lost") {
+          return { outcome: "not_held", reason: reported.reason };
+        }
+        if (reported.outcome === "refused") {
+          return { outcome: "refused", reason: reported.reason };
+        }
+        if (input.status === "released") {
+          return {
+            outcome: "accepted",
+            note: `${input.taskId} is back in the queue for somebody else.`,
+          };
+        }
+        if (input.status === "failed") {
+          return {
+            outcome: "accepted",
+            note: `Recorded that ${input.taskId} could not be done, and said so in its thread.`,
+          };
+        }
+        if (reported.requeued === true) {
+          return {
+            outcome: "accepted",
+            note:
+              "Canonical moved on while you were working, so this went back " +
+              "in the queue to be redone against the newer revision. Call " +
+              "take_task to pick it up again.",
+          };
+        }
+        return {
+          outcome: "accepted",
+          note:
+            reported.integrationStatus === "integrated" ||
+            reported.integrationStatus === undefined
+              ? `Landed. ${input.taskId} is done and its thread says so.`
+              : `Filed, and integration reported ${reported.integrationStatus}. The thread has the detail.`,
+        };
+      },
+      note: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return "not_held";
+        }
+        // The event a desktop worker writes, written the same way, so the
+        // watcher narrates it into the thread without knowing or caring
+        // which end produced it. A line from Cursor and a line from a laptop
+        // are the same line to everybody reading.
+        await this.options.store.appendAudit(undefined, {
+          type: "agent_progress",
+          taskId: held.lease.taskId,
+          data: {
+            projectId: held.lease.projectId,
+            repositoryId: held.lease.repositoryId,
+            workerId: held.lease.workerId,
+            leaseId: held.lease.id,
+            message: input.message,
+          },
+        });
+        // Evidence of life, so it renews the hold exactly as a worker's
+        // heartbeat does. An editor that has been narrating its work for
+        // thirty-five minutes is demonstrably alive, and losing its task at
+        // the half hour for want of a separate call would be punishing it
+        // for saying so. `extend_task` remains the way to ask for *longer*
+        // than the ordinary window; this only keeps the ordinary one.
+        await this.options.operations.editorWork
+          ?.extend({ leaseId: held.lease.id, ttlMs: EDITOR_HOLD_MS })
+          .catch(() => undefined);
+        for (const vendor of held.owner.adapters) {
+          this.editors.declare({ userId: principal.user.id, vendor });
+        }
+        return "recorded";
+      },
+      extend: async (input) => {
+        const held = await heldLease(input.taskId);
+        if ("refusal" in held) {
+          return undefined;
+        }
+        const expiresAt = await operation().extend({
+          leaseId: held.lease.id,
+          ttlMs: input.minutes * 60 * 1000,
+        });
+        if (expiresAt === undefined) {
+          return undefined;
+        }
+        // Still working, so still here. The vendor comes off the row holding
+        // the lease rather than from the request: an editor cannot declare
+        // presence for an agent it is not the one running.
+        for (const vendor of held.owner.adapters) {
+          this.editors.declare({ userId: principal.user.id, vendor });
+        }
+        return {
+          expiresAt,
+          bundleUrl: `${this.appBaseUrl}${API_PREFIX}/mcp/bundle/${this.bundleTickets.issue(
+            { leaseId: held.lease.id, userId: principal.user.id },
+          )}`,
+        };
+      },
+    };
+  }
+
+
+  /**
+   * Hands this caller one task to do in their editor.
+   *
+   * The one resolver, used by `take_task` and by `submit_task` when it gives
+   * an editor back the work it has just filed. Two copies of "which projects
+   * may this person be handed work from" is two answers, and the one that
+   * drifted would be the one deciding whose code runs on somebody's laptop.
+   */
+  private async takeForEditor(
+    principal: AuthenticatedPrincipal,
+    input: {
+      vendor: EditorVendor;
+      label: string;
+      repository?: string;
+      taskId?: string;
+    },
+  ): Promise<McpTakenTask | undefined> {
+    const editorWork = this.options.operations.editorWork;
+    if (editorWork === undefined) {
+      return undefined;
+    }
+    const reachable = await this.mcpReachable(principal);
+        const wanted =
+          input.repository === undefined
+            ? reachable
+            : reachable.filter(
+                (entry) =>
+                  entry.repository.id.toLowerCase() ===
+                  input.repository?.toLowerCase(),
+              );
+        if (input.repository !== undefined && wanted.length === 0) {
+          throw new HttpError(
+            404,
+            "repository_not_found",
+            `No repository called "${input.repository}".`,
+          );
+        }
+        // Grouped by project, because leasing is a per-project question and
+        // the repository narrowing has to travel with it: a collaborator
+        // reaches a project through repository grants alone, and handing the
+        // project id without the grant set would let one grant execute work
+        // from every repository beside it.
+        const byProject = new Map<string, string[]>();
+        for (const entry of wanted) {
+          const held = byProject.get(entry.projectId) ?? [];
+          held.push(entry.repository.id);
+          byProject.set(entry.projectId, held);
+        }
+        for (const [projectId, repositoryIds] of byProject) {
+          const { project } = await authorizeProject(
+            this.options.store,
+            principal,
+            projectId,
+            "submit_task",
+          ).catch(() => ({ project: undefined }));
+          if (project === undefined) {
+            continue;
+          }
+          const taken = await editorWork.take({
+            actorId: principal.user.id,
+            organizationId: project.organizationId,
+            projectId,
+            repositoryIds,
+            vendor: input.vendor,
+            label: input.label,
+            ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+          });
+          if (taken === undefined) {
+            continue;
+          }
+          // Declared here and nowhere else. Taking work is the one act that
+          // proves an editor is at the keyboard and will come back, which is
+          // exactly what a mention needs to know before it is dispatched.
+          this.editors.declare({
+            userId: principal.user.id,
+            vendor: input.vendor,
+          });
+          return {
+            taskId: taken.taskId,
+            objective: taken.objective,
+            repository: taken.repositoryId,
+            branch: taken.branch,
+            baseRevision: taken.baseRevision,
+            expiresAt: taken.expiresAt,
+            // Absolute, because the caller is a `git fetch` on somebody's
+            // laptop rather than a page on this origin. A deployment with no
+            // base URL configured still answers with the path, which is
+            // wrong for git and obvious rather than silent.
+            bundleUrl: `${this.appBaseUrl}${API_PREFIX}/mcp/bundle/${this.bundleTickets.issue(
+              { leaseId: taken.leaseId, userId: principal.user.id },
+            )}`,
+            validationCommands: taken.validationCommands,
+          };
+        }
+        return undefined;
+  }
+
+  /** Every repository this principal can reach, with its default roster. */
+  private async mcpRepositories(
+    principal: AuthenticatedPrincipal,
+  ): Promise<McpRepository[]> {
+    const found: McpRepository[] = [];
+    for (const entry of await this.mcpReachable(principal)) {
+      found.push({
+        projectId: entry.projectId,
+        repository: entry.repository,
+        agents: await this.mcpAgentsIn(entry.projectId, entry.repository.id),
+      });
+    }
+    return found;
+  }
+
+  /**
+   * Every repository this principal can reach, without the rosters.
+   *
+   * Split out because resolving a room's mentionable agents is the expensive
+   * half and only one caller wants it. `take_task` asks this on every poll
+   * and cares about nothing but which repositories it may be handed work
+   * from; paying for a roster read per repository to answer that was a cost
+   * with no reader.
+   */
+  private async mcpReachable(
+    principal: AuthenticatedPrincipal,
+  ): Promise<Array<{ projectId: string; repository: StoredRepository }>> {
+    const organizations = await this.reachableOrganizations(principal);
+    const found: Array<{ projectId: string; repository: StoredRepository }> =
+      [];
+    for (const organization of organizations) {
+      const projects = await this.options.store
+        .listProjects(organization.id)
+        .catch(() => []);
+      for (const project of projects) {
+        // Authorisation per project rather than once: a grant holder reaches
+        // some projects and not others, and the narrowing set differs between
+        // them. A throw here means "not this one", not "not any".
+        const authorized = await authorizeProject(
+          this.options.store,
+          principal,
+          project.id,
+          "view",
+        ).catch(() => undefined);
+        if (authorized === undefined) {
+          continue;
+        }
+        const all = await this.options.store
+          .listProjectRepositories(project.id)
+          .catch(() => []);
+        const visible =
+          authorized.repositories === undefined
+            ? all
+            : all.filter((entry) => authorized.repositories?.has(entry.id));
+        for (const repository of visible) {
+          found.push({ projectId: project.id, repository });
+        }
+      }
+    }
+    return found;
+  }
+
+  /** The mentionable roster of one room, with liveness folded in. */
+  private async mcpAgentsIn(
+    projectId: string,
+    repositoryId: string,
+    channel?: string,
+    /** Whose agents these are, so the roster can say which are the caller's. */
+    ownerId?: string,
+  ): Promise<McpAgent[]> {
+    const channelId = await this.mcpChannelId(repositoryId, channel);
+    const [candidates, project] = await Promise.all([
+      this.resolveChannelMentionCandidates(projectId, repositoryId, channelId),
+      this.options.store.getProject(projectId).catch(() => undefined),
+    ]);
+    const live = await this.liveWorkerOwners(project?.organizationId);
+    return candidates.map((candidate) => ({
+      name: candidate.name,
+      // The CLI behind it and whether it is the caller's own. Together these
+      // are what let `submit_task` answer "who did the person mean" without
+      // making a model guess from a list of names.
+      ...(PROVIDER_TO_VENDOR[candidate.provider] === undefined
+        ? {}
+        : { vendor: PROVIDER_TO_VENDOR[candidate.provider] }),
+      mine: ownerId !== undefined && candidate.userId === ownerId,
+      // Only meaningful where this deployment refuses to execute on its own
+      // behalf; everywhere else the control plane answers regardless and an
+      // offline owner is not a fact worth acting on.
+      online:
+        !localAgentsOnly() ||
+        ApiGateway.agentIsLive(live, candidate.userId, candidate.provider),
+      owner: candidate.userName,
+    }));
+  }
+
+  /** A channel named by slug, or the repository's default room. */
+  private async mcpChannelId(
+    repositoryId: string,
+    slug?: string,
+  ): Promise<string | undefined> {
+    if (slug === undefined) {
+      return undefined;
+    }
+    const channels = await this.options.store
+      .listSubChannels(repositoryId)
+      .catch(() => []);
+    const found = channels.find(
+      (channel) => channel.slug.toLowerCase() === slug.toLowerCase(),
+    );
+    if (found === undefined) {
+      throw new HttpError(
+        404,
+        "channel_not_found",
+        `No channel called #${slug}. This repository has: ${channels
+          .map((channel) => `#${channel.slug}`)
+          .join(", ")}.`,
+      );
+    }
+    return found.id;
+  }
+
   private async reachableOrganizations(
     principal: AuthenticatedPrincipal,
   ): Promise<Organization[]> {
@@ -14261,7 +16222,7 @@ export class ApiGateway {
   private async authorizeFleet(
     principal: AuthenticatedPrincipal,
     url: URL,
-  ): Promise<{ organizationId: string }> {
+  ): Promise<{ organizationId: string; wholeFleet: boolean }> {
     const organizationId = url.searchParams.get("organizationId")?.trim() ?? "";
     if (organizationId.length === 0) {
       throw new HttpError(
@@ -14270,13 +16231,19 @@ export class ApiGateway {
         "organizationId is required",
       );
     }
-    await authorizeOrganization(
+    // Grants count for reaching the fleet at all, because somebody invited to
+    // one repository does run a machine here and has to be able to see
+    // whether it is online. What they see is another question: `wholeFleet`
+    // is false for them, and the routes below show them their own machines
+    // rather than the whole company's. Being handed one repository is not
+    // being told how much infrastructure the organization operates.
+    const { repositories } = await authorizeOrganizationOrGrant(
       this.options.store,
       principal,
       organizationId,
       "view",
     );
-    return { organizationId };
+    return { organizationId, wholeFleet: repositories === undefined };
   }
 
   /**
@@ -14660,24 +16627,98 @@ export class ApiGateway {
   private async liveWorkerOwners(
     organizationId?: string,
   ): Promise<Map<string, Set<string>>> {
-    const workers = await this.options.store
-      .listWorkers(
-        organizationId === undefined ? undefined : { organizationId },
-      )
-      .catch((): [] => []);
+    // The cutoff goes to the store, not to a loop here. This runs on every
+    // roster read and every @mention, and `registerWorker` writes a fresh row
+    // per worker start, so reading the whole table and discarding most of it
+    // made the commonest query in the product scale with how often people had
+    // restarted their desktops.
+    const live = await this.pollingOwners(organizationId);
+    // Editors folded in here rather than asked about beside this. There is
+    // one liveness answer in this process and this is it: a second source
+    // consulted by the roster and not by dispatch is exactly how an agent
+    // comes to be drawn as available and then told nothing is running it.
+    //
+    // Not narrowed by organization, and it cannot be: an editor declares a
+    // person and a vendor, not a tenant. That is safe in the direction it is
+    // wrong in, because everything downstream asks "is this agent's owner
+    // live", and the owner is already the agent's own.
+    for (const [userId, vendors] of this.editors.owners()) {
+      const advertised = live.get(userId) ?? new Set<string>();
+      for (const vendor of vendors) {
+        advertised.add(vendor);
+      }
+      live.set(userId, advertised);
+    }
+    return live;
+  }
+
+  /**
+   * Everyone with a machine that is actually polling for work.
+   *
+   * The workers half on its own, because two callers want different things
+   * from it: the roster wants it merged with editors, and the sentence that
+   * says whether work has *begun* wants it alone. One query builder rather
+   * than two, so "which workers count as live" is stated once.
+   */
+  private async pollingOwners(
+    organizationId?: string,
+  ): Promise<Map<string, Set<string>>> {
+    // The cutoff goes to the store, not to a loop here. This runs on every
+    // roster read and every @mention, and `registerWorker` writes a fresh row
+    // per worker start, so reading the whole table and discarding most of it
+    // made the commonest query in the product scale with how often people had
+    // restarted their desktops.
     const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
-    const live = new Map<string, Set<string>>();
+    const workers = await this.options.store
+      .listWorkers({
+        ...(organizationId === undefined ? {} : { organizationId }),
+        seenAfter: cutoff,
+      })
+      .catch((): [] => []);
+    const polling = new Map<string, Set<string>>();
     for (const worker of workers) {
-      if (worker.lastSeenAt <= cutoff) {
+      // An editor's row is not a machine that polls. It exists because a
+      // lease needs a foreign key, and counting it here is what made the
+      // distinction below collapse the first time it was written.
+      if (worker.version === EDITOR_WORKER_VERSION) {
         continue;
       }
-      const advertised = live.get(worker.userId) ?? new Set<string>();
+      const advertised = polling.get(worker.userId) ?? new Set<string>();
       for (const adapter of worker.adapters) {
         advertised.add(adapter);
       }
-      live.set(worker.userId, advertised);
+      polling.set(worker.userId, advertised);
     }
-    return live;
+    return polling;
+  }
+
+  /**
+   * The same question, answered with *how* rather than only whether.
+   *
+   * Both are live, and for the roster that is the whole answer: an editor
+   * will do the work, so drawing it as available is right. But the two are
+   * not the same promise, and one sentence in this product depends on the
+   * difference. A worker polls, so a task it can take starts within seconds
+   * and "I've taken this and I'm working on it" is true. An editor cannot be
+   * woken: it picks work up the next time the person asks it to, and telling
+   * the room the work has begun would be a straight lie for as long as they
+   * do not.
+   */
+  private async agentLiveness(
+    projectId: string,
+    ownerId: string,
+    provider: string,
+  ): Promise<"worker" | "editor" | undefined> {
+    const project = await this.options.store
+      .getProject(projectId)
+      .catch(() => undefined);
+    const polling = await this.pollingOwners(project?.organizationId);
+    if (ApiGateway.agentIsLive(polling, ownerId, provider)) {
+      return "worker";
+    }
+    return ApiGateway.agentIsLive(this.editors.owners(), ownerId, provider)
+      ? "editor"
+      : undefined;
   }
 
   /**
@@ -14714,11 +16755,28 @@ export class ApiGateway {
     return vendor === undefined ? true : advertised.has(vendor);
   }
 
-  private async organizationFleet(organizationId: string): Promise<{
+  private async organizationFleet(
+    organizationId: string,
+    /**
+     * Narrows the answer to one person's own machines.
+     *
+     * Passed for a caller who reaches this organization through a repository
+     * grant rather than a membership. Applied to the workers, which then
+     * narrows the leases with them, since a lease is only ever reported
+     * against a worker in the list.
+     */
+    onlyUserId?: string,
+  ): Promise<{
     workers: WorkerRecord[];
     active: WorkLease[];
   }> {
-    const workers = await this.options.store.listWorkers({ organizationId });
+    const everyWorker = await this.options.store.listWorkers({
+      organizationId,
+    });
+    const workers =
+      onlyUserId === undefined
+        ? everyWorker
+        : everyWorker.filter((worker) => worker.userId === onlyUserId);
     const owned = new Set(workers.map((worker) => worker.id));
     const visibleProjects = new Set(
       (await this.options.store.listProjects(organizationId)).map(
@@ -15670,6 +17728,119 @@ export class ApiGateway {
     );
   }
 
+  /**
+   * Posts one message into a channel as this principal, and dispatches
+   * whatever it mentions.
+   *
+   * Lifted out of the channel POST route so a second caller can reach it. The
+   * second caller is the MCP endpoint: a task asked for from somebody's editor
+   * has to arrive the same way one asked for in the room does, or it gets a
+   * different thread, a different owner's credential and a different set of
+   * directives — four things reimplemented slightly wrong rather than reused.
+   *
+   * Everything here was already the route's body and is unchanged, including
+   * the two decisions worth restating. Reading and posting come apart in an
+   * open room, so membership is checked separately from access. And a mention
+   * that fails to dispatch must not un-send what was typed, so the dispatch is
+   * caught — loudly, on stderr, because a bare catch here once made every
+   * failure in that path present as "nothing happened".
+   */
+  private async postChannelMessageAndDispatch(input: {
+    projectId: string;
+    repositoryId: string;
+    /** Absent means the repository's default room. */
+    channelId: string | undefined;
+    content: string;
+    principal: AuthenticatedPrincipal;
+    /**
+     * Whether a dispatch failure should reach the caller.
+     *
+     * False for the room, where the rule is that a mention which fails to
+     * dispatch must not un-send what was typed: the message is already posted
+     * and the person is looking at the thread, where the failure will show.
+     *
+     * True for a caller that is not looking at the thread. An MCP client has
+     * only this return value to go on, and reporting "sent" for work that
+     * threw on its way to being started is the one answer it must never give.
+     */
+    rethrowDispatchErrors?: boolean;
+  }): Promise<{
+    channel: SubChannel;
+    message: ChannelMessage;
+    response: ChannelCommandResponse | undefined;
+    /** The tasks this message started, in the order they were dispatched. */
+    taskIds: readonly string[];
+  }> {
+    const { projectId, repositoryId, content, principal } = input;
+    const channel = await this.authorizeSubChannel({
+      projectId,
+      repositoryId,
+      channelId: input.channelId,
+      principal,
+    });
+    if (
+      !(await this.canPostInSubChannel(
+        channel,
+        principal.user.id,
+        await this.isRepositoryAdmin(principal, projectId, repositoryId),
+      ))
+    ) {
+      throw new HttpError(
+        403,
+        "not_a_member",
+        `You are not a member of #${channel.slug}`,
+      );
+    }
+    const message = await this.options.store.appendChannelMessage({
+      repositoryId,
+      channelId: channel.id,
+      projectId,
+      kind: "user",
+      authorId: principal.user.id,
+      content,
+    });
+    await this.options.store.appendAudit(undefined, {
+      type: "channel_message_posted",
+      data: {
+        projectId,
+        repositoryId,
+        channelId: channel.id,
+        messageId: message.id,
+      },
+    });
+    let dispatched: ChannelDispatch = { taskIds: [] };
+    try {
+      dispatched = await this.dispatchChannelMentions({
+        projectId,
+        repositoryId,
+        channelId: channel.id,
+        content,
+        senderId: principal.user.id,
+        referencedMessageId: message.id,
+      });
+    } catch (error) {
+      // Loud either way. A bare catch here once made every failure in the
+      // dispatch path present as "nothing happened", which is the hardest
+      // possible symptom to diagnose.
+      process.stderr.write(
+        `[channel] dispatch failed for ${repositoryId}: ${
+          error instanceof Error ? (error.stack ?? error.message) : String(error)
+        }\n`,
+      );
+      if (input.rethrowDispatchErrors === true) {
+        throw error;
+      }
+    }
+    return {
+      channel,
+      message,
+      ...(dispatched.response === undefined
+        ? { response: undefined }
+        : { response: dispatched.response }),
+      taskIds: dispatched.taskIds,
+    };
+  }
+
   private async dispatchChannelMentions(input: {
     projectId: string;
     repositoryId: string;
@@ -15686,7 +17857,7 @@ export class ApiGateway {
     senderId: string;
     /** The stored channel root that caused this dispatch. */
     referencedMessageId: string;
-  }): Promise<ChannelCommandResponse | undefined> {
+  }): Promise<ChannelDispatch> {
     const { projectId, repositoryId, channelId, senderId, referencedMessageId } =
       input;
     // A command says *how* to treat the request; an "@" says who it is for.
@@ -15715,7 +17886,12 @@ export class ApiGateway {
         ...(channelId === undefined ? {} : { channelId }),
       });
       if (dispatched.handled) {
-        return dispatched.response;
+        return {
+          ...(dispatched.response === undefined
+            ? {}
+            : { response: dispatched.response }),
+          taskIds: [],
+        };
       }
     }
     const [candidates, people] = await Promise.all([
@@ -15750,7 +17926,7 @@ export class ApiGateway {
               "their owners to make theirs org-wide.",
             channelId,
           );
-          return;
+          return { taskIds: [] };
         }
         if (parsed?.command.name === "ask") {
           await this.postChannelSystemMessage(
@@ -15760,7 +17936,7 @@ export class ApiGateway {
               "should ask the questions.",
             channelId,
           );
-          return;
+          return { taskIds: [] };
         }
         // "status report" reads as a task to the verb detector — "report" is
         // work vocabulary — and it is the whole reason this feature exists,
@@ -15786,7 +17962,7 @@ export class ApiGateway {
               "job once per agent. Mention one agent to dispatch work.",
             channelId,
           );
-          return;
+          return { taskIds: [] };
         }
         await Promise.all(
           reachable.map((candidate) =>
@@ -15811,7 +17987,7 @@ export class ApiGateway {
             ).catch(() => undefined),
           ),
         );
-        return;
+        return { taskIds: [] };
       }
       const mentioned = candidates.filter((candidate) =>
         textMentionsName(content, candidate.name),
@@ -15838,7 +18014,7 @@ export class ApiGateway {
             "should ask the questions.",
             channelId,
           );
-        return;
+        return { taskIds: [] };
       }
       if (parsed?.command.name === "queue" && mentioned.length !== 1) {
         await this.postChannelSystemMessage(
@@ -15854,7 +18030,7 @@ export class ApiGateway {
                     .join(", ")}.`,
             channelId,
           );
-        return;
+        return { taskIds: [] };
       }
       if (
         parsed?.command.name === "queue" &&
@@ -15866,7 +18042,7 @@ export class ApiGateway {
           "`/queue` needs a task to run later — use `/queue @agent what should run next`.",
             channelId,
           );
-        return;
+        return { taskIds: [] };
       }
       if (
         mentioned.length === 0 &&
@@ -15903,8 +18079,9 @@ export class ApiGateway {
                 `${candidates.map((candidate) => `@${candidate.name}`).join(", ")}.`,
             channelId,
           );
-        return;
+        return { taskIds: [] };
       }
+      const started: string[] = [];
       for (const candidate of mentioned) {
         // `/dnc` stays on the direct, read-only answer path. `/ask` is
         // deliberately different: it is coordinated work whose first round
@@ -15938,7 +18115,7 @@ export class ApiGateway {
           );
           continue;
         }
-        await this.dispatchOneMention({
+        const startedId = await this.dispatchOneMention({
           projectId,
           repositoryId,
           content,
@@ -15960,8 +18137,11 @@ export class ApiGateway {
           // what the sender actually typed.
           ...(parsed?.command.name === "simple" ? { brief: true } : {}),
         });
+        if (startedId !== undefined) {
+          started.push(startedId);
+        }
       }
-      return;
+      return { taskIds: started };
     }
     // Both commands require an explicit agent: `/ask` needs one task owner
     // for its forced question round, while `/dnc` needs one direct answerer.
@@ -15976,7 +18156,7 @@ export class ApiGateway {
           : `\`/dnc\` answers without starting work — mention the agent you are asking: \`${parsed.command.usage}\`.`,
             channelId,
           );
-      return;
+      return { taskIds: [] };
     }
     // "Yes" answers the offer below before it is read as anything else — an
     // approval is a short sentence with no work verb in it, so nothing would
@@ -15990,7 +18170,7 @@ export class ApiGateway {
         candidates,
       })
     ) {
-      return;
+      return { taskIds: [] };
     }
     await this.maybeAutoClaimTask({
       projectId,
@@ -16000,6 +18180,11 @@ export class ApiGateway {
       candidates,
       referencedMessageId,
     });
+    // Empty on purpose. Auto-claim decides with a model call that is
+    // deliberately not awaited — see `maybeAutoClaimTask` — so at this point
+    // there is no task and may never be one. A caller that needs an id back
+    // has to name an agent, which is what puts it on the mention path above.
+    return { taskIds: [] };
   }
 
   /**
@@ -16326,7 +18511,16 @@ export class ApiGateway {
      * actually receives — the answer prompt or the task objective.
      */
     brief?: boolean;
-  }): Promise<void> {
+    /**
+     * The task this mention started, when it started one.
+     *
+     * Undefined from every path that refuses, answers directly, or files
+     * a question instead — a caller must not read "no id" as failure. It
+     * is also undefined when submission threw, which is reported into the
+     * thread below rather than raised, because a mention that cannot be
+     * dispatched must not un-send the message that carried it.
+     */
+  }): Promise<string | undefined> {
     const {
       projectId,
       repositoryId,
@@ -16433,16 +18627,39 @@ export class ApiGateway {
       input.trigger !== "answer_followup" &&
       readsAsQuestion(content)
     ) {
-      const taskObjective = await this.answerInChannel(
-        candidate,
-        content,
-        projectId,
-        repositoryId,
-        input.referencedMessageId,
-        withAnswerDirective(
-          input.brief === true ? KEEP_IT_SIMPLE_DIRECTIVE : undefined,
-        ),
-      );
+      let taskObjective: string | undefined;
+      try {
+        taskObjective = await this.answerInChannel(
+          candidate,
+          content,
+          projectId,
+          repositoryId,
+          input.referencedMessageId,
+          withAnswerDirective(
+            input.brief === true ? KEEP_IT_SIMPLE_DIRECTIVE : undefined,
+          ),
+        );
+      } catch (error) {
+        // Said in the room before it is logged. The answer path has no
+        // thread of its own, so a failure here used to leave exactly what
+        // the person saw: dots for a minute, then nothing — no entry, no
+        // task, no way to tell a slow answer from a dead one. The log line
+        // the caller writes is still written; this is the half a person can
+        // see.
+        await this.appendChannelEntry({
+          projectId,
+          repositoryId,
+          kind: "agent",
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content: `I could not answer this: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          ...(input.referencedMessageId === undefined
+            ? {}
+            : { referencedMessageId: input.referencedMessageId }),
+        }).catch(() => undefined);
+        throw error;
+      }
       if (taskObjective !== undefined) {
         await this.dispatchOneMention({
           projectId,
@@ -16777,13 +18994,21 @@ export class ApiGateway {
       // Only asked on a deployment that executes nothing itself, because
       // only there can the answer be no. Everywhere else the control plane
       // takes the task the moment it lands and the present tense is true.
-      const waitingForAMachine =
-        localAgentsOnly() &&
-        !(await this.agentHasLiveMachine(
-          projectId,
-          candidate.userId,
-          candidate.provider,
-        ));
+      // Three answers, not two, and the third is the one this used to get
+      // wrong. An editor is live in the sense the roster cares about — it
+      // will do the work — but it cannot be woken, so it picks the task up
+      // the next time the person asks it to. Saying "I'm working on it"
+      // there is a lie for as long as they do not ask, and the room has no
+      // way to tell it from a run that has genuinely started.
+      const liveness = localAgentsOnly()
+        ? await this.agentLiveness(
+            projectId,
+            candidate.userId,
+            candidate.provider,
+          )
+        : "worker";
+      const waitingForAMachine = liveness === undefined;
+      const waitingForAnEditor = liveness === "editor";
       const acknowledgement = await this.appendChannelThreadReply({
         projectId,
         repositoryId,
@@ -16793,7 +19018,11 @@ export class ApiGateway {
           ? "I've filed this, but nothing is running it yet — my agents run " +
             "on my own machine and it isn't online. I'll start as soon as " +
             "it is."
-          : input.planOnly === true
+          : waitingForAnEditor
+            ? "I've filed this. I'm running inside an editor rather than on " +
+              "a machine that watches for work, so I'll pick it up the next " +
+              "time I'm asked to there."
+            : input.planOnly === true
             ? "I've taken this task and I'm working on the plan."
             : startsNow
               ? "I've taken this task and I'm working on it."
@@ -17001,6 +19230,7 @@ export class ApiGateway {
           watched?.pending.unshift(...(contextualized ? [] : thoughts));
         })
         .catch(() => undefined);
+      return task.id;
     } catch (error) {
       await this.appendChannelThreadReply({
         repositoryId,
@@ -20915,7 +23145,127 @@ export class ApiGateway {
    * `planned` by then, and cancelling a run that has just started would be
    * far worse than letting one late plan live.
    */
-  private async lapseStalePlanHolds(): Promise<void> {
+/**
+   * Says so when nothing ever picked a task up.
+   *
+   * `waitingForAMachine` is decided once, at dispatch, and never revisited. A
+   * machine that was live at that instant and then went away — or that is
+   * running but will never be offered this work, because its adapter list
+   * does not carry the agent's vendor — leaves the thread saying "I've taken
+   * this task and I'm working on it" in front of a row nothing will ever
+   * claim. The offline exchange cannot reach this: it runs strictly before
+   * dispatch, and answers the case where the agent already reads as offline.
+   * This is the other direction, and it had nobody watching it.
+   *
+   * Deliberately not a cancellation. The work is still good and still runs if
+   * the machine comes back; what was missing was anybody saying that it had
+   * not started. `lapseStalePlanHolds` beside this one may cancel because a
+   * plan nobody approved has genuinely ended.
+   *
+   * Three things keep this from crying wolf. A task queued behind another by
+   * `afterTaskId` is waiting by design. A repository with any active lease is
+   * working, and this row is behind that work. And the notice is written once,
+   * recorded as `task_stalled` against the task rather than in memory, so a
+   * restart does not say it again.
+   */
+  private async reportStalledTasks(): Promise<void> {
+    const cutoff = Date.now() - (this.options.stalledTaskMs ?? STALLED_TASK_MS);
+    for (const repository of await this.options.store.listRepositories()) {
+      const queued = await this.options.store
+        .listSubmittedTasks({ repositoryId: repository.id, status: "submitted" })
+        .catch((): [] => []);
+      const candidates = queued.filter(
+        (task) =>
+          task.afterTaskId === undefined &&
+          Date.parse(task.submittedAt) <= cutoff,
+      );
+      if (candidates.length === 0) {
+        // The common case, and the reason nothing below runs unconditionally:
+        // most rooms have nothing queued at all, and this walks every
+        // repository on the deployment once a minute.
+        continue;
+      }
+      // One read for the whole repository rather than one per task. A lease
+      // anywhere here means work is moving and these rows are behind it.
+      const active = await this.options.store
+        .listWorkLeases({ repositoryId: repository.id, status: "active" })
+        .catch((): [] => []);
+      if (active.length > 0) {
+        continue;
+      }
+      const messages = await this.options.store
+        .listChannelMessages(repository.id, "", { limit: 200 })
+        .catch((): [] => []);
+      for (const task of candidates) {
+        const said = await this.options.store
+          .listAuditEvents({
+            taskId: task.id,
+            types: ["task_stalled"],
+            limit: 1,
+          })
+          .catch((): [] => []);
+        if (said.length > 0) {
+          continue;
+        }
+        const root = messages.find((message) => message.taskId === task.id);
+        if (root === undefined || task.projectId === undefined) {
+          // No thread to correct — submitted outside a channel, or a row
+          // predating project stamping, which the reply cannot be addressed
+          // without inventing an id the room does not have. Recorded anyway,
+          // so the sweep does not reconsider it every minute for the life of
+          // the row.
+          await this.noteStalledTask(task);
+          continue;
+        }
+        await this.appendChannelThreadReply({
+          projectId: task.projectId,
+          repositoryId: repository.id,
+          messageId: root.id,
+          authorId: "coordinator",
+          content:
+            `${CHANNEL_STALLED_PREFIX} Nothing has picked this up. It is still ` +
+            "queued and will start on its own if the machine that runs this " +
+            "agent comes back — open Kumi there, or say `/cancel` here and " +
+            "give it to somebody who is online.",
+          kind: "system",
+        }).catch((error: unknown) => {
+          // A channel write that fails must not stop the record below: the
+          // audit row is what keeps this from being said twice, and losing it
+          // would turn one missed notice into one every minute.
+          process.stderr.write(
+            `[channel] stalled notice for ${task.id} could not be posted: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          );
+          return undefined;
+        });
+        await this.noteStalledTask(task);
+      }
+    }
+  }
+
+  /** Records that the stall was noticed, so it is only ever said once. */
+  private async noteStalledTask(task: {
+    id: string;
+    projectId: string | undefined;
+    repositoryId: string;
+    submittedAt: string;
+  }): Promise<void> {
+    await this.options.store
+      .appendAudit(undefined, {
+        type: "task_stalled",
+        taskId: task.id,
+        data: {
+          projectId: task.projectId,
+          repositoryId: task.repositoryId,
+          submittedAt: task.submittedAt,
+          reason: "No worker claimed this task",
+        },
+      })
+      .catch(() => undefined);
+  }
+
+    private async lapseStalePlanHolds(): Promise<void> {
     const ttl =
       this.options.planHoldTtlMs ??
       planHoldTtlMs(process.env["COORD_PLAN_HOLD_TTL_MINUTES"]);
@@ -22497,6 +24847,30 @@ export class ApiGateway {
           },
         })
         .catch(() => undefined);
+      // And said where somebody is actually looking.
+      //
+      // The audit line above is the whole of what this used to do, which made
+      // the name of this method half true: an expiry was recorded and never
+      // announced. What a person saw was an agent that said it was thinking
+      // and then stopped — no failure, no message, nothing to retry from —
+      // because the worker treats a lost lease as somebody else's task and
+      // correctly declines to report on work it no longer owns. Nobody was
+      // left to say anything at all.
+      //
+      // A machine that changes network is the ordinary way to reach this, and
+      // "the task went back on the queue" is both true and the one thing worth
+      // knowing, so it is said plainly rather than as a fault.
+      // A lease with no project cannot be addressed to a room; the audit
+      // line above is then the whole record, as it was before.
+      if (lease.projectId !== undefined) {
+        await this.postChannelSystemMessage(
+          lease.projectId,
+          lease.repositoryId,
+          "Lost contact with the machine running this task, so it has gone " +
+            "back on the queue. It will be picked up again by whichever " +
+            "agent is next available.",
+        ).catch(() => undefined);
+      }
     }
   }
 
@@ -24867,6 +27241,67 @@ export class ApiGateway {
    * only a fallback because that header is chosen by the caller: on a
    * deployment where it can be spoofed, `COORD_PUBLIC_URL` is the fix.
    */
+  /**
+   * Whether an approved MCP server will actually reach an agent here: the
+   * deployment switch and the sealer, both. What the listing reports, and
+   * what every write that could arm a server is gated on.
+   */
+  private mcpServersAvailable(): boolean {
+    return mcpServersEnabled() && this.options.secretSealer !== undefined;
+  }
+
+  /**
+   * The sealer, or a 501 naming what is missing.
+   *
+   * Storing a server while the switch is off is refused, not merely
+   * ineffective, so that turning the switch off leaves nothing armed and
+   * turning it on later arms nothing that was configured while nobody
+   * thought it could run. The message names the variable to set, and when
+   * it is the sealer that is absent, the credential store that supplies
+   * it — the same shape as the billing routes without Stripe.
+   */
+  private requireMcpServers(): SecretSealer {
+    if (!mcpServersEnabled()) {
+      throw new HttpError(
+        501,
+        "mcp_disabled",
+        "This deployment does not hand MCP servers to its agents; set " +
+          "COORD_MCP_ENABLED=1 to turn that on",
+      );
+    }
+    const sealer = this.options.secretSealer;
+    if (sealer === undefined) {
+      throw new HttpError(
+        501,
+        "mcp_disabled",
+        "This deployment has no credential store to seal MCP secrets with; " +
+          "COORD_MCP_ENABLED is set but no COORD_CREDENTIAL_KEY store was opened",
+      );
+    }
+    return sealer;
+  }
+
+  /**
+   * Every host this deployment knows itself by, lower-cased, for the loop
+   * check on an MCP server's URL. Empty when nothing is configured, in which
+   * case only the exact endpoint path can be recognised.
+   */
+  private ownHosts(): string[] {
+    const hosts: string[] = [];
+    for (const configured of [this.publicUrl, this.appBaseUrl]) {
+      if (configured === "") {
+        continue;
+      }
+      try {
+        hosts.push(new URL(configured).host.toLowerCase());
+      } catch {
+        // A malformed configured origin cannot name a host; the exact-path
+        // rule still applies.
+      }
+    }
+    return hosts;
+  }
+
   private originFor(request: IncomingMessage, secure: boolean): string {
     if (this.publicUrl !== "") {
       return this.publicUrl.replace(/\/+$/u, "");
@@ -25195,6 +27630,10 @@ export class ApiGateway {
     response.setHeader("Content-Type", "application/json; charset=utf-8");
     response.setHeader("Content-Length", String(body.length));
     response.setHeader("Cache-Control", "no-store");
+    // Carried on replies the page is already making, rather than on a poll of
+    // its own: the client asks this server something every few seconds, so
+    // noticing a deploy costs no request at all. See {@link BUILD_IDENTITY}.
+    response.setHeader("X-Kumi-Build", BUILD_IDENTITY);
     response.writeHead(status);
     response.end(body);
   }

@@ -60,7 +60,8 @@ the web UI.
 | `COORD_ALLOWED_ORIGINS` | Comma-separated browser origins allowed CORS access, for a UI hosted on a different origin. | none |
 | `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. Read once at boot and then removed from the process environment, so nothing the control plane spawns can see it. | generated |
 | `COORD_CREDENTIAL_STAGING` | Writable directory where per-task vendor credential homes are created. Codex refuses to create PATH-alias helper binaries when `CODEX_HOME` sits under `/tmp`, so the control-plane image points this at `/var/cache/coord/credentials`. Unset uses the process temp directory. | process temp directory (`/var/cache/coord/credentials` in the control-plane image) |
-| `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
+| `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** It also decides whether chatting with an agent may use this deployment's own vendor login: the two are one question — whether spending the host's login on somebody else's behalf is acceptable here — and answering it only for tasks left a deployment running work on the host login while refusing to answer a question about that work. See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
+| `COORD_SYSTEM_ADMINS` | Email addresses, comma separated, granted system administration when they sign in. The only other way to become one is to be the very first account this deployment ever created — `PATCH /admin/users/:id` needs the flag it grants — so a deployment whose first account arrived some other way had no administrator and no way to appoint one. Matched case-insensitively. Removing an address does not demote anybody; that is the admin screen, deliberately, so a variable edited in a hurry cannot lock everyone out. | unset |
 | `KUMI_PAYMENTS_ENABLED` | Set to `1` to switch the payment pathway on. Off by default, and off means off: no checkout, no billing portal, no Stripe webhook, no trial, and no entitlement gate — every organization keeps full use of its repositories. Public sign-up becomes a waitlist at `POST /api/v1/waitlist`; whoever runs the deployment lets people through one at a time in Settings — Deployment, which admits that address at `POST /api/v1/auth/register` and gives it a free organization. The four `STRIPE_*` settings are only read when this is on. | off |
 | `COORD_ALLOW_REGISTRATION` | Set to `0` to close self-service sign-up at `/api/v1/auth/register`. A new account owns its own organization and can run tasks, so close registration on a deployment strangers can reach unless that is intentional. Invitations are unaffected. `COORD_DISABLE_REGISTRATION=1` still closes it explicitly. | open |
 | `COORD_REQUIRE_EMAIL_CONFIRMATION` | Set to `1` to make sign-up mail a six-digit code and create the account only once that code is submitted. Off by default: sign-up creates the account immediately and signs the browser in, so a deployment with no mail configured can still take sign-ups. Only turn it on where a mail transport below is configured and tested — otherwise the code goes to the log and nobody can finish signing up. | off |
@@ -244,11 +245,27 @@ Worker environment:
 | `COORD_PROJECT_ROOT` | Directory with the worker's `.coordinator/config.json` (agents, sandbox). | working directory |
 | `COORD_WORKER_ROOT` | Where leased workspaces are materialized. | `.coordinator/worker` |
 | `COORD_WORKER_NAME` | Display name in the workers list. | hostname-derived |
+| `COORD_WORKER_CONCURRENCY` | How many tasks this machine runs at once. | sized from memory, at least 4 |
+| `COORD_PAUSE_ON_BATTERY` | Stop taking work while on battery. Off by default, so a laptop works whether or not it is plugged in. Set it on a machine that really does sleep unattended: a lease held by a sleeping machine is unavailable to everybody else until it expires. Know what it costs first — a worker that is not asking for work is not telling the control plane it exists either, because liveness is a side effect of the lease request, so three minutes later its owner's agents read as having no machine at all. | off |
 | `COORD_PROJECT_ID` | Only lease work for this project. | `project_local` |
 | `COORD_REPOSITORY` | Only lease work for this repository. | any |
 
-A worker that shuts down cleanly releases its lease immediately; one that
-dies simply stops heartbeating and the lease expires, so its task returns to
+A worker holds several leases at once and runs their agents together, the way
+a control-plane run leases a whole wave rather than one task. The default is
+the same memory-derived figure `COORD_REPOSITORY_PARALLELISM` uses, so a
+machine offers what it can hold; `COORD_WORKER_CONCURRENCY=1` makes it take
+one task at a time. The repository's own parallelism bound still applies on
+top and is the one that governs: a worker that asks for more than a repository
+admits is simply not granted the extra leases.
+
+This matters most with `COORD_LOCAL_AGENTS_ONLY=1`, where the control plane
+executes nothing and every task waits for somebody's machine. A fleet of
+one-task workers there is a queue that runs one agent at a time no matter how
+much work is submitted, which looks from the outside like a coordinator that
+has stopped rather than a fleet that is full.
+
+A worker that shuts down cleanly releases its leases immediately; one that
+dies simply stops heartbeating and the leases expire, so its tasks return to
 the queue either way.
 
 ## Project policy and budgets

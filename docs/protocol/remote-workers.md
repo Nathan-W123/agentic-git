@@ -9,10 +9,30 @@ Every endpoint is bearer-authenticated and requires the `run_task` scope, so a
 read-only token cannot pull work or return results. See
 [API tokens](api-tokens.md).
 
-The protocol is versioned. Each assignment carries `protocolVersion`; this
-document describes **version 2**, which is plan-first. A worker refuses to run
-against a control plane advertising version 1 rather than silently falling back
-to executing before its plan has been arbitrated.
+There is a second way a task gets done, with no worker process at all: an
+editor connected over MCP takes it and does it in the checkout the person
+already has open. That path shares the lease, the admission and the
+integration described here, and differs in when the plan is admitted and how
+long a hold lasts. See [doing Kumi's work from an editor](editor-work.md).
+
+The protocol is versioned in both directions. Each assignment carries the
+control plane's `protocolVersion`, and a worker announces its own in the body
+of `POST /workers/leases`. This document describes **version 4**:
+
+- **2** is plan-first. A worker refuses to run against a control plane
+  advertising version 1 rather than silently falling back to executing before
+  its plan has been arbitrated.
+- **3** lets a claim on the whole repository be narrowed while it is held, so
+  a control plane only grants one to a worker announcing 3 or later.
+- **4** lets an assignment carry `mcpServers` — the project's approved MCP
+  servers, secrets opened, for the one machine allowed to run them. A control
+  plane withholds them from a worker announcing anything older and records
+  that it did.
+
+The floor a worker holds a control plane to is **3**, not its own version:
+everything 4 added is optional, and a control plane one release behind simply
+never sends it. Refusing it would strand every desktop that updated before the
+server did.
 
 ## Plan first, then execute
 
@@ -458,6 +478,34 @@ later.
 A result on a lapsed lease is refused. By then another worker may hold the
 task, and accepting both would let two workers write results for one task.
 
+## MCP servers on the lease
+
+Since protocol 4 an assignment may carry `mcpServers`: the project's approved
+MCP servers, each as `{ name, transport, command?, args?, env?, url?, headers? }`
+with its secrets already opened into `env` (stdio) or `headers` (http). The
+control plane only attaches them when every one of these holds, and writes an
+audit event naming which failed when it does not:
+
+- `COORD_MCP_ENABLED=1` on the control plane and the server approved in
+  Settings (approval is a recorded act, separate from creating it)
+- the server's scope covers the task's repository
+- the worker announced protocol 4 or later on its lease request
+- the worker's owner is the owner of the agent the task was mentioned to, so
+  the secrets are being handed to the one person allowed to run with them
+- the sealing key is present, and every secret opens with it
+
+Nothing in that list starts anything. The worker applies its own allowlist
+(`mcp.allow` in the project file: `"all"`, or a list of `{ name, digest }`
+entries, absent meaning run nothing), writes what survives into the run's
+scratch directory beside the workspace — never into it, where the changeset
+would commit it — and hands the file to the vendor CLI. The digest is
+computed by the worker from what the lease carried — the command and
+arguments or URL, and the names of the secrets — so a server the project
+redefines after the owner allowed it is withheld again, and said to have
+changed. What was withheld is posted into the thread and offered to the
+desktop app, which shows the owner what each server runs or talks to before
+asking; the app's Agents menu can take every yes back.
+
 ## What a worker never gets
 
 - The canonical repository path, or any filesystem access to it
@@ -466,6 +514,9 @@ task, and accepting both would let two workers write results for one task.
 - Another tenant's leases — every lease action verifies the worker belongs to
   the calling user, and returns `404` rather than `403` so lease ids cannot be
   probed
+- Another person's MCP secrets — a lease whose worker owner is not the
+  mentioned agent's owner is served without `mcpServers`, whatever the
+  project approved
 
 ## The worker daemon
 
@@ -479,11 +530,23 @@ environment:
 | `COORD_ORGANIZATION` | Organization this worker registers into |
 | `COORD_PROJECT_ROOT` | Project supplying agent definitions |
 | `COORD_WORKER_NAME` | Reported to the fleet listing |
+| `COORD_WORKER_CONCURRENCY` | How many tasks this machine runs at once |
 | `COORD_REPOSITORY` | Restrict this worker to one repository |
 
 Each iteration leases a task, fetches the bundle, clones it, has the agent
 plan, gets that plan admitted, runs the agent, returns a changeset, and deletes
 the workspace. It owns nothing durable.
+
+Iterations run together rather than one after another. The daemon takes one
+lease at a time — the repository's parallelism bound is counted across active
+leases, so asking for a batch would ignore it — but starts looking for the
+next as soon as the previous one *has* its lease, rather than when it has
+finished with it. Everything a run owns while it holds a lease is its own: its
+agent session, its blanket claim, its admission wait and the plan it finally
+reports. The one thing runs share is this machine's cache of the repository,
+and work on that is serialised per repository, because concurrent fetches into
+one bare repository lose a ref lock and the loser's recovery is to delete the
+cache the winner is still reading.
 
 Splitting planning from execution costs the worker nothing to arrange: all
 shipped adapters separate them. `requestPlan` returns the agent's intent

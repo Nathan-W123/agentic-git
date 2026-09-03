@@ -260,7 +260,7 @@ function runOnce(executable, attempt) {
         clearTimeout(timer);
         // The app-server does not exit on its own; it is killed here, after
         // it has already answered.
-        stop(child);
+        stopProcess(child);
         resolve(value);
       }
     };
@@ -338,7 +338,15 @@ function runOnce(executable, attempt) {
  * not run has to fall through to the signal, which reaches less than the tree
  * does but is better than the tree surviving unremarked.
  */
-function stop(child) {
+/**
+ * Ends a child and whatever it started.
+ *
+ * Exported for the login probe beside this one: a status command that hangs
+ * has to be killed as a tree, not signalled, or an orphan `npx` is left behind
+ * on somebody's own machine — and doing that dance twice is how the two copies
+ * come to disagree about which platform needs which.
+ */
+export function stopProcess(child) {
   try {
     const tree = child.pid === undefined ? undefined : treeKill(child.pid);
     if (tree !== undefined) {

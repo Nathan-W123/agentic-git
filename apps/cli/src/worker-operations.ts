@@ -36,6 +36,11 @@ import {
 import { IntegrationService } from "@coord/integration-service";
 
 import {
+  extendEditorWork,
+  reportEditorWork,
+  takeEditorWork,
+} from "./editor-work.js";
+import {
   CLAIM_HEARTBEAT_INTERVAL_MS,
   askToDeliver,
   parseWorkingChanges,
@@ -85,11 +90,14 @@ import {
   type ScopeChangeRequest,
   type TaskDefinition,
   type TaskId,
+  type WorkAssignment as SharedWorkAssignment,
+  mcpServersForLease,
   summariseGrants,
 } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
   GitWorktreeWorkspaceManager,
+  type SecretSealer,
   type WorkspaceManager,
 } from "@coord/workspace-manager";
 
@@ -242,22 +250,22 @@ export function configuredBlanketClaims(explicit?: boolean): boolean {
  *   on the heartbeat, and adopts a claim the control plane narrows underneath
  *   it. A version-2 worker is never granted a claim, because a claim it could
  *   not be told about is one nobody could take back.
+ * 4 carries the project's approved MCP servers in the lease. A version-3
+ *   worker is never sent them, and the thread is told, because a run that
+ *   silently lacks tools it was promised is the failure this exists to
+ *   prevent.
  */
-export const WORKER_PROTOCOL_VERSION = 3;
+export const WORKER_PROTOCOL_VERSION = 4;
 
-export interface WorkAssignment {
-  lease: WorkLease;
-  task: SubmittedTask;
-  repository: { id: string; branch: string };
-  canonicalVersion: CanonicalVersion;
-  bundleUrl: string;
-  bundleRef: string;
-  heartbeatIntervalMs: number;
-  /** Worker-side check that the control plane expects a plan first. */
-  protocolVersion: number;
-  /** Submit the agent's plan here before executing anything. */
-  planUrl: string;
-}
+/**
+ * The shared shape, with this package's lease and task rows filled in.
+ *
+ * Re-exported under the old name because the worker imports it from here and
+ * has no reason to know the definition moved. The gateway names the same
+ * alias from the same shared definition, so the two ends of the wire cannot
+ * disagree about a field again.
+ */
+export type WorkAssignment = SharedWorkAssignment<WorkLease, SubmittedTask>;
 
 export interface WorkResultInput {
   leaseId: string;
@@ -300,7 +308,7 @@ export interface WorkResultAcceptance {
  */
 export const STALE_REASSESSMENT_BUDGET = 1;
 
-interface WorkResultServices {
+export interface WorkResultServices {
   repositories?: RepositoryService;
   integrations?: IntegrationService;
   /** Reads what a canonical advance changed, to decide whether it matters. */
@@ -416,6 +424,20 @@ async function trace(
   await store.appendAudit(runId, { type, taskId, data });
 }
 
+/**
+ * The adapter a task's agent needs, or `undefined` when nothing constrains it.
+ *
+ * Exported under a longer name for `editor-work.ts`, which asks the identical
+ * question about an editor: an editor advertises exactly one vendor, and work
+ * for a different one must fall past it rather than be taken and failed.
+ */
+export function editorAdapterName(
+  project: CoordinatorProject | undefined,
+  task: SubmittedTask,
+): string | undefined {
+  return adapterName(project, task);
+}
+
 function adapterName(
   project: CoordinatorProject | undefined,
   task: SubmittedTask,
@@ -485,6 +507,21 @@ export async function leaseWork(
     workerId: string;
     projectId: string;
     repositoryId?: string;
+    /**
+     * The only repositories this caller may be handed work from.
+     *
+     * Absent means "no limit", which is what an organization member gets.
+     * Present means the caller reaches this project through repository
+     * grants and holds precisely these — someone invited to one repository,
+     * running a worker on their own machine. Without it, a grant on one
+     * repository would be a licence to execute tasks from every other
+     * repository in the same project, on their laptop, with their
+     * credentials, which is the opposite of what granting one repository
+     * means.
+     *
+     * An empty set is therefore honoured as "nothing", not read as absent.
+     */
+    repositories?: ReadonlySet<string>;
     /** Test override; deployments configure COORD_REPOSITORY_PARALLELISM. */
     repositoryParallelism?: number;
     /**
@@ -495,9 +532,23 @@ export async function leaseWork(
      * reason no protocol version had to move.
      */
     kinds?: readonly TaskKind[];
+    /**
+     * The protocol version the worker reported when it asked. Absent from a
+     * worker built before it was sent, which is why it is read as 1 and not
+     * as "current": the lease has to know what the other end will look for.
+     */
+    protocolVersion?: number;
   },
   repositories = new RepositoryService(),
   project?: CoordinatorProject,
+  services: {
+    /**
+     * Opens the project's sealed MCP secrets for the lease. Omitted by the
+     * bare CLI and by tests that are not about tools, and with it omitted no
+     * server is ever attached — see `mcpServersForLease`.
+     */
+    sealer?: SecretSealer;
+  } = {},
 ): Promise<WorkAssignment | undefined> {
   const worker = await store.getWorker(input.workerId);
   if (worker === undefined) {
@@ -580,6 +631,16 @@ export async function leaseWork(
     )
   ).flat();
 
+  // Applied after listing rather than pushed into the query, because the
+  // store's filter takes one repository and this is a set. A worker asking
+  // for a specific `repositoryId` it does not hold falls out here too, which
+  // is the point: the id on the request is a preference the worker states,
+  // never a permission it asserts.
+  const reachable =
+    input.repositories === undefined
+      ? pending
+      : pending.filter((task) => input.repositories?.has(task.repositoryId));
+
   // Tasks known to be waiting on someone else go to the back of the queue.
   //
   // Planning is the expensive half of a lease and it happens before the
@@ -595,10 +656,10 @@ export async function leaseWork(
   // starved by it, only postponed behind work that can actually run.
   const waiting = legacyAdmissionLoop()
     ? new Set<TaskId>()
-    : await tasksWaitingOnActiveWork(store, pending);
+    : await tasksWaitingOnActiveWork(store, reachable);
   const ordered = [
-    ...pending.filter((task) => !waiting.has(task.id)),
-    ...pending.filter((task) => waiting.has(task.id)),
+    ...reachable.filter((task) => !waiting.has(task.id)),
+    ...reachable.filter((task) => waiting.has(task.id)),
   ];
 
   // Try every compatible candidate rather than only the first: another
@@ -643,6 +704,21 @@ export async function leaseWork(
       baseRevision: leased.lease.baseRevision,
       remote: true,
     });
+    // After the lease is recorded, never before: a secret is opened only for
+    // a task this worker now holds, and every gate in there answers "attach
+    // nothing" rather than throwing, so the lease just issued cannot be lost
+    // to a tool it did not need.
+    const mcpServers = await mcpServersForLease(store, {
+      opener: services.sealer,
+      projectId: input.projectId,
+      repositoryId: leased.task.repositoryId,
+      taskId: leased.task.id,
+      taskSubmittedBy: leased.task.submittedBy,
+      workerId: worker.id,
+      workerUserId: worker.userId,
+      workerProtocolVersion: input.protocolVersion,
+      leaseId: leased.lease.id,
+    });
     return {
       lease: leased.lease,
       task: leased.task,
@@ -656,6 +732,9 @@ export async function leaseWork(
       heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
       protocolVersion: WORKER_PROTOCOL_VERSION,
       planUrl: `/api/v1/workers/leases/${leased.lease.id}/plan`,
+      // Only when there is something to carry. An older worker that does not
+      // know the field never sees an empty one either.
+      ...(mcpServers === undefined ? {} : { mcpServers }),
     };
   }
   return undefined;
@@ -3660,6 +3739,13 @@ export function workerOperations(
   shared: {
     repositories?: RepositoryService;
     intelligence?: CodeIntelligenceService;
+    /**
+     * The credential store's sealer, so a lease can open the project's MCP
+     * secrets. The hosting web process passes the same one it gives the
+     * gateway that seals them; a process that passes none never attaches a
+     * server, whatever the table holds.
+     */
+    sealer?: SecretSealer;
   } = {},
 ) {
   const repositories = shared.repositories ?? new RepositoryService();
@@ -3694,7 +3780,17 @@ export function workerOperations(
       workerId: string;
       projectId: string;
       repositoryId?: string;
-    }) => await leaseWork(store, input, repositories, project),
+      repositories?: ReadonlySet<string>;
+      kinds?: readonly TaskKind[];
+      protocolVersion?: number;
+    }) =>
+      await leaseWork(
+        store,
+        input,
+        repositories,
+        project,
+        shared.sealer === undefined ? {} : { sealer: shared.sealer },
+      ),
     leaseBundle: async (leaseId: string, have?: string) =>
       await leaseBundle(store, leaseId, repositories, have),
     claimHeartbeat: async (input: {
@@ -3821,6 +3917,66 @@ export function workerOperations(
           admitting.delete(key);
         }
       }
+    },
+    editorWork: {
+      take: async (input: {
+        actorId: string;
+        organizationId: string;
+        projectId: string;
+        repositoryIds: readonly string[];
+        vendor: string;
+        label: string;
+        taskId?: string;
+      }) => {
+        const taken = await takeEditorWork(store, input, repositories, project);
+        return taken === undefined
+          ? undefined
+          : {
+              leaseId: taken.leaseId,
+              taskId: taken.task.id,
+              objective: taken.task.objective,
+              repositoryId: taken.task.repositoryId,
+              branch: taken.repository.branch,
+              baseRevision: taken.baseRevision,
+              baseVersion: taken.baseVersion,
+              expiresAt: taken.expiresAt,
+              // Flattened to the line somebody would type. The tool prints
+              // these for an agent to run, and a structured triple would have
+              // to be reassembled by a model that can only guess at quoting.
+              validationCommands: taken.task.validationCommands.map(
+                (command) =>
+                  [command.executable, ...command.args].join(" ").trim(),
+              ),
+            };
+      },
+      // Queued behind the same per-repository chain admission uses, and for
+      // the same reason: this path admits a plan too, and two of them
+      // deciding against the same executing set at once is exactly what that
+      // serialisation exists to prevent.
+      report: async (input: {
+        leaseId: string;
+        actorId: string;
+        status: "completed" | "failed" | "released";
+        patches: readonly FilePatch[];
+        summary: string;
+        detail?: string;
+      }) => {
+        const lease = await store.getWorkLease(input.leaseId);
+        const key = lease?.repositoryId ?? input.leaseId;
+        const run = async () =>
+          await reportEditorWork(store, input, services);
+        const queued = (admitting.get(key) ?? Promise.resolve()).then(run, run);
+        admitting.set(key, queued);
+        try {
+          return await queued;
+        } finally {
+          if (admitting.get(key) === queued) {
+            admitting.delete(key);
+          }
+        }
+      },
+      extend: async (input: { leaseId: string; ttlMs: number }) =>
+        await extendEditorWork(store, input),
     },
     acceptWorkResult: async (input: WorkResultInput) => {
       const existing = processing.get(input.leaseId);

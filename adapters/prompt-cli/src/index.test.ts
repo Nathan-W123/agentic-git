@@ -2606,3 +2606,94 @@ test("prose output keeps its whole message", () => {
   const said = "error: not logged in\n  run `claude login` to continue";
   assert.equal(failureFromStream(said), said);
 });
+
+test("claude: the MCP config rides planning and execution, and only its servers load", async () => {
+  // Planning and execution run in different worktrees. A server present for
+  // one and absent for the other is a plan made with tools the work then
+  // lacks, so both invocations carry the file — and carry it strictly, or the
+  // machine owner's own user-scope servers would start on somebody else's
+  // task.
+  const fixture = await createFixture();
+  const configPath = path.join(fixture.root, "mcp", "claude.json");
+  const calls: Array<readonly string[]> = [];
+  const runner: PromptCliProcessRunner = async (_executable, args, options = {}) => {
+    calls.push(args);
+    if (args.includes("--permission-mode")) {
+      return output(claudeEnvelope(JSON.stringify(PLAN)));
+    }
+    assert.ok(options.cwd !== undefined);
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    mcpConfigPath: configPath,
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+  await adapter.collectChanges(session.id);
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0]?.includes("--permission-mode"));
+  assert.ok(calls[1]?.includes("--dangerously-skip-permissions"));
+  for (const args of calls) {
+    const at = args.indexOf("--mcp-config");
+    assert.ok(at >= 0, `${args.join(" ")} carries no --mcp-config`);
+    assert.equal(args[at + 1], configPath);
+    assert.equal(args[at + 2], "--strict-mcp-config");
+  }
+});
+
+test("a vendor with no config flag refuses managed MCP servers rather than running without them", async () => {
+  const fixture = await createFixture();
+  const plain = {
+    agentId: "agent",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+  };
+  const base = {
+    ...plain,
+    mcpConfigPath: path.join(fixture.root, "mcp", "claude.json"),
+  };
+  // Cursor reads only <workspace>/.cursor/mcp.json, which is inside the
+  // changeset; Gemini has no flag this adapter drives.
+  assert.throws(
+    () => createCursorAdapter(base),
+    /cursor cannot be given managed MCP servers yet/u,
+  );
+  assert.throws(
+    () => createGeminiAdapter(base),
+    /gemini cannot be given managed MCP servers yet/u,
+  );
+  // Without a config the same vendors build as they always have.
+  createCursorAdapter(plain);
+  createGeminiAdapter(plain);
+  assert.equal(CLAUDE_PROFILE.mcpArgs?.("/x/claude.json").join(" "), "--mcp-config /x/claude.json --strict-mcp-config");
+  assert.equal(GEMINI_PROFILE.mcpArgs, undefined);
+});
