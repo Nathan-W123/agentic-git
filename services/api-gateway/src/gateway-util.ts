@@ -12,10 +12,105 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type {
   OrganizationRole,
   SubChannelVisibility,
+  SubmittedTaskStatus,
 } from "@coord/persistence";
+import type { ApprovalStatus } from "@coord/shared-types";
 
+import { hashSecret } from "./auth.js";
 import { HttpError, stringField } from "./field-validation.js";
 import { CHANNEL_ARBITRATION_PREFIX } from "./task-narration.js";
+
+/** Mirrors the attachment store's own cap; see `AttachmentStore` in apps/web. */
+export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Far shorter than an audit's, because somebody is watching a button.
+ *
+ * Rewriting text that is already on the screen is a small ask of a model, and
+ * a reader who has waited half a minute for a shorter version of something
+ * they can already read has been failed whether it arrives or not.
+ */
+export const SIMPLIFY_TIMEOUT_MS = 30_000;
+/**
+ * How long a socket ticket is worth anything.
+ *
+ * Long enough for the round trip that mints it and the upgrade that spends
+ * it, and short enough that one written to a log is stale before anybody
+ * reads the log.
+ */
+export const SOCKET_TICKET_TTL_MS = 30_000;
+
+/**
+ * How long an approved app has to collect its token.
+ *
+ * Longer than a socket ticket because a person is in the loop — the browser
+ * has to redirect and the waiting app has to notice — and still short enough
+ * that an abandoned approval is not a credential lying around.
+ */
+export const APP_AUTHORIZATION_TTL_MS = 120_000;
+
+/**
+ * How long a workspace picture's `data:` URL may be.
+ *
+ * The client sends a 128x128 JPEG at quality 0.82, which lands around seven
+ * kilobytes of base64; a quarter of a megabyte leaves room for a detailed
+ * image at that size while refusing an original photograph pasted in by a
+ * caller that skipped the resize. It is well inside `MAX_JSON_BYTES`, so an
+ * oversized picture is refused as a picture rather than as a large body.
+ */
+export const REPOSITORY_PICTURE_MAX_CHARS = 256 * 1024;
+/** How long a worker holds a task before it must heartbeat again. */
+export const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
+/** A week: long enough to be useful, short enough to be a poor thing to leak. */
+export const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Turns the recipient label into the credential used in a readable link.
+ *
+ * Six characters keeps the shortest codes out of the especially easy-to-
+ * guess range. Spaces become dashes, while everything else must already be a
+ * URL-safe letter, digit or separator so the link says exactly what its
+ * creator intended.
+ */
+export function normalizeInvitationCode(value: string): string | undefined {
+  const code = value.trim().toUpperCase().replace(/\s+/gu, "-");
+  if (
+    code.length < 6 ||
+    code.length > 48 ||
+    !/^[A-Z0-9]+(?:-[A-Z0-9]+)*$/u.test(code)
+  ) {
+    return undefined;
+  }
+  return code;
+}
+
+/** A stable lookup key that does not put the readable bearer code in storage. */
+export function invitationIdForCode(code: string): string {
+  return `inv_code_${hashSecret(code)}`;
+}
+
+export const ROLES: readonly OrganizationRole[] = [
+  "owner",
+  "admin",
+  "developer",
+  "viewer",
+];
+export const TASK_STATUSES: readonly SubmittedTaskStatus[] = [
+  "submitted",
+  "claimed",
+  "planned",
+  "open",
+  "integrated",
+  "failed",
+  "cancelled",
+];
+export const APPROVAL_STATUSES: readonly ApprovalStatus[] = [
+  "pending",
+  "approved",
+  "rejected",
+  "expired",
+  "cancelled",
+];
 
 /**
  * How long the live audit log keeps an event before it is compacted away.

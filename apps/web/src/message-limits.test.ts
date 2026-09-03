@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
@@ -24,22 +24,32 @@ async function publicFile(name: string): Promise<string> {
 /**
  * The gateway's own source, which is where the caps are enforced.
  *
- * Two files, joined: the caps and the field readers that refuse against them
- * live in `field-validation.ts`, while the routes that name a cap when they
- * call one live in `server.ts`. What this test pins is that the numbers agree
- * and that a refusal says which number it hit - neither of which cares which
- * file a declaration sits in, so a later split must not read as a failure.
+ * Every non-test module of the gateway, joined: the caps and the readers
+ * that refuse against them live in `field-validation.ts`, and the routes
+ * that name a cap when they call one live under `routes/`. What this test
+ * pins is that the numbers agree and that a refusal says which number it
+ * hit - neither of which cares which file a declaration sits in, so reading
+ * the tree rather than a named file keeps a later split from reading as a
+ * failure here.
  */
-const GATEWAY_SOURCES = [
-  "../../../services/api-gateway/src/server.ts",
-  "../../../services/api-gateway/src/field-validation.ts",
-];
-
 async function gatewaySource(): Promise<string> {
+  const root = path.join(
+    defaultPublicDirectory(),
+    "../../../services/api-gateway/src",
+  );
+  const found = await readdir(root, { recursive: true, withFileTypes: true });
+  const files = found
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        entry.name.endsWith(".ts") &&
+        !entry.name.endsWith(".test.ts"),
+    )
+    .map((entry) => path.join(entry.parentPath, entry.name))
+    .sort();
+  assert.ok(files.length > 0, "no gateway source was found to read");
   const parts = await Promise.all(
-    GATEWAY_SOURCES.map(async (relative) =>
-      readFile(path.join(defaultPublicDirectory(), relative), "utf8"),
-    ),
+    files.map(async (file) => readFile(file, "utf8")),
   );
   return parts.join("\n");
 }

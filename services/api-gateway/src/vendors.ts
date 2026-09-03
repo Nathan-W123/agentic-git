@@ -210,3 +210,37 @@ export function defaultChannelAgentName(connection: {
   // was never ambiguous.
   return connection.callSign ?? `${label} (${firstWord(connection.userName)})`;
 }
+
+/**
+ * Whether an agent has a machine that can actually run it.
+ *
+ * A set of owners was not enough, and the gap was not academic. A worker
+ * registers the adapters its machine has — one with Claude installed and
+ * nothing else registers exactly `claude` — but liveness was answered per
+ * *person*, so every agent that person owned read as online the moment any
+ * machine of theirs was listening. An agent for a CLI that was never
+ * installed was therefore drawn as available, took a mention, posted "I've
+ * taken this task and I'm working on it", and left the task in a queue no
+ * worker would ever claim. Nothing was hung and nothing failed; the work
+ * simply waited forever behind a sentence saying it had begun.
+ *
+ * Answered per adapter now, which is the question the dispatch actually
+ * asks. An agent whose CLI is on nobody's machine reads as offline, which
+ * is what the offline prompt is for.
+ */
+export function agentIsLive(
+  live: Map<string, Set<string>>,
+  userId: string,
+  provider: string,
+): boolean {
+  const advertised = live.get(userId);
+  if (advertised === undefined) {
+    return false;
+  }
+  const vendor = PROVIDER_TO_VENDOR[provider];
+  // A provider this build has no vendor CLI for cannot be checked against
+  // what a worker advertises. Falling back to "the owner is listening" keeps
+  // such an agent exactly as available as it was before adapters were
+  // consulted, rather than making it silently unmentionable.
+  return vendor === undefined ? true : advertised.has(vendor);
+}
