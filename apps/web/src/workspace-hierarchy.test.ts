@@ -164,3 +164,31 @@ test("workspace marks remain distinct and expose semantic selection", async () =
   assert.match(css, /\.channel-rail-entry\.active::before \{[\s\S]*?width: 3px;/u);
   assert.match(css, /\.roster-row-main\.selected \{[\s\S]*?box-shadow: inset 2px 0 0 var\(--accent\)/u);
 });
+
+test("settings name the workspace the way the rest of the shell names it", async () => {
+  const app = await publicFile("app.js");
+
+  // A workspace renamed to Kumi read "Kumi" in the channel rail and the
+  // conversation header, and "LATTICE" in its own settings — because these
+  // rows printed the id, which is the handle the routes and the mirror
+  // directory are keyed by and not what anybody calls the place. Every
+  // surface resolves the name through the one helper now.
+  const identity = app.slice(
+    app.indexOf("function workspaceSection() {"),
+    app.indexOf("function billingCard() {"),
+  );
+  assert.match(
+    identity,
+    /term: "Channel open",[\s\S]{0,300}repositoryLabel\(repository\.id\)/u,
+  );
+  assert.doesNotMatch(identity, /term: "Channel open", value: repository\?\.id/u);
+
+  // Including the invitations beneath it, which name the one channel they
+  // grant.
+  const invitations = app.slice(
+    app.indexOf("function invitationsCard() {"),
+    app.indexOf("function workspaceSection() {"),
+  );
+  assert.match(invitations, /repositoryLabel\(invite\.repositoryId\)/u);
+  assert.doesNotMatch(invitations, /invite\.repositoryId \?\? "every channel"/u);
+});

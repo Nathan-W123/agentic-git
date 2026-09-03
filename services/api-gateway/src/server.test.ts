@@ -11292,6 +11292,115 @@ test("a workspace picture is the workspace's: set only by a manager, read by eve
   assert.equal(cleared.data.repository.displayName, "Lattice");
 });
 
+test("a repository is reported by the name it was renamed to, and the rename moves nothing else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`;
+
+  // Every consumer of these payloads — the browser, and whatever reads the
+  // list over MCP — had to know that `displayName` beats `id` and that absent
+  // means "call it by the id". Anything that did not know went on showing the
+  // handle to somebody who had renamed the repository precisely so they would
+  // stop seeing it. `name` is that resolution, done once, on the way out.
+  const created = await owner.request(base, {
+    method: "POST",
+    body: { id: "lattice", branch: "main" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  assert.equal(created.data.repository.id, "lattice");
+  assert.equal(created.data.repository.name, "lattice");
+  assert.equal(created.data.repository.displayName, undefined);
+
+  // Something for the rename to leave alone: a second room, a member in it,
+  // and a colleague holding a grant on the repository.
+  const room = await owner.request(`${base}/lattice/channels`, {
+    method: "POST",
+    body: { name: "Design Review", visibility: "private" },
+  });
+  assert.equal(room.status, 201, JSON.stringify(room.data));
+  const colleague = await runtime.store.createUser({
+    email: "renamed-colleague@example.com",
+    displayName: "Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "viewer",
+  });
+  const granted = await owner.request(
+    `${base}/lattice/grants/${colleague.id}`,
+    { method: "POST", body: { role: "owner" } },
+  );
+  assert.equal(granted.status, 200, JSON.stringify(granted.data));
+  const roomsBefore = await owner.request(`${base}/lattice/channels`);
+  const grantsBefore = await owner.request(`${base}/lattice/grants`);
+
+  const renamed = await owner.request(`${base}/lattice`, {
+    method: "PATCH",
+    body: { name: "Kumi" },
+  });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+  assert.equal(renamed.data.repository.name, "Kumi");
+  assert.equal(renamed.data.repository.displayName, "Kumi");
+  // The handle does not move. It keys every row and names the mirror on disk,
+  // so the route that addressed this repository a moment ago still does.
+  assert.equal(renamed.data.repository.id, "lattice");
+
+  const listed = await owner.request(base);
+  assert.equal(listed.status, 200, JSON.stringify(listed.data));
+  assert.deepEqual(
+    listed.data.repositories.map(
+      (repository: { id: string; name: string }) => [
+        repository.id,
+        repository.name,
+      ],
+    ),
+    [["lattice", "Kumi"]],
+  );
+
+  // Membership, rooms and repository access are exactly as they were.
+  const roomsAfter = await owner.request(`${base}/lattice/channels`);
+  assert.deepEqual(
+    roomsAfter.data.channels.map((channel: { slug: string }) => channel.slug),
+    roomsBefore.data.channels.map((channel: { slug: string }) => channel.slug),
+  );
+  const grantsAfter = await owner.request(`${base}/lattice/grants`);
+  assert.deepEqual(
+    grantsAfter.data.grants.map(
+      (grant: { userId: string; role: string }) => [grant.userId, grant.role],
+    ),
+    grantsBefore.data.grants.map(
+      (grant: { userId: string; role: string }) => [grant.userId, grant.role],
+    ),
+  );
+  assert.equal(
+    (await runtime.store.listMemberships(DEFAULT_ORGANIZATION_ID)).some(
+      (membership) => membership.userId === colleague.id,
+    ),
+    true,
+  );
+  const colleagueClient = await loginAs(runtime.origin, colleague.email);
+  const stillReachable = await colleagueClient.request(base);
+  assert.deepEqual(
+    stillReachable.data.repositories.map(
+      (repository: { name: string }) => repository.name,
+    ),
+    ["Kumi"],
+  );
+
+  // Clearing the name is how a rename is undone, and the resolved name goes
+  // back to the handle rather than to nothing.
+  const cleared = await owner.request(`${base}/lattice`, {
+    method: "PATCH",
+    body: { name: "" },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+  assert.equal(cleared.data.repository.displayName, undefined);
+  assert.equal(cleared.data.repository.name, "lattice");
+});
+
 test("a repository's creator can rename it without manage_project, but deleting it is the owner's alone", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
