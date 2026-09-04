@@ -47,6 +47,19 @@ async function main(): Promise<void> {
     ...(process.env["COORD_WORKER_NAME"] === undefined
       ? {}
       : { name: process.env["COORD_WORKER_NAME"] }),
+    // What is actually installed on this machine, said out loud.
+    //
+    // `register` has always carried a version and nothing ever set one, so
+    // every worker in every fleet reported "0.0.0" — which made the column
+    // worse than absent: it looked like an answer. The desktop app has no
+    // auto-update, so an install stays on whatever build it was given until
+    // somebody downloads another one, and "which version is that machine on"
+    // is the first question when an agent behaves like an older one. Nothing
+    // could answer it, including the person sitting at the machine.
+    ...(process.env["COORD_WORKER_VERSION"]?.trim() === undefined ||
+    process.env["COORD_WORKER_VERSION"]?.trim() === ""
+      ? {}
+      : { version: process.env["COORD_WORKER_VERSION"].trim() }),
     ...((process.env["COORD_PROJECT_ID"] ?? process.env["COORD_PROJECT"]) ===
     undefined
       ? {}

@@ -237,11 +237,15 @@ test("each preload global is exposed independently of the others", async () => {
   const preload = await readFile(path.join(electronDir, "preload.cjs"), "utf8");
 
   // Every exposure goes through the guard, so none can be fatal to the rest.
+  // Counted rather than listed, so a global added without the guard is caught
+  // here rather than discovered as a page missing something it never said.
+  const exposures = (preload.match(/^expose\(/gmu) ?? []).length;
   assert.equal(
-    (preload.match(/^expose\(/gmu) ?? []).length,
-    3,
-    "all three globals must be exposed through the guard",
+    exposures,
+    (preload.match(/^expose\("[A-Z_]+"/gmu) ?? []).length,
+    "every exposure must name a global",
   );
+  assert.equal(exposures, 4, "server, version, token and the install bridge");
   assert.doesNotMatch(
     preload,
     /^contextBridge\.exposeInMainWorld/mu,
@@ -250,6 +254,9 @@ test("each preload global is exposed independently of the others", async () => {
   // The one that can genuinely fail, and the one whose loss is invisible.
   assert.match(preload, /expose\("KUMI_TOKEN", \(\) => ipcRenderer\.sendSync/u);
   assert.match(preload, /expose\("KUMI_INSTALL", \(\) => \(\{/u);
+  // The build the page is running in. Its own exposure, because an app that
+  // cannot say which version it is must still be an app that works.
+  assert.match(preload, /expose\("KUMI_VERSION", \(\) => argument\("kumi-version"\)\)/u);
   // A failure is said somewhere a person can find it, not swallowed.
   assert.match(preload, /could not expose \$\{name\}/u);
 });
@@ -537,4 +544,38 @@ test("an absent CLI reports nothing rather than an empty reading", async () => {
     assert.equal(none.ok, false);
     assert.match(String(none.detail), /publishes no usage command/u);
   });
+});
+
+/**
+ * The one branch of Connect that waits on another program.
+ *
+ * Claude and Cursor finish inside `connectEditor` and answer immediately.
+ * Codex cannot read a token out of a file, so its branch alone goes on to set
+ * an environment variable with `setx.exe` — and the page is sitting on that
+ * IPC call with nothing between it and the dialog that reports the outcome.
+ *
+ * `setx` broadcasts `WM_SETTINGCHANGE` to every top-level window and waits for
+ * them to answer, so a single unresponsive application is enough to leave it
+ * running. Unbounded, that is a Connect that produces no dialog, no toast and
+ * no error, for ever, on Codex and only on Codex.
+ */
+test("setting the Codex environment variable cannot wait for ever", async () => {
+  const main = await readFile(path.join(electronDir, "main.mjs"), "utf8");
+  const start = main.indexOf("async function setUserEnvironment");
+  assert.ok(start > 0, "setUserEnvironment must still exist");
+  const body = main.slice(start, start + 2000);
+
+  // A deadline, and a kill so the timeout does not leave the process behind.
+  assert.match(body, /setTimeout\(/u, "the wait must be bounded");
+  assert.match(body, /child\.kill\(\)/u, "a timed-out child must be killed");
+  // Cleared on the ordinary paths, so a connection that works does not hold a
+  // timer open behind it.
+  assert.match(body, /clearTimeout\(/u);
+  // Every exit route resolves. A promise with a path that never settles is
+  // exactly the bug this guards.
+  assert.equal(
+    (body.match(/resolve\(/gu) ?? []).length >= 2,
+    true,
+    "error, exit and timeout must all settle the promise",
+  );
 });
