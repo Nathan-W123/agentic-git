@@ -717,11 +717,9 @@ async function connectLocalAgent(providerId, rerender) {
     await showModal({
       title: `${label} was not connected`,
       subtitle: REFUSAL[verdict]?.subtitle ?? "This machine could not be checked.",
-      body: `<p class="modal-hint">${REFUSAL[verdict]?.body ?? ""}</p>${
-        REFUSAL[verdict]?.detail === undefined
-          ? ""
-          : `<p class="modal-hint">${esc(REFUSAL[verdict].detail())}</p>`
-      }`,
+      body: `<p class="modal-hint">${REFUSAL[verdict]?.body ?? ""}</p>${refusalDetail(
+        verdict,
+      )}`,
       confirm: "Close",
       cancel: "",
     });
@@ -799,6 +797,7 @@ const REFUSAL = {
   },
   unknown: {
     subtitle: "This machine could not be asked.",
+    detail: () => machineDetail,
     repair: `The check did not complete, so this is not an answer about the
       agent. Try again, and if it keeps happening restart the Kumi app.`,
     body: `The check did not complete, so Kumi will not claim an agent works
@@ -814,6 +813,32 @@ const REFUSAL = {
  * evidence instead of a guess. `KUMI_VERSION` is only in builds that expose
  * it, and saying so is itself the answer for a build old enough to lack it.
  */
+/**
+ * The evidence line under a refusal, or nothing when there is none to give.
+ *
+ * A `detail` that comes back empty is the ordinary case — most refusals are
+ * self-explanatory — so this renders nothing rather than the word `undefined`,
+ * which is what a naive template would have put on screen.
+ */
+function refusalDetail(verdict) {
+  const said = REFUSAL[verdict]?.detail?.();
+  return typeof said === "string" && said !== ""
+    ? `<p class="modal-hint">${esc(said)}</p>`
+    : "";
+}
+
+/**
+ * The last thing this machine said about why a check did not finish.
+ *
+ * `verifyMachineFor` answers with a verdict *name*, which is what picks the
+ * sentence out of `REFUSAL` and what the tests read. The machine's own reason
+ * — "The CLI did not answer in time.", an ENOENT, a spawn that was refused —
+ * came back beside it and was dropped on the floor. That reason is the entire
+ * content of a support conversation about somebody else's laptop, so it is
+ * kept here and shown under the sentence.
+ */
+let machineDetail;
+
 function appBridgeDetail() {
   const version =
     typeof window.KUMI_VERSION === "string" && window.KUMI_VERSION !== ""
@@ -850,7 +875,15 @@ async function verifyMachineFor(providerId, rerender) {
     // wrong, which is how this was found.
     return window.KUMI_SERVER === undefined ? "no-app" : "stale-app";
   }
-  const detected = await bridge.detected().catch(() => undefined);
+  machineDetail = undefined;
+  const detected = await bridge
+    .detected()
+    .catch((error) => {
+      machineDetail = `Asking this machine what is installed failed: ${
+        error?.message ?? String(error)
+      }`;
+      return undefined;
+    });
   if (detected === undefined) {
     return "unknown";
   }
@@ -866,9 +899,15 @@ async function verifyMachineFor(providerId, rerender) {
   // build that created agents without checking anything, so believing it here
   // would reinstate exactly the behaviour this replaces.
   if (bridge.login === undefined) {
+    machineDetail = "This build of the app cannot read a vendor login.";
     return "unknown";
   }
-  const first = await bridge.login(vendor).catch(() => undefined);
+  const first = await bridge.login(vendor).catch((error) => {
+    machineDetail = `Asking ${vendor} about its login failed: ${
+      error?.message ?? String(error)
+    }`;
+    return undefined;
+  });
   const outcome = await settleLogin(first, vendor, bridge, providerId);
   return outcome;
 }
@@ -895,6 +934,12 @@ async function settleLogin(verdict, vendor, bridge, providerId) {
     return "missing";
   }
   if (verdict.state !== "signed-out") {
+    // `readVendorLogin` says why in `detail` — a timeout, an ENOENT, a spawn
+    // the operating system refused. Collapsing that to the word "unknown" is
+    // what made this dialog unactionable from anywhere but the machine.
+    if (typeof verdict.detail === "string" && verdict.detail !== "") {
+      machineDetail = `${vendor}: ${verdict.detail}`;
+    }
     return "unknown";
   }
   const now = await showModal({
@@ -1095,7 +1140,9 @@ async function finishLocalSetup(providerId, rerender) {
     // The agent already exists on this path, so the sentence about nothing
     // having been created would be untrue — that half belongs to the connect
     // flow and is deliberately not repeated here.
-    body: `<p class="modal-hint">${REFUSAL[verdict]?.repair ?? REFUSAL[verdict]?.body ?? ""}</p>`,
+    body: `<p class="modal-hint">${
+      REFUSAL[verdict]?.repair ?? REFUSAL[verdict]?.body ?? ""
+    }</p>${refusalDetail(verdict)}`,
     confirm: "Close",
     cancel: "",
   });
