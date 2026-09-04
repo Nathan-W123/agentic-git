@@ -802,6 +802,56 @@ function renderAuth() {
   const setupRequired = state.health?.setupRequired === true;
   const bootstrap = mode === "bootstrap";
   const register = mode === "register";
+
+  // Signing in is the common, repeat visit. Keep its card self-contained so
+  // the task is obvious at a glance, rather than splitting the identity,
+  // fields, and account links into three separate visual stops.
+  if (!bootstrap && !register) {
+    const newAccount = paymentsOn()
+      ? `<a class="link-muted" href="#signup" data-act="auth-mode" data-value="signup">Start a free trial</a>.`
+      : `<a class="link-muted" href="#waitlist" data-act="auth-mode" data-value="waitlist">Join the waitlist</a>.`;
+    return `<main class="auth-shell auth-login-shell">
+      <section class="auth-login" aria-labelledby="auth-title">
+        <header class="auth-login-header">
+          <div class="auth-login-brand">${brandMark(32)}<span>Kumi</span></div>
+          <div>
+            <h1 id="auth-title">Welcome back</h1>
+            <p>Sign in to continue to your workspace.</p>
+          </div>
+        </header>
+
+        <form class="auth-card auth-login-card" data-act="login">
+          <label class="field">
+            <span>Email address</span>
+            <input class="input" name="email" type="email"
+              autocomplete="username" placeholder="you@company.com" required>
+          </label>
+          <div class="auth-login-password">
+            <label class="field">
+              <span>Password</span>
+              <input class="input" name="password" type="password" minlength="12"
+                autocomplete="current-password"
+                placeholder="Enter your password" required>
+            </label>
+            <a class="link-muted" href="#forgot" data-act="auth-mode"
+              data-value="forgot">Forgot password?</a>
+          </div>
+          <button class="btn btn-primary btn-wide" type="submit">Sign in</button>
+          <p class="form-msg" id="auth-msg" role="alert"></p>
+          <div class="auth-login-footer">
+            <p>${
+              setupRequired
+                ? `This control plane has no owner yet. <a class="link-muted" href="#setup" data-act="auth-mode" data-value="bootstrap">Run first-time setup</a>.`
+                : `New to Kumi? ${newAccount}`
+            }</p>
+          </div>
+        </form>
+
+        <a class="auth-login-desktop" href="/download">Get Kumi for desktop</a>
+      </section>
+    </main>`;
+  }
+
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">

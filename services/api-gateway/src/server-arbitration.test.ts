@@ -16,6 +16,7 @@ import {
 import {
   PASSWORD,
   TestClient,
+  type TestRuntime,
   bootstrap,
   invitableRepository,
   joinAllConnectedAgents,
@@ -929,6 +930,71 @@ test("a quick task keeps its outcome inline after acknowledging the handoff", as
 });
 
 /**
+ * Every arbitration line currently standing, wherever it is standing.
+ *
+ * A hold is the held agent's own reply inside its thread now, so a test that
+ * read only the room's roots would pass just as well on a deployment that had
+ * stopped saying anything at all. Both places are collected, and each line
+ * says which it came from, because proving the room-level fallback is *not*
+ * being used is half of what these tests are for.
+ *
+ * Thread lines are taken by kind as well as by marker: the run's own narration
+ * of the same admission opens with the same symbol and is `progress`, and it
+ * is not the notice — it is what this suppresses.
+ */
+async function arbitrationLines(
+  runtime: TestRuntime,
+  repositoryId: string,
+  viewerId: string,
+): Promise<
+  { authorId: string; content: string; inThread: boolean }[]
+> {
+  const messages = await runtime.store.listChannelMessages(
+    repositoryId,
+    viewerId,
+  );
+  return messages.flatMap((message) => [
+    ...(message.replies ?? [])
+      .filter(
+        (reply) => reply.kind === "agent" && reply.content.startsWith("⚖️"),
+      )
+      .map((reply) => ({
+        authorId: reply.authorId,
+        content: reply.content,
+        inThread: true,
+      })),
+    ...(message.authorId === "coordinator"
+      ? [
+          {
+            authorId: message.authorId,
+            content: message.content,
+            inThread: false,
+          },
+        ]
+      : []),
+  ]);
+}
+
+/** Every reply in the thread one task is narrating into. */
+async function threadRepliesFor(
+  runtime: TestRuntime,
+  repositoryId: string,
+  viewerId: string,
+  taskId: string,
+): Promise<{ kind: string; authorId: string; content: string }[]> {
+  const messages = await runtime.store.listChannelMessages(
+    repositoryId,
+    viewerId,
+  );
+  const root = messages.find((message) => message.taskId === taskId);
+  return (root?.replies ?? []).map((reply) => ({
+    kind: String(reply.kind),
+    authorId: reply.authorId,
+    content: reply.content,
+  }));
+}
+
+/**
  * Puts one dispatched task in the room, which is what starts the fast pump.
  *
  * `announceArbitration` rides on `pumpChannelProgress`, and that timer only
@@ -999,27 +1065,26 @@ test("a file collision and its admission produce one authoritative ordering", as
   });
 
   await waitFor(
-    async () => {
-      const messages = await runtime.store.listChannelMessages(repo, ownerId);
-      return messages.some((message) => message.authorId === "coordinator");
-    },
-    "the collision was never announced in the room",
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the collision was never announced",
     8_000,
   );
 
-  const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  const lines = messages
-    .filter((message) => message.authorId === "coordinator")
-    .map((message) => String(message.content));
+  const lines = await arbitrationLines(runtime, repo, ownerId);
   assert.deepEqual(
     lines,
     [
-      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
-        `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
+      {
+        authorId: `${ownerId}:anthropic`,
+        content:
+          `⚖️ Looks like @Codex (${firstName}) has the same files open — ` +
+          `I'll start once they're done.`,
+        inThread: true,
+      },
     ],
     `the collision did not produce one authoritative order: ${JSON.stringify(lines)}`,
   );
-  const line = lines[0] ?? "";
+  const line = lines[0]?.content ?? "";
   // The specific things that made it unreadable, each named so a rewrite that
   // reintroduces one fails here rather than in somebody's channel.
   assert.doesNotMatch(
@@ -1031,6 +1096,79 @@ test("a file collision and its admission produce one authoritative ordering", as
     line,
     /nobody is surprised|the moment that lands|one at a time|both touch/u,
     "the line kept a justification clause",
+  );
+});
+
+test("an arbitration hold is posted in the held task's thread under the agent's own account", async (t) => {
+  // In the words of the person who asked for it: "if I have two agents
+  // working, agent b would say looks like agent a is in node.js, I'll take
+  // app.js, then move when they're done". The decision was already being made
+  // and already being announced — in the channel, under the coordinator's
+  // name, beside the thread it was about. So somebody following one agent's
+  // work watched it go quiet with the explanation somewhere else.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "threadedholdroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
+    },
+  });
+  await waitFor(
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the hold was never announced",
+    8_000,
+  );
+
+  const [line] = await arbitrationLines(runtime, repo, ownerId);
+  assert.equal(line?.inThread, true, "the hold stayed a room-level line");
+  assert.equal(
+    line?.authorId,
+    `${ownerId}:anthropic`,
+    "the hold was not attributed to the held task's own agent",
+  );
+  // The agent never names itself: it is the one speaking, and its name is
+  // already on the bubble. What it names is the agent it is waiting for.
+  assert.doesNotMatch(
+    line?.content ?? "",
+    new RegExp(`@Claude \\(${firstName}\\)`, "u"),
+    "the agent talked about itself in the third person in its own thread",
+  );
+  assert.match(
+    line?.content ?? "",
+    new RegExp(`@Codex \\(${firstName}\\)`, "u"),
+    "the hold did not name the agent being waited for",
+  );
+
+  // And exactly one line about the admission. The run's own generic account of
+  // the same event — "Waiting my turn — files this plan needs are leased to
+  // another task in flight" — is the same sentence with nobody in it, and two
+  // of them in a row reads as two separate things having gone wrong.
+  const replies = await threadRepliesFor(runtime, repo, ownerId, tasks.claude);
+  assert.equal(
+    replies.filter((reply) => reply.content.startsWith("⚖️")).length,
+    1,
+    `the admission was narrated twice: ${JSON.stringify(replies)}`,
   );
 });
 
@@ -1119,32 +1257,35 @@ test("a collision no admission acts on is not announced at all", async (t) => {
   });
 
   await waitFor(
-    async () => {
-      const messages = await runtime.store.listChannelMessages(repo, ownerId);
-      return messages.some((message) => message.authorId === "coordinator");
-    },
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
     "the arbitration was never announced",
     8_000,
   );
 
-  const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  const lines = messages
-    .filter((message) => message.authorId === "coordinator")
-    .map((message) => String(message.content));
+  const lines = (await arbitrationLines(runtime, repo, ownerId)).map(
+    (line) => line.content,
+  );
   assert.deepEqual(
     lines,
     [
-      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
-        `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
+      `⚖️ Looks like @Codex (${firstName}) has the same files open — ` +
+        `I'll start once they're done.`,
     ],
     `a collision nobody was held by was still narrated: ${JSON.stringify(lines)}`,
   );
 });
 
-test("a sequenced admission is removed silently when the held task can start", async (t) => {
+test("the hold is replaced by a first-person release line when the blocker finishes", async (t) => {
   // The other half of the same complaint. This path already tried to resolve a
   // name and always failed, so every hold in the room was two truncated
   // prompts; and having resolved one it then spent two more clauses on why.
+  //
+  // Where the line stands changed what happens when it stops being true. In
+  // the room it was simply taken back, because nobody there was following this
+  // run and a second announcement about it was noise. In the agent's own
+  // thread the person reading has been waiting on exactly this, so the agent
+  // says so — and the stale sentence goes, rather than standing above its own
+  // contradiction.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const session = await bootstrap(owner);
@@ -1177,23 +1318,17 @@ test("a sequenced admission is removed silently when the held task can start", a
   });
 
   await waitFor(
-    async () => {
-      const messages = await runtime.store.listChannelMessages(repo, ownerId);
-      return messages.some((message) => message.authorId === "coordinator");
-    },
-    "the hold was never announced in the room",
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the hold was never announced",
     8_000,
   );
 
-  const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  const line = String(
-    messages.find((message) => message.authorId === "coordinator")?.content,
-  );
+  const line = (await arbitrationLines(runtime, repo, ownerId))[0]?.content ?? "";
   assert.equal(
     line,
-    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
-      `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
-    `the hold did not read as two names and an order: ${line}`,
+    `⚖️ Looks like @Codex (${firstName}) has the same files open — ` +
+      `I'll start once they're done.`,
+    `the hold did not read as one name and an order: ${line}`,
   );
   assert.doesNotMatch(
     line,
@@ -1210,18 +1345,31 @@ test("a sequenced admission is removed silently when the held task can start", a
     },
   });
   await waitFor(
-    async () => {
-      const current = await runtime.store.listChannelMessages(repo, ownerId);
-      return current.every((message) => message.authorId !== "coordinator");
-    },
-    "the expired hold notice stayed in the room",
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length === 0,
+    "the expired hold stayed standing",
     8_000,
   );
-  const afterRelease = await runtime.store.listChannelMessages(repo, ownerId);
+
+  const replies = await threadRepliesFor(runtime, repo, ownerId, tasks.claude);
   assert.equal(
-    afterRelease.some((message) => /starts now/iu.test(message.content)),
+    replies.some(
+      (reply) =>
+        reply.content ===
+        `@Codex (${firstName}) is done — picking this up now.`,
+    ),
+    true,
+    `the released hold left the thread with nothing to say: ${JSON.stringify(
+      replies,
+    )}`,
+  );
+  // And the generic "Plan approved — starting on the code" is not said beside
+  // it: the release is that sentence, with the reason in it.
+  assert.equal(
+    replies.some((reply) => /Plan approved/u.test(reply.content)),
     false,
-    "releasing the hold added a redundant starts-now message",
+    `the release was doubled by the canned admission line: ${JSON.stringify(
+      replies,
+    )}`,
   );
 });
 
@@ -1262,24 +1410,17 @@ test("a blocked admission says who waits for whom, not that a plan is shrinking"
   });
 
   await waitFor(
-    async () => {
-      const messages = await runtime.store.listChannelMessages(repo, ownerId);
-      return messages.some((message) => message.authorId === "coordinator");
-    },
-    "the block was never announced in the room",
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the block was never announced",
     8_000,
   );
 
-  const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  const line = String(
-    messages.find((message) => message.authorId === "coordinator")?.content,
-  );
+  const line = (await arbitrationLines(runtime, repo, ownerId))[0]?.content ?? "";
   assert.equal(
     line,
-    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
-      `files — @Claude (${firstName}) will wait for @Codex (${firstName}) ` +
-      `to go first.`,
-    `the block did not read as two names and an order: ${line}`,
+    `⚖️ Looks like @Codex (${firstName}) has the same files open — ` +
+      `I'll let them go first.`,
+    `the block did not read as one name and an order: ${line}`,
   );
   assert.doesNotMatch(
     line,
@@ -1354,30 +1495,25 @@ test("one agent holding two conflicting tasks is named once, with the order", as
   });
 
   await waitFor(
-    async () => {
-      const messages = await runtime.store.listChannelMessages(repo, ownerId);
-      return messages.some((message) => message.authorId === "coordinator");
-    },
-    "the one-agent collision was never announced in the room",
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the one-agent collision was never announced",
     8_000,
   );
 
-  const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  const line = String(
-    messages.find((message) => message.authorId === "coordinator")?.content,
-  );
+  const line = (await arbitrationLines(runtime, repo, ownerId))[0]?.content ?? "";
   assert.equal(
     line,
-    `⚖️ @Claude (${firstName}) is working on multiple tasks that conflict — ` +
-      `it will do "swap the retry timeout" first, then "${heldObjective}".`,
+    `⚖️ I'm on two tasks that conflict — I'll do "swap the retry timeout" ` +
+      `first, then "${heldObjective}".`,
     `the one-agent collision did not read as one agent and an order: ${line}`,
   );
-  // The shape of the complaint, named so a rewrite cannot bring it back: the
-  // agent is mentioned once, and never set against itself.
+  // The shape of the complaint, named so a rewrite cannot bring it back: in
+  // its own thread the agent is not named at all, and never set against
+  // itself.
   assert.equal(
     line.split(`@Claude (${firstName})`).length - 1,
-    1,
-    `the line named the same agent twice: ${line}`,
+    0,
+    `the line named the agent whose thread it is in: ${line}`,
   );
   assert.doesNotMatch(
     line,
@@ -1422,11 +1558,8 @@ test("a hold is taken back when the held task stops instead of starting", async 
     },
   });
   await waitFor(
-    async () =>
-      (await runtime.store.listChannelMessages(repo, ownerId)).some(
-        (message) => message.authorId === "coordinator",
-      ),
-    "the hold was never announced in the room",
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the hold was never announced",
     8_000,
   );
 
@@ -1436,10 +1569,7 @@ test("a hold is taken back when the held task stops instead of starting", async 
     data: { error: "npm test exited 1" },
   });
   await waitFor(
-    async () =>
-      (await runtime.store.listChannelMessages(repo, ownerId)).every(
-        (message) => message.authorId !== "coordinator",
-      ),
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length === 0,
     "the hold outlived the run it was about",
     8_000,
   );
@@ -1494,11 +1624,8 @@ test("notices left standing by a restart are swept once their collision is over"
     },
   });
   await waitFor(
-    async () =>
-      (await runtime.store.listChannelMessages(repo, ownerId)).some(
-        (message) => message.authorId === "coordinator",
-      ),
-    "the hold was never announced in the room",
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the hold was never announced",
     8_000,
   );
 
@@ -1509,29 +1636,91 @@ test("notices left standing by a restart are swept once their collision is over"
       }
     ).reconcileArbitrationNotices();
   };
-  const coordinatorLines = async (): Promise<string[]> =>
-    (await runtime.store.listChannelMessages(repo, ownerId))
-      .filter((message) => message.authorId === "coordinator")
-      .map((message) => String(message.content));
 
   // Both ends still running: the line is current, and a sweep that took it now
-  // would be deleting the room's only account of why one agent is idle.
+  // would be deleting the thread's only account of why this agent is idle.
   await sweep();
   assert.equal(
-    (await coordinatorLines()).length,
+    (await arbitrationLines(runtime, repo, ownerId)).length,
     1,
     "the sweep took a hold that was still true",
   );
 
   // The blocker lands. Nothing re-admits the held task — the case no live path
-  // reaches — and the sentence "starts once that one is done" is now about
-  // something that already happened.
+  // reaches — and "I'll start once they're done" is now about something that
+  // already happened.
   await runtime.store.cancelSubmittedTask(tasks.codex);
   await sweep();
   assert.deepEqual(
-    await coordinatorLines(),
+    await arbitrationLines(runtime, repo, ownerId),
     [],
     "the hold survived the work it was waiting on",
+  );
+});
+
+test("a restart still finds and withdraws a hold it did not post", async (t) => {
+  // The map recording which line to take back dies with the process, and being
+  // held is precisely the state that waits — across a deploy, routinely. Now
+  // that the line is a reply rather than a room-level message, finding it again
+  // means reading the thread it hangs in: a hold written into a thread by a
+  // deployment that is gone must still be withdrawable by the one that
+  // replaces it, or the first agent to be held across a deploy keeps "I'll
+  // start once they're done" over its head for the rest of the thread's life.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "restartholdroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
+    },
+  });
+  await waitFor(
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the hold was never announced",
+    8_000,
+  );
+
+  // The restart, as far as this line is concerned: everything the process
+  // remembered about posting it is gone, and only the reply itself is left.
+  const gateway = runtime.gateway as unknown as {
+    arbitrationNotices: Map<string, unknown>;
+    withdrawArbitrationNotice(watched: {
+      projectId: string;
+      repositoryId: string;
+      taskId: string;
+    }): Promise<void>;
+  };
+  gateway.arbitrationNotices.clear();
+
+  await gateway.withdrawArbitrationNotice({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    taskId: tasks.claude,
+  });
+  assert.deepEqual(
+    await arbitrationLines(runtime, repo, ownerId),
+    [],
+    "a hold this process had no memory of posting was left standing",
   );
 });
 
@@ -1608,6 +1797,11 @@ test("deleting a coordinator notice does not stop the task it names", async (t) 
   // tidying a stale hold out of their channel would otherwise have cancelled
   // somebody else's running agent, from a line that is not even that run's
   // thread.
+  //
+  // Written into the room by hand, because that is the only way a root-level
+  // notice arrives now: it is the fallback for a task with no agent account to
+  // speak for it, and the shape every line an older deployment left behind
+  // still has.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const session = await bootstrap(owner);
@@ -1627,23 +1821,16 @@ test("deleting a coordinator notice does not stop the task it names", async (t) 
     firstName,
   );
 
-  await runtime.store.appendAudit(undefined, {
-    type: "plan_admitted",
+  await runtime.store.appendChannelMessage({
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "system",
+    authorId: "coordinator",
+    content:
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+      `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
     taskId: tasks.claude,
-    data: {
-      status: "sequenced",
-      blockedBy: [tasks.codex],
-      explanation: "Sequenced behind executing work on the same resources",
-    },
   });
-  await waitFor(
-    async () =>
-      (await runtime.store.listChannelMessages(repo, ownerId)).some(
-        (message) => message.authorId === "coordinator",
-      ),
-    "the hold was never announced in the room",
-    8_000,
-  );
 
   const notice = (await runtime.store.listChannelMessages(repo, ownerId)).find(
     (message) => message.authorId === "coordinator",
@@ -1720,21 +1907,12 @@ test("an agent with no connection this channel knows still falls back to its obj
   });
 
   await waitFor(
-    async () => {
-      const messages = await runtime.store.listChannelMessages(repo, ownerId);
-      return messages.some((message) => message.authorId === "coordinator");
-    },
-    "the collision was never announced in the room",
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the collision was never announced",
     8_000,
   );
 
-  const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  const line = String(
-    messages.find((message) => message.authorId === "coordinator")?.content,
-  );
-  // The named agent is still named; only the one nobody is connected for
-  // falls back, and it falls back quoted and short rather than to a wrong name.
-  assert.match(line, new RegExp(`@Claude \\(${firstName}\\)`, "u"), line);
+  const line = (await arbitrationLines(runtime, repo, ownerId))[0]?.content ?? "";
   // 37 characters and an ellipsis — the exact shape the room was showing when
   // this was reported, which is how the fallback was identified as the path
   // every hold was taking.
@@ -1744,6 +1922,64 @@ test("an agent with no connection this channel knows still falls back to its obj
     new RegExp(`@Codex \\(${firstName}\\)`, "u"),
     "an agent nobody is connected for was named anyway",
   );
+});
+
+test("a task with no resolvable agent account falls back to the coordinator system line", async (t) => {
+  // The held task's own agent says the line — unless there is no agent account
+  // to say it under, and then somebody still has to. Putting first-person words
+  // in a thread with nobody behind them would attribute one agent's sentence to
+  // whoever posted last, so the room says it in its own name instead, which is
+  // what it did for everybody before these moved into threads.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "unattributedroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  // The account the thread would have been written under, disconnected. The
+  // run carries on — this is the shape of an agent removed from a channel, or
+  // a credential withdrawn, while its work is still in flight.
+  runtime.chatConnections.set(ownerId, []);
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
+    },
+  });
+  await waitFor(
+    async () => (await arbitrationLines(runtime, repo, ownerId)).length > 0,
+    "the collision was announced nowhere at all",
+    8_000,
+  );
+
+  const [line] = await arbitrationLines(runtime, repo, ownerId);
+  assert.equal(
+    line?.inThread,
+    false,
+    "a first-person line was posted with no account to attribute it to",
+  );
+  assert.equal(line?.authorId, "coordinator");
+  // Third person, because the room is speaking: "I'll start once they're done"
+  // in the channel names nobody at all.
+  assert.doesNotMatch(line?.content ?? "", /I'll/u, line?.content ?? "");
+  assert.match(line?.content ?? "", /starts once/u, line?.content ?? "");
 });
 
 test("the sweep leaves a quiet task alone, and closes a thread its watcher abandoned", async (t) => {

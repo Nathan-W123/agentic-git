@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   arbitrationLine,
+  arbitrationReleaseLine,
   namedDeferrals,
   type ArbitrationAnnouncement,
   type DeferredRef,
@@ -207,4 +208,123 @@ test("granted and deferred collisions keep enough path to tell them apart", () =
   assert.match(line, /starts on shared-types\/src\/index\.ts now/u, line);
   assert.match(line, /takes cli\/src\/index\.ts, renderThreadList once/u, line);
   assert.doesNotMatch(line, /packages\/|apps\//u, line);
+});
+
+test("the hold sentence is written in the agent's first person and names the other agent", () => {
+  // The line moved from the room into the held agent's own thread, and the
+  // move is the whole of the change: "@Rhea and @Hades have conflicting files
+  // — @Rhea starts once @Hades is done" is a referee's summary, and reading it
+  // under @Rhea's own name is @Rhea talking about somebody called @Rhea. What
+  // the person waiting on this run wants is one worker's account of what it
+  // found in its way, which is what it would say out loud.
+  const line = arbitrationLine({
+    ...BASE,
+    firstPerson: true,
+    blockedByNames: ["@Hades"],
+    status: "sequenced",
+    partial: false,
+  });
+
+  assert.equal(
+    line,
+    "⚖️ Looks like @Hades has the same files open — I'll start once they're " +
+      "done.",
+  );
+  // The speaker is never in its own sentence: its name is already on the
+  // bubble, and putting it in the words as well reads as a report about
+  // somebody else.
+  assert.doesNotMatch(line, /@Rhea/u, line);
+
+  // A block is the same finding with a different order in it, and two blockers
+  // take a plural verb rather than "@Hades and @Zeus has".
+  assert.equal(
+    arbitrationLine({
+      ...BASE,
+      firstPerson: true,
+      blockedByNames: ["@Hades", "@Zeus"],
+      status: "blocked",
+      partial: false,
+    }),
+    "⚖️ Looks like @Hades and @Zeus have the same files open — I'll let them " +
+      "go first.",
+  );
+
+  // Nobody to name is still somebody to wait for, and it is singular.
+  assert.equal(
+    arbitrationLine({ ...BASE, firstPerson: true, partial: false }),
+    "⚖️ Looks like other work in flight has the same files open — I'll start " +
+      "once it's done.",
+  );
+
+  // One agent's own two tasks: there is no second agent to look at, so the
+  // sentence is the order it will take its own work in.
+  assert.equal(
+    arbitrationLine({
+      ...BASE,
+      firstPerson: true,
+      held: "@Rhea",
+      blockedByNames: ["@Rhea"],
+      status: "blocked",
+      partial: false,
+    }),
+    '⚖️ I\'m on two tasks that conflict — I\'ll do "trim the settings text" ' +
+      'first, then "rename the agent".',
+  );
+});
+
+test("a split admission says what it is taking now and what it is waiting for, in one voice", () => {
+  const line = arbitrationLine({ ...REPORTED, firstPerson: true });
+
+  assert.match(line, /Looks like @Hades has the same files open/u, line);
+  assert.match(line, /I'll start on styles\.css now and take /u, line);
+  assert.match(line, /once they're done\.$/u, line);
+  // Everything the third-person line already refused to do, still refused:
+  // a file's contents are not further things lost, and a route is not a file.
+  assert.doesNotMatch(line, /965 more|GET \//u, line);
+});
+
+test("the release answers the hold in the same voice, and carries no marker", () => {
+  // The hold described a condition, and the condition is over. Left standing
+  // it is a thread contradicting itself; taken back without a word it is an
+  // agent that went quiet for twenty minutes and never said why. So the words
+  // change rather than vanish — and unmarked, because this one is a fact about
+  // something that happened and stays as the account of the wait.
+  const released = arbitrationReleaseLine({
+    ...BASE,
+    firstPerson: true,
+    blockedByNames: ["@Hades"],
+    partial: false,
+  });
+
+  assert.equal(released, "@Hades is done — picking this up now.");
+  assert.doesNotMatch(released, /⚖️/u, released);
+
+  assert.equal(
+    arbitrationReleaseLine({
+      ...BASE,
+      firstPerson: true,
+      blockedByNames: ["@Hades", "@Zeus"],
+      partial: false,
+    }),
+    "@Hades and @Zeus are done — picking this up now.",
+  );
+
+  // One agent's own two tasks name the work rather than the agent, exactly as
+  // the hold did.
+  assert.equal(
+    arbitrationReleaseLine({
+      ...BASE,
+      firstPerson: true,
+      blockedByNames: ["@Rhea"],
+      partial: false,
+    }),
+    'Done with "trim the settings text" — picking this one up now.',
+  );
+
+  // The restart case: a hold this process has no memory of posting is still
+  // withdrawn, and what replaces it can only say the wait is over.
+  assert.equal(
+    arbitrationReleaseLine({ ...BASE, firstPerson: true, partial: false }),
+    "That's clear now — picking this up.",
+  );
 });

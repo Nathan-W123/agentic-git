@@ -80,6 +80,28 @@ test("the footer links are addresses rather than dead hashes", async () => {
   );
 });
 
+test("sign-in is a focused card without changing its form contract", async () => {
+  const app = await publicFile("app.js");
+  const auth = app.slice(app.indexOf("function renderAuth()"));
+  const login = auth.slice(
+    auth.indexOf("if (!bootstrap && !register)"),
+    auth.indexOf('return `<main class="auth-shell">'),
+  );
+
+  assert.match(login, /class="auth-shell auth-login-shell"/u);
+  assert.match(login, /class="auth-card auth-login-card" data-act="login"/u);
+  assert.match(login, /Welcome back/u);
+  assert.match(login, /name="email" type="email"/u);
+  assert.match(login, /autocomplete="username"/u);
+  assert.match(login, /name="password" type="password" minlength="12"/u);
+  assert.match(login, /autocomplete="current-password"/u);
+  assert.match(
+    login,
+    /href="#forgot" data-act="auth-mode"\s*data-value="forgot"/u,
+    "password recovery should remain available from the sign-in card",
+  );
+});
+
 test("arriving on a sign-in link opens sign-in, and clicking one moves the URL", async () => {
   const app = await publicFile("app.js");
   // Boot honours the link somebody arrived on — but only once first-time
@@ -475,6 +497,21 @@ test("an invitation opens whichever door this deployment has open", async () => 
   assert.match(signup, /let through/u);
   // And it still says what the card is for, invitation or not.
   assert.match(signup, /day\s*\n?\s*fifteen/u);
+
+  // The sign-in card is chosen from the resolved mode, not the raw one.
+  // Where payments are off an invitation resolves to `register`, and a card
+  // picked off `authMode` would see "not bootstrap, not register" and show
+  // somebody arriving on an invitation the sign-in form instead of the one
+  // that makes their account. The two changes landed independently and this
+  // is the line where they meet.
+  const tail = app.slice(
+    app.indexOf("const setupRequired = state.health?.setupRequired === true;"),
+    app.indexOf("if (!bootstrap && !register)"),
+  );
+  assert.notEqual(tail, "", "the sign-in card should still be chosen here");
+  assert.match(tail, /const bootstrap = mode === "bootstrap";/u);
+  assert.match(tail, /const register = mode === "register";/u);
+  assert.doesNotMatch(tail, /authMode/u);
 });
 
 test("the desktop app is offered on the way in, not only once inside", async () => {
