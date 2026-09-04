@@ -52,6 +52,12 @@ interface PreparedUncoordinatedTask {
   plan: AgentPlan;
   workspace: TaskWorkspace;
   changeSet: ChangeSet;
+  /**
+   * Kept for the same reason the coordinated arm keeps its own: an adapter is
+   * the only thing that knows what it spent, and once this returns there is
+   * nothing left to ask.
+   */
+  adapter: AgentAdapter;
 }
 
 function rate(value: number, total: number): number {
@@ -319,7 +325,7 @@ async function prepareUncoordinatedTask(
     workspacePath: workspace.path,
   });
   const changeSet = await adapter.collectChanges(session.id);
-  return { task: entry.task, plan, workspace, changeSet };
+  return { task: entry.task, plan, workspace, changeSet, adapter };
 }
 
 async function integratePreparedTask(
@@ -361,6 +367,12 @@ export async function runUncoordinatedFixture(
     ),
   );
 
+  // Every agent cycle this arm spent, in the order it spent them. A replay is
+  // a second cycle against the same task, so it is appended rather than
+  // replacing the first: the wasted pass is the measurement.
+  const spent: Array<{ task: TaskDefinition; adapter: AgentAdapter }> =
+    prepared.map((entry) => ({ task: entry.task, adapter: entry.adapter }));
+
   const undetected = undetectedConflictIds(fixture.scenario);
   let integrationAttempts = 0;
   let integrationFailures = 0;
@@ -393,6 +405,7 @@ export async function runUncoordinatedFixture(
         scenarioTask,
         refreshedVersion,
       );
+      spent.push({ task: replay.task, adapter: replay.adapter });
       try {
         integrationAttempts += 1;
         const replayResult = await integratePreparedTask(
@@ -437,6 +450,7 @@ export async function runUncoordinatedFixture(
     undetectedConflicts,
     elapsedMs: Math.round(performance.now() - startedAt),
     finalRevision: finalVersion.revision,
+    ...tokenMetrics(spent),
   };
 }
 

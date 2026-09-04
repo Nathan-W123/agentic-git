@@ -379,7 +379,13 @@ test("profile and history are two states of one shell", async () => {
 
   // Escape still closes, and closing still puts the surface away rather than
   // leaving it open and invisible.
-  assert.match(app, /case "agent-panel-close":\s*\n\s*clearRightPanel\("agent"\);/u);
+  // The case remembers which agent it is closing before it clears the
+  // panel, so the clear is no longer the statement immediately after the
+  // label. Still the same close, on the same action.
+  assert.match(
+    app,
+    /case "agent-panel-close":[\s\S]{0,140}clearRightPanel\("agent"\);/u,
+  );
 });
 
 test("the profile opens with the layout and stops for direct manipulation", async () => {

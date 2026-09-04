@@ -1049,7 +1049,10 @@ test("settings floats above the product routes", async () => {
   assert.deepEqual(parsed, ["chats", "notifications"]);
   assert.match(source, /state\.settingsOpen === true \? settingsDialog\(\) : ""/u);
   assert.match(source, /role="dialog"[\s\S]{0,80}aria-modal="true"/u);
-  assert.match(source, /data-act="settings-section"/u);
+  // The dialog shell stays in `app.js`; its sections are rendered by
+  // `screen-settings.js`, which is where this moved to.
+  const settingsScreen = await publicFile("screen-settings.js");
+  assert.match(settingsScreen, /data-act="settings-section"/u);
   // Code is read where it is discussed — files and diffs render inline in the
   // channel transcript — so neither it nor the coordinator is a page of its
   // own, and tasks still belong to the agent that owns them.
@@ -1075,12 +1078,16 @@ test("settings exposes theme and sound effect preferences", async () => {
   const data = await publicFile("data.js");
   const ui = await publicFile("ui.js");
 
-  assert.match(app, /data-act="settings-theme"/u);
-  assert.match(app, /\["system", "System"\]/u);
+  // The rows are built by `settingRow` and `segmentedControl` now, so the
+  // action arrives as a property those helpers turn into `data-act`, and
+  // each option carries an icon beside its label. Same two controls, same
+  // two actions.
+  assert.match(app, /act: "settings-theme"/u);
+  assert.match(app, /\{ value: "system", label: "System"/u);
   assert.match(data, /export function myThemePreference\(\)/u);
   assert.match(data, /prefers-color-scheme: light/u);
 
-  assert.match(app, /data-act="settings-sounds"/u);
+  assert.match(app, /act: "settings-sounds"/u);
   assert.match(app, /Quiet cues for sent and incoming messages/u);
   assert.match(app, /localStorage\.setItem\("ag\.messageSounds"/u);
   // The inline `=== "false"` early return inside `chime` became the
@@ -1760,9 +1767,12 @@ test("people and agents only animate downward when the sidebar expands", async (
     css,
     /\.chats-shell\.chan-collapsed \.chan-roster \{\s*grid-template-rows: 0fr;/u,
   );
+  // Channels joined the same rule, so the `:is()` list is read for the two
+  // members this test is about rather than matched whole. What is being
+  // asserted is unchanged: the two sections have somewhere to travel from.
   assert.match(
     css,
-    /\.chats-shell\.chan-collapsed :is\(\.chan-sec-people, \.chan-sec-agents\),[\s\S]{0,120}transform: translateY\(-10px\);/u,
+    /\.chats-shell\.chan-collapsed :is\([^)]*\.chan-sec-people[^)]*\.chan-sec-agents[^)]*\),[\s\S]{0,200}transform: translateY\(-10px\);/u,
   );
   assert.match(
     css,
@@ -1805,7 +1815,7 @@ test("each roster is compact, unlabelled when empty, and folds on its heading", 
   // People and agents are drawn at the same, smaller face — the two rosters
   // must not disagree about how big somebody in the room is.
   assert.match(chats, /avatar\(name, 22, name, me \? myAvatar\(\) : undefined\)/u);
-  assert.match(chats, /agentFace\(agent, 22\)/u);
+  assert.match(chats, /statusAgentFace\(agent, 22/u);
   assert.match(css, /\.roster-row \.status-dot \{[\s\S]{0,80}width: 6px;/u);
   assert.match(css, /\.roster-row-main \{[\s\S]{0,120}padding: 4px 8px;/u);
 
@@ -2001,7 +2011,10 @@ test("the phone drawer closes when a sidebar destination opens", async () => {
   // through the helper before it renders, and the helper must still forget the
   // reply target and shut the drawer — a shell that stayed open over the
   // conversation it just opened is the failure this guards.
-  assert.match(dm, /openUserDirectMessage\(value\);\s*render\(\);/u);
+  assert.match(
+    dm,
+    /if \(!openUserDirectMessage\(value\)\) \{[\s\S]{0,40}\}[\s\S]{0,80}render\(\);/u,
+  );
   const openDm = app.slice(
     app.indexOf("function openUserDirectMessage"),
     app.indexOf("function showDirectMessageMenu"),
@@ -3663,14 +3676,18 @@ test("a connected agent is not painted as a working one", async () => {
   assert.match(chatHeader, /agentFace\(agent, 34, \{ status: agent\.status, progress \}\)/u);
   assert.doesNotMatch(chatHeader, /<span class="dot/u);
 
-  // The full agents screen still writes a separate status word and dot, and
-  // an idle connection remains amber there rather than green.
-  assert.match(agents, /agent\.presence === "idle"\s*\?\s*"orange"/u);
+  // The amber-for-idle dot went with the agents screen itself, which is a
+  // retired route — `settings floats above the product routes` guards that
+  // retirement, so it is not re-asserted here. `screen-agents.js` owns only
+  // credential setup now; agent activity is shown where the work happens.
+  const settingsScreen = await publicFile("screen-settings.js");
+  assert.doesNotMatch(agents, /renderAgents/u);
 
-  // And the count that opens the agents screen says what it counts.
-  assert.match(agents, /label: "Connected agents",/u);
+  // The count that opens the connections list still says what it counts: a
+  // stored credential is not an agent that is doing anything.
+  assert.match(settingsScreen, /label: "Connected agents",/u);
   assert.equal(
-    /label: "Active agents",/u.test(agents),
+    /label: "Active agents",/u.test(settingsScreen),
     false,
     "a stored credential is not an active agent",
   );
@@ -5025,7 +5042,7 @@ test("a direct message can send image-only and mixed text/image content", async 
     /dm: \{[\s\S]*draft: "dmDraft",[\s\S]*counter: "dmAttaching",[\s\S]*input: "dm-input"/u,
   );
   assert.match(dmPanel, /draftText\(state\.dmDraft\)/u);
-  assert.match(dmPanel, /messageBody\([\s\S]{0,100}message\.content/u);
+  assert.match(dmPanel, /messageFoldClip\([\s\S]{0,120}message\.content,[\s\S]{0,80}messageBody\(shown/u);
   assert.match(submit, /const draft = state\.dmDraft\.trim\(\)/u);
   assert.match(submit, /draft\.length === 0/u);
   assert.match(submit, /sendDirectMessage\(other, draft, referencedMessageId\)/u);
@@ -5666,11 +5683,17 @@ test("an invite link opened in a running session enters the invitation flow", as
   const body = app.slice(start, app.indexOf("\n/* ---", start));
   const invitation = body.indexOf("handleInviteLink");
   const signedOutShell = body.indexOf('const authRoot = $("#auth-root")');
-  const ordinaryRoute = body.indexOf("const route = window.location.hash");
+  const ordinaryRoute = body.indexOf("const route = (window.location.hash");
 
   assert.match(app, /addEventListener\("hashchange", applyHash\)/u);
   assert.match(body, /\^#invite\\\/\.\+\$/u);
-  assert.notEqual(invitation, -1);
+  // Each landmark asserted present before it is ordered against another: a
+  // missing one is -1, which sorts before everything and turns "this comes
+  // first" into a pass, or -- as here -- into a failure that reads as a
+  // behaviour change rather than as a renamed line.
+  assert.notEqual(invitation, -1, "applyHash should still take invite links");
+  assert.notEqual(signedOutShell, -1, "applyHash should still reach the signed-out shell");
+  assert.notEqual(ordinaryRoute, -1, "applyHash should still read the ordinary route");
   assert.ok(invitation < signedOutShell);
   assert.ok(invitation < ordinaryRoute);
 });
@@ -6303,6 +6326,8 @@ test("the run fills the agent working, at the front of the stack", async () => {
     "planTranscriptReplies",
     "threadReplyTurns",
     "channelAuthor",
+    "agentOwnerOffline",
+    "threadIsPaused",
     "agentFace",
     "avatar",
     "currentUserName",
@@ -6326,6 +6351,11 @@ test("the run fills the agent working, at the front of the stack", async () => {
       name: reply.author,
       agent: reply.agent === true ? { id: reply.author } : undefined,
     }),
+    // This test's premise is an agent that is working: its owner has a
+    // machine and the thread is not paused. `screen-chats.js` imports both
+    // for real; only this synthetic scope needs them handed in.
+    () => false,
+    () => false,
     (
       agent: { id: string },
       _size: number,
@@ -6924,7 +6954,7 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   // The header counted the whole organization — and, before that had loaded,
   // only the reader. Both it and the sidebar now count this room.
   assert.match(chats, /function channelPeopleFor/u);
-  assert.match(chats, /const people = channelPeopleFor\(repositoryId\)/u);
+  assert.match(chats, /const people = channelPeopleFor\(activeRepositoryId\)/u);
   assert.match(chats, /const people = channelPeopleFor\(activeRepositoryId\)/u);
   assert.doesNotMatch(
     /function conversationHeader[\s\S]*?\n\}/u.exec(chats)?.[0] ?? "",
@@ -7612,10 +7642,15 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   // The sidebar answers from the tasks rather than the messages: only the open
   // channel has its messages loaded, so a badge read from those would be right
   // for the room already on screen and absent for every other.
-  const channelHeld = data.slice(
-    data.indexOf("export function channelAwaitsGoAhead"),
-    data.indexOf("/** Records a `channel-typing` frame from somebody else. */"),
-  );
+  // Bounded by the next declaration, not by a comment: this used to end at a
+  // one-line comment that has since been expanded into a block, so `indexOf`
+  // returned -1 and `slice(start, -1)` quietly took the whole rest of the
+  // file. The assertions below then described `data.js`, not this function.
+  const heldStart = data.indexOf("export function channelAwaitsGoAhead");
+  const heldEnd = data.indexOf("export function noteTyping", heldStart);
+  assert.notEqual(heldStart, -1, "channelAwaitsGoAhead should still exist");
+  assert.notEqual(heldEnd, -1, "channelAwaitsGoAhead should have a boundary");
+  const channelHeld = data.slice(heldStart, heldEnd);
   assert.match(channelHeld, /state\.tasks\.some/u);
   assert.equal(/channelMessagesFor/u.test(channelHeld), false);
 
@@ -7694,7 +7729,13 @@ test("completed-work responses use an accessible inline pill while ordinary refe
   assert.match(row, /const completedReference =/u);
   assert.match(row, /completedReference === ""/u);
   assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
-  assert.match(row, /messageBodyWithIcons\(entry, repositoryId\)\}\$\{completedReference\}/u);
+  // The body is rewritten before it is drawn — the reference is lifted out
+  // of the text and rendered as the pill — so the entry reaches
+  // `messageBodyWithIcons` with its content replaced rather than whole.
+  assert.match(
+    row,
+    /messageBodyWithIcons\(\{ \.\.\.entry, content: shown \}, repositoryId\)\}\$\{completedReference\}/u,
+  );
 
   const pill = /\n\.cmsg-completed-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(pill, undefined, "completed work has its own inline treatment");
@@ -8367,10 +8408,14 @@ test("a provider with no model list still lets a model be named", async () => {
   // The agent panel's chips became labelled fields in the profile redesign, so
   // the slice is anchored on `field("Model", ...)` now. Same control, same
   // action, same question: what happens on a provider that lists nothing.
-  const chip = chats.slice(
-    chats.indexOf('field(\n      "Model"'),
-    chats.indexOf('field(\n      "Reasoning"'),
-  );
+  // Anchored on the function rather than on `field(\n      "Model"`, whose
+  // indentation is what actually moved. A slice bounded by whitespace is a
+  // slice that reformatting silently empties.
+  const zoneStart = chats.indexOf("function agentRuntimeZone(");
+  const zoneEnd = chats.indexOf('"Reasoning"', zoneStart);
+  assert.notEqual(zoneStart, -1, "the agent runtime zone should still exist");
+  assert.notEqual(zoneEnd, -1, "the model field should still precede reasoning");
+  const chip = chats.slice(zoneStart, zoneEnd);
   assert.match(chip, /customModel/u);
   assert.match(chip, /miniEditable\(\s*"channel-agent-model"/u);
   assert.match(chat, /providerAllowsCustomModel\(agent\?\.id\)/u);
@@ -8684,8 +8729,18 @@ test("the transcript reads in a column rather than across the window", async () 
   // A message run edge to edge on a wide screen is a message read twice: the
   // eye leaves the end of one line with nowhere to land on the next. Day
   // separators still span the panel so "Today" is not left-shifted short.
-  assert.match(css, /--room-column: 940px;/u);
-  assert.match(css, /--message-max: 100%;/u);
+  // The bound, not its value. `--room-column` was 940px and is the panel's
+  // own width now — a deliberate reversal, with the reason written above the
+  // declaration: a fixed measure left long posts wrapping beside a large
+  // empty area. What has to stay true is that rows are bounded by a named
+  // column at all, rather than running to the window's edge.
+  assert.match(css, /--room-column: [^;]+;/u);
+  assert.match(css, /--message-max: [^;]+;/u);
+  assert.match(
+    css,
+    /max-width: var\(--room-column\);/u,
+    "message rows are still held to the column rather than the window",
+  );
   assert.match(
     css,
     /\.chan-messages \{[\s\S]{0,400}padding: 12px 18px 20px;/u,

@@ -8,6 +8,7 @@ import type { ResolvedMcpServer } from "@coord/shared-types";
 
 import {
   CoordinatorProject,
+  DEFAULT_CONFIG,
   allowedMcpServers,
   describeMcpServer,
   mcpServerDigest,
@@ -325,10 +326,17 @@ test("a config written before a vendor existed still gains its agent", () => {
     agents: { codex: { adapter: "codex" }, claude: { adapter: "claude" } },
   });
 
-  for (const adapter of ["cursor", "copilot", "kiro", "gemini"]) {
+  // Read off the defaults rather than listed again here. This was a second
+  // copy of the vendor roster, and when Copilot and Gemini were withdrawn
+  // from the connect screen only the other copy was updated — so the test
+  // went on demanding agents for two vendors nobody can connect any more.
+  // Whatever the defaults offer is what an older config must gain.
+  for (const [name, wanted] of Object.entries(DEFAULT_CONFIG.agents)) {
     assert.ok(
-      Object.values(older.agents).some((agent) => agent.adapter === adapter),
-      `${adapter} must be runnable once it is connected`,
+      Object.values(older.agents).some(
+        (agent) => agent.adapter === wanted.adapter,
+      ),
+      `${name} must be runnable once it is connected`,
     );
   }
   // And the entries that were already there are untouched.

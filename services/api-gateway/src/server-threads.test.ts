@@ -935,7 +935,22 @@ test("a reply that @mentions an agent in a person's thread reaches that agent", 
     runtime.submittedTasks[0]?.objective ?? "",
     /tackle this/u,
   );
-  assert.equal(runtime.chatPrompts.length, 0);
+  // What this has always been for: the mention dispatched work rather than
+  // being answered conversationally. It used to say that as "no provider turn
+  // at all", which two later features made untrue without either of them
+  // being wrong — the root message above names nobody, so it is classified,
+  // and dispatched work now opens with an acknowledgement. Both are spent on
+  // purpose; an answer to the reply would not be.
+  const answered = runtime.chatPrompts.filter(
+    (entry) =>
+      !entry.prompt.startsWith("You are an agent in a team chat") &&
+      !entry.prompt.startsWith("You have just been asked to do the following"),
+  );
+  assert.deepEqual(
+    answered.map((entry) => entry.prompt.slice(0, 80)),
+    [],
+    "the mention should dispatch work, never be answered as a question",
+  );
 });
 
 /**

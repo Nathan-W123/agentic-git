@@ -182,9 +182,14 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(entries, /state\.repositories\.map/u);
   assert.match(entries, /group: "Workspaces"/u);
   assert.match(entries, /group: "People"/u);
+  // Messages are built by their own helper and spread in, so the group name
+  // lives there rather than inline. Both halves asserted: the helper makes
+  // the rows, and the entries actually take them.
+  assert.match(entries, /\.\.\.switcherMessageRows\(query\),/u);
+  const messageRows = slice(app, "function switcherMessageRows(query) {", "function paintSwitcher()");
+  assert.match(messageRows, /group: "Messages"/u);
   assert.match(entries, /group: "Navigation"/u);
   assert.match(entries, /switcherMessageRows\(query\)/u);
-  assert.match(entries, /group: "Messages"/u);
   assert.match(entries, /state\.dmPeople/u);
   // Navigation is Settings and nothing else. Chats is the screen the switcher
   // is already drawn over, and the backlog of everything every agent has done
