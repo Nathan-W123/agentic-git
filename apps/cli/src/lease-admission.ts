@@ -59,7 +59,7 @@ import {
 import {
   blockedAdmissionHistory,
   wasPartiallyAdmitted,
-} from "./worker-operations.js";
+} from "./admission-history.js";
 
 /**
  * What makes one admission answer different from another.
@@ -1470,7 +1470,26 @@ export class LeasePlanAuthority implements PlanAuthority {
     }
   }
 
-  private async narrowBlanketHolder(
+  /**
+   * Narrows one repository-wide holder for an arriving plan, and answers what
+   * it became.
+   *
+   * Public because there are two admission paths and this is the only
+   * narrowing. `admit` below is the local coordinator's; `admitWorkPlan` is
+   * the one a worker's plan arrives on, and it had none — it read the active
+   * set and decided against it, so a blanket claim refused it outright and
+   * the holder was never asked anything. Both halves of the ask were already
+   * built for that path: a remote holder publishes itself into the same
+   * registry a local one does, and its heartbeat carries the ask. Nothing
+   * looked it up, so the ask was never armed and the heartbeat delivered
+   * nothing, every time.
+   *
+   * Answers `undefined` for every failure and for a deliberate wait — a
+   * pending ask included, which is not a failure but the arrival taking the
+   * retry it was going to take while the holder finishes answering. The
+   * caller decides against the claim exactly as it does today.
+   */
+  public async narrowBlanketHolder(
     holder: ActivePlan,
     baseVersion: CanonicalVersion,
     repository: CanonicalRepository,

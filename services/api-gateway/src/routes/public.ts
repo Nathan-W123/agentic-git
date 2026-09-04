@@ -313,6 +313,29 @@ export async function routePublic(
     if (email === "") {
       throw new HttpError(400, "invalid_request", "An email is required");
     }
+    // Through the waitlist, or not through the door.
+    //
+    // This is the gate `/auth/register` has always had, on the route that
+    // now leads somewhere. With payments on, being let in off the waitlist
+    // is what entitles an address to start a trial — and without this the
+    // list would be decoration, since anybody holding a card could walk
+    // straight past it to the checkout.
+    //
+    // Ahead of the duplicate-address answer below rather than after it, so
+    // the only people who can learn whether an address already has an
+    // account are people this deployment has already approved.
+    const waiting = await gw.options.store.getWaitlistEntryByEmail(email);
+    if (waiting?.invitedAt === undefined) {
+      // One refusal for "never asked", "still waiting" and "we said no", so
+      // this cannot be used to read the list back out one address at a
+      // time. It still says the useful thing: there is a list, and this
+      // address is not through it.
+      throw new HttpError(
+        403,
+        "waitlist_pending",
+        "Kumi is invitation-only right now. Join the waitlist and we will be in touch.",
+      );
+    }
     if ((await gw.options.store.getUserByEmail(email)) !== undefined) {
       // Said plainly, matching what `/auth/register` already answers for
       // the same case. This route is no more of an address oracle than the

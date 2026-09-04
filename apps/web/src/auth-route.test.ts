@@ -25,10 +25,16 @@ test("the signed-out forms are named by a hash", async () => {
   // side, the form it opens on the other.
   for (const [hash, mode] of [
     ["signin", "login"],
-    // `register` survives as an address but opens the paid trial: the free
-    // form it used to open is retired, and an older bookmark should land
-    // somewhere real rather than on a blank screen.
-    ["register", "signup"],
+    // Where an invitation lands. Which form it opens is resolved from
+    // health rather than fixed here, so one address in the mail serves a
+    // deployment selling trials and one giving accounts away.
+    ["join", "join"],
+    // `register` is the address older invitations carry, so it resolves the
+    // same way. It used to resolve to the paid trial unconditionally, which
+    // meant that on a deployment with payments off — the only kind that has
+    // a waitlist — an invitation landed the person back on the waitlist form
+    // they had already filled in.
+    ["register", "join"],
     ["setup", "bootstrap"],
     // Recovering a password is two more forms with two more addresses: one to
     // ask for a link, one the link itself opens.
@@ -384,7 +390,7 @@ test("the waitlist is a signed-out screen with its own address", async () => {
   // complete is a worse answer than the thing that replaced it.
   assert.match(
     app,
-    /authMode === "waitlist" \|\| \(authMode === "signup" && !paymentsOn\(\)\)/u,
+    /mode === "waitlist" \|\| \(mode === "signup" && !paymentsOn\(\)\)/u,
   );
 
   // Read from health rather than kept as its own flag, so the screen can
@@ -442,4 +448,111 @@ test("billing says it is switched off rather than misconfigured", async () => {
     app.indexOf("function banner()"),
   );
   assert.match(banner, /billing\.payments !== true/u);
+});
+
+test("an invitation opens whichever door this deployment has open", async () => {
+  const app = await publicFile("app.js");
+
+  // The mail cannot know how the deployment sells, and should not have to:
+  // it sends one address and the app resolves it. That also means turning
+  // payments on does not invalidate the invitations already sent.
+  const resolve = app.slice(
+    app.indexOf("function renderAuth()"),
+    app.indexOf('if (mode === "forgot"'),
+  );
+  assert.notEqual(resolve, "", "renderAuth should still resolve the mode");
+  assert.match(resolve, /authMode === "join"/u);
+  assert.match(resolve, /paymentsOn\(\)\s*\n?\s*\?\s*"signup"/u);
+  assert.match(resolve, /:\s*"register"/u);
+
+  // And waits rather than guessing. Everywhere else an unanswered health
+  // check reads as "payments off", because offering a queue to somebody who
+  // could have paid is recoverable. Here both wrong guesses put a dead form
+  // in front of somebody arriving on an invitation — a card form the
+  // checkout answers 501 to, or a free form registration answers 410 to.
+  assert.match(resolve, /state\.health === undefined/u);
+  assert.match(app, /function renderInvitationLoading\(\)/u);
+
+  // The approved address rides in the fragment, which the browser never
+  // sends, so the form can be prefilled without the address reaching a
+  // server or an access log.
+  assert.match(app, /function invitedEmailFromHash\(\)/u);
+  const reader = app.slice(
+    app.indexOf("function invitedEmailFromHash()"),
+    app.indexOf("/** The secret out of a `#reset/<token>` link"),
+  );
+  assert.match(reader, /decodeURIComponent/u);
+  // A hand-edited or truncated link is an empty box, not a thrown render.
+  assert.match(reader, /catch\s*\{[\s\S]{0,200}return "";/u);
+
+  const signup = app.slice(
+    app.indexOf("function renderSignup()"),
+    app.indexOf("function renderWelcome()"),
+  );
+  assert.notEqual(signup, "", "the trial form should still exist");
+  assert.match(signup, /const invited = invitedEmailFromHash\(\);/u);
+  assert.match(signup, /value="\$\{esc\(invited\)\}"/u);
+  // Somebody who signs up with a different address is refused by the server
+  // with no way to see why, so the form says which address is the one.
+  assert.match(signup, /let through/u);
+  // And it still says what the card is for, invitation or not.
+  assert.match(signup, /day\s*\n?\s*fifteen/u);
+
+  // The sign-in card is chosen from the resolved mode, not the raw one.
+  // Where payments are off an invitation resolves to `register`, and a card
+  // picked off `authMode` would see "not bootstrap, not register" and show
+  // somebody arriving on an invitation the sign-in form instead of the one
+  // that makes their account. The two changes landed independently and this
+  // is the line where they meet.
+  const tail = app.slice(
+    app.indexOf("const setupRequired = state.health?.setupRequired === true;"),
+    app.indexOf("if (!bootstrap && !register)"),
+  );
+  assert.notEqual(tail, "", "the sign-in card should still be chosen here");
+  assert.match(tail, /const bootstrap = mode === "bootstrap";/u);
+  assert.match(tail, /const register = mode === "register";/u);
+  assert.doesNotMatch(tail, /authMode/u);
+});
+
+test("the desktop app is offered on the way in, not only once inside", async () => {
+  const app = await publicFile("app.js");
+
+  // Agents run on the person's own machine against their own vendor
+  // subscription, so an account with no worker on it never runs anything.
+  // Settings has always carried the download; the two screens somebody
+  // actually passes through on the way to their first task had not.
+  for (const [name, from, to] of [
+    ["the trial form", "function renderSignup()", "function renderWelcome()"],
+    ["the last step", "function renderWelcome()", "function renderPasswordReset()"],
+  ] as const) {
+    const start = app.indexOf(from);
+    const end = app.indexOf(to);
+    assert.notEqual(start, -1, `${name}: ${from} should still exist`);
+    assert.notEqual(end, -1, `${name}: ${to} should still exist`);
+    assert.match(
+      app.slice(start, end),
+      /href="\/download"/u,
+      `${name} should offer the desktop app`,
+    );
+  }
+});
+
+test("every auth form reports failure in the same red", async () => {
+  const app = await publicFile("app.js");
+
+  // `form-msg` is the styled one — red, centred, and holding its height so
+  // the form does not jump when a message arrives. `auth-msg` is the id the
+  // script writes into and has never had a rule, so the trial and welcome
+  // screens were reporting errors as ordinary body text. The refusal most
+  // people will now meet — an address that is not through the waitlist —
+  // lands on the trial form, so it had better look like a refusal.
+  assert.doesNotMatch(app, /class="auth-msg"/u);
+  const shells = [...app.matchAll(/id="auth-msg"/gu)];
+  assert.ok(shells.length >= 6, `expected every auth form, found ${shells.length}`);
+  for (const match of shells) {
+    assert.match(
+      app.slice(Math.max(0, match.index - 60), match.index),
+      /class="form-msg[^"]*"\s*$/u,
+    );
+  }
 });

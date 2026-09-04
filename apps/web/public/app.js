@@ -473,9 +473,20 @@ const AUTH_HASHES = new Map([
   // the marketing site can link straight at it, and so somebody can be sent
   // the form rather than "open the app and look for the link".
   ["waitlist", "waitlist"],
-  // `register` still maps, so an older bookmark opens the trial rather than
-  // a blank screen — the free form it used to open is gone.
-  ["register", "signup"],
+  // Where an invitation lands, carrying the approved address after the slash
+  // the way `#reset/<token>` carries its secret. It resolves to whichever
+  // door this deployment has open, so the mail does not have to know how the
+  // deployment is configured and turning payments on does not invalidate the
+  // invitations already sent.
+  //
+  // `register` is the address of the form that used to live here and the one
+  // older invitations point at, so it resolves the same way. It used to
+  // resolve to the paid sign-up unconditionally — which meant that on a
+  // deployment with payments off, the only kind that has a waitlist at all,
+  // an invitation landed the person back on the waitlist form they had
+  // already filled in.
+  ["register", "join"],
+  ["join", "join"],
   // Paid sign-up, and the screen somebody lands on coming back from Stripe.
   // `#welcome/<token>` carries its claim secret the way `#reset/<token>`
   // carries its own: in the fragment, which the browser never sends, so it
@@ -505,6 +516,35 @@ function authModeFromHash() {
   return AUTH_HASHES.get(
     window.location.hash.replace(/^#/u, "").split("/")[0] ?? "",
   );
+}
+
+/**
+ * The approved address out of a `#join/<email>` invitation, or "" if absent.
+ *
+ * Prefilled rather than retyped because the address is the credential here:
+ * an invitation admits one address, and somebody who signs up with their
+ * personal mail instead of the one that was let through is refused with no
+ * way to see why. The fragment is never sent, so this reaches no server and
+ * no access log, and it grants nothing on its own — the gate checks the
+ * address server-side, so a forwarded invitation still admits nobody new.
+ */
+function invitedEmailFromHash() {
+  const hash = window.location.hash.replace(/^#/u, "");
+  const separator = hash.indexOf("/");
+  if (separator === -1) {
+    return "";
+  }
+  const head = hash.slice(0, separator);
+  if (head !== "join" && head !== "register") {
+    return "";
+  }
+  try {
+    return decodeURIComponent(hash.slice(separator + 1));
+  } catch {
+    // A truncated or hand-edited link. An empty box somebody can fill in
+    // beats a thrown render, and the gate is server-side either way.
+    return "";
+  }
 }
 
 /** The secret out of a `#reset/<token>` link, or "" when there is none. */
@@ -720,27 +760,48 @@ function renderRegistrationConfirmation() {
 }
 
 function renderAuth() {
-  if (authMode === "forgot" || authMode === "reset") {
+  // An invitation says "join". Which form that means is the deployment's
+  // business and not the mail's: the trial and a card where payments are on,
+  // the free account the waitlist used to hand out where they are not.
+  //
+  // Waiting for health rather than guessing, and only here. Everywhere else
+  // an unknown answer reads as "payments off", because offering a waitlist
+  // to somebody who could have paid is recoverable. It is not recoverable
+  // here: this is somebody arriving on an invitation, and both wrong guesses
+  // put a dead form in front of them — a card form the checkout answers 501
+  // to, or a free form registration answers 410 to.
+  const mode =
+    authMode === "join"
+      ? state.health === undefined
+        ? "join"
+        : paymentsOn()
+          ? "signup"
+          : "register"
+      : authMode;
+  if (mode === "join") {
+    return renderInvitationLoading();
+  }
+  if (mode === "forgot" || mode === "reset") {
     return renderPasswordReset();
   }
-  if (authMode === "waitlist" || (authMode === "signup" && !paymentsOn())) {
+  if (mode === "waitlist" || (mode === "signup" && !paymentsOn())) {
     // `#signup` lands here too while payments are off: it is the address on
     // every link this product has ever sent, and a card form nobody can
     // complete is a worse answer than the thing that replaced it.
     return renderWaitlist();
   }
-  if (authMode === "signup") {
+  if (mode === "signup") {
     return renderSignup();
   }
-  if (authMode === "welcome") {
+  if (mode === "welcome") {
     return renderWelcome();
   }
-  if (authMode === "register" && pendingRegistration !== undefined) {
+  if (mode === "register" && pendingRegistration !== undefined) {
     return renderRegistrationConfirmation();
   }
   const setupRequired = state.health?.setupRequired === true;
-  const bootstrap = authMode === "bootstrap";
-  const register = authMode === "register";
+  const bootstrap = mode === "bootstrap";
+  const register = mode === "register";
 
   // Signing in is the common, repeat visit. Keep its card self-contained so
   // the task is obvious at a glance, rather than splitting the identity,
@@ -950,6 +1011,28 @@ function paymentsOn() {
   return state.health?.billing?.payments === true;
 }
 
+/**
+ * The beat between opening an invitation and knowing which form it opens.
+ *
+ * Deliberately says nothing about a card or a queue, because at this point
+ * this browser does not know which it is, and a heading that has to be taken
+ * back reads worse than one that waits. Health is already in flight when the
+ * shell paints, so this is one frame in the ordinary case.
+ */
+function renderInvitationLoading() {
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandWordmark(120)}
+        <div>
+          <h1>You're through the waitlist</h1>
+          <p>One moment — getting your sign-up ready.</p>
+        </div>
+      </div>
+    </div>
+  </main>`;
+}
+
 /** Where everybody goes while nobody is being let in automatically. */
 function renderWaitlist() {
   return `<main class="auth-shell">
@@ -991,12 +1074,18 @@ function renderWaitlist() {
 
 /** Where a paid sign-up starts: an address, then Stripe takes the card. */
 function renderSignup() {
+  // Arriving on an invitation is a different moment from finding the pricing
+  // page: they have already asked, already waited, and already been told yes.
+  // Saying so is the difference between "start a trial" and "you're in".
+  const invited = invitedEmailFromHash();
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
         ${brandWordmark(120)}
         <div>
-          <h1>Start your free trial</h1>
+          <h1>${
+            invited === "" ? "Start your free trial" : "You're through the waitlist"
+          }</h1>
           <p>Fourteen days free. We take your card now and bill you on day
             fifteen — cancel any time before then and you pay nothing.</p>
         </div>
@@ -1005,8 +1094,14 @@ function renderSignup() {
         <label class="field">
           <span>Work email</span>
           <input class="input" name="email" type="email"
-            autocomplete="email" required placeholder="you@company.com">
-        </label>
+            autocomplete="email" required placeholder="you@company.com"
+            value="${esc(invited)}">
+        </label>${
+          invited === ""
+            ? ""
+            : `<p class="auth-foot">This is the address that was let through.
+                 Signing up with a different one will be turned away.</p>`
+        }
         <label class="field">
           <span>Team name <span class="muted">(optional)</span></span>
           <input class="input" name="organizationName"
@@ -1015,10 +1110,13 @@ function renderSignup() {
         <button class="btn btn-primary btn-wide" type="submit">
           Continue to payment
         </button>
-        <p class="auth-msg" id="auth-msg"></p>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
         <p class="auth-alt">Already have an account?
           <a href="#signin">Sign in</a></p>
       </form>
+      <p class="auth-foot">Kumi runs your agents on your own machine, so
+        you will want <a class="link-muted" href="/download">Kumi for
+        desktop</a> too.</p>
     </div>
   </main>`;
 }
@@ -1095,8 +1193,12 @@ function renderWelcome() {
         <button class="btn btn-primary btn-wide" type="submit">
           Create my account
         </button>
-        <p class="auth-msg" id="auth-msg"></p>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
       </form>
+      <p class="auth-foot">Next: <a class="link-muted"
+        href="/download">Kumi for desktop</a>. Agents run on your own machine
+        against your own Claude or Codex subscription, so nothing runs until
+        it does.</p>
     </div>
   </main>`;
 }
@@ -1223,7 +1325,7 @@ async function submitWaitlist(form) {
       note: String(data.get("note") ?? "").trim(),
       source: "app",
     });
-    form.innerHTML = `<p class="auth-msg" role="status">You are on the list.
+    form.innerHTML = `<p class="form-msg ok" role="status">You are on the list.
       We will email you when there is a place — nothing has been charged and
       there is nothing to pay.</p>`;
   } catch (error) {
@@ -8462,7 +8564,10 @@ function applyHash() {
     const mode = authModeFromHash();
     if (mode !== undefined && mode !== authMode) {
       authMode = mode;
-      if (mode !== "register") {
+      // `join` is the mode an invitation arrives on and the one that hosts
+      // the free registration form, so leaving the confirmation screen means
+      // leaving both of them, not just the older name.
+      if (mode !== "register" && mode !== "join") {
         pendingRegistration = undefined;
       }
       // A different link means a different answer; the old one would otherwise
@@ -9086,7 +9191,7 @@ document.addEventListener("click", (event) => {
     case "auth-mode": {
       event.preventDefault();
       authMode = value;
-      if (value !== "register") {
+      if (value !== "register" && value !== "join") {
         pendingRegistration = undefined;
       }
       // Rendered here rather than left to the `hashchange` this triggers, so
