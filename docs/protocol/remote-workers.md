@@ -254,6 +254,15 @@ requires the exact base the lease was issued at, and a result whose base moved
 is requeued to replan rather than merged. Admission runs in front of that
 backstop and never in place of it.
 
+A claim frozen from observation is re-arbitrated before it is enforced. The
+directories a freeze carries are what let its holder write there without
+asking, but arbitration stopped treating them as a hold, so a path under one
+may have been granted to somebody else since. Anything the changeset touches
+that the claim permits but no longer occupies goes back through the same
+admission every mid-run widening does: still free, and it is granted and
+recorded as a revision; held by somebody else, and the result is refused. The
+local coordinator has always done this; the remote path does now too.
+
 Results are held to the admitted plan, not to whatever plan the worker reports
 alongside its changeset. A result whose reported plan claims resources the
 admission never covered is refused, and the changeset is validated against the

@@ -53,6 +53,13 @@ Implemented in `narrowBlanketHolder` (`apps/cli/src/lease-admission.ts`).
 The second change this document names — making a refused widening requeue
 rather than fail — is **not** implemented and remains a follow-up.
 
+Enforcement of a release against the holder that lost the file was for a long
+time in-process only. A remote result could write a released file and be
+accepted on the strength of the claim's directory prefix, which is what
+`claimCoversPath` reads and what the changeset validator consults. The remote
+result path now re-arbitrates those files first, so the release means the same
+thing on both paths.
+
 ## The change
 
 Release on contest, not on arrival and not preemptively.
