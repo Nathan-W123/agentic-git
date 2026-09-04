@@ -754,17 +754,12 @@ const REFUSAL = {
       happen here. Finish it and press Connect again. No agent was created, and
       nothing on your account changed.`,
   },
-  // Told apart from `no-app`, because the advice is the opposite. "Open the
-  // desktop app" is useless to somebody reading it *inside* the desktop app,
-  // and that is exactly who sees this one: `KUMI_SERVER` has been in the
-  // preload since the app first shipped, the install bridge beside it came
-  // much later, and a preload that throws part-way leaves the page with the
-  // first and not the second. `checkLocalCli` already draws this distinction;
-  // the connect flow was lumping both into "you are in a browser".
+  // Apart from `no-app` because the advice is the opposite; the reason they
+  // are different is at the `verifyMachineFor` return that picks between them.
   "stale-app": {
     subtitle: "This copy of the Kumi app cannot check the CLI.",
     repair: `The app is running, but the part of it that inspects this machine
-      did not load. Download the latest version and open it again — your
+      did not load. Download the latest version and open it again. Your
       agents and their names are kept.`,
     body: `The app is running, but the part of it that inspects this machine
       did not load, so Kumi cannot see whether the CLI is there. Download the
