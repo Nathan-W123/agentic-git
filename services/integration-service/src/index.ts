@@ -5,8 +5,11 @@ import {
   type CommandResult,
   type FilePatch,
   type FilePatchStatus,
+  type GraderEditReport,
   type IntegrationResult,
+  type ValidationBaseline,
   type ValidationCommand,
+  type ValidationEvidence,
 } from "@coord/shared-types";
 import {
   emitPatch,
@@ -78,10 +81,57 @@ export interface IntegrateChangeSetInput {
 export interface IntegrationServiceOptions {
   validationTimeoutMs?: number;
   maxValidationOutputBytes?: number;
+  /**
+   * Where the before-run results are remembered between tasks.
+   *
+   * Shared deliberately: two integrations of the same repository at the same
+   * revision should not each pay for the same baseline. Injectable so a test
+   * can watch what was reused.
+   */
+  baselines?: ValidationBaselineCache;
+  /**
+   * Skip the before-run entirely.
+   *
+   * For a caller that knows it does not want the comparison and would rather
+   * have the wall clock — a rollback, an overlay preview. The result then
+   * carries no `baseline` and its evidence tops out at `executed`, which is
+   * the honest reading of one measurement.
+   */
+  skipBaseline?: boolean;
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Paths that grade a change rather than being graded by it.
+ *
+ * Tests, fixtures, and the files that decide what the validators are. An
+ * agent editing these is not necessarily cheating — the task may be to change
+ * behaviour, and the test may encode the old contract — but "passes the tests
+ * as they were" and "passes the tests it rewrote" are different claims, and
+ * only one of them is evidence.
+ *
+ * Deliberately generous about what counts. A false positive costs one extra
+ * validation run and a line in the history; a false negative is the case this
+ * exists to catch.
+ */
+const GRADER_PATH = new RegExp(
+  [
+    "(?:^|/)(?:tests?|__tests__|spec|specs|e2e|fixtures?|testdata)(?:/|$)",
+    "\\.(?:test|spec)\\.[A-Za-z0-9]+$",
+    "(?:^|/)conftest\\.py$",
+    "(?:^|/)(?:jest|vitest|karma|playwright|cypress|pytest|tox|phpunit)\\.[A-Za-z0-9.]*(?:config|ini|xml)?[A-Za-z0-9.]*$",
+    "(?:^|/)\\.coordinator/config\\.json$",
+    "(?:^|/)(?:Makefile|justfile)$",
+    "(?:^|/)\\.github/workflows/",
+  ].join("|"),
+  "u",
+);
+
+export function isGraderPath(filePath: string): boolean {
+  return GRADER_PATH.test(normalizeRepositoryPath(filePath));
 }
 
 /** What survived a salvage pass, and what is being handed back. */
@@ -105,7 +155,96 @@ function patchStatus(code: string): FilePatchStatus {
   }
 }
 
+/**
+ * How strong the evidence is, given what ran and what the baseline showed.
+ *
+ * Deliberately computed from the commands themselves rather than from their
+ * exit codes: a suite that passes tells you nothing extra about *this* change
+ * unless something it was failing now passes.
+ */
+export function validationEvidence(
+  commands: readonly ValidationCommand[],
+  baseline: ValidationBaseline | undefined,
+): ValidationEvidence {
+  if (commands.length === 0) {
+    return "none";
+  }
+  if (commands.every((command) => command.proves === "integrity")) {
+    return "integrity";
+  }
+  return baseline !== undefined && baseline.nowPassing.length > 0
+    ? "demonstrated"
+    : "executed";
+}
+
+/** A stable identity for a set of commands, so a baseline is not reused across a config change. */
+export function validationFingerprint(
+  commands: readonly ValidationCommand[],
+): string {
+  return JSON.stringify(
+    commands.map((command) => [command.executable, command.args, command.label]),
+  );
+}
+
+/**
+ * Remembers a revision's validation results so the next task does not re-run them.
+ *
+ * The observation that makes the second run affordable: when a change passes
+ * validation and promotes, canonical *is* the tree those commands ran on. So
+ * the after-run of one task is the before-run of the next, and only the first
+ * task at a revision pays.
+ *
+ * Deliberately small and in-memory. A miss costs one honest run, which is the
+ * behaviour without a cache at all, so there is nothing here worth persisting
+ * or worth being wrong about across a restart.
+ */
+export class ValidationBaselineCache {
+  private readonly entries = new Map<string, CommandResult[]>();
+
+  public constructor(private readonly limit = 64) {}
+
+  private static key(
+    repositoryId: string,
+    revision: string,
+    commands: readonly ValidationCommand[],
+  ): string {
+    return `${repositoryId}\u0000${revision}\u0000${validationFingerprint(commands)}`;
+  }
+
+  public get(
+    repositoryId: string,
+    revision: string,
+    commands: readonly ValidationCommand[],
+  ): CommandResult[] | undefined {
+    return this.entries.get(
+      ValidationBaselineCache.key(repositoryId, revision, commands),
+    );
+  }
+
+  public set(
+    repositoryId: string,
+    revision: string,
+    commands: readonly ValidationCommand[],
+    results: readonly CommandResult[],
+  ): void {
+    const key = ValidationBaselineCache.key(repositoryId, revision, commands);
+    // Oldest out first, and re-inserting refreshes position — a revision being
+    // actively worked on is exactly the one worth keeping.
+    this.entries.delete(key);
+    this.entries.set(key, [...results]);
+    while (this.entries.size > this.limit) {
+      const oldest = this.entries.keys().next();
+      if (oldest.done === true) {
+        break;
+      }
+      this.entries.delete(oldest.value);
+    }
+  }
+}
+
 export class IntegrationService {
+  private readonly baselines: ValidationBaselineCache;
+
   public constructor(
     private readonly repositories = new RepositoryService(),
     private readonly workspaces: WorkspaceManager =
@@ -123,6 +262,174 @@ export class IntegrationService {
         throw new RangeError(`${name} must be a positive integer`);
       }
     }
+    this.baselines = options.baselines ?? new ValidationBaselineCache();
+  }
+
+  /** One validation command in a workspace, as a recorded result. */
+  private async runValidationCommand(
+    workspace: TaskWorkspace,
+    command: ValidationCommand,
+  ): Promise<CommandResult & { timedOut?: boolean }> {
+    const startedAt = new Date().toISOString();
+    const output = await this.workspaces.runInWorkspace(
+      workspace,
+      { command: command.executable, args: command.args },
+      {
+        timeoutMs: this.options.validationTimeoutMs ?? 10 * 60 * 1000,
+        maxOutputBytes: this.options.maxValidationOutputBytes ?? 1024 * 1024,
+      },
+    );
+    return {
+      command,
+      exitCode: output.exitCode,
+      stdout: output.stdout,
+      stderr: output.stderr,
+      startedAt,
+      durationMs: output.durationMs,
+      ...(output.timedOut === true ? { timedOut: true } : {}),
+    };
+  }
+
+  /**
+   * The same commands at canonical, before the patch goes in.
+   *
+   * Reused from the cache where the last task at this revision already ran
+   * them, which is the ordinary case in a busy repository: a promotion means
+   * canonical *is* the tree those commands passed on.
+   */
+  private async collectBaseline(
+    workspace: TaskWorkspace,
+    repositoryId: string,
+    revision: string,
+    commands: readonly ValidationCommand[],
+  ): Promise<ValidationBaseline | undefined> {
+    if (this.options.skipBaseline === true || commands.length === 0) {
+      return undefined;
+    }
+    const cached = this.baselines.get(repositoryId, revision, commands);
+    if (cached !== undefined) {
+      return {
+        revision,
+        cached: true,
+        results: cached,
+        nowPassing: [],
+        alreadyFailing: [],
+      };
+    }
+    const results: CommandResult[] = [];
+    for (const command of commands) {
+      // Every command runs, including ones that fail. A red baseline is the
+      // point: it is what stops the next failure being blamed on the change.
+      results.push(await this.runValidationCommand(workspace, command));
+    }
+    // Put the tree back before the patch goes anywhere near it.
+    //
+    // Validation commands are not guaranteed to be read-only — the tamper
+    // check further down exists precisely because they are not — and this run
+    // happens *before* the apply rather than after. Without the restore, a
+    // command that touches a tracked file leaves the worktree disagreeing with
+    // the index and the changeset fails to apply against a tree nobody
+    // changed on purpose. Tracked files only: build output and installed
+    // dependencies are untracked, and throwing those away would make the
+    // second run pay for the first run's setup all over again.
+    await this.repositories
+      .getGitClient()
+      .run(["-C", workspace.path, "reset", "--hard", revision]);
+    this.baselines.set(repositoryId, revision, commands, results);
+    return {
+      revision,
+      cached: false,
+      results,
+      nowPassing: [],
+      alreadyFailing: [],
+    };
+  }
+
+  /**
+   * Re-runs validation with the change's own edits to its graders set aside.
+   *
+   * The tree is restored afterwards, and the restore is checked: this runs
+   * between the applied tree and the commit, so leaving a grader at canonical
+   * would promote the wrong bytes. A restore that cannot be verified reports
+   * no verdict rather than a reassuring one.
+   */
+  private async gradeWithoutEdits(
+    workspace: TaskWorkspace,
+    previousVersion: CanonicalVersion,
+    graderPaths: readonly string[],
+    commands: readonly ValidationCommand[],
+  ): Promise<GraderEditReport> {
+    const git = this.repositories.getGitClient();
+    const applied = (
+      await git.run(["-C", workspace.path, "write-tree"])
+    ).stdout.trim();
+    try {
+      // `restore --worktree`, deliberately, not `checkout`. Checkout writes
+      // the index as well, which would replace the candidate the commit below
+      // is made from — the graders would land at canonical and the promoted
+      // tree would not be the one that was validated. Restoring the worktree
+      // alone leaves the index holding the candidate throughout.
+      await git.run([
+        "-C",
+        workspace.path,
+        "restore",
+        "--worktree",
+        "--source",
+        previousVersion.revision,
+        "--",
+        ...graderPaths,
+      ]);
+    } catch {
+      // A grader the change *added* does not exist at canonical, so there is
+      // nothing to restore it to and nothing to compare against. Saying so is
+      // the answer; guessing is not.
+      return { paths: [...graderPaths], passesOnlyWithEdits: false };
+    }
+    const withoutEdits: CommandResult[] = [];
+    let allPassed = true;
+    for (const command of commands) {
+      const result = await this.runValidationCommand(workspace, command);
+      withoutEdits.push(result);
+      if (result.exitCode !== 0) {
+        allPassed = false;
+        break;
+      }
+    }
+    // Put the candidate back in the worktree, from the index, which never
+    // moved. Only the graders were disturbed, so only they are restored.
+    await git.run([
+      "-C",
+      workspace.path,
+      "checkout-index",
+      "-f",
+      "--",
+      ...graderPaths,
+    ]);
+    const restored = (
+      await git.run(["-C", workspace.path, "write-tree"])
+    ).stdout.trim();
+    if (restored !== applied) {
+      throw new Error(
+        "Could not restore the changeset after grading it without its " +
+          "grader edits; refusing to promote a tree that may not be the " +
+          "one that was validated",
+      );
+    }
+    return {
+      paths: [...graderPaths],
+      withoutEdits,
+      passesOnlyWithEdits: !allPassed,
+    };
+  }
+
+  /** Records a passing run so the next task at this revision reuses it. */
+  public rememberValidation(
+    repositoryId: string,
+    revision: string,
+    commands: readonly ValidationCommand[],
+    results: readonly CommandResult[],
+  ): void {
+    this.baselines.set(repositoryId, revision, commands, results);
   }
 
   public async integrate(
@@ -376,6 +683,15 @@ export class IntegrationService {
     replaying: boolean,
   ): Promise<IntegrationResult> {
     const validation: CommandResult[] = [];
+    // Taken here, before the patch goes in, because the workspace is at
+    // canonical for exactly this window and never will be again. Everything
+    // the two-sided comparison can say depends on measuring first.
+    const baseline = await this.collectBaseline(
+      integrationWorkspace,
+      input.repository.id,
+      previousVersion.revision,
+      input.validationCommands,
+    );
     // What integration is actually promoting. These start as everything the
     // changeset declared and narrow only if a conflict is salvaged, in which
     // case the tree must match what survived rather than what was submitted.
@@ -554,30 +870,22 @@ export class IntegrationService {
     ).stdout.trim();
 
     for (const command of input.validationCommands) {
-      const startedAt = new Date().toISOString();
-      const output = await this.workspaces.runInWorkspace(
+      const commandResult = await this.runValidationCommand(
         integrationWorkspace,
-        {
-          command: command.executable,
-          args: command.args,
-        },
-        {
-          timeoutMs: this.options.validationTimeoutMs ?? 10 * 60 * 1000,
-          maxOutputBytes:
-            this.options.maxValidationOutputBytes ?? 1024 * 1024,
-        },
-      );
-      const commandResult: CommandResult = {
         command,
-        exitCode: output.exitCode,
-        stdout: output.stdout,
-        stderr: output.stderr,
-        startedAt,
-        durationMs: output.durationMs,
-      };
+      );
       validation.push(commandResult);
 
       if (commandResult.exitCode !== 0) {
+        // Before blaming the change, ask whether this was already failing.
+        // Reported either way — a regression and a pre-existing red are both
+        // reasons this cannot land — but only one of them is this task's
+        // doing, and they were indistinguishable.
+        const alreadyRed =
+          baseline?.results.some(
+            (entry) =>
+              entry.command.label === command.label && entry.exitCode !== 0,
+          ) === true;
         return {
           taskId: input.changeSet.taskId,
           changeSetId: input.changeSet.id,
@@ -585,11 +893,59 @@ export class IntegrationService {
           previousVersion,
           canonicalVersion: previousVersion,
           validation,
+          ...(baseline === undefined ? {} : { baseline }),
+          evidence: validationEvidence(input.validationCommands, baseline),
           explanation:
             `Validation failed: ${command.label}` +
-            (output.timedOut === true ? " (timed out)" : ""),
+            (commandResult.timedOut === true ? " (timed out)" : "") +
+            (alreadyRed
+              ? " (already failing before this change)"
+              : ""),
         };
       }
+    }
+
+    // The comparison the second run bought. A command that was red at
+    // canonical and is green here is the only evidence integration can produce
+    // on its own that the change did the thing it was asked to do, rather than
+    // merely not breaking anything.
+    if (baseline !== undefined) {
+      for (const before of baseline.results) {
+        if (before.exitCode === 0) {
+          continue;
+        }
+        const after = validation.find(
+          (entry) => entry.command.label === before.command.label,
+        );
+        if (after !== undefined && after.exitCode === 0) {
+          baseline.nowPassing.push(before.command.label);
+        } else {
+          baseline.alreadyFailing.push(before.command.label);
+        }
+      }
+    }
+
+    const evidence = validationEvidence(input.validationCommands, baseline);
+
+    // Did this change edit the things that judge it, and does it still pass
+    // without those edits?
+    //
+    // Not a refusal. A task whose whole point is to change behaviour has to
+    // move the tests that encode the old behaviour, and banning that would
+    // ban the work. What was missing is the distinction: a result that passes
+    // only because the agent rewrote its grader is a different claim from one
+    // that passes the grader as it stood, and both were recorded identically.
+    const graderPaths = appliedEntries
+      .filter((entry) => isGraderPath(entry.path))
+      .map((entry) => entry.path);
+    let graderEdits: GraderEditReport | undefined;
+    if (graderPaths.length > 0 && input.validationCommands.length > 0) {
+      graderEdits = await this.gradeWithoutEdits(
+        integrationWorkspace,
+        previousVersion,
+        graderPaths,
+        input.validationCommands,
+      );
     }
 
     // Validation is evidence, not an additional editor. Generated dependency,
@@ -689,6 +1045,38 @@ export class IntegrationService {
                 )
                 .join(", "),
       },
+      // What that run established, beside what it was. A reader of the history
+      // could previously see "Validation: patch integrity(exit 0)" and had no
+      // way to know it meant the program was never executed.
+      { key: "Validation-Evidence", value: evidence },
+      ...(baseline === undefined || baseline.nowPassing.length === 0
+        ? []
+        : [
+            {
+              key: "Now-Passing",
+              value: baseline.nowPassing.join(", "),
+            },
+          ]),
+      ...(baseline === undefined || baseline.alreadyFailing.length === 0
+        ? []
+        : [
+            {
+              key: "Already-Failing",
+              value: baseline.alreadyFailing.join(", "),
+            },
+          ]),
+      ...(graderEdits === undefined
+        ? []
+        : [
+            {
+              key: "Grader-Edits",
+              value:
+                `${graderEdits.paths.join(" ")}` +
+                (graderEdits.passesOnlyWithEdits
+                  ? " (validation passes only with these edits)"
+                  : ""),
+            },
+          ]),
     ];
 
     const candidateRevision = await this.repositories.commitIndex(
@@ -744,6 +1132,9 @@ export class IntegrationService {
       canonicalVersion,
       validation,
       candidateRevision,
+      evidence,
+      ...(baseline === undefined ? {} : { baseline }),
+      ...(graderEdits === undefined ? {} : { graderEdits }),
       ...(salvage === undefined
         ? {}
         : {

@@ -248,6 +248,12 @@ export const DEFAULT_CONFIG: ProjectConfig = {
       executable: "git",
       args: ["diff", "--check"],
       label: "patch integrity",
+      // Marked for what it is. This checks the shape of the patch and never
+      // executes the program, so a project that never edits this file was
+      // getting a green "Validation: patch integrity(exit 0)" for free — a
+      // pass recorded identically to one from a real test suite. It still
+      // runs; it no longer counts as evidence the change works.
+      proves: "integrity",
     },
   ],
   /*

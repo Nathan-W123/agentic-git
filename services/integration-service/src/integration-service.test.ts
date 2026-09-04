@@ -16,7 +16,11 @@ import {
 } from "@coord/workspace-manager";
 import type { ProcessOutput } from "@coord/repository-service";
 
-import { IntegrationService } from "./index.js";
+import {
+  IntegrationService,
+  ValidationBaselineCache,
+  validationEvidence,
+} from "./index.js";
 
 class TrackingWorkspaceManager implements WorkspaceManager {
   public readonly commands: Array<{
@@ -126,18 +130,20 @@ test("validates and atomically promotes a changeset", async () => {
     });
 
     assert.equal(result.status, "integrated");
-    assert.deepEqual(workspaces.commands, [
-      {
-        spec: {
-          command: "node",
-          args: ["--check", "src/value.js"],
-        },
-        options: {
-          timeoutMs: 12_345,
-          maxOutputBytes: 54_321,
-        },
-      },
-    ]);
+    // Twice, and that is the point: once at canonical before the patch and
+    // once after it. One measurement cannot tell "fixed it" from "broke
+    // nothing" from "was already broken".
+    const invocation = {
+      spec: { command: "node", args: ["--check", "src/value.js"] },
+      options: { timeoutMs: 12_345, maxOutputBytes: 54_321 },
+    };
+    assert.deepEqual(workspaces.commands, [invocation, invocation]);
+    assert.equal(result.baseline?.cached, false);
+    assert.equal(result.baseline?.revision, result.previousVersion.revision);
+    // The fixture's command passes at canonical too, so nothing went from red
+    // to green — an honest "executed", not "demonstrated".
+    assert.deepEqual(result.baseline?.nowPassing, []);
+    assert.equal(result.evidence, "executed");
     assert.notEqual(
       result.canonicalVersion.revision,
       result.previousVersion.revision,
@@ -469,4 +475,207 @@ test("preserves a promoted result when integration cleanup fails", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+/** A repository with one source file and one test that asserts its value. */
+async function gradedFixture(root: string): Promise<{
+  repositories: RepositoryService;
+  repository: Awaited<ReturnType<RepositoryService["importLocalRepository"]>>;
+  workspaces: GitWorktreeWorkspaceManager;
+  workspaceRoot: string;
+  integrationRoot: string;
+}> {
+  const sourcePath = path.join(root, "source");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(sourcePath);
+  await mkdir(path.join(sourcePath, "src"), { recursive: true });
+  await mkdir(path.join(sourcePath, "test"), { recursive: true });
+  await writeFile(
+    path.join(sourcePath, "src", "value.js"),
+    "export const value = 1;\n",
+    "utf8",
+  );
+  // Asserts 2, so it fails at canonical and passes once the change lands.
+  await writeFile(
+    path.join(sourcePath, "test", "value.test.js"),
+    [
+      'import { value } from "../src/value.js";',
+      "if (value !== 2) { process.exit(1); }",
+    ].join("\n"),
+    "utf8",
+  );
+  await repositories.commitAll(sourcePath, "seed");
+  return {
+    repositories,
+    repository: await repositories.importLocalRepository(
+      sourcePath,
+      path.join(root, "canonical.git"),
+      "graded",
+    ),
+    workspaces: new GitWorktreeWorkspaceManager(repositories.getGitClient()),
+    workspaceRoot: path.join(root, "workspaces"),
+    integrationRoot: path.join(root, "integration"),
+  };
+}
+
+const NODE_TEST = {
+  executable: process.execPath,
+  args: ["test/value.test.js"],
+  label: "suite",
+};
+
+test("a change that turns a failing test green is recorded as demonstrated", async () => {
+  // The signal Kumi could not produce before. One run says "nothing exploded";
+  // two say "something that was broken now works", which is the only evidence
+  // integration can give on its own that the change did what was asked.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-evidence-"));
+  try {
+    const fixture = await gradedFixture(root);
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const workspace = await fixture.workspaces.create({
+      taskId: "task_fix",
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    const changeSet = await fixture.workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "make the test pass",
+    });
+
+    const result = await new IntegrationService(
+      fixture.repositories,
+      fixture.workspaces,
+    ).integrate({
+      repository: fixture.repository,
+      integrationRoot: fixture.integrationRoot,
+      changeSet,
+      validationCommands: [NODE_TEST],
+      commitMessage: "coord: fix the value",
+    });
+
+    assert.equal(result.status, "integrated");
+    assert.equal(result.evidence, "demonstrated");
+    assert.deepEqual(result.baseline?.nowPassing, ["suite"]);
+    assert.equal(result.baseline?.results[0]?.exitCode, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a change that passes only because it rewrote the test says so", async () => {
+  // Not a refusal — a task whose point is to change behaviour has to move the
+  // test that encodes the old behaviour. What was missing is that "passes the
+  // test as it stood" and "passes the test it rewrote" were the same record.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-grader-"));
+  try {
+    const fixture = await gradedFixture(root);
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const workspace = await fixture.workspaces.create({
+      taskId: "task_regrade",
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    // The source is untouched; only the grader moves to accept what is there.
+    await writeFile(
+      path.join(workspace.path, "test", "value.test.js"),
+      [
+        'import { value } from "../src/value.js";',
+        "if (value !== 1) { process.exit(1); }",
+      ].join("\n"),
+      "utf8",
+    );
+    const changeSet = await fixture.workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "adjust the expectation",
+    });
+
+    const result = await new IntegrationService(
+      fixture.repositories,
+      fixture.workspaces,
+    ).integrate({
+      repository: fixture.repository,
+      integrationRoot: fixture.integrationRoot,
+      changeSet,
+      validationCommands: [NODE_TEST],
+      commitMessage: "coord: adjust the expectation",
+    });
+
+    assert.equal(result.status, "integrated");
+    assert.deepEqual(result.graderEdits?.paths, ["test/value.test.js"]);
+    assert.equal(result.graderEdits?.passesOnlyWithEdits, true);
+    // And the promoted tree is the candidate, not the one graded without the
+    // edits — the restore is load-bearing, not cosmetic.
+    assert.equal(
+      await fixture.repositories.readFile(
+        fixture.repository,
+        result.canonicalVersion.revision,
+        "test/value.test.js",
+      ),
+      [
+        'import { value } from "../src/value.js";',
+        "if (value !== 1) { process.exit(1); }",
+      ].join("\n"),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a project that configured nothing does not get a green for free", async () => {
+  // The default config ships an integrity check and nothing else. It runs, it
+  // passes, and it establishes nothing about whether the program works.
+  assert.equal(
+    validationEvidence(
+      [
+        {
+          executable: "git",
+          args: ["diff", "--check"],
+          label: "patch integrity",
+          proves: "integrity",
+        },
+      ],
+      undefined,
+    ),
+    "integrity",
+  );
+  assert.equal(validationEvidence([], undefined), "none");
+  assert.equal(
+    validationEvidence([NODE_TEST], undefined),
+    "executed",
+  );
+});
+
+test("a baseline is reused at a revision that has already been measured", async () => {
+  const cache = new ValidationBaselineCache();
+  assert.equal(cache.get("repo_1", "abc", [NODE_TEST]), undefined);
+  cache.set("repo_1", "abc", [NODE_TEST], [
+    {
+      command: NODE_TEST,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      durationMs: 1,
+    },
+  ]);
+  assert.equal(cache.get("repo_1", "abc", [NODE_TEST])?.length, 1);
+  // A different revision, or different commands, is a different question.
+  assert.equal(cache.get("repo_1", "def", [NODE_TEST]), undefined);
+  assert.equal(
+    cache.get("repo_1", "abc", [{ ...NODE_TEST, label: "other" }]),
+    undefined,
+  );
 });
