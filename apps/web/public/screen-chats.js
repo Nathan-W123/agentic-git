@@ -2488,13 +2488,27 @@ const PLAN_LAPSED_PREFIX = "⌛ Plan expired";
 const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
 
 /**
+ * How a hold an agent is under opens, as the gateway writes it.
+ *
+ * Mirrors `CHANNEL_ARBITRATION_PREFIX`. It is not a symbol for the reader: the
+ * line under it is the agent's own sentence about what it found in its way,
+ * and it belongs in the bubble reading exactly like everything else that agent
+ * says. The mark is there so the gateway can find the line again and take it
+ * back when the collision it describes is over.
+ */
+const ARBITRATION_NOTICE_PREFIX = "⚖️ ";
+
+/**
  * Protocol notices still carry their legacy symbol so older clients can
  * recognise them. The symbol is not shown: Kumi renders the matching mark
- * from the shared icon set, just like every other interface glyph.
+ * from the shared icon set, just like every other interface glyph — or, for
+ * one whose words are somebody's own speech rather than a notice, nothing at
+ * all, so the sentence starts where the bubble does.
  */
 const NOTICE_ICONS = [
   { prefix: HOLD_NOTICE_PREFIX, marker: "⏸ ", iconName: "pause" },
   { prefix: PLAN_LAPSED_PREFIX, marker: "⌛ ", iconName: "clock" },
+  { prefix: ARBITRATION_NOTICE_PREFIX, marker: ARBITRATION_NOTICE_PREFIX },
 ];
 
 function messageBodyWithIcons(entry, repositoryId) {
@@ -2503,12 +2517,15 @@ function messageBodyWithIcons(entry, repositoryId) {
   if (notice === undefined) {
     return messageBody(content, repositoryId, entry.mentions);
   }
-  return `<div class="cmsg-library-notice">${icon(notice.iconName)}
-    <div>${messageBody(
-      content.slice(notice.marker.length),
-      repositoryId,
-      entry.mentions,
-    )}</div></div>`;
+  const body = messageBody(
+    content.slice(notice.marker.length),
+    repositoryId,
+    entry.mentions,
+  );
+  return notice.iconName === undefined
+    ? body
+    : `<div class="cmsg-library-notice">${icon(notice.iconName)}
+    <div>${body}</div></div>`;
 }
 
 /**
