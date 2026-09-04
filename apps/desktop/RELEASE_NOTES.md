@@ -14,6 +14,26 @@ machine, and a control plane that would not say which tenant this machine
 belongs to. Each says what it was and what to do about it, in the place people
 are already being sent.
 
+And the worker itself stopped dying of an answer it could not read. A machine
+enrolled nine times in half an hour and never once asked for work — the fleet
+table has the rows, each with its last heartbeat equal to its registration to
+the millisecond, so nothing it did ever reached the queue. Three things in
+that gap could end a process and none of them could say so.
+
+It registered twice on every start, because two different places both wanted
+to know which worker this was; the second of those calls was the first request
+to reuse the connection the first one opened, which is the one exchange
+anything in between — a proxy, an antivirus reading TLS — can let through
+fresh and mishandle on reuse. It parsed every reply as JSON before looking at
+the status, so a proxy's error page arrived as a parser crash rather than an
+error, taking the process down and destroying the page that would have named
+whoever sent it. And it trusted that a reply to a registration contained a
+worker, so an empty one failed a line later as a missing property, blaming the
+wrong file.
+
+None of those is proven to be what stopped that machine. Each of them would
+have, and none of them would have left a sentence behind. Now they do.
+
 The status line in the menu is fixed too. Node prints an experimental-feature
 warning about SQLite on every start, and it arrives on the same stream as the
 worker's own output, so it became the last thing said and therefore the
