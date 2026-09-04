@@ -566,6 +566,25 @@ export class Worker {
   private readonly pauseOnBattery: boolean;
 
   public async register(): Promise<string> {
+    // Registering twice was never intended and was never harmless.
+    //
+    // `main` registers so it can print which worker it is, and `run` opened by
+    // registering again, so every worker in every fleet enrolled itself twice
+    // on every start — two rows, milliseconds apart, no upsert behind them.
+    // The fleet table therefore counted restarts double, which is a nuisance,
+    // and the second call did something worse than duplicate the first: it was
+    // the first request to reuse the connection the first one opened. Anything
+    // on the path that tolerates a fresh connection and mishandles the second
+    // exchange on it — a proxy, a TLS-inspecting antivirus — met that call and
+    // not the one before it, and a throw there exits the process before the
+    // worker has asked for work even once.
+    //
+    // So the second call answers from what the first one learned. Idempotent
+    // rather than removed, because both callers legitimately want the id and
+    // neither should have to know which of them got there first.
+    if (this.identity !== undefined) {
+      return this.identity.id;
+    }
     const configured = new Set(
       Object.values(this.options.project.config.agents).map(
         (agent) => agent.adapter ?? "generic-cli",
