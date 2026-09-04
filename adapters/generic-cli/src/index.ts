@@ -502,9 +502,13 @@ export class GenericCliAdapter implements AgentAdapter {
     record.process = undefined;
     await previous?.close();
     await this.destroyPlanningWorkspace(record);
+    // Absent for a refusal, where nothing moved and the session's own version
+    // is the base the plan was written against.
+    const planningVersion =
+      request.canonicalChange?.canonicalVersion ?? record.input.canonicalVersion;
     record.input = {
       ...record.input,
-      canonicalVersion: request.canonicalChange.canonicalVersion,
+      canonicalVersion: planningVersion,
     };
 
     try {
@@ -513,7 +517,7 @@ export class GenericCliAdapter implements AgentAdapter {
           taskId: `replanning-${record.input.task.id}`,
           rootPath: this.options.planningRoot,
           repository: this.options.repository,
-          baseVersion: request.canonicalChange.canonicalVersion,
+          baseVersion: planningVersion,
         });
         await applyHolderWorkingOverlay(
           record.planningWorkspace.path,

@@ -102,8 +102,19 @@ export function assessReplay(
       ...complete.expectedFiles,
     ].map(key),
   );
+  // A read set that could not be computed is not a read set of nothing.
+  //
+  // `dependsOn` above is built from `dependencies` alone, so a plan enrichment
+  // could not see through — every declared file new, or outside the indexed
+  // languages — makes `touched` answer "no" to everything and every advance
+  // look unrelated. That is the cheap answer, and it is the wrong one for
+  // exactly the plans most likely to be racing: "create a new module" is what
+  // decomposition produces. Where the evidence is missing, the advance is
+  // treated as touching what this plan depends on, which is what this check
+  // did for every plan before the replay optimisation existed.
+  const blind = plan.dependenciesUnknown === true;
   for (const file of advance.changedFiles) {
-    if (touched("file", file)) {
+    if (blind || touched("file", file)) {
       semantic.push(`file:${file}`);
     } else if (files.has(key(file))) {
       textual.push(`file:${file}`);

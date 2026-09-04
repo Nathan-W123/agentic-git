@@ -1,4 +1,4 @@
-### 0.5.16 — a quiet log is an answer, not an absence
+### 0.5.17 — a quiet log is an answer, not an absence
 
 Somebody asked why their prompt did nothing, was told to open the worker log,
 and found the last entry was from two days ago. The obvious reading is that

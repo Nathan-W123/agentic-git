@@ -331,7 +331,11 @@ export const TOTAL_BEHAVIOR: ScriptedAgentBehavior = {
     ["symbol:increment"],
   ),
   replan(request) {
-    if (!request.canonicalChange.changedSymbols.includes("increment")) {
+    // This scenario only ever replans for a canonical change, so an absent
+    // notice is as wrong here as a notice without the symbol.
+    if (
+      request.canonicalChange?.changedSymbols.includes("increment") !== true
+    ) {
       throw new Error("Expected the increment contract change during replanning");
     }
     return {

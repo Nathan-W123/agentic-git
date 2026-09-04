@@ -24,8 +24,10 @@ import {
   requestFromObjective,
   scopeChangeGranted,
   type AgentPlan,
+  type CanonicalChangeNotice,
   type ChangeSet,
   type HolderWorkingChange,
+  type PlanRefusal,
   type ReplanRequest,
   type ScopeChangeDecision,
 } from "@coord/shared-types";
@@ -1118,6 +1120,26 @@ function taskRequest(objective: string): string {
  * ungrounded and sequences the task, which is safe but slower than the
  * silence it replaced.
  */
+/**
+ * A change list for a replan that is not about a change.
+ *
+ * Only reachable if a caller sends neither a canonical notice nor a refusal;
+ * the amend prompt then reads "nothing relevant changed", which is true and
+ * is the answer that costs least.
+ */
+const EMPTY_CANONICAL_CHANGE: CanonicalChangeNotice = {
+  previousVersion: { sequence: 0, revision: "", branch: "", createdAt: "" },
+  canonicalVersion: { sequence: 0, revision: "", branch: "", createdAt: "" },
+  changedFiles: [],
+  changedSymbols: [],
+  changedApis: [],
+  changedSchemas: [],
+  changedConfigKeys: [],
+  changedTests: [],
+  changedServices: [],
+  reason: "no canonical change",
+};
+
 const EMPTY_PLAN_CORRECTION = [
   "Your previous answer listed no files in expectedFiles, so this plan " +
     "claims nothing. Read the workspace and name the files you expect to " +
@@ -2120,15 +2142,21 @@ export class PromptCliAdapter implements AgentAdapter {
       );
     }
     await this.destroyPlanningWorkspace(record);
+    // A refusal carries no notice, because nothing moved: the plan was refused
+    // against the same canonical it was written against. Rebuilding at the
+    // version this session already holds is then the correct base, not a
+    // fallback.
+    const planningVersion =
+      request.canonicalChange?.canonicalVersion ?? record.input.canonicalVersion;
     record.input = {
       ...record.input,
-      canonicalVersion: request.canonicalChange.canonicalVersion,
+      canonicalVersion: planningVersion,
     };
     record.planningWorkspace = await this.options.workspaces.create({
       taskId: `replanning-${record.input.task.id}`,
       rootPath: path.resolve(this.options.planningRoot),
       repository: this.options.repository,
-      baseVersion: request.canonicalChange.canonicalVersion,
+      baseVersion: planningVersion,
     });
     try {
       await applyHolderWorkingOverlay(
@@ -2143,7 +2171,10 @@ export class PromptCliAdapter implements AgentAdapter {
       record.plan = plan;
       this.emit(record, {
         event: "progress",
-        message: `${this.profile.name} revised its plan for canonical ${request.canonicalChange.canonicalVersion.revision.slice(0, 12)}`,
+        message:
+          request.refusal === undefined
+            ? `${this.profile.name} revised its plan for canonical ${planningVersion.revision.slice(0, 12)}`
+            : `${this.profile.name} narrowed its plan after ${request.refusal.status}`,
         occurredAt: new Date().toISOString(),
       });
       return structuredClone(plan);
@@ -3284,7 +3315,16 @@ export class PromptCliAdapter implements AgentAdapter {
     // handed, which is the entire saving gone. So the instruction is not
     // "inspect only what changed" (which still invites a look around) but
     // "the change list is complete, start from the previous plan".
-    const change = request.canonicalChange;
+    // A refusal is a different question and gets a different prompt. Amending
+    // for a canonical change says "trust this list, change as little as
+    // possible"; a refusal says "you asked for something somebody else holds,
+    // ask for less". Handing the refusal to the amend prompt would tell an
+    // agent whose plan was rejected that nothing had changed and it should
+    // return the same plan — which is exactly the loop this replaces.
+    if (request.refusal !== undefined) {
+      return this.refusalPrompt(record, request, request.refusal);
+    }
+    const change = request.canonicalChange ?? EMPTY_CANONICAL_CHANGE;
     const touched = [
       ...change.changedFiles,
       ...change.changedSymbols,
@@ -3313,7 +3353,7 @@ export class PromptCliAdapter implements AgentAdapter {
       `Objective: ${taskRequest(record.input.task.objective)}`,
       ...this.conversationContextLines(record),
       `Previous plan: ${JSON.stringify(request.previousPlan)}`,
-      `Canonical change: ${JSON.stringify(request.canonicalChange)}`,
+      `Canonical change: ${JSON.stringify(change)}`,
       ...(request.holderWorkingChanges === undefined ||
       request.holderWorkingChanges.length === 0
         ? []
@@ -3325,6 +3365,55 @@ export class PromptCliAdapter implements AgentAdapter {
           ]),
       `Coordinator constraints: ${JSON.stringify(request.constraints)}`,
       "Account for changed dependencies and remove stale file assumptions.",
+      PLAN_SHAPE_INSTRUCTIONS,
+    ].join("\n");
+  }
+
+  /**
+   * What to say to an agent whose plan the coordinator refused.
+   *
+   * The refusal already names the collision precisely — which task, on which
+   * files and symbols — so the instruction can be concrete rather than "try
+   * something else". What it must not do is invite a fresh exploration: the
+   * previous plan is mostly right, and the part that is wrong is enumerated.
+   */
+  private refusalPrompt(
+    record: PromptCliSession,
+    request: ReplanRequest,
+    refusal: PlanRefusal,
+  ): string {
+    const contested = [
+      ...new Set(
+        refusal.conflicts.flatMap((assessment) =>
+          assessment.evidence.flatMap((entry) => entry.resources),
+        ),
+      ),
+    ].sort();
+    return [
+      "Narrow an existing plan. This is not a fresh planning task.",
+      "Do not edit files.",
+      "The coordinator refused the previous plan because it asked for work",
+      "another task is already doing. Nothing in the repository has changed.",
+      contested.length === 0
+        ? "Return a plan that asks for less than the previous one."
+        : "Return the previous plan with the contested resources below removed, " +
+          "keeping everything else exactly as it was. Do not re-derive the " +
+          "rest of the plan and do not read files to reconsider it.",
+      "If removing them leaves nothing this task can do alone, return a plan",
+      "with an empty file list rather than inventing different work.",
+      `Planning deadline: ${this.planningTimeoutMs} ms.`,
+      `Task id: ${record.input.task.id}`,
+      `Objective: ${taskRequest(record.input.task.objective)}`,
+      ...this.conversationContextLines(record),
+      `Previous plan: ${JSON.stringify(request.previousPlan)}`,
+      `Refusal: ${refusal.status} — ${refusal.explanation}`,
+      ...(contested.length === 0
+        ? []
+        : [`Contested resources: ${JSON.stringify(contested)}`]),
+      ...(refusal.blockedBy.length === 0
+        ? []
+        : [`Held by: ${JSON.stringify(refusal.blockedBy)}`]),
+      `Coordinator constraints: ${JSON.stringify(request.constraints)}`,
       PLAN_SHAPE_INSTRUCTIONS,
     ].join("\n");
   }
