@@ -881,7 +881,7 @@ export async function routeTasks(
           path,
           new RegExp(
             `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/workspace` +
-              `/(files|file|reset|exec|submit)$`,
+              `/(files|file|move|reset|exec|submit)$`,
             "u",
           ),
         )
