@@ -67,6 +67,7 @@ import {
 import {
   AGENT_ACCOUNT_PREFIX,
   ANSWER_NOT_STATUS_DIRECTIVE,
+  SHOW_IMAGES_DIRECTIVE,
   assertProjectPolicy,
   createId,
   deriveCallSign,
@@ -7182,7 +7183,7 @@ export class ApiGateway {
     const leaseMatch = matchPath(
       path,
       new RegExp(
-        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|claim|declaration|plan|scope|result|release|progress)$`,
+        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|claim|declaration|plan|scope|result|release|progress|attachment)$`,
         "u",
       ),
     );
@@ -7211,6 +7212,38 @@ export class ApiGateway {
         lease.projectId,
         "run_task",
       );
+
+      if (action === "attachment" && method === "POST") {
+        // One image, from the machine the agent is running on.
+        //
+        // `attachCommittedImages` already lifts pictures out of a change set,
+        // but it fires on `canonical_promoted` and reads the committed
+        // revision — so an agent asked to look at something and describe it
+        // has no route at all: it promotes nothing, and the screenshot it
+        // took is a file on somebody else's computer. That is the commonest
+        // shape of "show me", and it was the one shape that could not.
+        //
+        // Bytes rather than a path, because the control plane cannot read the
+        // worker's disk, and the worker is the only party that can. The store
+        // validates the format from the bytes themselves, so a lease is not
+        // trusted about what it is uploading — only about being a lease.
+        const save = this.options.operations.attachmentSave;
+        if (save === undefined) {
+          throw new HttpError(
+            501,
+            "not_supported",
+            "This deployment cannot store images",
+          );
+        }
+        const contentType = request.headers["content-type"] ?? "";
+        const bytes = await this.readBinary(request, MAX_ATTACHMENT_BYTES);
+        const id = await this.performOperation(
+          "attachment_rejected",
+          async () => await save({ bytes, contentType }),
+        );
+        this.sendJson(response, 200, { id });
+        return;
+      }
 
       if (action === "progress" && method === "POST") {
         // The agent's own words, from the machine running it.
@@ -16677,6 +16710,7 @@ export class ApiGateway {
           [
             await this.describeAttachments(visibleObjective),
             ANSWER_NOT_STATUS_DIRECTIVE,
+            SHOW_IMAGES_DIRECTIVE,
             ...(input.brief === true ? [KEEP_IT_SIMPLE_DIRECTIVE] : []),
             ...(input.forceQuestion === true ? [FORCE_QUESTION_MARKER] : []),
           ].join("\n\n"),
