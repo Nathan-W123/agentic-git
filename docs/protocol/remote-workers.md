@@ -69,10 +69,21 @@ worker re-leases at the new revision and plans afresh. That is the same
 replan-on-canonical-change the local coordinator performs between waves,
 happening at the cheapest possible moment.
 
-A deferred worker keeps its lease and resubmits the *same* plan — a bare HTTP
-call, not another agent invocation. It gives the lease back once its wait
-budget is spent, so a blocked task cannot hold a repository concurrency slot
-indefinitely.
+A *sequenced* worker keeps its lease and resubmits the same plan — a bare HTTP
+call, not another agent invocation. Somebody is holding what it asked for and
+will finish, so waiting is the cheap and correct move.
+
+A *blocked* worker plans again, which is what the table above has always said
+and what the worker now does. Ordering cannot separate the two tasks, so
+waiting buys the identical refusal; instead the refusal goes back to the agent
+— the conflicting task, the contested resources, and the constraint — and the
+agent returns a narrower plan. Nothing in the worker caps this: admission
+escalates a twice-blocked plan to `sequenced` with "do not narrow this
+further", and the worker then waits. The bound belongs to the arbitration,
+which is the only side that can see whether narrowing is still worth trying.
+
+Either way the lease goes back once the wait budget is spent, so a blocked task
+cannot hold a repository concurrency slot indefinitely.
 
 ### How the decision is made
 
