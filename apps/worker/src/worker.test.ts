@@ -2162,3 +2162,147 @@ test("a Claude worker loads the lease's MCP servers from scratch, strictly, and 
   assert.notEqual(reoffered?.servers[0]?.digest, digest);
   assert.equal(reoffered?.servers[0]?.summary, "github: talks to https://mcp.example/elsewhere");
 });
+
+/**
+ * Plans two files, and answers a refusal by dropping the contested one.
+ *
+ * The refusal prompt is recognised by its own opening line rather than by
+ * keyword, so a test that stops exercising the refusal path fails here rather
+ * than silently passing through the amend branch.
+ */
+function narrowingRunner(
+  taskId: string,
+  prompts: string[],
+): CodexProcessRunner {
+  return async (_executable, args, options) => {
+    const prompt = options?.input ?? "";
+    prompts.push(prompt);
+    const planFor = (files: string[]): string =>
+      JSON.stringify({
+        taskId,
+        objective: "Increase the exported constant",
+        expectedFiles: files,
+        expectedSymbols: [],
+        dependencies: [],
+        commands: [],
+        externalAccess: [],
+        riskLevel: "low",
+      });
+    if (prompt.startsWith("Narrow the approved task's plan")) {
+      return {
+        exitCode: 0,
+        stdout: planFor(["src/value.js"]),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    if (prompt.includes("prepare a coordination plan")) {
+      return {
+        exitCode: 0,
+        stdout: planFor(["src/value.js", "src/other.js"]),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    const cwd = options?.cwd;
+    assert.ok(cwd);
+    await writeFile(
+      path.join(cwd, "src", "value.js"),
+      "export const value = 4;\n",
+    );
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "raised",
+      }),
+      stderr: "",
+      durationMs: 1,
+    };
+  };
+}
+
+test("a blocked plan is narrowed against the refusal, not resubmitted", async (t) => {
+  // The loop this replaces asked the same question on a timer. The refusal
+  // already names the collision, so the agent has what it needs to ask for
+  // less — and the coordinator's own escalation is what bounds the retries.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+
+  const prompts: string[] = [];
+  const submitted: string[][] = [];
+  const client = new WorkerClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+  });
+  const real = client.submitPlan.bind(client);
+  let refusals = 0;
+  let assignmentBase = "";
+  client.submitPlan = async (leaseId, plan) => {
+    submitted.push([...plan.expectedFiles]);
+    if (refusals === 0) {
+      refusals += 1;
+      return {
+        status: "blocked",
+        taskId: task.id,
+        planRevision: 1,
+        baseRevision: assignmentBase,
+        ownershipGrants: [],
+        constraints: ["Plan again with a narrower scope"],
+        blockedBy: ["task_rival"],
+        conflicts: [
+          {
+            taskIds: [task.id, "task_rival"],
+            score: 100,
+            disposition: "block",
+            evidence: [
+              {
+                kind: "file_overlap",
+                resources: ["src/other.js"],
+                taskIds: [task.id, "task_rival"],
+                score: 100,
+              },
+            ],
+            explanation: "both write src/other.js",
+          },
+        ],
+        explanation: "collides with executing work",
+        retryAfterMs: 1,
+        decidedAt: new Date().toISOString(),
+      };
+    }
+    return await real(leaseId, plan);
+  };
+
+  const worker = new Worker({
+    client,
+    project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    workspaceRoot: path.join(runtime.root, "narrow-worker"),
+    codexRunner: narrowingRunner(task.id, prompts),
+  });
+  await worker.register();
+  const outcome = await worker.runOnce();
+
+  assert.equal(outcome.accepted, true, outcome.reason);
+  const refusalPrompt = prompts.find((entry) =>
+    entry.startsWith("Narrow the approved task's plan"),
+  );
+  assert.ok(refusalPrompt, "the agent should have been told it was refused");
+  assert.match(refusalPrompt, /src\/other\.js/u);
+  assert.match(refusalPrompt, /task_rival/u);
+  assert.deepEqual(submitted, [
+    ["src/other.js", "src/value.js"],
+    ["src/value.js"],
+  ]);
+});

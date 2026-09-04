@@ -182,6 +182,22 @@ export interface AgentPlan {
    * coordinator-issued claim takes.
    */
   claim?: PlanClaim;
+  /**
+   * Set when the read set could not be computed, as opposed to being empty.
+   *
+   * Enrichment builds `dependencies` from the indexed form of the files a plan
+   * declares. A plan whose declared files are all new, or outside the indexed
+   * languages, matches nothing — so it comes back with whatever the agent
+   * typed and no way to tell that apart from a plan that genuinely reads
+   * nothing. Everything downstream that asks "did this advance touch anything
+   * I depend on" would then answer "no" out of ignorance and call it safety.
+   *
+   * Absent rather than `false` when the set is known, and deliberately outside
+   * {@link CompleteAgentPlan}'s `Required` for the same reason `declared` is:
+   * there is no honest default, because absent and false do not mean the same
+   * thing.
+   */
+  dependenciesUnknown?: boolean;
 }
 
 /**
@@ -669,10 +685,43 @@ export interface HolderWorkingChange {
   absolutePath?: string;
 }
 
+/**
+ * Why a plan was refused, in the words the arbitration already produced.
+ *
+ * The coordinator writes a refusal an agent could act on — which task holds
+ * what, on which resources, and an instruction to narrow — and until now it
+ * reached nobody. A blocked worker slept and resubmitted the same plan, which
+ * bought the same refusal, because the only thing it read off the answer was
+ * how long to wait. Asking the same question on a timer is not a retry.
+ *
+ * Carried rather than flattened to prose because the resource lists are the
+ * actionable part: "this file, held by that task" is what a narrower plan is
+ * built from, and a sentence about it is not.
+ */
+export interface PlanRefusal {
+  status: PlanAdmissionStatus;
+  explanation: string;
+  /** Tasks holding what this plan asked for. */
+  blockedBy: TaskId[];
+  /** What collided, and on which resources. Empty when nothing structural did. */
+  conflicts: ConflictAssessment[];
+}
+
 export interface ReplanRequest {
   taskId: TaskId;
   previousPlan: AgentPlan;
-  canonicalChange: CanonicalChangeNotice;
+  /**
+   * What moved underneath the previous plan, when something did.
+   *
+   * Optional because canonical moving is no longer the only reason to replan.
+   * A refusal is the other one, and there the base has not moved at all — so
+   * an adapter with no notice rebuilds its planning workspace at the version
+   * it already holds, and says nothing to the model about a change that did
+   * not happen.
+   */
+  canonicalChange?: CanonicalChangeNotice;
+  /** Set when the coordinator refused this task's plan. */
+  refusal?: PlanRefusal;
   constraints: string[];
   /**
    * In-progress edits from holders this task is deferred behind.
@@ -2334,13 +2383,20 @@ export function assertChangeSet(value: unknown): asserts value is ChangeSet {
  * than an agent describing it, which is untrue of every plan an agent wrote.
  */
 export type CompleteAgentPlan = Required<
-  Omit<AgentPlan, "grounding" | "claim" | "declared">
+  Omit<AgentPlan, "grounding" | "claim" | "declared" | "dependenciesUnknown">
 > &
   // `declared` keeps its optionality on purpose: absent is not the same as
   // empty. Absent says this plan was never enriched, so the `expected*` lists
   // are still the agent's own words; a list present but empty says the agent
   // named none of that kind. Filling it in here would erase that.
-  Pick<AgentPlan, "grounding" | "claim" | "declared">;
+  //
+  // `dependenciesUnknown` is here for the same reason and needs it more:
+  // defaulting it to `false` would assert that the read set is trustworthy on
+  // every plan that never went near enrichment.
+  Pick<
+    AgentPlan,
+    "grounding" | "claim" | "declared" | "dependenciesUnknown"
+  >;
 
 /** Returns a detached plan with every optional resource collection populated. */
 export function completeAgentPlan(plan: AgentPlan): CompleteAgentPlan {

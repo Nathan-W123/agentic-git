@@ -849,7 +849,7 @@ export class Worker {
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
-      const admission = await this.awaitAdmission(run, assignment, planned.plan);
+      const admission = await this.awaitAdmission(run, assignment, planned);
       laps.mark("admission");
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
@@ -1068,8 +1068,9 @@ export class Worker {
   private async awaitAdmission(
     run: Run,
     assignment: WorkAssignment,
-    plan: AgentPlan,
+    planned: PlannedWork,
   ): Promise<PlanAdmission> {
+    let plan = planned.plan;
     const budget =
       this.options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
     const approvalBudget =
@@ -1115,6 +1116,32 @@ export class Worker {
       if (this.stopping || run.cancellationRequested) {
         break;
       }
+      // `sequenced` and `blocked` are different answers and deserve different
+      // moves. Sequenced means somebody is holding these resources and will
+      // finish, so waiting is right and the resubmission is a bare HTTP call
+      // with the agent idle. Blocked means ordering cannot separate the two —
+      // waiting buys the identical refusal, forever, which is what the
+      // protocol has always documented as "plan again" and what the worker
+      // has never done.
+      //
+      // The refusal already says which task holds what, on which resources, so
+      // the agent has everything it needs to ask for less. Nothing here caps
+      // the replans: the coordinator escalates a twice-blocked plan to
+      // `sequenced` with "do not narrow this further", and that lands in the
+      // condition above as a wait. The bound is the arbitration's to set.
+      const narrowed =
+        admission.status === "blocked"
+          ? await this.narrowAfterRefusal(planned, assignment, admission)
+          : undefined;
+      if (narrowed !== undefined) {
+        plan = narrowed;
+        // The narrowed plan is now *the* plan, not a variant of it submitted
+        // for admission. Execution collects a changeset against it and the
+        // result reports it alongside, and the control plane refuses a result
+        // whose reported plan claims anything the admitted one did not — so
+        // leaving the old one here would trade a deferral for a failed task.
+        planned.plan = narrowed;
+      }
       admission = await this.options.client.submitPlan(
         assignment.lease.id,
         plan,
@@ -1122,6 +1149,48 @@ export class Worker {
       extend(admission);
     }
     return admission;
+  }
+
+  /**
+   * Asks the agent for a narrower plan, given why the last one was refused.
+   *
+   * Returns `undefined` when the agent could not be asked or answered with
+   * nothing usable — the caller then resubmits what it had, which is the old
+   * behaviour and still a legitimate outcome: a blocker that clears on its own
+   * makes the unchanged plan admissible.
+   *
+   * Failure is swallowed on purpose. A replan is an optimisation over waiting,
+   * and an adapter that cannot produce one must not turn a deferral into a
+   * failed task.
+   */
+  private async narrowAfterRefusal(
+    planned: PlannedWork,
+    assignment: WorkAssignment,
+    admission: PlanAdmission,
+  ): Promise<AgentPlan | undefined> {
+    try {
+      const revised = await planned.adapter.requestReplan(planned.sessionId, {
+        taskId: assignment.task.id,
+        previousPlan: planned.plan,
+        refusal: {
+          status: admission.status,
+          explanation: admission.explanation,
+          blockedBy: [...admission.blockedBy],
+          conflicts: structuredClone(admission.conflicts),
+        },
+        constraints: [...admission.constraints],
+      });
+      // Bound to the leased task the same way the first plan is: the objective
+      // the control plane compares against is the assigned one, and a model's
+      // rephrasing of it belongs in `intent`.
+      return {
+        ...revised,
+        taskId: assignment.task.id,
+        objective: assignment.task.objective,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   private async waitForAdmissionRetry(

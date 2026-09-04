@@ -27,6 +27,7 @@ import {
   substituteGroundedNames,
   type AgentPlan,
   type ChangeSet,
+  type PlanRefusal,
   type ReplanRequest,
   type ResolvedMcpServer,
   type ScopeChangeDecision,
@@ -1649,15 +1650,19 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
     await this.destroyPlanningWorkspace(record);
+    // A refusal carries no notice, because nothing moved: the plan was refused
+    // against the canonical it was already written against.
+    const planningVersion =
+      request.canonicalChange?.canonicalVersion ?? record.input.canonicalVersion;
     record.input = {
       ...record.input,
-      canonicalVersion: request.canonicalChange.canonicalVersion,
+      canonicalVersion: planningVersion,
     };
     record.planningWorkspace = await this.options.workspaces.create({
       taskId: `replanning-${record.input.task.id}`,
       rootPath: path.resolve(this.options.planningRoot),
       repository: this.options.repository,
-      baseVersion: request.canonicalChange.canonicalVersion,
+      baseVersion: planningVersion,
     });
 
     try {
@@ -1670,7 +1675,10 @@ export class CodexAdapter implements AgentAdapter {
       record.plan = plan;
       this.emit(record, {
         event: "progress",
-        message: `Codex revised its plan for canonical ${request.canonicalChange.canonicalVersion.revision.slice(0, 12)}`,
+        message:
+          request.refusal === undefined
+            ? `Codex revised its plan for canonical ${planningVersion.revision.slice(0, 12)}`
+            : `Codex narrowed its plan after ${request.refusal.status}`,
         occurredAt: new Date().toISOString(),
       });
       return structuredClone(plan);
@@ -2797,6 +2805,13 @@ export class CodexAdapter implements AgentAdapter {
     record: CodexSession,
     request: ReplanRequest,
   ): string {
+    // A refusal is a different question: not "what moved" but "who else is in
+    // here". Sending it through the amend prompt would tell an agent whose
+    // plan was rejected that nothing changed, which invites it to return the
+    // same plan — the loop this exists to break.
+    if (request.refusal !== undefined) {
+      return this.refusalPrompt(record, request, request.refusal);
+    }
     return [
       "Replan the approved task against the new canonical repository state.",
       "Do not edit files. Return only the JSON object required by the schema.",
@@ -2831,7 +2846,7 @@ export class CodexAdapter implements AgentAdapter {
                     (request.previousPlan.grounding?.notes ?? []).join("; "),
                 ]),
           ]),
-      `Canonical change: ${JSON.stringify(request.canonicalChange)}`,
+      `Canonical change: ${JSON.stringify(request.canonicalChange ?? {})}`,
       `Coordinator constraints: ${JSON.stringify(request.constraints)}`,
       "Account for changed dependencies and remove stale file assumptions.",
       ...(process.env["COORD_COLD_REPLAN"] === "1"
@@ -2839,6 +2854,52 @@ export class CodexAdapter implements AgentAdapter {
         : [
             "Declare only files and symbols that exist at the new revision, plus any you will create.",
           ]),
+      "List all affected symbols, APIs, schemas, configuration keys, tests, and services.",
+    ].join("\n");
+  }
+
+  /**
+   * What to say to an agent whose plan the coordinator refused.
+   *
+   * Concrete because the refusal is: it names the tasks and the resources that
+   * collided, so the instruction can be "drop these" rather than "try
+   * something else". Deliberately does not invite re-exploration — the rest of
+   * the previous plan was fine, and re-deriving it is the cost this avoids.
+   */
+  private refusalPrompt(
+    record: CodexSession,
+    request: ReplanRequest,
+    refusal: PlanRefusal,
+  ): string {
+    const contested = [
+      ...new Set(
+        refusal.conflicts.flatMap((assessment) =>
+          assessment.evidence.flatMap((entry) => entry.resources),
+        ),
+      ),
+    ].sort();
+    return [
+      "Narrow the approved task's plan. The coordinator refused it.",
+      "Do not edit files. Return only the JSON object required by the schema.",
+      "Nothing in the repository has changed. Another task is already doing",
+      "part of what this plan asked for.",
+      contested.length === 0
+        ? "Return a plan that asks for less than the previous one."
+        : "Return the previous plan with the contested resources below removed " +
+          "and everything else unchanged. Do not re-read the repository.",
+      "If nothing useful remains, return a plan with an empty file list rather",
+      "than substituting different work.",
+      `Task id: ${record.input.task.id}`,
+      `Objective: ${taskRequest(record.input.task.objective)}`,
+      `Previous plan: ${JSON.stringify(request.previousPlan)}`,
+      `Refusal: ${refusal.status} — ${refusal.explanation}`,
+      ...(contested.length === 0
+        ? []
+        : [`Contested resources: ${JSON.stringify(contested)}`]),
+      ...(refusal.blockedBy.length === 0
+        ? []
+        : [`Held by: ${JSON.stringify(refusal.blockedBy)}`]),
+      `Coordinator constraints: ${JSON.stringify(request.constraints)}`,
       "List all affected symbols, APIs, schemas, configuration keys, tests, and services.",
     ].join("\n");
   }
