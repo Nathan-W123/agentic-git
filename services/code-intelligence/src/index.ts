@@ -349,6 +349,39 @@ function analyzeScript(
       }
     }
 
+    // What a type implements or extends is a reference, and frequently the
+    // only one it will ever have.
+    //
+    // `referencedSymbols` was populated from one place — the identifier of a
+    // bare call — so `implements AuditStore` contributed nothing at all. That
+    // is fine where the import resolves, because the import edge already says
+    // the two files are connected. It is not fine anywhere else:
+    // `resolveImport` gives up on any specifier that does not start with a
+    // dot, so in a repository using path aliases or workspace packages a class
+    // and the interface it implements have *no* recorded relation of any kind.
+    // The decomposer then reads two unrelated modules, splits them into
+    // separate tasks, and the conflict detector scores the pair at zero —
+    // concurrency this system manufactured and then could not see.
+    //
+    // `new X()` is here for the same reason and is the same size of fix: it is
+    // a use of a symbol that produces no call edge.
+    if (
+      (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) &&
+      node.heritageClauses !== undefined
+    ) {
+      for (const clause of node.heritageClauses) {
+        for (const type of clause.types) {
+          if (ts.isIdentifier(type.expression)) {
+            referencedSymbols.add(type.expression.text);
+          }
+        }
+      }
+    }
+
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
+      referencedSymbols.add(node.expression.text);
+    }
+
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       symbols.add(node.name.text);
       // The whole statement, not just the declarator: `export const value = 1`

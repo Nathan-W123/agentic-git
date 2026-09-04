@@ -570,3 +570,66 @@ test("parsing across threads produces exactly what one thread produces", async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("an interface reached through an alias is still a recorded reference", async () => {
+  // The case that produced no relation at all. `implements AuditStore` used to
+  // contribute nothing to the index, and `resolveImport` gives up on any
+  // specifier that is not relative — so with a path alias the class and the
+  // interface it implements were two unconnected modules, which is what the
+  // decomposer splits and the conflict detector then scores at zero.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-heritage-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "store.ts"),
+      "export interface AuditStore { read(): void }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "postgres.ts"),
+      [
+        'import type { AuditStore } from "@app/store";',
+        "export class PostgresStore implements AuditStore {",
+        "  read() { return undefined; }",
+        "}",
+        "export function build() { return new PostgresStore(); }",
+      ].join("\n"),
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "aliased",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const index = await new CodeIntelligenceService(repositories).index(
+      repository,
+      version.revision,
+    );
+    const file = index.files.find((entry) => entry.path === "src/postgres.ts");
+    assert.ok(file);
+    assert.ok(
+      file.referencedSymbols.includes("AuditStore"),
+      "implements should be a reference",
+    );
+    assert.ok(
+      file.referencedSymbols.includes("PostgresStore"),
+      "new X() should be a reference",
+    );
+    // The alias really did fail to resolve — otherwise this test would be
+    // passing on the import edge rather than on the change it is pinning.
+    assert.equal(
+      index.edges.find(
+        (edge) =>
+          edge.fromFile === "src/postgres.ts" && edge.resource === "@app/store",
+      )?.toFile,
+      undefined,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
