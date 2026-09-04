@@ -850,7 +850,9 @@ function appBridgeDetail() {
       ? "the whole bridge"
       : bridge.detected === undefined
         ? "the machine check"
-        : "nothing";
+        : bridge.login === undefined
+          ? "the vendor login check"
+          : "nothing";
   return `Kumi app ${version}; missing: ${missing}.`;
 }
 
@@ -903,8 +905,11 @@ async function verifyMachineFor(providerId, rerender) {
   // build that created agents without checking anything, so believing it here
   // would reinstate exactly the behaviour this replaces.
   if (bridge.login === undefined) {
-    machineDetail = "This build of the app cannot read a vendor login.";
-    return "unknown";
+    // Old, not unknowable. "Try again, and if it keeps happening restart the
+    // Kumi app" is advice that cannot work: restarting the same installer
+    // brings back the same missing bridge, and this is the one refusal whose
+    // remedy is a download. Answered as `stale-app` so it says so.
+    return "stale-app";
   }
   const first = await bridge.login(vendor).catch((error) => {
     machineDetail = `Asking ${vendor} about its login failed: ${
