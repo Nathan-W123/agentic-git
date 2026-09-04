@@ -754,6 +754,23 @@ const REFUSAL = {
       happen here. Finish it and press Connect again. No agent was created, and
       nothing on your account changed.`,
   },
+  // Told apart from `no-app`, because the advice is the opposite. "Open the
+  // desktop app" is useless to somebody reading it *inside* the desktop app,
+  // and that is exactly who sees this one: `KUMI_SERVER` has been in the
+  // preload since the app first shipped, the install bridge beside it came
+  // much later, and a preload that throws part-way leaves the page with the
+  // first and not the second. `checkLocalCli` already draws this distinction;
+  // the connect flow was lumping both into "you are in a browser".
+  "stale-app": {
+    subtitle: "This copy of the Kumi app cannot check the CLI.",
+    repair: `The app is running, but the part of it that inspects this machine
+      did not load. Download the latest version and open it again — your
+      agents and their names are kept.`,
+    body: `The app is running, but the part of it that inspects this machine
+      did not load, so Kumi cannot see whether the CLI is there. Download the
+      latest version and open it again, then press Connect. Nothing was
+      created here, and your agents and their names are kept.`,
+  },
   unknown: {
     subtitle: "This machine could not be asked.",
     repair: `The check did not complete, so this is not an answer about the
@@ -777,7 +794,13 @@ async function verifyMachineFor(providerId, rerender) {
   const bridge = window.KUMI_INSTALL;
   const vendor = PROVIDER_VENDOR[providerId];
   if (bridge?.detected === undefined || vendor === undefined) {
-    return "no-app";
+    // Two very different situations, and only one of them is "you are in a
+    // browser". `KUMI_SERVER` is exposed by the same preload and has been
+    // there far longer, so a page holding it without the install bridge is
+    // the app — just one whose bridge did not load. Telling that person to
+    // open the desktop app sends them to check the one thing that is not
+    // wrong, which is how this was found.
+    return window.KUMI_SERVER === undefined ? "no-app" : "stale-app";
   }
   const detected = await bridge.detected().catch(() => undefined);
   if (detected === undefined) {
