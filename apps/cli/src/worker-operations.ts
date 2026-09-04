@@ -3291,10 +3291,16 @@ export async function acceptWorkResult(
   // through to integration, whose three-way apply merges disjoint hunks for
   // free and reports a real conflict otherwise. The paid replan becomes the
   // fallback instead of the default.
+  //
+  // `COORD_STRICT_PLAN_REBASE=1` restores the unconditional requeue, the same
+  // switch and the same spelling the plan path and the in-process coordinator
+  // already use. It was missing from this path alone, which is the one where
+  // an over-optimistic answer costs a promoted result rather than a replan.
   const currentBeforeRun = await repositories.getCanonicalVersion(repository);
   if (
     currentBeforeRun.revision !== baseVersion.revision &&
-    (await replay(currentBeforeRun)).semantic.length > 0
+    (process.env["COORD_STRICT_PLAN_REBASE"] === "1" ||
+      (await replay(currentBeforeRun)).semantic.length > 0)
   ) {
     return await requeueForCanonicalChange(
       store,

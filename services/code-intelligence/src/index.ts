@@ -1265,8 +1265,36 @@ export class CodeIntelligenceService {
     const dependencyFiles = index.edges
       .filter((edge) => selected.has(edge.fromFile) && edge.toFile !== undefined)
       .map((edge) => `file:${edge.toFile}`);
+    // Whether enrichment had anything to work from.
+    //
+    // Every source this draws on hangs off `files`, so a plan whose declared
+    // paths are all new — the exact shape task decomposition produces — comes
+    // out with `dependencies` holding only what the agent typed, and nothing
+    // anywhere distinguishes that from a plan genuinely depending on nothing.
+    // `assessReplay` then asks whether an advance touched anything this plan
+    // depends on, gets "no" from an empty set, and reads it as proof of
+    // independence. It is proof of blindness.
+    //
+    // The same distinction `symbolRangesUnknown` draws a hundred lines above,
+    // for the same reason and in the same words: "declares nothing" is safe to
+    // enforce against, "could not read" is emphatically not.
+    //
+    // Narrowed to files that could have carried a dependency in the first
+    // place. A plan over `.txt`, `.md` or anything else outside
+    // `SOURCE_EXTENSIONS` has an empty read set because prose has no imports,
+    // not because anything failed to read it — calling that blind would put
+    // every documentation task on the pessimistic path permanently, for a
+    // hazard it cannot have. What is left is the real case: source files that
+    // should have been in the index and were not, because they are new, or
+    // skipped by the byte budget, or in a language that is scanned rather than
+    // parsed.
+    const couldHaveDependencies = plan.expectedFiles.some((file) =>
+      SOURCE_EXTENSIONS.has(path.posix.extname(file).toLowerCase()),
+    );
+    const blind = couldHaveDependencies && files.length === 0;
     const enriched: AgentPlan = {
       ...structuredClone(plan),
+      ...(blind ? { dependenciesUnknown: true } : {}),
       // Kept before it is widened, because the widening is lossy in the one
       // place it matters. Every symbol of every declared file goes into
       // `expectedSymbols` below, which is what makes two plans comparable —

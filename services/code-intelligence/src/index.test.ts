@@ -633,3 +633,67 @@ test("an interface reached through an alias is still a recorded reference", asyn
   }
 });
 
+test("a plan enrichment could not see through says so", async () => {
+  // Every source `dependencies` draws on hangs off the declared files being in
+  // the index. When none of them are, the result is indistinguishable from a
+  // plan that depends on nothing — and downstream that reads as independence.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-blind-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "util.ts"),
+      "export function helper() { return true; }\n",
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "blind",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+
+    const base = {
+      taskId: "task_1",
+      objective: "add a module",
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low" as const,
+    };
+    const blind = service.enrichPlan(
+      { ...base, expectedFiles: ["src/brand-new.ts"] },
+      index,
+    );
+    assert.equal(blind.dependenciesUnknown, true);
+
+    const seeing = service.enrichPlan(
+      { ...base, expectedFiles: ["src/util.ts"] },
+      index,
+    );
+    assert.equal(seeing.dependenciesUnknown, undefined);
+
+    // A plan declaring nothing is not blind — it asked for nothing, which is a
+    // different statement from asking for something unreadable.
+    const empty = service.enrichPlan({ ...base, expectedFiles: [] }, index);
+    assert.equal(empty.dependenciesUnknown, undefined);
+
+    // Nor is a plan over files that never had an import graph to miss. Prose
+    // has no dependencies, so an empty read set for it is the answer rather
+    // than the absence of one — and treating it as blind would put every
+    // documentation task on the pessimistic path for good.
+    const prose = service.enrichPlan(
+      { ...base, expectedFiles: ["docs/guide.md", "notes.txt"] },
+      index,
+    );
+    assert.equal(prose.dependenciesUnknown, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
