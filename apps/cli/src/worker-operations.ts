@@ -41,6 +41,11 @@ import {
   takeEditorWork,
 } from "./editor-work.js";
 import {
+  blockedAdmissionHistory,
+  wasPartiallyAdmitted,
+} from "./admission-history.js";
+import { LeasePlanAuthority } from "./lease-admission.js";
+import {
   CLAIM_HEARTBEAT_INTERVAL_MS,
   askToDeliver,
   parseWorkingChanges,
@@ -1665,77 +1670,13 @@ export async function tasksWaitingOnActiveWork(
   return waiting;
 }
 
-/**
- * How often running this task has been refused outright: in an unbroken run
- * ending at the most recent admission, and over the task's whole life.
- *
- * Deliberately blind to *which* task did the blocking. An earlier version
- * counted only while the blocking set stayed identical, on the reasoning that
- * a task refused by two different holders is making progress through a queue.
- * That reasoning is wrong in exactly the case this mechanism exists for: three
- * tasks contending for one function block each other in a rotating order, so
- * the blocking set changes every turn, the run resets every turn, and the
- * escalation is never reached. The loop survives the fix meant to break it.
- *
- * Escalating on a genuine queue costs nothing anyway, which is what makes the
- * blunter rule safe. Sequencing behind whoever currently holds the resource is
- * the correct answer whether that holder is the same one as last time or not —
- * it grants no permission to execute either way.
- *
- * `total` is the backstop. A task that alternates between refusals and other
- * non-approving answers never builds a consecutive run, so the unbroken count
- * alone still has a hole; the lifetime count has none, because it only ever
- * rises.
- *
- * The admission record is the source because the count has to outlive the
- * lease. The loop this exists to break releases its lease on every turn, and
- * the next turn may be a different worker entirely, so anything held in memory
- * would reset exactly when it mattered.
- */
-export async function blockedAdmissionHistory(
-  store: CoordinationStore,
-  taskId: TaskId,
-): Promise<{ consecutive: number; total: number }> {
-  const events = await store.listAuditEvents({
-    taskId,
-    types: ["plan_admitted"],
-  });
-  let consecutive = 0;
-  let counting = true;
-  let total = 0;
-  for (const entry of [...events].reverse()) {
-    if (entry.event.data["status"] === "blocked") {
-      total += 1;
-      if (counting) {
-        consecutive += 1;
-      }
-      continue;
-    }
-    counting = false;
-  }
-  return { consecutive, total };
-}
-
-/**
- * Whether this task has already spent an execution on a partial admission.
- *
- * A task may prove that its nominally free files cannot be changed without
- * the withheld ones. That attempt is returned to the queue, and allowing the
- * next lease to split the same plan again would repeat the empty execution
- * forever. The audit trail survives that lease boundary, so it is the stable
- * signal that subsequent admissions must decide the plan as one unit.
- */
-export async function wasPartiallyAdmitted(
-  store: CoordinationStore,
-  taskId: TaskId,
-): Promise<boolean> {
-  return (
-    await store.listAuditEvents({
-      taskId,
-      types: ["plan_admitted"],
-    })
-  ).some((entry) => entry.event.data["partial"] === true);
-}
+// Re-exported rather than moved out of sight: these have callers, tests
+// among them, that name this module and have no reason to care that the
+// readers moved so the two admission paths could share one narrowing.
+export {
+  blockedAdmissionHistory,
+  wasPartiallyAdmitted,
+} from "./admission-history.js";
 
 /**
  * The plans currently executing in one repository, and the exact set of
@@ -2184,7 +2125,7 @@ export async function admitWorkPlan(
     // functions of plan and index, so computing them now yields exactly what
     // full admission would have stored, and the comparison loses nothing to
     // the fast path having skipped it.
-    const active = executing.active.map((entry) =>
+    let active = executing.active.map((entry) =>
       entry.plan.grounding === undefined
         ? {
             ...entry,
@@ -2195,6 +2136,58 @@ export async function admitWorkPlan(
           }
         : entry,
     );
+
+    // A repository-wide claim is narrowed here, on arrival, before anything is
+    // decided against it.
+    //
+    // Without this the answer was foregone: a blanket claim covers every path,
+    // so `claimBlocked` refused whatever this plan said and the holder was
+    // never asked anything. The pieces to ask it were all present and all
+    // unreachable — a remote holder publishes itself into the same registry a
+    // local one does, and its heartbeat beats faster while a claim is held
+    // precisely so it can carry an ask — but the ask is armed by asking, and
+    // the only caller that asks lives on the local coordinator's admission
+    // path. So the heartbeat delivered nothing, every time, and an arrival
+    // waited for a poll that had no reason to fire.
+    //
+    // The narrowing is the local path's own, called rather than copied: the
+    // ask, its bound, the freeze that covers a holder which will not answer,
+    // and the compare-and-swap that makes a lost race harmless all come with
+    // it. `leaseIdForTask` is empty deliberately — the holder is not a task
+    // this process is executing, which is the arrival's case the freeze
+    // already handles by finding the lease itself.
+    //
+    // Answering `undefined` leaves the claim whole and this plan sequenced,
+    // which is exactly today's behaviour and the right one: a holder that
+    // cannot be read or is still answering has not said anything that would
+    // make it safe to admit somebody into its files.
+    const blanket = active.find((entry) => isBlanketClaim(entry.plan));
+    if (blanket !== undefined && blanket.plan.expectedFiles.length > 0) {
+      const narrowed = await new LeasePlanAuthority({
+        store,
+        leaseIdForTask: new Map(),
+        repositories,
+        intelligence,
+        admissions,
+      })
+        .narrowBlanketHolder(
+          blanket,
+          baseVersion,
+          repository,
+          // What this arrival is asking for. A file the holder only guessed at
+          // and has never written to is released to it here rather than held
+          // for the rest of the holder's run.
+          uniqueRepositoryPaths(plan.expectedFiles),
+          task.projectId,
+        )
+        .catch(() => undefined);
+      if (narrowed !== undefined) {
+        active = active.map((entry) =>
+          entry.taskId === blanket.taskId ? narrowed : entry,
+        );
+      }
+    }
+
     const decided = admissions.admit({
       plan,
       agentId: task.agentId,
