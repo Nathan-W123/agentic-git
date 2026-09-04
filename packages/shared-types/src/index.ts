@@ -1146,10 +1146,33 @@ export const KEEP_IT_SIMPLE_DIRECTIVE =
  * added at the dispatch site and not added here silently stops being
  * stripped, so both ends are declared together.
  */
+/**
+ * How to put a picture in front of somebody, rather than a path to one.
+ *
+ * An agent asked for a screenshot takes one and then says where it went —
+ * which is an absolute path on a machine the person asking is very often not
+ * sitting at, read on a phone. The bytes existed and the room could have
+ * shown them; nothing told the agent that was possible.
+ *
+ * Deliberately a path in the workspace, not an upload API. The agent already
+ * writes files there, the worker already knows where there is, and a marker
+ * in ordinary prose works identically across every vendor because it is only
+ * text. `liftLocalImages` in the worker turns the marker into a stored
+ * attachment on the way past; a marker whose file never appeared is left
+ * alone and reads as the filename it already was.
+ */
+export const SHOW_IMAGES_DIRECTIVE =
+  "To show someone an image — a screenshot, a chart, a diagram you rendered " +
+  "— write the file inside the workspace and reference it in your reply as " +
+  "![caption](relative/path.png). It is posted into the room as a picture. " +
+  "PNG, JPEG, GIF or WebP, under 8 MB, at most four per message. A path in " +
+  "prose is not an image: nobody reading this can open your filesystem.";
+
 export const COORDINATOR_DIRECTIVES: readonly string[] = [
   ANSWER_NOT_STATUS_DIRECTIVE,
   KEEP_IT_SIMPLE_DIRECTIVE,
   DO_NOT_CODE_DIRECTIVE,
+  SHOW_IMAGES_DIRECTIVE,
   FORCE_QUESTION_MARKER,
 ];
 

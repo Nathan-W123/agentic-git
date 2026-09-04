@@ -890,9 +890,8 @@ function renderAuth() {
                    placeholder="COORD_BOOTSTRAP_TOKEN"></label>`
               }
                <label class="field"><span>Your name</span>
-                 <input class="input" name="displayName" autocomplete="name" required></label>
-               <label class="field"><span>Team name</span>
-                 <input class="input" name="organizationName" value="Local team" required></label>`
+                 <input class="input" name="displayName" autocomplete="name"
+                   required></label>`
             : register
               ? `<label class="field"><span>Your name</span>
                    <input class="input" name="displayName" autocomplete="name" required></label>
@@ -1553,11 +1552,13 @@ async function submitBootstrap(form) {
       headers: { "X-Bootstrap-Token": String(data.get("token") ?? "").trim() },
       body: {
         displayName: String(data.get("displayName") ?? ""),
-        organizationName: String(data.get("organizationName") ?? ""),
         email: String(data.get("email") ?? ""),
         confirmEmail: String(data.get("confirmEmail") ?? ""),
         password: String(data.get("password") ?? ""),
         confirmPassword: String(data.get("confirmPassword") ?? ""),
+        // No team name is sent, because first-run setup no longer asks for
+        // one: the server names the deployment's organization after the owner
+        // creating it, and renaming a team is a settings screen away.
       },
     });
     authMode = "login";

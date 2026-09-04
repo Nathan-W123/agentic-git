@@ -214,6 +214,8 @@ export class WorkerClient {
     init: {
       method?: string;
       body?: unknown;
+      /** Raw bytes to send instead of JSON, with the type they really are. */
+      binary?: { bytes: Buffer; contentType: string };
       expectBinary?: boolean;
       timeoutMs?: number;
     } = {},
@@ -254,6 +256,7 @@ export class WorkerClient {
     init: {
       method?: string;
       body?: unknown;
+      binary?: { bytes: Buffer; contentType: string };
       expectBinary?: boolean;
       timeoutMs?: number;
     },
@@ -261,7 +264,9 @@ export class WorkerClient {
     const headers = new Headers({
       Authorization: `Bearer ${this.options.token}`,
     });
-    if (init.body !== undefined) {
+    if (init.binary !== undefined) {
+      headers.set("Content-Type", init.binary.contentType);
+    } else if (init.body !== undefined) {
       headers.set("Content-Type", "application/json");
     }
 
@@ -280,9 +285,11 @@ export class WorkerClient {
         headers,
         signal: controller.signal,
         redirect: "error",
-        ...(init.body === undefined
-          ? {}
-          : { body: JSON.stringify(init.body) }),
+        ...(init.binary !== undefined
+          ? { body: new Uint8Array(init.binary.bytes) }
+          : init.body === undefined
+            ? {}
+            : { body: JSON.stringify(init.body) }),
       });
 
       if (response.status === 204) {
@@ -689,6 +696,32 @@ export class WorkerClient {
       });
     } catch {
       // Deliberately silent. See above.
+    }
+  }
+
+  /**
+   * Stores one image the agent produced, and answers with its id.
+   *
+   * `undefined` rather than a throw on every failure: an oversized PNG, a
+   * control plane too old to know the route, a store the deployment never
+   * configured. The caller is decorating a message with a picture, and a
+   * message that arrives with a filename where a picture was meant is a much
+   * better outcome than a run that failed over a screenshot.
+   */
+  public async attachImage(
+    leaseId: string,
+    bytes: Buffer,
+    contentType: string,
+  ): Promise<string | undefined> {
+    try {
+      const { json } = await this.request(
+        `/api/v1/workers/leases/${leaseId}/attachment`,
+        { method: "POST", binary: { bytes, contentType } },
+      );
+      const id = (json as { id?: unknown } | undefined)?.id;
+      return typeof id === "string" && id !== "" ? id : undefined;
+    } catch {
+      return undefined;
     }
   }
 }

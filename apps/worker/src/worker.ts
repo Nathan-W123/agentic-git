@@ -72,6 +72,7 @@ import {
   type PowerSource,
   type PowerState,
 } from "./power.js";
+import { liftLocalImages } from "./attachments.js";
 
 /**
  * The oldest control plane this worker will take work from.
@@ -967,6 +968,34 @@ export class Worker {
    * What comes back is the agent's own explanation, and the guard below is
    * the point of the whole method.
    */
+  /**
+   * The agent's words, with any pictures it wrote turned into pictures.
+   *
+   * Applied to everything an agent says rather than only to its ending,
+   * because narration is where a screenshot is usually offered: "here is what
+   * the page looks like" arrives while the run is still going, and holding it
+   * back until the summary would show it long after it answered anything.
+   *
+   * Never allowed to fail a run. `liftLocalImages` already swallows its own
+   * failures per marker; this catches the rest, and returns what the agent
+   * actually said.
+   */
+  private async withImages(
+    leaseId: string,
+    workspacePath: string,
+    text: string,
+  ): Promise<string> {
+    try {
+      return await liftLocalImages(text, {
+        workspacePath,
+        upload: async (bytes, contentType) =>
+          await this.options.client.attachImage(leaseId, bytes, contentType),
+      });
+    } catch {
+      return text;
+    }
+  }
+
   private async answerQuestion(
     run: Run,
     assignment: WorkAssignment,
@@ -998,7 +1027,15 @@ export class Worker {
     if (said.length === 0 || readsAsCompletionNotice(said, assignment.task.objective)) {
       throw new Error("The agent produced no answer of its own");
     }
-    return said;
+    // After the emptiness check, not before. A marker becomes a much shorter
+    // `attachment:` reference, and an answer that is only a picture would
+    // otherwise have its length judged on the rewritten text rather than on
+    // what the agent actually produced.
+    return await this.withImages(
+      assignment.lease.id,
+      planned.workspacePath,
+      said,
+    );
   }
 
   /**
@@ -1865,7 +1902,11 @@ export class Worker {
             // run; see `WorkerClient.progress`.
             await this.options.client.progress(
               assignment.lease.id,
-              event.message,
+              await this.withImages(
+                assignment.lease.id,
+                planned.workspacePath,
+                event.message,
+              ),
             );
             return;
           }

@@ -69,6 +69,7 @@ import {
 import {
   AGENT_ACCOUNT_PREFIX,
   ANSWER_NOT_STATUS_DIRECTIVE,
+  SHOW_IMAGES_DIRECTIVE,
   assertProjectPolicy,
   createId,
   deriveCallSign,
@@ -6069,6 +6070,7 @@ export class ApiGateway {
           [
             await this.describeAttachments(visibleObjective),
             ANSWER_NOT_STATUS_DIRECTIVE,
+            SHOW_IMAGES_DIRECTIVE,
             ...(input.brief === true ? [KEEP_IT_SIMPLE_DIRECTIVE] : []),
             ...(input.forceQuestion === true ? [FORCE_QUESTION_MARKER] : []),
           ].join("\n\n"),

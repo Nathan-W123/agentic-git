@@ -88,3 +88,48 @@ test("a lease request announces the worker's protocol version", async () => {
   });
   assert.equal(typeof WORKER_PROTOCOL_VERSION, "number");
 });
+
+test("an image is sent as its own bytes, under its own content type", async () => {
+  let seen: { url: string; contentType: string | null; body: unknown } | undefined;
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async (input, init) => {
+      seen = {
+        url: String(input),
+        contentType: new Headers(init?.headers).get("Content-Type"),
+        body: init?.body,
+      };
+      return new Response(JSON.stringify({ id: "abc.png" }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  assert.equal(await client.attachImage("lease_1", bytes, "image/png"), "abc.png");
+  assert.equal(
+    seen?.url,
+    "https://control.example/api/v1/workers/leases/lease_1/attachment",
+  );
+  // Not JSON: the store reads the format out of the bytes themselves, and
+  // base64 in a field would have made them something else on the way.
+  assert.equal(seen?.contentType, "image/png");
+  assert.deepEqual([...(seen?.body as Uint8Array)], [...bytes]);
+});
+
+test("a refused image is undefined rather than a failed run", async () => {
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async () =>
+      new Response(
+        JSON.stringify({ error: { code: "not_supported", message: "no store" } }),
+        { status: 501, headers: { "Content-Type": "application/json" } },
+      ),
+  });
+  assert.equal(
+    await client.attachImage("lease_1", Buffer.from([1]), "image/png"),
+    undefined,
+  );
+});
