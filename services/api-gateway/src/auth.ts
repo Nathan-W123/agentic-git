@@ -464,10 +464,17 @@ export class AuthService {
     });
     const organizations = await this.store.listOrganizations();
     const local = organizations.find((entry) => entry.id === "org_local");
-    if (local !== undefined && input.organizationName !== undefined) {
-      await this.store.updateOrganization(local.id, {
-        name: input.organizationName,
-      });
+    // Named after the person when they did not name it themselves, which is
+    // what self-registration already does. The seeded row is called "Local
+    // Workspace" — a schema detail, not a name anybody chose — so leaving it
+    // in place made the field required on the form purely to avoid it. It is
+    // optional now, and this is what pays for that.
+    const organizationName =
+      input.organizationName !== undefined && input.organizationName !== ""
+        ? input.organizationName
+        : `${input.displayName}'s team`;
+    if (local !== undefined) {
+      await this.store.updateOrganization(local.id, { name: organizationName });
     }
     if (local !== undefined) {
       await this.store.saveMembership({

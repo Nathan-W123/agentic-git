@@ -750,8 +750,9 @@ function renderAuth() {
               }
                <label class="field"><span>Your name</span>
                  <input class="input" name="displayName" autocomplete="name" required></label>
-               <label class="field"><span>Team name</span>
-                 <input class="input" name="organizationName" value="Local team" required></label>`
+               <label class="field"><span>Team name <span class="field-optional">optional</span></span>
+                 <input class="input" name="organizationName"
+                   placeholder="Defaults to your name"></label>`
             : register
               ? `<label class="field"><span>Your name</span>
                    <input class="input" name="displayName" autocomplete="name" required></label>
@@ -1356,6 +1357,7 @@ async function submitBootstrap(form) {
   if (!confirmationsMatch(data)) {
     return;
   }
+  const organizationName = String(data.get("organizationName") ?? "").trim();
   try {
     // The one-time token authenticates the request itself, so it travels as a
     // header rather than as part of the record being created.
@@ -1371,11 +1373,13 @@ async function submitBootstrap(form) {
       headers: { "X-Bootstrap-Token": String(data.get("token") ?? "").trim() },
       body: {
         displayName: String(data.get("displayName") ?? ""),
-        organizationName: String(data.get("organizationName") ?? ""),
         email: String(data.get("email") ?? ""),
         confirmEmail: String(data.get("confirmEmail") ?? ""),
         password: String(data.get("password") ?? ""),
         confirmPassword: String(data.get("confirmPassword") ?? ""),
+        // Omitted rather than sent empty, so the server picks its default
+        // instead of naming a team the empty string.
+        ...(organizationName === "" ? {} : { organizationName }),
       },
     });
     authMode = "login";
