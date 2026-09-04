@@ -37,6 +37,7 @@ import {
 import {
   DEFAULT_PROJECT_ID,
   InMemoryCoordinationStore,
+  type CoordinationStore,
 } from "@coord/persistence";
 
 test("the marketing front page owns \"/\" exactly, and its absence falls back to the dashboard", async (t) => {
@@ -332,6 +333,29 @@ test("an empty token is the same as none, not a token nobody can send", async (t
   assert.equal(created.status, 201, JSON.stringify(created.data));
 });
 
+/**
+ * Puts an address through the waitlist, which is where a paid sign-up begins.
+ *
+ * Approval is what entitles an address to a checkout — the list would be
+ * decoration otherwise, since anybody holding a card could walk past it — so
+ * every test that buys something has to be somebody who was let in.
+ */
+async function letThrough(
+  store: CoordinationStore,
+  email: string,
+): Promise<void> {
+  const entry = await store.createWaitlistEntry({
+    id: `wait_${email.replace(/[^a-z0-9]/gu, "")}`,
+    email: email.toLowerCase(),
+    displayName: undefined,
+    note: undefined,
+    source: undefined,
+    createdAt: new Date().toISOString(),
+    invitedAt: undefined,
+  });
+  await store.markWaitlistEntryInvited(entry.id, new Date().toISOString());
+}
+
 test("a paid sign-up takes the card first and builds the account last", async (t) => {
   // The whole flow, in the order a person meets it: an address, a card, then
   // a name and a password. Nothing anybody can sign in to exists until the
@@ -350,6 +374,9 @@ test("a paid sign-up takes the card first and builds the account last", async (t
     stripeWebhookSecret: secret,
     stripePriceId: "price_example",
   });
+
+  // 0. Through the waitlist. Nothing here reaches a checkout otherwise.
+  await letThrough(store, "buyer@example.com");
 
   // 1. An address. No account, no organization — only an intent naming an id
   //    that does not exist yet.
@@ -914,6 +941,11 @@ test("a paid sign-up refuses an address that already has an account", async (t) 
     passwordDigest: "digest",
     systemAdmin: false,
   });
+  // Approved, so the answer below is about the account and not about the
+  // list. The order matters: somebody who is not through the waitlist is
+  // told that and nothing else, which is what stops this route being read
+  // one address at a time to find out who already has an account.
+  await letThrough(store, "taken@example.com");
 
   const refused = await client.request("/api/v1/auth/signup", {
     method: "POST",
@@ -921,6 +953,66 @@ test("a paid sign-up refuses an address that already has an account", async (t) 
   });
   assert.equal(refused.status, 409);
   assert.equal(refused.data.error.code, "account_exists");
+});
+
+test("a card cannot walk past the waitlist", async (t) => {
+  // The whole point of turning payments on behind a waitlist: being let in is
+  // what entitles an address to a checkout, so an address nobody approved
+  // must not reach Stripe at all — not reach it and be refused later, not
+  // reach it and be refunded. No session is created, so nothing was charged
+  // and there is nothing to unwind.
+  let sessions = 0;
+  const stripe = {
+    createCheckoutSession: async () => {
+      sessions += 1;
+      return { id: "cs_never", url: "https://checkout.example/cs_never" };
+    },
+  } as unknown as StripeClient;
+  const { client, store } = await startBareGateway(t, {
+    stripe,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+  });
+
+  for (const [label, email] of [
+    ["never asked", "stranger@example.com"],
+    ["still waiting", "waiting@example.com"],
+  ] as const) {
+    if (email === "waiting@example.com") {
+      // On the list, not yet let in — the case an operator creates by
+      // reading the list and not pressing the button.
+      await store.createWaitlistEntry({
+        id: "wait_waiting",
+        email,
+        displayName: undefined,
+        note: undefined,
+        source: undefined,
+        createdAt: new Date().toISOString(),
+        invitedAt: undefined,
+      });
+    }
+    const refused = await client.request("/api/v1/auth/signup", {
+      method: "POST",
+      body: { email },
+    });
+    assert.equal(refused.status, 403, `${label}: ${JSON.stringify(refused.data)}`);
+    // One refusal for both, so the reply cannot be read as an answer to
+    // "is this address on the list".
+    assert.equal(refused.data.error.code, "waitlist_pending");
+  }
+
+  assert.equal(sessions, 0, "no checkout is created for an unapproved address");
+  assert.equal(await store.countUsers(), 0);
+
+  // And the same address goes through the moment it is let in, so what was
+  // being refused is the approval and not something about the address.
+  await letThrough(store, "waiting@example.com");
+  const allowed = await client.request("/api/v1/auth/signup", {
+    method: "POST",
+    body: { email: "waiting@example.com" },
+  });
+  assert.equal(allowed.status, 200, JSON.stringify(allowed.data));
+  assert.equal(sessions, 1);
 });
 
 test("a forged webhook buys nothing, through the route rather than the verifier", async (t) => {
@@ -1145,4 +1237,110 @@ test("a token short enough to guess is refused at startup", async (t) => {
       }),
     /at least 24 characters/u,
   );
+});
+
+test("accepting somebody off the waitlist mails them into the trial", async (t) => {
+  // The whole handover, from the operator's button to the checkout: what the
+  // approval mails, and that following it works. These were two features that
+  // had never met — approval mailed a link to a form the paid deployment
+  // answers 410 to, because the waitlist was written for a free account and
+  // the paywall was written before the waitlist existed.
+  let checkout: Record<string, unknown> | undefined;
+  const stripe = {
+    createCheckoutSession: async (input: Record<string, unknown>) => {
+      checkout = input;
+      return { id: "cs_invited", url: "https://checkout.example/cs_invited" };
+    },
+  } as unknown as StripeClient;
+  const { client, store, sent } = await startBareGateway(t, {
+    stripe,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+    appBaseUrl: "https://kumi.test",
+  });
+  await bootstrap(client);
+
+  const asked = new TestClient(client.origin);
+  await asked.request("/api/v1/waitlist", {
+    method: "POST",
+    body: { email: "Ada@Example.com", displayName: "Ada" },
+  });
+  const [entry] = await store.listWaitlistEntries();
+  assert.notEqual(entry, undefined);
+
+  const approved = await client.request(
+    `/api/v1/admin/waitlist/${entry?.id ?? ""}/approve`,
+    { method: "POST" },
+  );
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  assert.equal(approved.data.approved, true);
+
+  const invitation = sent.at(-1);
+  assert.equal(invitation?.to, "ada@example.com");
+  const text = invitation?.text ?? "";
+
+  // One link, carrying the approved address so the form does not ask them to
+  // remember which of their addresses was let through.
+  assert.match(text, /https:\/\/kumi\.test\/app#join\/ada%40example\.com/u);
+  // It is absolute. A relative link in an email is not a link.
+  assert.doesNotMatch(text, /\n\/app#/u);
+
+  // What the card is for, said before they meet the card and not after.
+  assert.match(text, /card/iu);
+  assert.match(text, /\b14 days\b/u);
+  assert.match(text, /\bday 15\b/u);
+
+  // And the desktop app, because a Kumi account with no worker on it never
+  // runs anything — execution is local by design.
+  assert.match(text, /https:\/\/kumi\.test\/download/u);
+
+  // Following it reaches the checkout. This is the assertion the two features
+  // never had between them.
+  const started = await asked.request("/api/v1/auth/signup", {
+    method: "POST",
+    body: { email: "ada@example.com", organizationName: "Ada's team" },
+  });
+  assert.equal(started.status, 200, JSON.stringify(started.data));
+  assert.equal(started.data.url, "https://checkout.example/cs_invited");
+  assert.equal(checkout?.["trialPeriodDays"], 14);
+  assert.equal(checkout?.["customerEmail"], "ada@example.com");
+  // Still nothing anybody can sign in to: the card comes before the account.
+  assert.equal(await store.countUsers(), 1, "only the owner from bootstrap");
+});
+
+test("approving twice mails once, and says which press did it", async (t) => {
+  // Two operators working the same list, or one pressing twice because the
+  // page had not refreshed. The second press must not send a second
+  // invitation, and the reply has to say so or neither of them can tell.
+  const { client, store, sent } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+  });
+  await bootstrap(client);
+  const before = sent.length;
+
+  const asked = new TestClient(client.origin);
+  await asked.request("/api/v1/waitlist", {
+    method: "POST",
+    body: { email: "grace@example.com" },
+  });
+  const [entry] = await store.listWaitlistEntries();
+
+  const first = await client.request(
+    `/api/v1/admin/waitlist/${entry?.id ?? ""}/approve`,
+    { method: "POST" },
+  );
+  assert.equal(first.data.approved, true);
+  assert.equal(sent.length, before + 1);
+
+  const second = await client.request(
+    `/api/v1/admin/waitlist/${entry?.id ?? ""}/approve`,
+    { method: "POST" },
+  );
+  assert.equal(second.status, 200);
+  assert.equal(second.data.approved, false, "the second press did not do it");
+  assert.equal(sent.length, before + 1, "and did not send a second invitation");
+  // Either way the entry is through, which is what the button is for.
+  assert.notEqual(second.data.entry.invitedAt, undefined);
 });
