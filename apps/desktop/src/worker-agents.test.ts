@@ -538,3 +538,37 @@ test("an absent CLI reports nothing rather than an empty reading", async () => {
     assert.match(String(none.detail), /publishes no usage command/u);
   });
 });
+
+/**
+ * The one branch of Connect that waits on another program.
+ *
+ * Claude and Cursor finish inside `connectEditor` and answer immediately.
+ * Codex cannot read a token out of a file, so its branch alone goes on to set
+ * an environment variable with `setx.exe` — and the page is sitting on that
+ * IPC call with nothing between it and the dialog that reports the outcome.
+ *
+ * `setx` broadcasts `WM_SETTINGCHANGE` to every top-level window and waits for
+ * them to answer, so a single unresponsive application is enough to leave it
+ * running. Unbounded, that is a Connect that produces no dialog, no toast and
+ * no error, for ever, on Codex and only on Codex.
+ */
+test("setting the Codex environment variable cannot wait for ever", async () => {
+  const main = await readFile(path.join(electronDir, "main.mjs"), "utf8");
+  const start = main.indexOf("async function setUserEnvironment");
+  assert.ok(start > 0, "setUserEnvironment must still exist");
+  const body = main.slice(start, start + 2000);
+
+  // A deadline, and a kill so the timeout does not leave the process behind.
+  assert.match(body, /setTimeout\(/u, "the wait must be bounded");
+  assert.match(body, /child\.kill\(\)/u, "a timed-out child must be killed");
+  // Cleared on the ordinary paths, so a connection that works does not hold a
+  // timer open behind it.
+  assert.match(body, /clearTimeout\(/u);
+  // Every exit route resolves. A promise with a path that never settles is
+  // exactly the bug this guards.
+  assert.equal(
+    (body.match(/resolve\(/gu) ?? []).length >= 2,
+    true,
+    "error, exit and timeout must all settle the promise",
+  );
+});

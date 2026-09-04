@@ -1033,6 +1033,15 @@ ipcMain.handle("kumi:connect-editor", async (_event, vendor, token) => {
  * equivalent that is not somebody's shell profile, so this answers false and
  * the caller hands the line over instead of editing a file it does not own.
  */
+/**
+ * Ten seconds, which `setx` beats by three orders of magnitude when it works.
+ *
+ * Long enough that a machine under load is never cut off mid-write, short
+ * enough that somebody who pressed Connect is still watching when the answer
+ * arrives.
+ */
+const SETX_TIMEOUT_MS = 10_000;
+
 async function setUserEnvironment(name, value) {
   if (process.platform !== "win32") {
     return false;
@@ -1047,8 +1056,32 @@ async function setUserEnvironment(name, value) {
       [name, value],
       { windowsHide: true, stdio: "ignore" },
     );
-    child.once("error", () => resolve(false));
-    child.once("exit", (code) => resolve(code === 0));
+    // Bounded, because this promise is the only thing between a button press
+    // and the dialog that says what happened — and it is on the Codex branch
+    // alone. Claude and Cursor answer before this is ever called, so a
+    // `setx.exe` that never exits took exactly one editor's Connect and left
+    // it hanging with no dialog, no toast and no error: the whole flow simply
+    // stopped, forever, on the one vendor that needs an environment variable.
+    //
+    // `setx` broadcasts `WM_SETTINGCHANGE` to every top-level window and waits
+    // for them to acknowledge it, so one unresponsive application on the
+    // machine is enough to hold it open. Antivirus interposing on the registry
+    // write does the same thing. Neither is rare, and neither is ours to fix.
+    //
+    // Timing out answers `false`, which is not a failure: the caller already
+    // has a path for a variable it could not set, and hands back the export
+    // line for the person to run. A instruction they can act on beats a
+    // spinner that never resolves.
+    const deadline = setTimeout(() => {
+      child.kill();
+      resolve(false);
+    }, SETX_TIMEOUT_MS);
+    const settle = (ok) => {
+      clearTimeout(deadline);
+      resolve(ok);
+    };
+    child.once("error", () => settle(false));
+    child.once("exit", (code) => settle(code === 0));
   });
 }
 
