@@ -2158,3 +2158,77 @@ test("a direct message can be unsent by its sender and nobody else", async (t) =
     [],
   );
 });
+
+test("every overlay workspace action the handler answers is routable", async (t) => {
+  // `move` had a handler, an operation on the interface, an implementation in
+  // the overlay, and a caller in the browser — and no way in. The route names
+  // its actions in one regex and the handlers test them one by one below, and
+  // the two lists had drifted apart: dragging a file onto a folder in the
+  // code view came back "Route was not found".
+  //
+  // Asserted as the invariant rather than as one path, because the next
+  // action added will be added the same way. The route's own list is read out
+  // of the source and compared with the actions the handlers answer, so
+  // either half growing without the other fails here.
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../src/routes/tasks.ts", import.meta.url),
+    "utf8",
+  );
+  const block = source.slice(
+    source.indexOf("const workspaceActionMatch ="),
+    source.indexOf("if (action === \"exec\" && method === \"POST\")"),
+  );
+  assert.notEqual(block, "", "the workspace route should still exist");
+  const routed = new Set(
+    (/\/\((?<actions>[a-z|]+)\)\$/u.exec(block)?.groups?.["actions"] ?? "")
+      .split("|")
+      .filter((entry) => entry !== ""),
+  );
+  assert.ok(routed.size > 0, "the route should still name its actions");
+  const answered = new Set(
+    [...block.matchAll(/action === "([a-z]+)"/gu)].map((match) => match[1] ?? ""),
+  );
+  // `exec` and `submit` are answered past the slice above; they are in the
+  // route's list and their handlers are the two the slice ends at.
+  for (const known of ["exec", "submit"]) {
+    answered.add(known);
+  }
+  assert.deepEqual(
+    [...answered].filter((action) => !routed.has(action)).sort(),
+    [],
+    "an action with a handler that the route cannot match is unreachable",
+  );
+  assert.deepEqual(
+    [...routed].filter((action) => !answered.has(action)).sort(),
+    [],
+    "an action the route matches with no handler falls through to 404",
+  );
+
+  // And over HTTP, which is what proves the regex is the thing that decides.
+  // No overlay is configured here, so a path the route *matches* answers 501
+  // "not_supported" while one it does not falls through to 404 "not_found".
+  // That difference is the bug, and it needs no overlay to see.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/repo_a/workspace`;
+  for (const action of routed) {
+    const answer = await client.request(`${base}/${action}`, {
+      method: "POST",
+      body: {},
+    });
+    assert.equal(
+      answer.data.error?.code,
+      "not_supported",
+      `${action} should reach the workspace route: ${JSON.stringify(answer.data)}`,
+    );
+  }
+  // A neighbour that is not an action still falls through, so the assertion
+  // above is about routing and not about every path answering 501.
+  const stranger = await client.request(`${base}/rename`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(stranger.data.error?.code, "not_found");
+});
