@@ -29,6 +29,7 @@ import {
   safeStorage,
   shell,
 } from "electron";
+import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -51,14 +52,17 @@ import {
 // into "no answer", and the setup that answer gates — the CLI check, the
 // install offer, the sign-in — was skipped in silence. Agents connected,
 // looked connected, and could run nothing.
-import { detectAgents } from "./agents.mjs";
+import { detectAgents, findAgentCommand } from "./agents.mjs";
+import { CONNECTABLE, connectEditor } from "./editor-mcp.mjs";
 import {
+  forgetMcpServers,
   setStayAwake,
   startWorker,
   stopWorker,
   workerLogPath,
 } from "./worker.mjs";
-import { readVendorUsage } from "./usage.mjs";
+import { readVendorUsage, stopProcess } from "./usage.mjs";
+import { loginIsKnowable, readVendorLogin } from "./vendor-login.mjs";
 import {
   INSTALLABLE_VENDORS,
   VENDOR_LABELS,
@@ -67,6 +71,7 @@ import {
   openSignIn,
   runInstall,
   runNodeInstall,
+  runnable,
 } from "./installers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -317,6 +322,13 @@ function buildMenu() {
       label: "Open Worker Log",
       click: () => void shell.openPath(workerLogPath()),
     },
+    {
+      // The other half of the question the app asks when a project offers
+      // its agents a tool. A yes that could only be taken back by editing a
+      // JSON file would be a yes kept forever.
+      label: "Forget Allowed MCP Servers…",
+      click: () => void forgetAllowedMcp(),
+    },
     { type: "separator" },
     {
       // Named for what it actually does. The platform call underneath is
@@ -363,6 +375,40 @@ function buildMenu() {
  * give up to be reachable. Somebody may reasonably want to run agents all day
  * and still have their laptop sleep at night.
  */
+/**
+ * Takes back every MCP server this computer has allowed, after asking.
+ *
+ * Asked because it is not free: agents here run without those tools from
+ * the next task on, until the owner says yes again. The worker is restarted
+ * by the call so the answer takes effect now rather than at the next launch.
+ */
+async function forgetAllowedMcp() {
+  const choice = await askDialog({
+    kind: "question",
+    title: "Kumi",
+    heading: "Forget the MCP servers this computer has allowed?",
+    body:
+      "Your agents here will run without those tools until you allow them " +
+      "again. Kumi asks the next time a task offers one.",
+    buttons: ["Forget", "Keep"],
+    cancelId: 1,
+  });
+  if (choice !== 0) {
+    return;
+  }
+  try {
+    await forgetMcpServers(here, session, noteWorkerState);
+  } catch (error) {
+    await tellDialog({
+      kind: "error",
+      title: "Kumi",
+      heading: "Could not forget the allowed MCP servers.",
+      body: error instanceof Error ? error.message : String(error),
+      buttons: ["Close"],
+    });
+  }
+}
+
 async function toggleKeepAwake(wanted) {
   awakeForWork = wanted === true;
   // Said once, when the expectation is being formed. Somebody turning this on
@@ -406,7 +452,12 @@ async function toggleKeepAwake(wanted) {
 function noteWorkerState(event) {
   workerStatus =
     event.state === "running"
-      ? "Running agents on this machine"
+      ? // Named, not counted. This line is the only place a person can see
+        // which CLIs this machine actually found, and "Running agents on this
+        // machine" is true of a worker that found one of the two they have
+        // installed — which is indistinguishable, from here, from a worker
+        // that is about to ignore every task sent to the other one.
+        (event.detail ?? "Running agents on this machine").replace(/\.$/u, "")
       : event.state === "restarting"
         ? "Reconnecting…"
         : `Not running — ${event.detail}`;
@@ -813,6 +864,105 @@ ipcMain.handle("kumi:agent-usage", async (_event, vendor) =>
   await readVendorUsage(vendor),
 );
 
+/**
+ * Whether one vendor's CLI on this machine is signed in.
+ *
+ * Asked before an agent is created, not after. The connect flow used to mint
+ * an agent and its call sign the moment somebody pressed Connect and consult
+ * the machine afterwards, so people ended up with named agents, in every
+ * channel, behind a CLI that had no login — and the only thing that ever said
+ * so was a toast.
+ *
+ * The probe runs *here* because here is the only place the answer exists. The
+ * control plane has a CLI too, and under local execution it is nobody's: a
+ * verdict from there is a confident sentence about a computer the reader has
+ * never seen.
+ *
+ * Cheap on purpose. The usage reading beside this starts a real turn and can
+ * take a minute; a status command costs nothing and spends no quota, which is
+ * what makes it safe to run on a button press.
+ */
+ipcMain.handle("kumi:vendor-login", async (_event, vendor) => {
+  const name = String(vendor);
+  const agents = await detectAgents();
+  const entry = agents[name];
+  if (entry === undefined && loginIsKnowable(name)) {
+    // Not installed. Said as its own answer rather than as a login failure,
+    // because the remedy is an install and not a sign-in.
+    return { state: "missing", vendor: name };
+  }
+  const executable = entry?.command ?? (await findAgentCommand(name)) ?? name;
+  const verdict = await readVendorLogin(name, {
+    home: app.getPath("home"),
+    join: (...parts) => path.join(...parts),
+    exists: async (file) =>
+      await readFile(file).then(
+        () => true,
+        () => false,
+      ),
+    readJson: async (file) =>
+      await readFile(file, "utf8").then(
+        (text) => JSON.parse(text),
+        () => undefined,
+      ),
+    run: async (args, options = {}) =>
+      await runStatus(executable, args, options.timeoutMs ?? 30_000),
+  });
+  return { ...verdict, vendor: name };
+});
+
+/**
+ * Runs one status command and reports both streams and the code.
+ *
+ * `spawnFailed` rather than a throw, because the caller distinguishes "could
+ * not ask" from "the answer is no" and a rejection collapses the two. Through
+ * `runnable` for the reason every other spawn here is: on Windows npm installs
+ * its global binaries as batch shims, and spawning one directly is EINVAL.
+ */
+function runStatus(executable, args, timeoutMs) {
+  return new Promise((resolve) => {
+    const plan = runnable(executable, args);
+    let child;
+    try {
+      child = spawn(plan.command, plan.args, {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      resolve({
+        spawnFailed: true,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (value) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        stopProcess(child);
+        resolve(value);
+      }
+    };
+    const timer = setTimeout(
+      () => finish({ spawnFailed: true, detail: "The CLI did not answer in time." }),
+      timeoutMs,
+    );
+    child.stdout?.on("data", (chunk) => {
+      stdout = `${stdout}${String(chunk)}`.slice(0, 65_536);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = `${stderr}${String(chunk)}`.slice(0, 65_536);
+    });
+    child.on("error", (error) =>
+      finish({ spawnFailed: true, detail: error.message }),
+    );
+    child.on("close", (code) => finish({ exitCode: code ?? 0, stdout, stderr }));
+  });
+}
+
 // What this machine actually has, asked for by the connect screen.
 //
 // The same scan the worker registers from, so the page and the worker cannot
@@ -822,6 +972,85 @@ ipcMain.handle("kumi:agent-usage", async (_event, vendor) =>
 ipcMain.handle("kumi:machine-agents", async () =>
   Object.values(await detectAgents()).map((agent) => agent.adapter),
 );
+
+/**
+ * Connects one editor on this machine to this Kumi, from the dashboard.
+ *
+ * The split of responsibility is the point. The *page* supplies the token,
+ * because it is the thing holding a session that can mint one. The *app*
+ * supplies the address, from the server it is already signed in to — so a
+ * page cannot write a config that points somebody's editor, and the token
+ * authorising it, at an address of its choosing. `editor-mcp.mjs` refuses
+ * anything but https or loopback on top of that.
+ *
+ * Codex is finished separately, because it will not read a token out of a
+ * file. On Windows the variable is set for the user with `setx`; elsewhere
+ * the export line is handed back to paste, because a shell profile is
+ * somebody's own file in a way a config directory is not.
+ */
+ipcMain.handle("kumi:connect-editor", async (_event, vendor, token) => {
+  if (session?.server === undefined) {
+    return { ok: false, detail: "This app is not signed in to a server yet." };
+  }
+  if (typeof token !== "string" || token.trim() === "") {
+    return { ok: false, detail: "No token was supplied for the connection." };
+  }
+  try {
+    const written = await connectEditor({
+      vendor: String(vendor),
+      home: app.getPath("home"),
+      server: {
+        name: "kumi",
+        url: new URL("/api/v1/mcp", session.server).toString(),
+        token: token.trim(),
+      },
+    });
+    if (written.variable === undefined) {
+      return { ok: true, path: written.path };
+    }
+    const set = await setUserEnvironment(written.variable, token.trim());
+    return {
+      ok: true,
+      path: written.path,
+      ...(set
+        ? {}
+        : {
+            // Said rather than skipped: the file alone does not connect Codex,
+            // and reporting success here would be reporting half a job.
+            manual: `export ${written.variable}=${token.trim()}`,
+          }),
+    };
+  } catch (error) {
+    return { ok: false, detail: describe(error) };
+  }
+});
+
+/**
+ * Sets a variable for this user, where the platform lets an app do that.
+ *
+ * `setx` writes it to the registry for future processes, which is what a
+ * terminal opened after this will inherit. Everywhere else there is no
+ * equivalent that is not somebody's shell profile, so this answers false and
+ * the caller hands the line over instead of editing a file it does not own.
+ */
+async function setUserEnvironment(name, value) {
+  if (process.platform !== "win32") {
+    return false;
+  }
+  return await new Promise((resolve) => {
+    const child = spawn(
+      path.join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32",
+        "setx.exe",
+      ),
+      [name, value],
+      { windowsHide: true, stdio: "ignore" },
+    );
+    child.once("error", () => resolve(false));
+    child.once("exit", (code) => resolve(code === 0));
+  });
+}
 
 // The renderer asks for the token here instead of being handed it on its
 // command line. Only the top frame of a window running our preload can reach

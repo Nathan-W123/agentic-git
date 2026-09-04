@@ -1557,6 +1557,128 @@ export const MIGRATIONS: readonly Migration[] = [
          ADD COLUMN visibility TEXT NOT NULL DEFAULT 'personal'`,
     ],
   },
+  {
+    /**
+     * The MCP servers a project has chosen for its agents, and who said so.
+     *
+     * An approved MCP server is an arbitrary process. A project admin picks
+     * it, and it then runs on a teammate's own laptop, under that teammate's
+     * account, every time one of the project's agents takes a task there. That
+     * is a bigger thing to hand a row than a URL or a label, which is why the
+     * table records approval as an act rather than as a flag somebody set:
+     * `approved_by` and `approved_at` say who decided and when, and `enabled`
+     * defaults to off so a server that was merely configured — by the person
+     * who typed it in, or by a migration, or by a client that forgot the
+     * field — arms nothing until somebody with the standing to do so turns it
+     * on. Disabling clears both, so a re-approval is a fresh decision with a
+     * fresh name on it and not the old one quietly resumed.
+     *
+     * Secrets live in `secrets_json` as sealed triples, the same shape the
+     * credential store has always written, and never come back on an
+     * ordinary read: a listing says which names are set and nothing else.
+     * `values_json` is the part that is not secret — a stdio server's plain
+     * environment, an HTTP server's plain headers — so a screen can show it.
+     *
+     * `scope` decides which of the project's repositories the server is
+     * attached to. `repository` is the default because it is the narrow one:
+     * a server nobody widened reaches only the repositories explicitly listed
+     * in the join table, which for a fresh row is none. No foreign keys, as
+     * with the neighbouring tables; the store removes join rows itself.
+     *
+     * The name is unique per project ignoring case because it becomes the key
+     * in a vendor's config file, where `Linear` and `linear` would be the
+     * same entry and one would silently win.
+     */
+    version: 54,
+    name: "project-mcp-servers",
+    statements: [
+      `CREATE TABLE project_mcp_servers (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        command TEXT,
+        args_json TEXT NOT NULL DEFAULT '[]',
+        url TEXT,
+        values_json TEXT NOT NULL DEFAULT '{}',
+        secrets_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 0,
+        scope TEXT NOT NULL DEFAULT 'repository',
+        approved_by TEXT,
+        approved_at TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE UNIQUE INDEX project_mcp_servers_project_name_idx
+         ON project_mcp_servers (project_id, LOWER(name))`,
+      `CREATE TABLE project_mcp_server_repositories (
+        server_id TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        PRIMARY KEY (server_id, repository_id)
+      )`,
+    ],
+  },
+  {
+    // The desktop app authenticates with a token, not a session, so it could
+    // not mint the narrow one an editor needs — and the rule it ran into is
+    // worth keeping: a token that mints tokens makes revocation meaningless.
+    // Recording the parent restores that, because revoking it takes the
+    // children with it.
+    version: 55,
+    name: "api-token-parent",
+    statements: [
+      `ALTER TABLE api_tokens ADD COLUMN created_by_token TEXT`,
+    ],
+  },
+  {
+    /**
+     * A second, separate opt-in: may this server also be reached from an
+     * editor, through Kumi's own MCP endpoint?
+     *
+     * Not folded into `enabled`, because the two decisions are not the same
+     * decision. `enabled` says a server may run on a teammate's laptop beside
+     * an agent Kumi started, where the machine owner is asked first and the
+     * lease names exactly one task. Editor access says the control plane
+     * itself will dial that server, with the project's secrets, on behalf of
+     * whoever is typing in Cursor — a different process, a different network,
+     * and no per-task scope at all. An admin approving the first should not
+     * silently be granting the second.
+     *
+     * Default false, so every server that already exists stays exactly as
+     * armed as it was.
+     */
+    version: 56,
+    name: "mcp-servers-for-editors",
+    statements: [
+      `ALTER TABLE project_mcp_servers
+         ADD COLUMN editor_enabled INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
+  {
+    /**
+     * Which editor a token was minted for, when it was minted for one.
+     *
+     * So the control plane can tell that a request came from Codex rather
+     * than from Claude Code, without asking the model to say so. That matters
+     * because `submit_task` used to require an agent name, which meant an
+     * editor asking Kumi to do something had to *invent* the assignment: a
+     * person who named nobody had their work sent to whichever agent the
+     * model picked off the roster, which is how a prompt typed in Codex came
+     * to be run by Claude.
+     *
+     * The token name already carries this — the app mints "Codex on <device>"
+     * — and reading it back is the fallback for every connection made before
+     * this column existed. A name is editable, though, and a person renaming
+     * their token in settings must not quietly change who does their work.
+     * So it is recorded once, at mint, where nothing can drift.
+     */
+    version: 57,
+    name: "editor-tokens-name-their-editor",
+    statements: [
+      `ALTER TABLE api_tokens ADD COLUMN editor_vendor TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

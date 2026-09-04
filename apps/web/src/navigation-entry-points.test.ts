@@ -18,8 +18,32 @@ import { defaultPublicDirectory } from "./assets.js";
  * the source — because the dashboard ships as plain ES modules with no
  * bundler and the test run has no DOM.
  */
+/**
+ * The dashboard shell, which is three files.
+ *
+ * `app.js` used to hold the router, the motion system and the accent colour
+ * arithmetic together. Motion moved to `motion.js` and the colour maths to
+ * `colour.js`; what these tests pin - that the behaviour is there and has
+ * the shape it is meant to have - never cared which of the three a line sat
+ * in, so asking for "app.js" here still means the whole shell.
+ */
+const SHELL_MODULES = ["app.js", "motion.js", "colour.js"];
+
 async function publicFile(name: string): Promise<string> {
-  return await readFile(path.join(defaultPublicDirectory(), name), "utf8");
+  const wanted = name === "app.js" ? SHELL_MODULES : [name];
+  const parts = await Promise.all(
+    wanted.map(async (file) =>
+      readFile(path.join(defaultPublicDirectory(), file), "utf8"),
+    ),
+  );
+  if (name !== "app.js") {
+    return parts.join("\n");
+  }
+  // Only the shell, and only because several tests below slice a function out
+  // of it and run it: `export` is a syntax error outside a module, and the
+  // shell's own functions carry it now that two of its three files are
+  // imported rather than inlined.
+  return parts.join("\n").replaceAll(/^export /gmu, "");
 }
 
 /** One region of a file, from its opening marker to the next one. */
@@ -71,7 +95,7 @@ test("the account menu carries account destinations", async () => {
   assert.match(agentMenu, /"Connect another agent"[\s\S]{0,80}"View agent connections"/u);
   assert.match(
     app,
-    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render\);/u,
+    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render, openSettingsSearchResult\);/u,
   );
   // Still not a second product route for agent connections.
   assert.doesNotMatch(agentMenu, /value: "agents"/u);
@@ -158,9 +182,14 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(entries, /state\.repositories\.map/u);
   assert.match(entries, /group: "Workspaces"/u);
   assert.match(entries, /group: "People"/u);
+  // Messages are built by their own helper and spread in, so the group name
+  // lives there rather than inline. Both halves asserted: the helper makes
+  // the rows, and the entries actually take them.
+  assert.match(entries, /\.\.\.switcherMessageRows\(query\),/u);
+  const messageRows = slice(app, "function switcherMessageRows(query) {", "function paintSwitcher()");
+  assert.match(messageRows, /group: "Messages"/u);
   assert.match(entries, /group: "Navigation"/u);
   assert.match(entries, /switcherMessageRows\(query\)/u);
-  assert.match(entries, /group: "Messages"/u);
   assert.match(entries, /state\.dmPeople/u);
   // Navigation is Settings and nothing else. Chats is the screen the switcher
   // is already drawn over, and the backlog of everything every agent has done
@@ -419,16 +448,37 @@ test("the renamed categories keep their old ids working", async () => {
 
 test("the waitlist is where whoever runs the deployment finds it", async () => {
   const app = await publicFile("app.js");
+  const settings = await publicFile("screen-settings.js");
 
   // Under Deployment, beside the other things only a system administrator
   // sees, and above the health numbers: the top of that screen is a job —
   // a queue somebody works down — and the rest of it is a readout.
-  const dialog = slice(app, "const SETTINGS_SECTIONS = [", "\n/**\n * The user's own GitHub");
-  assert.match(
-    dialog,
-    /case "deployment":\s*\n\s*return `\$\{waitlistCard\(\)\}\$\{deploymentCard\(\)\}`/u,
+  //
+  // The category list lives in the settings module now; the markup that
+  // answers it stayed with the router, where the data layer is.
+  const sections = slice(
+    settings,
+    "export const SETTINGS_SECTIONS = [",
+    "\n/**\n * Old ids that must keep working.",
   );
-  assert.match(dialog, /id: "deployment"[\s\S]{0,200}adminOnly: true/u);
+  assert.match(sections, /id: "deployment"[\s\S]{0,240}adminOnly: true/u);
+
+  const markup = slice(
+    app,
+    "function deploymentSection() {",
+    "\n/**\n * The categories this account may actually open.",
+  );
+  assert.match(
+    markup,
+    /return `\$\{waitlistCard\(\)\}\$\{deploymentCard\(\)\}`/u,
+  );
+  // And the one place that draws it asks whether this account runs the
+  // deployment before it does. `adminOnly` keeps the category out of the
+  // sidebar; this keeps its contents off the screen.
+  assert.match(
+    markup,
+    /case "deployment":[\s\S]{0,700}iAmSystemAdmin\(\) \? deploymentSection\(\) : generalSection\(\)/u,
+  );
 
   // Letting somebody in and taking them off the list are both one press, and
   // both go through the data layer rather than patching the row on screen.

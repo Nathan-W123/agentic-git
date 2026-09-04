@@ -52,6 +52,7 @@ import {
   setMyTheme,
   myAgents,
   notifications,
+  PROVIDER_VENDOR,
   persist,
   isFavourite,
   flushChannelDrafts,
@@ -174,6 +175,7 @@ import {
   badge,
   relativeTime,
   showModal,
+  VENDOR_LABEL,
   toast,
   armChime,
   chime,
@@ -231,7 +233,8 @@ import {
   TERMINAL_TASK_STATUS,
   cancelTask,
   checkLocalCli,
-  connectAgent,
+  connectEditorToKumi,
+  connectProviderSomehow,
   disconnectAgent,
   installVendorCli,
   connectGitHubAccount,
@@ -260,6 +263,13 @@ import {
   invitationLink,
   createApiToken,
   loadApiTokens,
+  approveMcpServer,
+  shareMcpServerWithEditors,
+  createMcpServer,
+  deleteMcpServer,
+  ensureMcpServers,
+  parseMcpArgs,
+  parseMcpSecrets,
   loadInvitations,
   revokeApiToken,
   loadPendingQuestions,
@@ -311,6 +321,26 @@ import {
   sendOfflineChoice,
   setOfflineTarget,
 } from "./screen-chats.js";
+import {
+  accentInk,
+  channels,
+  contrastRatio,
+  luminance,
+  mix,
+  readableOn,
+  withAlpha,
+} from "./colour.js";
+import {
+  animateOnce,
+  captureSurfaceMotion,
+  forgetOldEntrances,
+  forgetOldReveals,
+  playMessageEntrance,
+  playPhaseSlots,
+  playSurfaceMotion,
+  playTextReveal,
+  startEntrance,
+} from "./motion.js";
 
 // A socket callback cannot unlock browser audio by itself. The first genuine
 // interaction quietly prepares it so a later incoming cue can play; no sound
@@ -443,9 +473,20 @@ const AUTH_HASHES = new Map([
   // the marketing site can link straight at it, and so somebody can be sent
   // the form rather than "open the app and look for the link".
   ["waitlist", "waitlist"],
-  // `register` still maps, so an older bookmark opens the trial rather than
-  // a blank screen — the free form it used to open is gone.
-  ["register", "signup"],
+  // Where an invitation lands, carrying the approved address after the slash
+  // the way `#reset/<token>` carries its secret. It resolves to whichever
+  // door this deployment has open, so the mail does not have to know how the
+  // deployment is configured and turning payments on does not invalidate the
+  // invitations already sent.
+  //
+  // `register` is the address of the form that used to live here and the one
+  // older invitations point at, so it resolves the same way. It used to
+  // resolve to the paid sign-up unconditionally — which meant that on a
+  // deployment with payments off, the only kind that has a waitlist at all,
+  // an invitation landed the person back on the waitlist form they had
+  // already filled in.
+  ["register", "join"],
+  ["join", "join"],
   // Paid sign-up, and the screen somebody lands on coming back from Stripe.
   // `#welcome/<token>` carries its claim secret the way `#reset/<token>`
   // carries its own: in the fragment, which the browser never sends, so it
@@ -475,6 +516,35 @@ function authModeFromHash() {
   return AUTH_HASHES.get(
     window.location.hash.replace(/^#/u, "").split("/")[0] ?? "",
   );
+}
+
+/**
+ * The approved address out of a `#join/<email>` invitation, or "" if absent.
+ *
+ * Prefilled rather than retyped because the address is the credential here:
+ * an invitation admits one address, and somebody who signs up with their
+ * personal mail instead of the one that was let through is refused with no
+ * way to see why. The fragment is never sent, so this reaches no server and
+ * no access log, and it grants nothing on its own — the gate checks the
+ * address server-side, so a forwarded invitation still admits nobody new.
+ */
+function invitedEmailFromHash() {
+  const hash = window.location.hash.replace(/^#/u, "");
+  const separator = hash.indexOf("/");
+  if (separator === -1) {
+    return "";
+  }
+  const head = hash.slice(0, separator);
+  if (head !== "join" && head !== "register") {
+    return "";
+  }
+  try {
+    return decodeURIComponent(hash.slice(separator + 1));
+  } catch {
+    // A truncated or hand-edited link. An empty box somebody can fill in
+    // beats a thrown render, and the gate is server-side either way.
+    return "";
+  }
 }
 
 /** The secret out of a `#reset/<token>` link, or "" when there is none. */
@@ -690,27 +760,98 @@ function renderRegistrationConfirmation() {
 }
 
 function renderAuth() {
-  if (authMode === "forgot" || authMode === "reset") {
+  // An invitation says "join". Which form that means is the deployment's
+  // business and not the mail's: the trial and a card where payments are on,
+  // the free account the waitlist used to hand out where they are not.
+  //
+  // Waiting for health rather than guessing, and only here. Everywhere else
+  // an unknown answer reads as "payments off", because offering a waitlist
+  // to somebody who could have paid is recoverable. It is not recoverable
+  // here: this is somebody arriving on an invitation, and both wrong guesses
+  // put a dead form in front of them — a card form the checkout answers 501
+  // to, or a free form registration answers 410 to.
+  const mode =
+    authMode === "join"
+      ? state.health === undefined
+        ? "join"
+        : paymentsOn()
+          ? "signup"
+          : "register"
+      : authMode;
+  if (mode === "join") {
+    return renderInvitationLoading();
+  }
+  if (mode === "forgot" || mode === "reset") {
     return renderPasswordReset();
   }
-  if (authMode === "waitlist" || (authMode === "signup" && !paymentsOn())) {
+  if (mode === "waitlist" || (mode === "signup" && !paymentsOn())) {
     // `#signup` lands here too while payments are off: it is the address on
     // every link this product has ever sent, and a card form nobody can
     // complete is a worse answer than the thing that replaced it.
     return renderWaitlist();
   }
-  if (authMode === "signup") {
+  if (mode === "signup") {
     return renderSignup();
   }
-  if (authMode === "welcome") {
+  if (mode === "welcome") {
     return renderWelcome();
   }
-  if (authMode === "register" && pendingRegistration !== undefined) {
+  if (mode === "register" && pendingRegistration !== undefined) {
     return renderRegistrationConfirmation();
   }
   const setupRequired = state.health?.setupRequired === true;
-  const bootstrap = authMode === "bootstrap";
-  const register = authMode === "register";
+  const bootstrap = mode === "bootstrap";
+  const register = mode === "register";
+
+  // Signing in is the common, repeat visit. Keep its card self-contained so
+  // the task is obvious at a glance, rather than splitting the identity,
+  // fields, and account links into three separate visual stops.
+  if (!bootstrap && !register) {
+    const newAccount = paymentsOn()
+      ? `<a class="link-muted" href="#signup" data-act="auth-mode" data-value="signup">Start a free trial</a>.`
+      : `<a class="link-muted" href="#waitlist" data-act="auth-mode" data-value="waitlist">Join the waitlist</a>.`;
+    return `<main class="auth-shell auth-login-shell">
+      <section class="auth-login" aria-labelledby="auth-title">
+        <header class="auth-login-header">
+          <div class="auth-login-brand">${brandMark(32)}<span>Kumi</span></div>
+          <div>
+            <h1 id="auth-title">Welcome back</h1>
+            <p>Sign in to continue to your workspace.</p>
+          </div>
+        </header>
+
+        <form class="auth-card auth-login-card" data-act="login">
+          <label class="field">
+            <span>Email address</span>
+            <input class="input" name="email" type="email"
+              autocomplete="username" placeholder="you@company.com" required>
+          </label>
+          <div class="auth-login-password">
+            <label class="field">
+              <span>Password</span>
+              <input class="input" name="password" type="password" minlength="12"
+                autocomplete="current-password"
+                placeholder="Enter your password" required>
+            </label>
+            <a class="link-muted" href="#forgot" data-act="auth-mode"
+              data-value="forgot">Forgot password?</a>
+          </div>
+          <button class="btn btn-primary btn-wide" type="submit">Sign in</button>
+          <p class="form-msg" id="auth-msg" role="alert"></p>
+          <div class="auth-login-footer">
+            <p>${
+              setupRequired
+                ? `This control plane has no owner yet. <a class="link-muted" href="#setup" data-act="auth-mode" data-value="bootstrap">Run first-time setup</a>.`
+                : `New to Kumi? ${newAccount}`
+            }</p>
+          </div>
+        </form>
+
+        <a class="auth-login-desktop" href="/download">Get Kumi for desktop</a>
+      </section>
+    </main>`;
+  }
+
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
@@ -869,6 +1010,28 @@ function paymentsOn() {
   return state.health?.billing?.payments === true;
 }
 
+/**
+ * The beat between opening an invitation and knowing which form it opens.
+ *
+ * Deliberately says nothing about a card or a queue, because at this point
+ * this browser does not know which it is, and a heading that has to be taken
+ * back reads worse than one that waits. Health is already in flight when the
+ * shell paints, so this is one frame in the ordinary case.
+ */
+function renderInvitationLoading() {
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandWordmark(120)}
+        <div>
+          <h1>You're through the waitlist</h1>
+          <p>One moment — getting your sign-up ready.</p>
+        </div>
+      </div>
+    </div>
+  </main>`;
+}
+
 /** Where everybody goes while nobody is being let in automatically. */
 function renderWaitlist() {
   return `<main class="auth-shell">
@@ -910,12 +1073,18 @@ function renderWaitlist() {
 
 /** Where a paid sign-up starts: an address, then Stripe takes the card. */
 function renderSignup() {
+  // Arriving on an invitation is a different moment from finding the pricing
+  // page: they have already asked, already waited, and already been told yes.
+  // Saying so is the difference between "start a trial" and "you're in".
+  const invited = invitedEmailFromHash();
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
         ${brandWordmark(120)}
         <div>
-          <h1>Start your free trial</h1>
+          <h1>${
+            invited === "" ? "Start your free trial" : "You're through the waitlist"
+          }</h1>
           <p>Fourteen days free. We take your card now and bill you on day
             fifteen — cancel any time before then and you pay nothing.</p>
         </div>
@@ -924,8 +1093,14 @@ function renderSignup() {
         <label class="field">
           <span>Work email</span>
           <input class="input" name="email" type="email"
-            autocomplete="email" required placeholder="you@company.com">
-        </label>
+            autocomplete="email" required placeholder="you@company.com"
+            value="${esc(invited)}">
+        </label>${
+          invited === ""
+            ? ""
+            : `<p class="auth-foot">This is the address that was let through.
+                 Signing up with a different one will be turned away.</p>`
+        }
         <label class="field">
           <span>Team name <span class="muted">(optional)</span></span>
           <input class="input" name="organizationName"
@@ -934,10 +1109,13 @@ function renderSignup() {
         <button class="btn btn-primary btn-wide" type="submit">
           Continue to payment
         </button>
-        <p class="auth-msg" id="auth-msg"></p>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
         <p class="auth-alt">Already have an account?
           <a href="#signin">Sign in</a></p>
       </form>
+      <p class="auth-foot">Kumi runs your agents on your own machine, so
+        you will want <a class="link-muted" href="/download">Kumi for
+        desktop</a> too.</p>
     </div>
   </main>`;
 }
@@ -1014,8 +1192,12 @@ function renderWelcome() {
         <button class="btn btn-primary btn-wide" type="submit">
           Create my account
         </button>
-        <p class="auth-msg" id="auth-msg"></p>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
       </form>
+      <p class="auth-foot">Next: <a class="link-muted"
+        href="/download">Kumi for desktop</a>. Agents run on your own machine
+        against your own Claude or Codex subscription, so nothing runs until
+        it does.</p>
     </div>
   </main>`;
 }
@@ -1142,7 +1324,7 @@ async function submitWaitlist(form) {
       note: String(data.get("note") ?? "").trim(),
       source: "app",
     });
-    form.innerHTML = `<p class="auth-msg" role="status">You are on the list.
+    form.innerHTML = `<p class="form-msg ok" role="status">You are on the list.
       We will email you when there is a place — nothing has been charged and
       there is nothing to pay.</p>`;
   } catch (error) {
@@ -1676,11 +1858,25 @@ function workspaceActivityStrip() {
  * Read-only by design — canonical moves through the pipeline, not through a
  * field on a settings page — so it is a definition list rather than a stack
  * of rows with no controls in them.
+ *
+ * Named the way it is named everywhere else — through `repositoryLabel`, so a
+ * repository somebody has renamed reads here as what they renamed it to. This
+ * page printed the raw id instead, which is how a workspace called Kumi in
+ * its own header was still LATTICE in its settings. The id has not gone
+ * anywhere: it addresses every route and names the mirror on disk, so it
+ * keeps a row of its own for whoever came here to read exactly that.
  */
 function repositoryDefinitionList() {
   const repository = currentRepository();
   return definitionList([
-    { term: "Repository", value: repository?.id ?? "No repository open" },
+    {
+      term: "Repository",
+      value:
+        repository === undefined
+          ? "No repository open"
+          : repositoryLabel(repository.id),
+    },
+    { term: "Identifier", value: repository?.id ?? "—", mono: true },
     { term: "Canonical branch", value: repository?.branch ?? "—", mono: true },
     {
       term: "Remote",
@@ -2071,6 +2267,31 @@ function agentProviderRow(agent) {
   const localAgent =
     state.localAgentsOnly === true && agent.exists === true && !agent.mine;
   const connecting = state.providerConnecting?.has(agent.id) === true;
+  // The second connection this row can have, and it is a different thing from
+  // the first. The CLI is what makes the agent run here; MCP is what lets that
+  // editor file work into Kumi. A row that showed only the first said "Not
+  // connected" about a Codex somebody had just connected over MCP, because the
+  // two were never the same question.
+  const editor = state.editorConnected?.[PROVIDER_VENDOR[agent.id]];
+  const mcp =
+    editor === undefined
+      ? ""
+      : editor.state === "connected"
+        ? statusBadge("ok", "MCP", {
+            iconName: "link",
+            title: "This editor can file work into Kumi",
+          })
+        : editor.state === "connecting"
+          ? statusBadge("info", "MCP", { iconName: "link", title: "Connecting" })
+          : statusBadge("warn", "MCP failed", {
+              iconName: "alert",
+              title: editor.message ?? "",
+            });
+  // Named once there are two of them. "Not connected" beside a green MCP badge
+  // reads as a contradiction rather than as two answers to two questions, so
+  // the CLI badge says which connection it is talking about exactly when
+  // something else is standing next to it.
+  const cliLabel = mcp === "" ? "Not connected" : "No CLI";
   const status = agent.needsReconnect
     ? statusBadge("warn", "Sign-in expired", { iconName: "alert" })
     : agent.mine
@@ -2079,15 +2300,15 @@ function agentProviderRow(agent) {
         ? statusBadge("ok", "Connected", { iconName: "checkCircle" })
         : agent.hostAccount
           ? statusBadge("info", "Available", { iconName: "info" })
-          : statusBadge("idle", "Not connected", { iconName: "minusCircle" });
+          : statusBadge("idle", cliLabel, { iconName: "minusCircle" });
   const detail = agent.needsReconnect
-    ? "Sign in again — every task given to this agent will fail until you do."
+    ? "Sign in again. Every task given to this agent will fail until you do."
     : agent.mine
       ? agent.hasName === true
         ? `as ${callSign}`
         : "as you"
       : localAgent
-        ? `as ${callSign} — runs on this machine`
+        ? `as ${callSign}, runs on this machine`
         : agent.hostAccount
           ? "using this machine's account"
           : "";
@@ -2134,6 +2355,9 @@ function agentProviderRow(agent) {
                 }>${icon("terminal")} ${checking ? "Checking…" : "Check CLI"}</button>`
             : ""
         }
+        <button type="button" role="menuitem" class="st-menu-item"
+          data-act="agent-connect" data-value="${esc(agent.id)}">
+          ${icon("robot")} Connect tools with MCP</button>
         <button type="button" role="menuitem" class="st-menu-item st-menu-danger"
           data-act="agent-disconnect" data-value="${esc(agent.id)}">
           ${icon("closeCircle")} Disconnect</button>
@@ -2152,7 +2376,7 @@ function agentProviderRow(agent) {
     row: `agent-${agent.id}`,
     mark: vendorMark(agent.id),
     name: agentLabelOf(agent.id),
-    status,
+    status: `${status}${mcp}`,
     detail,
     controls,
     busy: connecting,
@@ -2269,7 +2493,9 @@ function invitationsCard() {
               settingRow({
                 label: invite.email,
                 description: `${esc(invite.role)} on ${esc(
-                  invite.repositoryId ?? "every channel",
+                  invite.repositoryId === undefined
+                    ? "every channel"
+                    : repositoryLabel(invite.repositoryId),
                 )} · invited ${esc(relativeTime(invite.createdAt))}`,
                 control: `${badge(invite.status)}
                   <button type="button" class="btn btn-sm" data-act="invite-revoke"
@@ -2294,7 +2520,14 @@ function workspaceSection() {
     body: `<div data-settings-row="workspace-identity"
       id="settings-row-workspace-identity" tabindex="-1">${definitionList([
         { term: "Project", value: state.project?.name ?? "This project" },
-        { term: "Channel open", value: repository?.id ?? "None" },
+        {
+          term: "Channel open",
+          // The name, not the handle: this row answers "which of these am I
+          // changing", and the answer has to be the one word the rest of the
+          // interface calls this workspace.
+          value:
+            repository === undefined ? "None" : repositoryLabel(repository.id),
+        },
         {
           term: "People",
           value: exactCountLabel(
@@ -2460,7 +2693,7 @@ function apiTokensCard() {
         : `<div class="st-token-secret" role="status">
             <div class="st-row-label">Copy this now</div>
             <p class="st-row-help">It is shown once. Kumi keeps only a
-              fingerprint, so nobody — including us — can read it back.</p>
+              fingerprint, so nobody, including us, can read it back.</p>
             <code class="token-secret">${esc(minted)}</code>
             <span class="st-token-secret-actions">
               <button type="button" class="btn btn-sm" data-act="token-copy">Copy</button>
@@ -2501,6 +2734,258 @@ function apiTokensCard() {
   });
 }
 
+/**
+ * MCP servers the project's agents may reach while they work.
+ *
+ * Approving one here does not start anything: it records that somebody with
+ * the standing to say so said yes, and each teammate's computer still asks
+ * before it runs the program. So the list shows who approved and when, the
+ * way an audit line would, rather than a bare switch. Secrets are write-only
+ * — the row shows how many there are and never what they are, because the
+ * list route never has them to give.
+ */
+/**
+ * Servers worth offering by name, so adding one is a pick rather than a form.
+ *
+ * The form underneath stays for everything not on this list — it is a short
+ * list on purpose, not an attempt at a registry. What it removes is the class
+ * of mistake the form invites: a command typed slightly wrong, a package name
+ * misremembered, and above all a missing version, which means every teammate
+ * downloads whatever was published that morning and runs it under their own
+ * account. Every entry here is pinned for that reason.
+ *
+ * `secret` names the one credential the server needs, or is absent when it
+ * needs none. `note` is what a person needs to know before agreeing to run it.
+ */
+const MCP_CATALOGUE = [
+  {
+    id: "context7",
+    label: "Context7",
+    note: "Current documentation for whatever library your agents are using. No account needed.",
+    server: { name: "context7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp@1.0.14"] },
+  },
+  {
+    id: "playwright",
+    label: "Playwright",
+    note: "Drives a real browser, so an agent can check the page it just changed.",
+    server: { name: "playwright", transport: "stdio", command: "npx", args: ["-y", "@playwright/mcp@0.0.41"] },
+  },
+  {
+    id: "github",
+    label: "GitHub",
+    note: "Issues and pull requests. Needs a personal access token.",
+    secret: "a GitHub personal access token",
+    server: { name: "github", transport: "http", url: "https://api.githubcopilot.com/mcp/" },
+  },
+  {
+    id: "sentry",
+    label: "Sentry",
+    note: "The errors your users are actually hitting. Needs a Sentry auth token.",
+    secret: "a Sentry auth token",
+    server: { name: "sentry", transport: "http", url: "https://mcp.sentry.dev/mcp" },
+  },
+];
+
+function mcpServersCard() {
+  const servers = state.mcpServers ?? [];
+  const enabled = state.mcpServersEnabled;
+  const heading = {
+    id: "mcp-servers",
+    heading: "MCP servers",
+    description:
+      "Programs your agents can reach while they work — a Linear or Sentry server, say. Approving one starts it on each teammate's own computer when their agent runs here, so approval is a recorded act and each computer still gets to say yes.",
+  };
+  if (enabled === false) {
+    return settingsSectionBlock({
+      ...heading,
+      body: settingRow({
+        row: "mcp-servers",
+        label: "Switched off on this deployment",
+        description:
+          "Whoever runs this control plane has not enabled MCP servers. Setting <code>COORD_MCP_ENABLED=1</code> on it turns this section on.",
+      }),
+    });
+  }
+  const scopeOf = (server) =>
+    server.scope === "repository" ? "this repository" : "every repository";
+  const approvalOf = (server) =>
+    server.enabled === true && server.approvedBy !== undefined
+      ? `approved by ${esc(memberName(server.approvedBy) ?? server.approvedBy)} ${esc(
+          relativeTime(server.approvedAt),
+        )}`
+      : "not approved";
+  // Said in the row rather than left to the button, because the two states
+  // read very differently: one is a program on a teammate's laptop, the
+  // other is Kumi calling out with the project's key for anybody in an
+  // editor.
+  const reachOf = (server) =>
+    server.editorEnabled === true ? "also in editors" : "agents only";
+  const secretsOf = (server) => {
+    const count = (server.secretNames ?? []).length;
+    return `${String(count)} secret${count === 1 ? "" : "s"}`;
+  };
+  return settingsSectionBlock({
+    ...heading,
+    body: `${settingRow({
+      row: "mcp-servers",
+      label: "Add a known one",
+      description:
+        "Fills the form below with a pinned version, so every teammate runs the same program rather than whatever was published this morning.",
+      stacked: true,
+      control: `<div class="st-mcp-picks">${MCP_CATALOGUE.map(
+        (entry) => `<button type="button" class="btn btn-sm" data-act="mcp-pick"
+          data-value="${esc(entry.id)}" title="${esc(entry.note)}">${esc(entry.label)}</button>`,
+      ).join("")}</div>`,
+    })}${settingRow({
+      row: "mcp-servers",
+      label: "New server",
+      description:
+        "Name it the way your agents will hear it. A stdio server is a command started on the agent's machine; an http server is a URL it talks to.",
+      stacked: true,
+      control: `<div class="st-mcp-form">
+        <input class="input input-sm" data-mcp-name placeholder="linear"
+          aria-label="Server name">
+        <select class="input input-sm" data-mcp-transport data-act="mcp-transport"
+          aria-label="Transport">
+          <option value="stdio">stdio — a command</option>
+          <option value="http">http — a URL</option>
+        </select>
+        <div data-mcp-stdio>
+          <input class="input input-sm" data-mcp-command placeholder="npx"
+            aria-label="Command">
+          <input class="input input-sm" data-mcp-args placeholder="-y @linear/mcp-server"
+            aria-label="Arguments, space-separated">
+        </div>
+        <div data-mcp-http hidden>
+          <input class="input input-sm" data-mcp-url placeholder="https://mcp.example.com/mcp"
+            aria-label="Server URL">
+          <input class="input input-sm" data-mcp-token type="password" autocomplete="off"
+            placeholder="Bearer token, if the server needs one" aria-label="Bearer token">
+        </div>
+        <textarea class="input st-textarea" rows="3" data-mcp-secrets data-mcp-stdio-only
+          placeholder="LINEAR_API_KEY=lin_api_…"
+          aria-label="Environment for the command, one per line as NAME=value"></textarea>
+        <select class="input input-sm" data-mcp-scope aria-label="Scope">
+          <option value="repository">This repository</option>
+          <option value="project">Every repository</option>
+        </select>
+        <span>
+          <button type="button" class="btn btn-sm btn-primary" data-act="mcp-create">Create</button>
+        </span>
+      </div>`,
+    })}${
+      servers.length === 0
+        ? `<div class="st-inline-empty">${icon("lock")}<span>No servers yet.</span></div>`
+        : servers
+            .map((server) =>
+              settingRow({
+                label: server.name ?? "Unnamed",
+                description: `${esc(server.transport ?? "stdio")} · ${scopeOf(server)} · ${secretsOf(
+                  server,
+                )} · ${approvalOf(server)} · ${reachOf(server)}`,
+                control: `<button type="button" class="btn btn-sm${
+                  server.enabled === true ? "" : " btn-primary"
+                }" data-act="mcp-approve" data-value="${esc(server.id)}">${
+                  server.enabled === true ? "Disable" : "Approve"
+                }</button>${
+                  // Only for http servers, and only once approved. A stdio
+                  // server is a command, and Kumi will not start one; a
+                  // server nobody approved has nothing to share.
+                  server.transport === "http" && server.enabled === true
+                    ? `<button type="button" class="btn btn-sm"
+                        data-act="mcp-editors" data-value="${esc(server.id)}">${
+                        server.editorEnabled === true
+                          ? "Take out of editors"
+                          : "Offer in editors"
+                      }</button>`
+                    : ""
+                }
+                <button type="button" class="btn btn-sm btn-danger"
+                  data-act="mcp-remove" data-value="${esc(server.id)}">Remove</button>`,
+              }),
+            )
+            .join("")
+    }`,
+  });
+}
+
+/**
+ * Pointing the editors on this computer at Kumi.
+ *
+ * The reverse of the MCP servers card below it: that one gives Kumi's agents
+ * tools, this one makes Kumi a tool inside Claude Code, Codex or Cursor, so
+ * "have Kumi fix the login redirect" typed in an editor lands in a channel
+ * here.
+ *
+ * A button rather than a command to copy, because the commands are not
+ * stable and every way of getting one wrong fails silently — the wrong
+ * scope binds the server to one folder, a pasted placeholder keeps its
+ * angle brackets, the word Bearer goes missing, and all three arrive as an
+ * unexplained 401 hours later. The app writes the file instead.
+ *
+ * In a browser there is no bridge to write anything, so the command comes
+ * back — the same fall-back the CLI install row takes.
+ */
+/**
+ * What this computer actually has, so the connect rows offer only editors
+ * that are here.
+ *
+ * The same scan the worker registers from, so the card and the worker cannot
+ * disagree about what this machine can run. Absent in a browser, where the
+ * card says to open the app instead; a failed scan leaves the answer unknown,
+ * which the card reads as "offer it" rather than greying out a row because a
+ * lookup did not finish.
+ */
+async function loadMachineAgents() {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge?.detected === undefined) {
+    return;
+  }
+  state.machineAgents = await bridge.detected().catch(() => undefined);
+}
+
+function editorMcpCard() {
+  const bridge = typeof window === "undefined" ? undefined : window.KUMI_INSTALL;
+  const heading = {
+    id: "editor-mcp",
+    heading: "Use Kumi from your editor",
+    description:
+      "Ask Kumi for work from inside Claude Code, Codex or Cursor. It files the task in a channel here and the thread follows it, the same as if you had typed it in Kumi.",
+  };
+  if (bridge?.connectEditor === undefined) {
+    return settingsSectionBlock({
+      ...heading,
+      body: settingRow({
+        row: "editor-mcp",
+        label: "Open Kumi's desktop app to connect an editor",
+        description:
+          "Connecting writes a config file on the computer the editor runs on, so it happens in the app rather than in a browser tab.",
+      }),
+    });
+  }
+  // Asked once when Settings opens and remembered; `undefined` means the
+  // question has not been answered yet, which reads as "offer it" rather than
+  // "greyed out" — a row disabled because a scan has not finished is a row
+  // that looks broken.
+  const detected = state.machineAgents;
+  const rows = (bridge.connectable ?? ["claude", "codex", "cursor"]).map((vendor) => {
+    const here = detected === undefined || detected.includes(vendor);
+    const done = state.editorConnected?.[vendor]?.message;
+    return settingRow({
+      label: VENDOR_LABEL[vendor] ?? vendor,
+      description: here
+        ? (done ?? "Writes its config on this computer and mints a token that can file work and nothing else.")
+        : "Not installed on this computer.",
+      control: `<button type="button" class="btn btn-sm${
+        here ? " btn-primary" : ""
+      }" data-act="editor-connect" data-value="${esc(vendor)}"${
+        here ? "" : " disabled"
+      }>Connect</button>`,
+    });
+  });
+  return settingsSectionBlock({ ...heading, body: rows.join("") });
+}
+
 /** Repository, approval policy and app tokens — the project-wide controls. */
 function projectControlsSection() {
   return `${settingsSectionBlock({
@@ -2510,7 +2995,7 @@ function projectControlsSection() {
       "Canonical state is owned by the control plane. Publishing it to a remote branch is /push in the channel.",
     body: `<div data-settings-row="repository" id="settings-row-repository"
       tabindex="-1">${repositoryDefinitionList()}</div>`,
-  })}${approvalPolicySection()}${apiTokensCard()}`;
+  })}${approvalPolicySection()}${apiTokensCard()}${editorMcpCard()}${mcpServersCard()}`;
 }
 
 /** Everything the person who runs this deployment looks after. */
@@ -2529,7 +3014,14 @@ function settingsSectionMarkup(section) {
     case "billing":
       return billingSection();
     case "deployment":
-      return deploymentSection();
+      // Asked again here, and not only where the sidebar is built. This is
+      // the one category that is not everybody's, and the only one whose
+      // markup fetches as it renders — drawing it is what puts the waitlist,
+      // every address that ever asked for an account, on screen. A stored
+      // `settingsSection` read back before the principal arrives must not be
+      // able to reach it, so the render path carries the same gate the
+      // navigation does.
+      return iAmSystemAdmin() ? deploymentSection() : generalSection();
     case "project-controls":
       return projectControlsSection();
     default:
@@ -4502,83 +4994,6 @@ function applyTheme() {
       ?.setAttribute("content", ground);
   }
 }
-
-function channels(hex) {
-  return [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
-}
-
-function mix(hex, towards, amount) {
-  const from = channels(hex);
-  const to = channels(towards);
-  const parts = from.map((value, index) =>
-    Math.round(value + (to[index] - value) * amount),
-  );
-  return `#${parts.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
-}
-
-function withAlpha(hex, alpha) {
-  const [red, green, blue] = channels(hex);
-  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
-}
-
-/** WCAG relative luminance, which is what a contrast ratio is built from. */
-function luminance(hex) {
-  const [red, green, blue] = channels(hex).map((value) => {
-    const channel = value / 255;
-    return channel <= 0.03928
-      ? channel / 12.92
-      : ((channel + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-}
-
-function contrastRatio(hex, against) {
-  const [lighter, darker] = [luminance(hex), luminance(against)].sort(
-    (left, right) => right - left,
-  );
-  return (lighter + 0.05) / (darker + 0.05);
-}
-
-/**
- * The accent, darkened only as far as it has to be to be read on `ground`.
- *
- * Stepped rather than solved for: the relationship between a mix amount and
- * the resulting ratio is not one anybody should be inverting in a theme
- * function, and fifty steps of 2% is both exact enough and over in a fraction
- * of a millisecond. Stopping at the first step that clears the target is what
- * keeps the hue: darkening further buys contrast nobody needed and spends the
- * colour somebody chose to get it.
- *
- * An accent already dark enough comes back untouched, which is the common case
- * for anybody who picked a deep colour.
- */
-function readableOn(accent, ground, target) {
-  for (let step = 0; step <= 40; step += 1) {
-    const candidate = mix(accent, "#000000", step / 50);
-    if (contrastRatio(candidate, ground) >= target) {
-      return candidate;
-    }
-  }
-  return mix(accent, "#000000", 0.8);
-}
-
-/**
- * The readable ink for text sitting on a filled accent.
- *
- * Not a search, because there are only two answers worth having: near-white
- * and near-black are the two colours a filled bubble can carry without
- * inventing a third tone the palette does not have. Whichever stands further
- * off the accent wins, which lands white on a deep blue and black on the
- * yellows and limes the wheel also allows — the case a hardcoded `#fff` got
- * wrong every time.
- */
-function accentInk(accent) {
-  return contrastRatio("#ffffff", accent) >= contrastRatio("#141312", accent)
-    ? "#ffffff"
-    : "#141312";
-}
-
-/* ------------------------------------------------------------- router ---- */
 
 const ROUTES = new Set([
   "chats",
@@ -6924,763 +7339,6 @@ function renameFieldFocused() {
  * it back is what gives a panel something to animate *out*, since by the time
  * anybody knows it closed it is already gone from the new tree.
  */
-const MOTION_SURFACES = [
-  {
-    selector: ".primary-conversation-surface",
-    parent: ".chan-main",
-    enter: "primary-entering",
-    leave: "primary-leaving",
-    key: (node) => node.dataset.primaryKey ?? "",
-  },
-  // Thread, thread list, DM, agent profile and the file view share one column
-  // that holds up to three of them, and each of them is tracked by name
-  // through `key` — so this is "which surfaces are in the column", not "is
-  // the column occupied". Without the key the column was one thing that was
-  // either there or not, and a second tab opening beside the first was
-  // therefore not a change at all: it appeared fully formed, in one frame,
-  // while the tab already open jumped aside to make room for it.
-  {
-    selector: ".thread-panel",
-    parent: ".chats-shell",
-    enter: "panel-entering",
-    leave: "panel-leaving",
-    key: (node) => node.dataset.panelKey ?? "",
-  },
-  // The file tree, which is a drawer only below 900px. Above that it is an
-  // ordinary grid column and never opens or closes at all — the classes are
-  // still applied there and styled to do nothing, which keeps the width test
-  // in the stylesheet where the rest of the breakpoint already lives.
-  //
-  // Open is asked of the shell rather than of the pane, because the pane is
-  // in the markup either way and it is the modifier that decides.
-  {
-    selector: ".tree-pane",
-    parent: ".code-shell",
-    enter: "tree-entering",
-    leave: "tree-leaving",
-    isOpen: (root) => root.querySelector(".code-shell.tree-open") !== null,
-  },
-  {
-    selector: ".tree-scrim",
-    parent: ".code-shell",
-    enter: "scrim-entering",
-    leave: "scrim-leaving",
-  },
-  // The room's live line: somebody typing, an agent thinking. It is the one
-  // thing in the transcript that is *replaced* by what it was announcing, so
-  // it is the one thing that needs to be seen going — dots that blink out in
-  // the same frame the answer appears read as the answer having interrupted
-  // something rather than as it having arrived.
-  //
-  // Only the channel's own copy. The thread panel has a second one at the
-  // foot of its body, and a surface here is re-appended to one parent by
-  // selector, so a thread's dots would leave from the bottom of the room. The
-  // exit is `position: absolute` against the transcript — which is already
-  // the containing block — so a row on its way out cannot change the height
-  // of a conversation somebody is pinned to the bottom of.
-  {
-    selector: "#chan-messages > .chan-typing",
-    parent: "#chan-messages",
-    enter: "typing-entering",
-    leave: "typing-leaving",
-    // Only back into the room it belonged to. Changing channels also ends a
-    // typing line, and appending that one to the transcript that has just
-    // opened would fade somebody else's dots at the foot of a conversation
-    // they were never in. Left unplaced it is simply dropped, which is what
-    // "it went away because you left" should look like.
-    place: (parent, closed) => {
-      if (parent.dataset.scrollKey !== `channel:${closed.dataset.typingRoom}`) {
-        return;
-      }
-      // Silent on the way out. The transcript is a live region that announces
-      // what is added to it, and this node has already been announced once —
-      // put back for its exit it would be read out a second time, over the
-      // answer that replaced it, which is the one thing anybody listening
-      // actually wants to hear.
-      closed.removeAttribute("aria-live");
-      closed.setAttribute("aria-hidden", "true");
-      parent.append(closed);
-    },
-  },
-  // Settings is redrawn with the rest of the app. An animation on the bare
-  // dialog would play from opacity 0 on every control that calls render —
-  // theme, section, sounds — so the panel would vanish and settle again
-  // while it was already open. The class is applied only when the overlay
-  // was not on the last tree.
-  {
-    selector: ".settings-layer",
-    parent: ".app",
-    enter: "settings-entering",
-    leave: "settings-leaving",
-  },
-];
-
-/**
- * What each surface was showing before the swap: its keys, and the element
- * each one was.
- *
- * A map rather than a flag because a surface can be on screen more than once
- * — the right-hand column holds up to three panels — and "one of them opened"
- * is a different event from "the column opened". Surfaces that only ever have
- * one of themselves file it under the empty key and read exactly as they did.
- */
-const surfaceNodes = new Map();
-
-/**
- * The live element for a surface, never the one a close is still fading out.
- *
- * The distinction is the whole reason this is a function. A closing surface is
- * put back into the shell and is, for those few frames, a perfectly ordinary
- * match for its own selector — so the next render would read it as "open
- * again", the render after that as "closed again", and the panel would sit
- * there fading out on a loop for as long as anything kept redrawing.
- */
-function liveNode(root, surface) {
-  return root.querySelector(`${surface.selector}:not(.${surface.leave})`);
-}
-
-function surfaceIsOpen(root, surface) {
-  return surface.isOpen === undefined
-    ? liveNode(root, surface) !== null
-    : surface.isOpen(root);
-}
-
-/**
- * Every live copy of a surface, by key.
- *
- * A surface with no `key` has at most one copy and gets the empty key, which
- * is the whole of the old behaviour. A surface that decides whether it is
- * open from something other than its own element — the file tree, which is a
- * grid column above 900px — keeps answering that question, and files its one
- * element under the same empty key.
- */
-function liveNodes(root, surface) {
-  const found = new Map();
-  if (surface.isOpen !== undefined) {
-    if (surfaceIsOpen(root, surface)) {
-      found.set("", liveNode(root, surface));
-    }
-    return found;
-  }
-  for (const node of root.querySelectorAll(
-    `${surface.selector}:not(.${surface.leave})`,
-  )) {
-    found.set(surface.key === undefined ? "" : surface.key(node), node);
-  }
-  return found;
-}
-
-/** Reads the outgoing document. Must run before `innerHTML` throws it away. */
-function captureSurfaceMotion(root) {
-  for (const surface of MOTION_SURFACES) {
-    surfaceNodes.set(surface.selector, liveNodes(root, surface));
-  }
-}
-
-/** Plays whatever the swap turned out to be: an opening, a closing, or nothing. */
-function playSurfaceMotion(root) {
-  for (const surface of MOTION_SURFACES) {
-    const before = surfaceNodes.get(surface.selector) ?? new Map();
-    const now = liveNodes(root, surface);
-    for (const [key, node] of now) {
-      if (before.has(key) || node === null) {
-        continue;
-      }
-      animateOnce(node, surface.enter, false);
-    }
-    for (const [key, closed] of before) {
-      if (now.has(key) || closed === null || closed === undefined) {
-        continue;
-      }
-      const parent = root.querySelector(surface.parent);
-      if (parent === null) {
-        continue;
-      }
-      // Back in the document, but not back in the interface: it answers to
-      // nothing, takes no focus, and is gone before the animation is cold.
-      closed.inert = true;
-      if (surface.place === undefined) {
-        parent.append(closed);
-      } else {
-        surface.place(parent, closed);
-      }
-      animateOnce(closed, surface.leave, true);
-    }
-  }
-}
-
-/**
- * Wears a class for exactly one animation, then cleans up after itself.
- *
- * The timer is not a belt-and-braces second try at `animationend` — it is the
- * only guarantee. That event never fires at all when reduced motion has taken
- * the animation away, and browsers hold it back while a tab is in the
- * background, either of which would otherwise leave a closing panel pinned
- * over the screen until the next render happened to notice.
- */
-function animateOnce(node, className, drop) {
-  node.classList.add(className);
-  let done = false;
-  const finish = () => {
-    if (done) {
-      return;
-    }
-    done = true;
-    node.removeEventListener("animationend", onEnd);
-    node.classList.remove(className);
-    if (drop) {
-      node.remove();
-    }
-  };
-  // `animationend` bubbles, and a panel is full of small animations of its
-  // own — a status dot finishing a breath, a skeleton row shimmering. Without
-  // this test the first of them to reach the top would end the panel's
-  // animation on the panel's behalf, a frame or two in.
-  const onEnd = (event) => {
-    if (event.target === node) {
-      finish();
-    }
-  };
-  node.addEventListener("animationend", onEnd);
-  window.setTimeout(finish, 400);
-}
-
-/* -------------------------------------------------------- text arrival ---- */
-
-/**
- * The pace an answer opens at: how far apart the first few words start, and
- * how long each one takes to settle.
- *
- * Deliberately short. The effect is meant to be noticed at the edge of
- * attention and then be over — a line or two should read as one soft settle
- * rather than as a sentence being spelled out. Anything slower and the reader
- * is waiting on words they can already half-see.
- *
- * The word's own duration is stated here as well as in `.text-reveal-word`,
- * because this is what decides when an arrival is over and stops being
- * resumed; the stylesheet is what actually plays it.
- */
-const REVEAL_STAGGER_MS = 18;
-const REVEAL_WORD_MS = 220;
-
-/**
- * The longest an arrival is ever spread over, however much was said.
- *
- * A reader takes the effect in from the first line; after that every extra
- * moment is spent watching text that is already written appear at walking
- * pace. So a long answer is not simply the opening pace repeated — it is the
- * same words, much closer together: the more there is to say, the quicker it
- * is said, and the ceiling here plus one word's settle is the longest any
- * message can hold the reader.
- */
-const REVEAL_MAX_TOTAL_MS = 420;
-
-/**
- * How far apart consecutive words start, given how many there are.
- *
- * A short line is barely staggered at all: a handful of words are a fraction
- * of a beat apart, which is enough to read as arriving and little enough to
- * be finished before it can be studied. From there the gap closes off
- * smoothly — the spread approaches `REVEAL_MAX_TOTAL_MS` without ever
- * reaching it — so a paragraph lands in under half a second and a wall of
- * text is done inside two thirds of one. Nothing is truncated and there is no
- * cliff where a longer message suddenly stops animating; it just arrives
- * faster the more of it there is.
- */
-function revealStaggerFor(count) {
-  if (count <= 1) {
-    return 0;
-  }
-  return (
-    REVEAL_MAX_TOTAL_MS /
-    (count - 1 + REVEAL_MAX_TOTAL_MS / REVEAL_STAGGER_MS)
-  );
-}
-
-/**
- * How many words are taken apart at all. Past this the remainder is left as
- * plain text: by then it is far below the fold, and at the pace a message
- * this long arrives at, the tail is landing within a few milliseconds of
- * itself anyway — a span apiece costs more than the effect is worth.
- */
-const REVEAL_MAX_WORDS = 120;
-
-/** How many arrivals are remembered before the oldest are let go. */
-const REVEAL_MEMORY = 800;
-
-/**
- * What this tab has already watched arrive, and when each one started.
- *
- * The screen is redrawn by replacing the whole document — see
- * `MOTION_SURFACES` — so "is this element new" is never the question CSS can
- * answer on its own. Every block that can animate carries a stable
- * `data-reveal` key, and this map is the only thing that knows whether the
- * words under that key are new to the reader or have been on screen for a
- * while.
- *
- * The timestamp is kept rather than a bare flag because a redraw lands in the
- * middle of most arrivals — somebody typing in the room is enough — and the
- * words have to pick the animation back up where the last frame left it
- * instead of starting over or snapping to the end.
- */
-const revealSeen = new Map();
-
-/**
- * The surfaces that were on screen a moment ago, by the group half of the key.
- *
- * This is what separates "a message arrived" from "you opened a conversation
- * that already had a hundred of them". Only text belonging to a surface the
- * reader was already looking at animates; opening a channel, a thread or a
- * direct message shows its backlog the way it has always been shown, whole.
- */
-let revealGroups = new Set();
-
-/** `group|id` — the group is the surface, the id is the block within it. */
-function revealGroupOf(key) {
-  const cut = key.indexOf("|");
-  return cut === -1 ? key : key.slice(0, cut);
-}
-
-/**
- * Plays whatever arrived in this render, and only what arrived.
- *
- * Runs after the swap, beside `playSurfaceMotion` and for the same reason:
- * the outgoing document is gone by then, and the render loop is the only
- * thing left that remembers what it was showing.
- */
-function playTextReveal(root) {
-  const quiet = motionIsUnwanted();
-  const now = Date.now();
-  const groups = new Set();
-  for (const block of root.querySelectorAll("[data-reveal]")) {
-    const key = block.dataset.reveal ?? "";
-    if (key === "") {
-      continue;
-    }
-    const group = revealGroupOf(key);
-    groups.add(group);
-    const started = revealSeen.get(key);
-    if (started === undefined) {
-      // New to the document. Whether it is new to the *reader* is the
-      // question the group answers: text in a surface that was not on screen
-      // last time is a backlog being opened, not an answer coming in.
-      const arriving = !quiet && revealGroups.has(group);
-      revealSeen.set(key, arriving ? now : 0);
-      if (arriving) {
-        revealWords(block, 0);
-      }
-      continue;
-    }
-    // Zero means "was already here", which never animates. Anything else is
-    // an arrival still in flight until its last word has landed.
-    if (started === 0 || quiet) {
-      continue;
-    }
-    const elapsed = now - started;
-    if (elapsed < REVEAL_MAX_TOTAL_MS + REVEAL_WORD_MS) {
-      revealWords(block, elapsed);
-    }
-  }
-  revealGroups = groups;
-  forgetOldReveals(groups);
-}
-
-/**
- * Keeps the map from growing for as long as the tab is open.
- *
- * Only keys from surfaces nobody is looking at are dropped: forgetting a
- * message still on screen would make it arrive a second time on the next
- * redraw, which is the one thing this whole mechanism exists to prevent.
- */
-function forgetOldReveals(groups) {
-  if (revealSeen.size <= REVEAL_MEMORY) {
-    return;
-  }
-  for (const key of revealSeen.keys()) {
-    if (!groups.has(revealGroupOf(key))) {
-      revealSeen.delete(key);
-    }
-  }
-}
-
-/** Text that is not prose, and is not taken apart. */
-const REVEAL_SKIPPED = new Set([
-  "PRE",
-  "CODE",
-  "SCRIPT",
-  "STYLE",
-  "TEXTAREA",
-  "SVG",
-]);
-
-/**
- * Text that is not a message either: it is a running task saying where it has
- * got to, and it will say something else in a moment.
- *
- * An arrival is a one-time event — a sentence landing in the room, word after
- * word — and live status copy is the opposite of that. Wrapping its words
- * would also cut the travelling highlight into one gradient per word, because
- * `.glimmer-text` paints itself across the whole line. See `threadLiveStatus`
- * in screen-chats.js for the line this is describing.
- */
-const REVEAL_SKIPPED_CLASS = "glimmer-text";
-
-function insideSkipped(node, root) {
-  let parent = node.parentNode;
-  while (parent !== null && parent !== root) {
-    if (REVEAL_SKIPPED.has(String(parent.nodeName).toUpperCase())) {
-      return true;
-    }
-    if (
-      parent instanceof Element &&
-      parent.classList.contains(REVEAL_SKIPPED_CLASS)
-    ) {
-      return true;
-    }
-    parent = parent.parentNode;
-  }
-  return false;
-}
-
-/**
- * A picture posted with the message.
- *
- * An attachment is part of the body rather than something beside it —
- * `messageBody` in screen-chats.js puts it inside the very block the words
- * are in — so it belongs to the same arrival. The link is what carries the
- * picture's box; the bare image is the fallback for anywhere one is written
- * without it.
- */
-function revealIsMedia(element) {
-  return (
-    element.classList.contains("cmsg-image") ||
-    (String(element.nodeName).toUpperCase() === "IMG" &&
-      element.hasAttribute("data-attachment"))
-  );
-}
-
-/**
- * The outermost thing around this node that arrives in one piece, if any.
- *
- * A picture is not read word by word, and neither is a span of code inside a
- * sentence: each is one thing that appears, so each takes a single place in
- * the schedule instead of being split or — as both were — left out of it
- * altogether and shown whole while the words around them were still coming
- * in.
- *
- * Outermost, because a picture is a link around an image: counting it twice
- * would leave one copy waiting on the other in the middle of the message.
- */
-function revealWholeOf(node, block) {
-  let found = null;
-  for (
-    let step = node;
-    step !== null && step !== block;
-    step = step.parentNode
-  ) {
-    if (
-      step instanceof Element &&
-      (revealIsMedia(step) || String(step.nodeName).toUpperCase() === "CODE")
-    ) {
-      found = step;
-    }
-  }
-  return found;
-}
-
-/**
- * Wraps each piece of a block in its own element so it can come in on its own
- * delay, resuming `elapsed` milliseconds into the sequence.
- *
- * A negative delay is what does the resuming: the browser starts an animation
- * that far through rather than waiting, so a redraw two hundred milliseconds
- * into an arrival carries on from two hundred milliseconds instead of
- * replaying the opening. Whitespace is left as it was, which is what keeps
- * wrapping, selection and copied text identical to the markup underneath.
- *
- * A piece is usually a word, but the message is what arrives, not only its
- * prose: a picture posted with it takes a place in the same schedule, which
- * is also what gives a message of nothing but a picture an arrival at all.
- *
- * The block is the body and stops there. The quoted line above a reply, the
- * reactions under it and the buttons beside it are the room's furniture
- * rather than anything that was said, so they stay where they are — see the
- * `data-reveal` key in screen-chats.js for what a block is.
- */
-function revealWords(block, elapsed) {
-  // One pass in reading order over the text and the elements together, so a
-  // picture between two paragraphs arrives between them rather than before or
-  // after everything else.
-  const walker = document.createTreeWalker(
-    block,
-    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-  );
-  const parts = [];
-  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-    if (node instanceof Element) {
-      if (revealWholeOf(node, block) === node && !insideSkipped(node, block)) {
-        parts.push(node);
-      }
-      continue;
-    }
-    const text = node.nodeValue ?? "";
-    if (
-      text.trim() !== "" &&
-      !insideSkipped(node, block) &&
-      revealWholeOf(node, block) === null
-    ) {
-      parts.push(node);
-    }
-  }
-  // Wrapped first and timed second: the stagger depends on how many pieces
-  // there turned out to be, and that is only known once the last one is in
-  // hand.
-  const revealedPings = new Set();
-  const words = [];
-  for (const part of parts) {
-    if (part instanceof Element) {
-      // Kept however long the message runs to. A picture or a piece of code
-      // is a handful of nodes at most, and one of them standing at full
-      // strength beside a sentence that is still arriving is the whole thing
-      // this is here to prevent.
-      part.classList.add(
-        revealIsMedia(part) ? "text-reveal-media" : "text-reveal-word",
-      );
-      words.push(part);
-      continue;
-    }
-    if (words.length >= REVEAL_MAX_WORDS) {
-      continue;
-    }
-    const ping = revealPingOf(part, block);
-    if (ping !== null) {
-      if (revealedPings.has(ping)) {
-        continue;
-      }
-      revealedPings.add(ping);
-      ping.classList.add("text-reveal-word");
-      words.push(ping);
-      continue;
-    }
-    const pieces = String(part.nodeValue).split(/(\s+)/u);
-    const holder = document.createDocumentFragment();
-    for (const piece of pieces) {
-      if (piece === "") {
-        continue;
-      }
-      if (piece.trim() === "" || words.length >= REVEAL_MAX_WORDS) {
-        holder.append(piece);
-        continue;
-      }
-      const word = document.createElement("span");
-      word.className = "text-reveal-word";
-      word.textContent = piece;
-      holder.append(word);
-      words.push(word);
-    }
-    part.replaceWith(holder);
-  }
-  const step = revealStaggerFor(words.length);
-  for (const [index, word] of words.entries()) {
-    word.style.setProperty(
-      "--reveal-delay",
-      `${Math.round(index * step - elapsed)}ms`,
-    );
-  }
-}
-
-/**
- * A posted ping or slash command, if this text node belongs to one.
- *
- * Those spans carry a coloured wash. Splitting them word by word would leave
- * the box visible while each piece faded in, so the whole token is tagged as
- * one arrival instead.
- */
-function revealPingOf(node, block) {
-  let parent = node.parentNode;
-  while (parent !== null && parent !== block) {
-    if (
-      parent instanceof Element &&
-      (parent.classList.contains("mention-ping") ||
-        parent.classList.contains("slash-ping"))
-    ) {
-      return parent;
-    }
-    parent = parent.parentNode;
-  }
-  return null;
-}
-
-/* ---------------------------------------------------- message arrival ---- */
-
-/**
- * How long a message may still be settling into its place.
- *
- * The longest of the shell entrances rather than the common one: an ordinary
- * message takes `--motion-content`, and the artifact at the end of a run
- * takes `--motion-emphasis`. This is only the window in which a redraw
- * resumes an arrival instead of ignoring it, so the longer of the two is the
- * safe number — a resume that overshoots lands on an animation that has
- * already finished, which is where the message belongs anyway.
- */
-const ENTRANCE_MS = 300;
-
-/** How many arrivals are remembered before the oldest are let go. */
-const ENTRANCE_MEMORY = 800;
-
-/**
- * What this tab has already watched arrive, and when each one started.
- *
- * The twin of `revealSeen`, for the message rather than for the words in it,
- * and separate from it on purpose: the shell owns where a message is and the
- * reveal owns whether its text is legible yet, so each has to be able to
- * decide on its own that it has already played. Sharing one record would mean
- * a message whose words were skipped — a picture, a tombstone, a system line —
- * could never be given a position either.
- */
-const entranceSeen = new Map();
-
-/** The surfaces that were on screen a moment ago, by the group half of the key. */
-let entranceGroups = new Set();
-
-/**
- * Moves a message that is genuinely new into its place, once.
- *
- * The same test the words go through, for the same reason: the document is
- * replaced on every keystroke, every poll tick and every event off the
- * stream, so "is this element new" is not a question CSS can answer. A key
- * that was not in the map is new to the document; a key whose surface was not
- * on screen last time is a backlog being opened rather than a message
- * arriving, and a backlog is still.
- *
- * Position only. The words inside are already coming in on their own opacity,
- * and the one thing this must never do is fade a parent while every word
- * inside it fades too.
- */
-function playMessageEntrance(root) {
-  const quiet = motionIsUnwanted();
-  const now = Date.now();
-  const groups = new Set();
-  for (const shell of root.querySelectorAll("[data-entrance]")) {
-    const key = shell.dataset.entrance ?? "";
-    if (key === "") {
-      continue;
-    }
-    const group = revealGroupOf(key);
-    groups.add(group);
-    const started = entranceSeen.get(key);
-    if (started === undefined) {
-      const arriving = !quiet && entranceGroups.has(group);
-      entranceSeen.set(key, arriving ? now : 0);
-      if (arriving) {
-        startEntrance(shell, 0);
-      }
-      continue;
-    }
-    // Zero means "was already here", which never animates again.
-    if (started === 0 || quiet) {
-      continue;
-    }
-    const elapsed = now - started;
-    if (elapsed < ENTRANCE_MS) {
-      startEntrance(shell, elapsed);
-    }
-  }
-  entranceGroups = groups;
-  forgetOldEntrances(groups);
-}
-
-/**
- * A negative delay is what resumes an arrival a redraw landed in the middle
- * of, exactly as it does for a word. The animation has no fill mode, so a
- * message that is interrupted, or one whose animation never runs at all under
- * reduced motion, is simply where it belongs — there is no state it can be
- * left stuck in.
- */
-function startEntrance(shell, elapsed) {
-  shell.style.setProperty("--entrance-delay", `${-Math.round(elapsed)}ms`);
-  shell.classList.add("msg-entering");
-}
-
-/** Keeps the map from growing for as long as the tab is open. See `forgetOldReveals`. */
-function forgetOldEntrances(groups) {
-  if (entranceSeen.size <= ENTRANCE_MEMORY) {
-    return;
-  }
-  for (const key of entranceSeen.keys()) {
-    if (!groups.has(revealGroupOf(key))) {
-      entranceSeen.delete(key);
-    }
-  }
-}
-
-/* ------------------------------------------------------- phase changes ---- */
-
-/**
- * How close together two phase reports have to be to count as one.
- *
- * A run narrates in bursts — planned, claimed, working on a file, working on
- * the next — and several can land in the same tick or a frame apart. Played
- * one after another that is a status line flickering through states nobody
- * could read, ending on the only one that mattered. Inside this window the
- * latest is simply written into the slot without a second swap: the reader
- * sees the current phase immediately, and sees it move once.
- */
-const PHASE_COALESCE_MS = 280;
-
-/** How many slots are remembered before the oldest are let go. */
-const PHASE_MEMORY = 400;
-
-/** What each phase slot last said, and when it last changed. */
-const phaseSeen = new Map();
-
-/**
- * Swaps a live status line for the next phase, once per real change.
- *
- * Nothing here delays or withholds data: the render has already written the
- * current phase into the document, and this only decides whether the change
- * is allowed to be *seen* moving. An unchanged phase — which is what almost
- * every render carries — plays nothing at all, which is what keeps a
- * background redraw silent.
- */
-function playPhaseSlots(root) {
-  const quiet = motionIsUnwanted();
-  const now = Date.now();
-  const live = new Set();
-  for (const slot of root.querySelectorAll("[data-phase-slot]")) {
-    const key = slot.dataset.phaseSlot ?? "";
-    if (key === "") {
-      continue;
-    }
-    live.add(key);
-    const text = slot.textContent.trim();
-    const last = phaseSeen.get(key);
-    if (last === undefined) {
-      // First sight of this task's status line. It arrived with its row.
-      phaseSeen.set(key, { text, at: 0 });
-      continue;
-    }
-    if (last.text === text) {
-      continue;
-    }
-    // Coalesced: the newest text is on screen either way, and the swap that
-    // is already playing is the one the reader is watching.
-    const coalesce = last.at !== 0 && now - last.at < PHASE_COALESCE_MS;
-    phaseSeen.set(key, { text, at: coalesce ? last.at : now });
-    if (!quiet && !coalesce) {
-      animateOnce(slot, "phase-changing", false);
-    }
-  }
-  if (phaseSeen.size > PHASE_MEMORY) {
-    for (const key of phaseSeen.keys()) {
-      if (!live.has(key)) {
-        phaseSeen.delete(key);
-      }
-    }
-  }
-}
-
-/** A coalesced render waiting for the next frame, if one is waiting. */
 let renderFrame;
 
 /**
@@ -8436,6 +8094,162 @@ async function revokeApiTokenConfirmed(id) {
 }
 
 /**
+ * Removing an MCP server, after the same confirmation a token revoke gets.
+ *
+ * Removal reaches further than disabling: an agent mid-task on somebody's
+ * machine loses the tools it was told it had, and the sealed secrets go with
+ * the record. Disable is the reversible button beside it, so this one asks.
+ */
+async function removeMcpServerConfirmed(id) {
+  const server = (state.mcpServers ?? []).find((entry) => entry.id === id);
+  const confirmed = await confirmDestructive({
+    title: `Remove ${server?.name ?? "this server"}?`,
+    subtitle:
+      "Agents stop being offered it on their next run, and its secrets are " +
+      "deleted with it. Disable it instead to keep the record.",
+    confirm: "Remove server",
+    cancel: "Keep it",
+  });
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await deleteMcpServer(state.projectId, id);
+    toast("Server removed", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Reads the new-server form and registers it.
+ *
+ * The form is read at click time rather than mirrored into state as it is
+ * typed, the way the token form is: nothing else on the page needs the draft,
+ * and a half-typed secret has no business in a render cycle. Errors are the
+ * server's own words in the same toast a token error uses — a name already
+ * taken, a deployment with the feature off, a server that points back at
+ * this control plane.
+ */
+/**
+ * The one header an http MCP server can be given from the form.
+ *
+ * "Bearer " is prepended here so the person pastes the token as their
+ * provider showed it; a token already carrying the prefix is left alone
+ * rather than doubled.
+ */
+function mcpBearerHeader(token) {
+  const trimmed = String(token ?? "").trim();
+  if (trimmed === "") {
+    return {};
+  }
+  return {
+    Authorization: /^Bearer\s/iu.test(trimmed) ? trimmed : `Bearer ${trimmed}`,
+  };
+}
+
+/**
+ * Puts one catalogue entry into the form, and leaves it there to be read.
+ *
+ * Deliberately not "create on click". What is being agreed to is that this
+ * program starts on every teammate's computer, and a person should see the
+ * command and the version before they approve that — the form is the last
+ * place it is legible, and approval is a second, separate act after it.
+ */
+function fillMcpFormFrom(id) {
+  const entry = MCP_CATALOGUE.find((candidate) => candidate.id === id);
+  if (entry === undefined) {
+    return;
+  }
+  const set = (selector, value) => {
+    const field = document.querySelector(selector);
+    if (field) {
+      field.value = value;
+    }
+  };
+  const http = entry.server.transport === "http";
+  set("[data-mcp-name]", entry.server.name);
+  set("[data-mcp-transport]", entry.server.transport);
+  set("[data-mcp-command]", entry.server.command ?? "");
+  set("[data-mcp-args]", (entry.server.args ?? []).join(" "));
+  set("[data-mcp-url]", entry.server.url ?? "");
+  // The transport picker's own handler shows and hides the right half, and
+  // setting `value` in script does not fire it.
+  const form = document.querySelector(".st-mcp-form");
+  for (const field of form?.querySelectorAll("[data-mcp-stdio], [data-mcp-stdio-only]") ?? []) {
+    field.hidden = http;
+  }
+  const httpFields = form?.querySelector("[data-mcp-http]");
+  if (httpFields) {
+    httpFields.hidden = !http;
+  }
+  const credential = document.querySelector(http ? "[data-mcp-token]" : "[data-mcp-secrets]");
+  toast(
+    entry.secret === undefined
+      ? `${entry.label} filled in — check it, then Create.`
+      : `${entry.label} filled in — paste ${entry.secret}, then Create.`,
+    "ok",
+  );
+  credential?.focus();
+}
+
+function createMcpServerFromForm() {
+  const read = (selector) =>
+    (document.querySelector(selector)?.value ?? "").trim();
+  const name = read("[data-mcp-name]");
+  if (name === "") {
+    toast("Name the server the way your agents will hear it", "error");
+    return;
+  }
+  const transport = read("[data-mcp-transport]") === "http" ? "http" : "stdio";
+  const scope = read("[data-mcp-scope]") === "project" ? "project" : "repository";
+  if (scope === "repository" && !state.repositoryId) {
+    toast("Open a repository first, or pick every repository", "error");
+    return;
+  }
+  const input = { name, transport, scope };
+  if (transport === "stdio") {
+    const command = read("[data-mcp-command]");
+    if (command === "") {
+      toast("A stdio server needs a command to start", "error");
+      return;
+    }
+    input.command = command;
+    input.args = parseMcpArgs(read("[data-mcp-args]"));
+  } else {
+    const url = read("[data-mcp-url]");
+    if (url === "") {
+      toast("An http server needs a URL", "error");
+      return;
+    }
+    input.url = url;
+  }
+  // A stdio server's secrets are its environment, typed as NAME=value. An
+  // http server's are its headers, and the only header shape every vendor's
+  // CLI can be handed is one bearer token — Codex reads nothing else — so the
+  // form asks for the token alone and builds the header itself. A server
+  // that needs some other header is created through the API, and runs only
+  // on a Claude agent.
+  const secrets =
+    transport === "stdio"
+      ? parseMcpSecrets(document.querySelector("[data-mcp-secrets]")?.value ?? "")
+      : mcpBearerHeader(read("[data-mcp-token]"));
+  if (Object.keys(secrets).length > 0) {
+    input.secrets = secrets;
+  }
+  if (scope === "repository") {
+    input.repositoryIds = [state.repositoryId];
+  }
+  void createMcpServer(state.projectId, input)
+    .then(() => {
+      toast(`${name} added — approve it when you are ready`, "ok");
+      render();
+    })
+    .catch((error) => toast(error.message, "error"));
+}
+
+/**
  * Scrolls a row into view and puts focus on it.
  *
  * Focus lands on the row, not on the control inside it: the person searched
@@ -8500,11 +8314,12 @@ function openSettings(section = "general") {
     state.settingsPushedEntry = true;
   }
   // Fetched on open rather than at boot: nobody who never opens settings
-  // needs their token list, and the section renders its skeleton until it
-  // arrives.
-  void loadApiTokens()
-    .then(() => render())
-    .catch(() => undefined);
+  // needs these lists. Settled, so one failing still renders the other.
+  void Promise.allSettled([
+    loadApiTokens(),
+    ensureMcpServers(state.projectId),
+    loadMachineAgents(),
+  ]).then(() => render());
   state.settingsAgentsLoading = state.providers.length === 0;
   void loadProviders()
     .catch(() => undefined)
@@ -8750,7 +8565,10 @@ function applyHash() {
     const mode = authModeFromHash();
     if (mode !== undefined && mode !== authMode) {
       authMode = mode;
-      if (mode !== "register") {
+      // `join` is the mode an invitation arrives on and the one that hosts
+      // the free registration form, so leaving the confirmation screen means
+      // leaving both of them, not just the older name.
+      if (mode !== "register" && mode !== "join") {
         pendingRegistration = undefined;
       }
       // A different link means a different answer; the old one would otherwise
@@ -9374,7 +9192,7 @@ document.addEventListener("click", (event) => {
     case "auth-mode": {
       event.preventDefault();
       authMode = value;
-      if (value !== "register") {
+      if (value !== "register" && value !== "join") {
         pendingRegistration = undefined;
       }
       // Rendered here rather than left to the `hashchange` this triggers, so
@@ -10867,7 +10685,11 @@ document.addEventListener("click", (event) => {
       return;
     /* Agent connections */
     case "agent-connect":
-      void connectAgent(value, render);
+      // The chooser, not the CLI path straight off. This is the button on the
+      // agents screen, which is where somebody deciding how to connect one
+      // actually is — routing it past the question left the whole flow
+      // reachable only from a channel's plus menu.
+      void connectProviderSomehow(value, render, openSettingsSearchResult);
       return;
     case "agent-check-cli":
       // The machine half of an agent, on demand. Connecting used to be the
@@ -10894,7 +10716,7 @@ document.addEventListener("click", (event) => {
       return;
     case "agent-add":
       closePopover();
-      void startAddAgentFlow(render);
+      void startAddAgentFlow(render, openSettingsSearchResult);
       return;
     case "agent-disconnect":
       // Asks before it destroys, and removes the agent rather than only its
@@ -11448,6 +11270,45 @@ document.addEventListener("click", (event) => {
     case "token-revoke":
       void revokeApiTokenConfirmed(value);
       return;
+    case "mcp-create":
+      createMcpServerFromForm();
+      return;
+    case "mcp-pick":
+      fillMcpFormFrom(value);
+      return;
+    case "editor-connect":
+      void connectEditorToKumi(value, render);
+      return;
+    case "mcp-approve": {
+      const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
+      const enabled = server?.enabled !== true;
+      void approveMcpServer(state.projectId, value, enabled)
+        .then(() => {
+          toast(enabled ? "Server approved" : "Server disabled", "ok");
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "mcp-editors": {
+      const server = (state.mcpServers ?? []).find((entry) => entry.id === value);
+      const enabled = server?.editorEnabled !== true;
+      void shareMcpServerWithEditors(state.projectId, value, enabled)
+        .then(() => {
+          toast(
+            enabled
+              ? "Offered to editors connected to Kumi"
+              : "Taken out of editors",
+            "ok",
+          );
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "mcp-remove":
+      void removeMcpServerConfirmed(value);
+      return;
     case "invite-revoke":
       void revokeInvitation(value)
         .then(() => {
@@ -11780,6 +11641,23 @@ document.addEventListener("change", (event) => {
   // the keyboard fires no click at all.
   if (picker?.dataset?.act === "offline-target") {
     setOfflineTarget(picker.value, render);
+    return;
+  }
+  // Which fields a new MCP server needs depends on its transport. Toggled in
+  // place rather than re-rendered: a render would throw away the name and the
+  // secrets somebody has already typed into the same form.
+  if (picker?.dataset?.act === "mcp-transport") {
+    const http = picker.value === "http";
+    const form = picker.closest(".st-mcp-form");
+    for (const stdioField of form?.querySelectorAll(
+      "[data-mcp-stdio], [data-mcp-stdio-only]",
+    ) ?? []) {
+      stdioField.hidden = http;
+    }
+    const httpFields = form?.querySelector("[data-mcp-http]");
+    if (httpFields) {
+      httpFields.hidden = !http;
+    }
     return;
   }
   if (picker?.dataset?.act === "channel-picture-pick") {

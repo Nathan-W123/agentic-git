@@ -56,6 +56,18 @@ export interface AuthorizedOrganization {
   role: OrganizationRole;
 }
 
+/**
+ * An authorized organization plus what of it the caller may actually reach.
+ *
+ * `repositories` is `undefined` for a caller with an organization role —
+ * "all of them", including repositories created after this request, which a
+ * snapshot list could not say. A set means the caller reached this
+ * organization through repository grants and holds precisely those.
+ */
+export interface AuthorizedReach extends AuthorizedOrganization {
+  repositories: ReadonlySet<string> | undefined;
+}
+
 export interface AuthorizedProject extends AuthorizedOrganization {
   project: ProjectRecord;
   /**
@@ -270,6 +282,99 @@ export async function authorizeOrganization(
 }
 
 /**
+ * Authorizes an organization-wide action, honouring per-repository grants.
+ *
+ * {@link authorizeOrganization} reads memberships and nothing else, which is
+ * right for the routes that administer an organization — you cannot bill,
+ * rename or invite into a company you were merely handed one repository in.
+ * It is wrong for the routes that are *about the caller's own work*, and
+ * enrolling a machine is the sharpest case: somebody invited to a single
+ * repository, told to install the desktop app and run agents on it, was
+ * answered "You do not have permission to perform this action" by
+ * `POST /workers/register` and could therefore never run anything at all.
+ * Their agent then read as permanently offline in every channel, which is
+ * the same bug wearing its second face.
+ *
+ * Every other layer already understood this shape — `reachableOrganizations`
+ * lists an organization reached only by a grant, `reachableProjects` lists
+ * its projects, `authorizeProject` and `authorizeRepository` both compose the
+ * grant into the role — so the worker routes were the one hole left.
+ *
+ * `repositories` is what stops this from being a widening. A caller with an
+ * organization role gets `undefined`, meaning "all of them, including ones
+ * created after this request". A grant-only caller gets exactly the set they
+ * hold, and every caller of this function must narrow repository-shaped data
+ * by it — leasing work above all, or a grant on one repository would become
+ * a licence to execute tasks from every other repository beside it.
+ *
+ * Folding every grant in the organization into one role is correct *here* and
+ * would not be correct in {@link authorizeRepository}: the question this
+ * answers is "may this caller do X somewhere in this organization", which is
+ * genuinely a question about the highest thing they hold. The narrowing that
+ * keeps repository A's grant out of repository B is `repositories`, applied
+ * by the caller, not a lower role.
+ */
+export async function authorizeOrganizationOrGrant(
+  store: CoordinationStore,
+  principal: AuthenticatedPrincipal,
+  organizationId: string,
+  permission: Permission,
+): Promise<AuthorizedReach> {
+  assertTokenOrganization(principal, organizationId);
+  const organization = await store.getOrganization(organizationId);
+  if (organization === undefined) {
+    throw new AuthenticationError(
+      "Organization was not found",
+      404,
+      "not_found",
+    );
+  }
+
+  // `roleFor` answers "owner" for a system administrator, so this branch also
+  // carries them, and carries them unnarrowed.
+  const stored = roleFor(principal, organizationId);
+  if (stored !== undefined) {
+    const role = await entitledRole(store, principal, organization, stored);
+    assertPermission(role, permission);
+    assertTokenScope(principal, permission);
+    return { organization, role, repositories: undefined };
+  }
+
+  // Somebody holding nothing here folds to no role at all, and
+  // `assertPermission` below refuses them with the ordinary 403 — identical
+  // to what an unrelated stranger gets, saying nothing about whether this
+  // organization has repositories or how many. Deliberately not short-circuited
+  // above: a second refusal reaching the same answer is a branch no test can
+  // tell apart from the first, and those are the ones that quietly diverge.
+  const grants = await grantsInOrganization(store, principal, organizationId);
+  const grantRole = grants.reduce<OrganizationRole | undefined>(
+    (highest, grant) => higherRole(highest, grant.role),
+    undefined,
+  );
+  // A comped grant stands on its own, exactly as it does in
+  // `authorizeProject` and `authorizeRepository`: it was given away by
+  // whoever runs the deployment, to somebody who was told they would not have
+  // to pay, so an unpaid organization must not fold it to `viewer`.
+  const compedRole = grants
+    .filter((grant) => grant.comped)
+    .reduce<OrganizationRole | undefined>(
+      (highest, grant) => higherRole(highest, grant.role),
+      undefined,
+    );
+  const role = higherRole(
+    await entitledRole(store, principal, organization, grantRole),
+    compedRole,
+  );
+  assertPermission(role, permission);
+  assertTokenScope(principal, permission);
+  return {
+    organization,
+    role,
+    repositories: new Set(grants.map((grant) => grant.repositoryId)),
+  };
+}
+
+/**
  * Authorizes a project, honouring per-repository grants.
  *
  * Access comes from either of two places now: an organization role, which
@@ -350,6 +455,44 @@ export async function authorizeProject(
         ? new Set(grants.map((grant) => grant.repositoryId))
         : undefined,
   };
+}
+
+/**
+ * Every grant the caller holds anywhere in one organization.
+ *
+ * A grant records only its repository — not the project that holds it, nor
+ * the organization above that — so answering "does this person reach this
+ * organization at all" means walking down: projects, then their
+ * repositories, then intersecting with what the caller was granted. That is
+ * the same walk `reachableOrganizations` already does in the gateway, and it
+ * is the only walk available.
+ *
+ * Costs one project listing plus one repository listing per project. Paid
+ * only by callers with no organization role, and only on the handful of
+ * organization-wide routes that accept a grant at all — never on the
+ * per-project routes, which have a project id in hand and use
+ * {@link grantsInProject}.
+ */
+async function grantsInOrganization(
+  store: CoordinationStore,
+  principal: AuthenticatedPrincipal,
+  organizationId: string,
+): Promise<RepositoryGrant[]> {
+  const grants = await store.listGrantsForUser(principal.user.id);
+  if (grants.length === 0) {
+    return [];
+  }
+  const held = new Map(grants.map((grant) => [grant.repositoryId, grant]));
+  const found: RepositoryGrant[] = [];
+  for (const project of await store.listProjects(organizationId)) {
+    for (const repository of await store.listProjectRepositories(project.id)) {
+      const grant = held.get(repository.id);
+      if (grant !== undefined) {
+        found.push(grant);
+      }
+    }
+  }
+  return found;
 }
 
 /** The caller's grants, limited to repositories this project actually owns. */

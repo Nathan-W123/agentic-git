@@ -43,6 +43,7 @@ import {
 } from "./remote-holders.js";
 import {
   WORKER_PROTOCOL_VERSION,
+  admitWorkPlan,
   claimWorkRepository,
 } from "./worker-operations.js";
 
@@ -1236,6 +1237,174 @@ test("a contended remote task is told where the objective already lives", async 
     // Offered as a starting point, never as a scope: an agent that adopted it
     // wholesale would plan the estimate instead of the task.
     assert.match(String(prepared.planningContext), /starting point|not a scope/iu);
+  } finally {
+    await real.cleanup();
+  }
+});
+
+/**
+ * The other front door.
+ *
+ * Everything above drives the arrival through `LeasePlanAuthority.admit`,
+ * which is the local coordinator's admission. A worker's plan does not arrive
+ * that way: it is posted to `POST /api/v1/workers/{lease}/plan` and lands in
+ * `admitWorkPlan`, which had no narrowing at all. It read the active set and
+ * decided against it, so a repository-wide claim refused whatever the plan
+ * said and the holder was never asked anything — while the same holder sat
+ * registered for asking, and its heartbeat beat faster than usual precisely so
+ * it could carry an ask that nothing ever armed.
+ *
+ * Which door a refusal came through is legible from its wording, and that is
+ * how this was found: "A task already executing holds a repository-wide claim"
+ * belongs to the controller, and is reachable only from an admission that did
+ * not narrow first.
+ */
+test("a plan arriving on the worker route narrows the holder too", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  let holderTaskId = "";
+  try {
+    const held = await leaseFor(
+      store,
+      worker,
+      "rename holderOne in src/shared.ts",
+      real.version,
+    );
+    const { plan: claim } = await claimWorkRepository(
+      store,
+      { leaseId: held.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+    assert.ok(claim, "the solo task should have been given the repository");
+    assert.equal(isBlanketClaim(claim), true);
+    holderTaskId = held.task.id;
+
+    rememberWorkingChanges(held.task.id, [
+      { path: "src/shared.ts", status: "modified" },
+    ]);
+
+    // The holder answers when asked, which is the whole question: before this
+    // it was never asked, so this loop would spin out its attempts and the
+    // declaration would never be delivered.
+    let asked = 0;
+    const answering = (async () => {
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        const askId = askToDeliver(held.task.id);
+        if (askId !== undefined) {
+          asked += 1;
+          settleDeclaration(
+            held.task.id,
+            askId,
+            { files: ["src/shared.ts"], symbols: ["holderOne"] },
+            [{ path: "src/shared.ts", status: "modified" }],
+          );
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    })();
+
+    // A second worker posts its plan the way a desktop worker does.
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a prefix to candidateOne",
+      real.version,
+    );
+    const outcome = await admitWorkPlan(store, {
+      leaseId: second.leaseId,
+      actorId: "actor",
+      // The worker route refuses a plan whose objective is not the task's, so
+      // unlike the authority above this cannot take `candidatePlan` as it
+      // comes: a worker may not quietly re-scope what it was asked to do.
+      plan: {
+        ...candidatePlan(second.task.id, ["src/shared.ts"], ["candidateOne"]),
+        objective: second.task.objective,
+      },
+    });
+    await answering;
+
+    assert.equal(asked, 1, "the holder should have been asked exactly once");
+
+    // The claim is an ordinary plan now, naming what the holder is in rather
+    // than the whole repository.
+    const converted = (await store.getWorkLease(held.leaseId))?.plan?.plan;
+    assert.ok(converted);
+    assert.equal(isBlanketClaim(converted), false);
+    assert.ok(converted.expectedFiles.includes("src/shared.ts"));
+    assert.ok(converted.expectedSymbols.includes("holderOne"));
+
+    // And the arrival runs, in the same file, around the holder's symbol.
+    assert.equal(outcome.outcome, "admitted", JSON.stringify(outcome));
+    assert.notEqual(
+      outcome.outcome === "admitted" ? outcome.admission.status : "sequenced",
+      "sequenced",
+      "the arrival should not be queued behind a claim it just narrowed",
+    );
+  } finally {
+    releaseRemoteHolder(holderTaskId);
+    await real.cleanup();
+  }
+});
+
+/**
+ * And the same restraint the other door has.
+ *
+ * Narrowing is not admission. A holder that cannot say where it is — no
+ * registered session, nothing reported from its worktree — has told nobody
+ * anything, and the arrival waits rather than being let into files somebody
+ * may be editing. This is the half that must not regress while making the
+ * other half work: a narrowing path that answered "nothing" for a holder it
+ * could not read would hand its files away.
+ */
+test("a worker-route arrival still waits for a holder nobody can read", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    const held = await leaseFor(
+      store,
+      worker,
+      "rename holderOne in src/shared.ts",
+      real.version,
+    );
+    const { plan: claim } = await claimWorkRepository(
+      store,
+      { leaseId: held.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+    assert.ok(claim);
+    // Deliberately no `rememberWorkingChanges` and no registered session: the
+    // holder is on a machine that has said nothing since it started.
+    releaseRemoteHolder(held.task.id);
+
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a prefix to candidateOne",
+      real.version,
+    );
+    const outcome = await admitWorkPlan(store, {
+      leaseId: second.leaseId,
+      actorId: "actor",
+      plan: {
+        ...candidatePlan(second.task.id, ["src/shared.ts"], ["candidateOne"]),
+        objective: second.task.objective,
+      },
+    });
+
+    assert.equal(outcome.outcome, "admitted", JSON.stringify(outcome));
+    assert.equal(
+      outcome.outcome === "admitted" ? outcome.admission.status : "",
+      "sequenced",
+      "an unreadable holder keeps its claim and the arrival waits",
+    );
+    const stillHeld = (await store.getWorkLease(held.leaseId))?.plan?.plan;
+    assert.ok(stillHeld);
+    assert.equal(
+      isBlanketClaim(stillHeld),
+      true,
+      "and the claim is left whole rather than frozen to nothing",
+    );
   } finally {
     await real.cleanup();
   }

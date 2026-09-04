@@ -1208,4 +1208,89 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ADD COLUMN visibility TEXT NOT NULL DEFAULT 'personal'`,
     ],
   },
+  {
+    /**
+     * The MCP servers a project has chosen for its agents, and who said so.
+     * See the same migration in `schema.ts` for why approval is a recorded
+     * act, off by default. The flag is a real BOOLEAN here and the
+     * per-project name uniqueness a unique index over LOWER(name), as the
+     * dialect notes above prescribe.
+     */
+    version: 54,
+    name: "project-mcp-servers",
+    statements: [
+      `CREATE TABLE project_mcp_servers (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        command TEXT,
+        args_json TEXT NOT NULL DEFAULT '[]',
+        url TEXT,
+        values_json TEXT NOT NULL DEFAULT '{}',
+        secrets_json TEXT NOT NULL DEFAULT '{}',
+        enabled BOOLEAN NOT NULL DEFAULT false,
+        scope TEXT NOT NULL DEFAULT 'repository',
+        approved_by TEXT,
+        approved_at TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE UNIQUE INDEX project_mcp_servers_project_name_idx
+         ON project_mcp_servers (project_id, LOWER(name))`,
+      `CREATE TABLE project_mcp_server_repositories (
+        server_id TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        PRIMARY KEY (server_id, repository_id)
+      )`,
+    ],
+  },
+  {
+    // The desktop app authenticates with a token, not a session, so it could
+    // not mint the narrow one an editor needs — and the rule it ran into is
+    // worth keeping: a token that mints tokens makes revocation meaningless.
+    // Recording the parent restores that, because revoking it takes the
+    // children with it.
+    version: 55,
+    name: "api-token-parent",
+    statements: [
+      `ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS created_by_token TEXT`,
+    ],
+  },
+  {
+    // The second opt-in. See the SQLite copy of this migration for why
+    // reaching a server from an editor is a different decision from letting
+    // it run beside an agent on somebody's laptop.
+    version: 56,
+    name: "mcp-servers-for-editors",
+    statements: [
+      `ALTER TABLE project_mcp_servers
+         ADD COLUMN IF NOT EXISTS editor_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+    ],
+  },
+  {
+    /**
+     * Which editor a token was minted for, when it was minted for one.
+     *
+     * So the control plane can tell that a request came from Codex rather
+     * than from Claude Code, without asking the model to say so. That matters
+     * because `submit_task` used to require an agent name, which meant an
+     * editor asking Kumi to do something had to *invent* the assignment: a
+     * person who named nobody had their work sent to whichever agent the
+     * model picked off the roster, which is how a prompt typed in Codex came
+     * to be run by Claude.
+     *
+     * The token name already carries this — the app mints "Codex on <device>"
+     * — and reading it back is the fallback for every connection made before
+     * this column existed. A name is editable, though, and a person renaming
+     * their token in settings must not quietly change who does their work.
+     * So it is recorded once, at mint, where nothing can drift.
+     */
+    version: 57,
+    name: "editor-tokens-name-their-editor",
+    statements: [
+      `ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS editor_vendor TEXT`,
+    ],
+  },
 ];

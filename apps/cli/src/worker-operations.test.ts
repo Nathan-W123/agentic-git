@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -41,7 +42,10 @@ import {
   type ChangeSet,
   type PlanAdmission,
 } from "@coord/shared-types";
-import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
+import {
+  GitWorktreeWorkspaceManager,
+  createSecretSealer,
+} from "@coord/workspace-manager";
 
 import {
   STALE_REASSESSMENT_BUDGET,
@@ -277,6 +281,102 @@ function resultStub(
     ...overrides,
   };
 }
+
+test("a lease opens the project's approved MCP servers for the worker that owns the task", async () => {
+  const previous = process.env["COORD_MCP_ENABLED"];
+  process.env["COORD_MCP_ENABLED"] = "1";
+  const harness = await createHarness();
+  try {
+    const worker = await harness.store.getWorker(harness.workerId);
+    assert.ok(worker);
+    const sealer = createSecretSealer(randomBytes(32));
+    await harness.store.createMcpServer({
+      id: "mcp_linear",
+      projectId: DEFAULT_PROJECT_ID,
+      scope: "project",
+      name: "linear",
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "linear-mcp"],
+      values: { LINEAR_TEAM: "platform" },
+      secrets: { LINEAR_API_KEY: sealer.seal("lin_api_plaintext") },
+      createdBy: worker.userId,
+      createdAt: new Date().toISOString(),
+    });
+    await harness.store.setMcpServerApproval("mcp_linear", {
+      enabled: true,
+      approvedBy: worker.userId,
+      approvedAt: new Date().toISOString(),
+    });
+    // Approved but never enabled: stays out.
+    await harness.store.createMcpServer({
+      id: "mcp_draft",
+      projectId: DEFAULT_PROJECT_ID,
+      scope: "project",
+      name: "draft",
+      transport: "http",
+      url: "https://mcp.example.com/",
+      createdBy: worker.userId,
+      createdAt: new Date().toISOString(),
+    });
+    const task = await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "file the ticket",
+      agentId: "generic-cli",
+      validationCommands: [],
+      submittedBy: worker.userId,
+    });
+
+    const assignment = await leaseWork(
+      harness.store,
+      { workerId: harness.workerId, projectId: DEFAULT_PROJECT_ID, protocolVersion: 4 },
+      harness.repositories,
+      undefined,
+      { sealer },
+    );
+    assert.ok(assignment);
+    assert.equal(assignment.task.id, task.id);
+    assert.deepEqual(assignment.mcpServers, [
+      {
+        name: "linear",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "linear-mcp"],
+        env: { LINEAR_TEAM: "platform", LINEAR_API_KEY: "lin_api_plaintext" },
+      },
+    ]);
+
+    // Without a sealer the same lease carries nothing: the bare CLI and a
+    // process that was never given the key attach no server, however the
+    // table reads.
+    await harness.store.finishWorkLease(
+      assignment.lease.id,
+      "completed",
+      new Date().toISOString(),
+    );
+    await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "file another ticket",
+      agentId: "generic-cli",
+      validationCommands: [],
+      submittedBy: worker.userId,
+    });
+    const bare = await leaseWork(
+      harness.store,
+      { workerId: harness.workerId, projectId: DEFAULT_PROJECT_ID, protocolVersion: 4 },
+      harness.repositories,
+    );
+    assert.ok(bare);
+    assert.equal("mcpServers" in bare, false);
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_MCP_ENABLED"];
+    } else {
+      process.env["COORD_MCP_ENABLED"] = previous;
+    }
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
 
 test("a lease pins the worker to the canonical revision", async () => {
   const harness = await createHarness();

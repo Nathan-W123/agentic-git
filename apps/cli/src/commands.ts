@@ -1668,6 +1668,41 @@ export async function runPendingTasks(
     }
   }
 
+  // Nothing below this line is free, and on a deployment that executes
+  // nothing none of it buys anything.
+  //
+  // `leaseQueuedWork` already refuses to claim under this flag, so execution
+  // was never at risk. But the refusal came four calls too late: resolving the
+  // canonical version runs three git processes, one of which is
+  // `rev-list --count` over the whole history, and every dispatched message
+  // paid for all of it before being told there was nothing to do. That is a
+  // per-message cost on the control plane for work the control plane will
+  // never perform — and it grows with exactly the traffic Kumi-as-an-MCP-server
+  // is built to attract, where each editor request is another dispatch.
+  //
+  // The conversation sweep above stays: it settles rows a *worker's* run left
+  // open, and it is store work rather than repository work.
+  //
+  // The gate inside `leaseQueuedWork` stays too. This one is about the bill;
+  // that one is the invariant, and an invariant with one guard is an invariant
+  // one refactor away from being gone.
+  if (localAgentsOnly()) {
+    return {
+      repository,
+      claimed: [],
+      runId: undefined,
+      integrated: 0,
+      failed: 0,
+      cancelled: 0,
+      // Never read on this path — `runRepository` returns void to the gateway,
+      // and the only caller that reads the summary at all reads `claimed` to
+      // decide whether to drain again. Empty says what happened: nothing was
+      // resolved, because nothing looked.
+      finalRevision: "",
+      conflicts: 0,
+    };
+  }
+
   // Leases first, claims only as a fallback. A leased task is one every other
   // run in this repository can see, which is what lets plan admission decide
   // between them; a merely claimed task is invisible, and two runs holding

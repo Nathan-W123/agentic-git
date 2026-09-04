@@ -270,10 +270,20 @@ test("the standard places Node and npm's globals live are searched too", async (
   const windows = wellKnownBinDirectories("win32").join("|");
   assert.match(windows, /nodejs/u, "Node's own directory");
   assert.match(windows, /npm/u, "and where npm puts what it installs globally");
+  // Where a native installer puts a CLI, as opposed to npm. Claude Code's
+  // does, and this list had it everywhere except Windows — so a machine with
+  // Claude installed registered no `claude` adapter, and the control plane
+  // drew that agent as having no machine at all.
+  assert.match(
+    windows,
+    /[\\/]\.local[\\/]bin/u,
+    "and where a native installer puts one",
+  );
 
   const unix = wellKnownBinDirectories("darwin").join("|");
   assert.match(unix, /homebrew/u);
   assert.match(unix, /usr.local.bin/u);
+  assert.match(unix, /[\\/]\.local[\\/]bin/u);
 });
 
 /**

@@ -63,14 +63,29 @@ import {
   type HeartbeatReply,
   type WorkingChange,
 } from "./client.js";
-import { holdHost } from "./host-signal.js";
+import { holdHost, hostAttached, signalHost } from "./host-signal.js";
+import { stageMcpServers, type StagedMcpServers } from "./mcp-config.js";
 import type { WorkNudge } from "./nudge.js";
 import {
   shouldClaimWork,
   systemPowerSource,
   type PowerSource,
+  type PowerState,
 } from "./power.js";
 import { liftLocalImages } from "./attachments.js";
+
+/**
+ * The oldest control plane this worker will take work from.
+ *
+ * Distinct from `WORKER_PROTOCOL_VERSION`, which is what this worker
+ * *speaks* and announces on its lease. The two part ways whenever a version
+ * adds something optional: protocol 4 lets a lease carry MCP servers, and a
+ * control plane still on 3 simply never sends any, which is not a reason to
+ * refuse its tasks. What cannot be done without is plan admission, which
+ * arrived in 3 — an older control plane would have work done first and
+ * discarded on conflict afterwards, and that is refused.
+ */
+const MINIMUM_CONTROL_PLANE_PROTOCOL = 3;
 
 /**
  * The worker daemon.
@@ -135,6 +150,11 @@ export interface WorkerOptions {
    * have to be running on a laptop that was actually unplugged.
    */
   powerSource?: PowerSource;
+  /**
+   * Stop taking work while on battery. Defaults to `COORD_PAUSE_ON_BATTERY`,
+   * and to off — a laptop works. See {@link Worker.pauseOnBattery}.
+   */
+  pauseOnBattery?: boolean;
   /**
    * An optional shortcut out of the idle wait.
    *
@@ -289,6 +309,11 @@ class Laps {
     const now = Date.now();
     this.marks.push([name, now - this.last]);
     this.last = now;
+  }
+
+  /** The last phase that completed, or `nothing` if none did. */
+  public reached(): string {
+    return this.marks.at(-1)?.[0] ?? "nothing";
   }
 
   /** Everything measured, longest phase named first among equals. */
@@ -475,6 +500,11 @@ export class Worker {
   public constructor(private readonly options: WorkerOptions) {
     this.plans = options.planCache ?? new Map<string, CachedPlan>();
     this.power = options.powerSource ?? systemPowerSource();
+    this.pauseOnBattery =
+      options.pauseOnBattery ??
+      ["1", "true", "yes"].includes(
+        (process.env["COORD_PAUSE_ON_BATTERY"] ?? "").trim().toLowerCase(),
+      );
     this.concurrency = configuredConcurrency(options.concurrency);
     const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
     const planWaitBudget =
@@ -500,6 +530,41 @@ export class Worker {
     return this.identity?.id;
   }
 
+  /** Set by {@link register}; see {@link advertisedAdapters}. */
+  private advertised: string[] = [];
+
+  /**
+   * The power state this worker last refused work on, or `undefined` while it
+   * is taking work. Kept only so the refusal is logged when it changes rather
+   * than on every poll.
+   */
+  private declining: PowerState | undefined;
+
+  /**
+   * Whether to stop taking work while on battery.
+   *
+   * Off by default, which is the opposite of where this started. The original
+   * reasoning was sound as far as it went — a laptop that sleeps mid-task
+   * holds its lease until the five-minute expiry, so declining up front keeps
+   * the task visibly queued instead. What it weighed was the cost of a
+   * *sleeping* machine against nothing, and the cost of the caution turned
+   * out to be much larger than the cost it was avoiding.
+   *
+   * Declining never contacts the control plane, and that contact is the only
+   * thing telling it this machine exists. So an unplugged laptop was not a
+   * machine that was waiting: three minutes later it was no machine at all.
+   * Its owner's agents went grey, mentions were answered with "nothing will
+   * pick this up yet", and the app offered to install a CLI already sitting
+   * on the disk — for the whole time somebody was sitting in front of it,
+   * lid open, perfectly able to work.
+   *
+   * Against that, a lease lost to standby costs one requeue after five
+   * minutes, and since the control plane started announcing that in the room
+   * it is not even a silent one. So a laptop works by default, and anybody
+   * running a machine that really does sleep unattended can say so.
+   */
+  private readonly pauseOnBattery: boolean;
+
   public async register(): Promise<string> {
     const configured = new Set(
       Object.values(this.options.project.config.agents).map(
@@ -520,6 +585,7 @@ export class Worker {
             this.options.adapters?.includes(adapter),
           );
     const adapters = advertised;
+    this.advertised = [...adapters];
     const identity = await this.options.client.register({
       organizationId: this.options.organizationId,
       name: this.options.name ?? `worker-${process.pid}`,
@@ -528,6 +594,21 @@ export class Worker {
     });
     this.identity = identity;
     return identity.id;
+  }
+
+  /**
+   * What this worker told the control plane it can run.
+   *
+   * Worth reading back, because it is an intersection and an intersection can
+   * be empty. A worker that advertises nothing registers, polls happily
+   * forever, is never offered a single task, and reports itself as running
+   * the whole time — while the control plane, which decides an agent is
+   * reachable by exactly this list, draws every one of that person's agents
+   * as having no machine at all. Every symptom of it points somewhere else,
+   * so the list is said out loud at start rather than left to be inferred.
+   */
+  public get advertisedAdapters(): readonly string[] {
+    return this.advertised;
   }
 
   /** How many tasks this machine will hold at once. */
@@ -576,8 +657,32 @@ export class Worker {
     // hold work this machine cannot promise to finish. A laptop that claims a
     // task and then sleeps keeps it for the full lease expiry while its owner
     // watches nothing happen; declining leaves it visibly queued instead.
-    if (!shouldClaimWork(await this.power.read())) {
+    const power = await this.power.read();
+    if (this.pauseOnBattery && !shouldClaimWork(power)) {
+      // Said once per change of state, not once per poll: this loop runs
+      // every few seconds and a line each time would bury the log it is in.
+      //
+      // Said at all because the silence here is the whole problem. Declining
+      // never touches the control plane, and the control plane decides a
+      // machine is present by exactly that touch — so a laptop on battery
+      // stops being a machine that is waiting and becomes, to everyone in
+      // the room, a machine that does not exist. Its owner's agents go grey,
+      // a mention raises "nothing will pick this up yet", and the app offers
+      // to install a CLI that is already there. Nothing in the product ever
+      // said "battery", and this loop was the only thing that knew.
+      if (this.declining !== power) {
+        this.declining = power;
+        console.log(
+          `[worker] on ${power} — not claiming work, because ` +
+            "COORD_PAUSE_ON_BATTERY is set on this machine. Plug in, or " +
+            "unset it to work on battery.",
+        );
+      }
       return { worked: false };
+    }
+    if (this.declining !== undefined) {
+      this.declining = undefined;
+      console.log("[worker] claiming work again");
     }
     const assignment = await this.options.client.lease(
       workerId,
@@ -625,6 +730,8 @@ export class Worker {
     // otherwise tell the host it was idle and let the machine sleep on top of
     // three agents that were still working.
     const releaseHost = holdHost();
+    /** Set once timing starts, so a failure before it still logs. */
+    let failure: Laps | undefined;
     const scratch = workerScratchPath(
       this.options.workspaceRoot,
       assignment.lease.id,
@@ -664,18 +771,38 @@ export class Worker {
     beat.unref?.();
 
     try {
-      if ((assignment.protocolVersion ?? 1) < WORKER_PROTOCOL_VERSION) {
+      if ((assignment.protocolVersion ?? 1) < MINIMUM_CONTROL_PLANE_PROTOCOL) {
         // Executing anyway would put the old plan-blind behaviour back: work
         // would be done first and discarded on conflict afterwards.
         throw new Error(
           "Control plane speaks remote worker protocol " +
             `${assignment.protocolVersion ?? 1}, which has no plan admission ` +
-            `step; this worker requires ${WORKER_PROTOCOL_VERSION}`,
+            `step; this worker requires at least ${MINIMUM_CONTROL_PLANE_PROTOCOL}`,
         );
       }
 
       if (assignment.task.kind === "question") {
-        const answer = await this.answerQuestion(run, assignment, scratch);
+        // Logged like a task, because it costs like one — a planning run and
+        // an execution run on this machine — and because a question that
+        // fails leaves nothing else behind: no thread, no changeset, and
+        // until this line, no trace in the log that it was ever here.
+        const startedAt = Date.now();
+        let answer: string;
+        try {
+          answer = await this.answerQuestion(run, assignment, scratch);
+        } catch (error) {
+          console.log(
+            `[worker] question ${assignment.task.id} — failed after ` +
+              `${((Date.now() - startedAt) / 1000).toFixed(1)}s: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+          );
+          throw error;
+        }
+        console.log(
+          `[worker] question ${assignment.task.id} — answered in ` +
+            `${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+        );
         if (leaseLost) {
           throw new LeaseLostError(assignment.lease.id);
         }
@@ -697,6 +824,7 @@ export class Worker {
 
       const laps = new Laps();
       run.laps = laps;
+      failure = laps;
       const planned = await this.plan(run, assignment, scratch);
       laps.mark("plan");
       if (leaseLost) {
@@ -763,6 +891,22 @@ export class Worker {
       };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      // Every ending, not only the good one.
+      //
+      // The success path below logs where a task's minutes went, and until
+      // now that was the only line a run could produce. So a task that failed
+      // — the agent giving up, the plan refused, the lease lost, the control
+      // plane unreachable — left the worker log looking *exactly* like a task
+      // still working: the start line, and then nothing, forever. Somebody
+      // watching a task that had already died could not tell it from one
+      // still thinking, and the only honest answer to "is it stuck" was to
+      // wait longer. Naming the phase it got to is most of the diagnosis.
+      console.log(
+        `[worker] task ${assignment.task.id} — failed after ` +
+          `${failure?.summary() ?? "no work"} (reached ${
+            failure?.reached() ?? "nothing"
+          }): ${detail}`,
+      );
       if (error instanceof LeaseLostError) {
         // The task belongs to someone else now; reporting would be a lie.
         return { worked: true, taskId: assignment.task.id, accepted: false, reason: detail };
@@ -1482,11 +1626,65 @@ export class Worker {
             worktrees,
           );
     const workspaces: WorkspaceManager = docker ?? worktrees;
+    // The lease's MCP servers, after this machine's allowlist. Staged under
+    // scratch — the same root the workspace has, so the `finally` that
+    // removes the run removes the config and its secrets with it — and
+    // staged before the adapter exists, because the adapter is what carries
+    // them. Both outcomes are said aloud: a room told nothing sees a run with
+    // no tools and cannot tell whether nobody offered any or this machine
+    // declined them, and those have different fixes in different places.
+    const offered = assignment.mcpServers ?? [];
+    const mcp = await stageMcpServers({
+      scratch,
+      vendor: configuredAgent.adapter ?? "generic-cli",
+      servers: offered,
+      allow: this.options.project.config.mcp,
+    });
+    if (offered.length > 0 && mcp.withheld.length > 0) {
+      const names = mcp.withheld.map((server) => server.name);
+      const changed = mcp.withheld
+        .filter((server) => server.changed)
+        .map((server) => server.name);
+      await this.options.client.progress(
+        assignment.lease.id,
+        `This project offers MCP servers ${names.join(", ")}; this machine ` +
+          "has not allowed them" +
+          (changed.length === 0
+            ? ""
+            : ` (${changed.join(", ")} changed since it was allowed here)`) +
+          (hostAttached()
+            ? ". Kumi on that machine will ask its owner."
+            : ". They run once listed under mcp.allow in the worker's " +
+              ".coordinator/config.json."),
+      );
+      // Said to the host as well as to the room, because the room cannot
+      // fix it. The allowlist belongs to whoever owns this machine, the
+      // desktop app is the one thing that can put the question in front of
+      // them, and this process read its config once at start — so the most
+      // it can do is say what was withheld, and what agreeing would mean,
+      // and let the app ask. Nowhere to send it is the ordinary case and is
+      // a no-op.
+      signalHost({
+        type: "mcp-offered",
+        servers: mcp.withheld.map(({ name, digest, summary }) => ({
+          name,
+          digest,
+          summary,
+        })),
+      });
+    }
+    if (mcp.staged.length > 0) {
+      await this.options.client.progress(
+        assignment.lease.id,
+        `Running with tools: ${mcp.staged.join(", ")}.`,
+      );
+    }
     const adapter = this.adapterFor(
       assignment,
       workspace,
       workspaces,
       agentSandbox,
+      mcp,
     );
     // Whatever conversation this request was asked inside travels with it —
     // the hosted path has the same problem the local one does: a follow-up
@@ -1899,6 +2097,7 @@ export class Worker {
     workspace: TaskWorkspace,
     workspaces: WorkspaceManager,
     sandbox: WorkspaceSandbox | undefined,
+    mcp: StagedMcpServers,
   ): AgentAdapter {
     const [agentId, agent]: [string, AgentConfig] =
       this.options.project.requireAgent(assignment.task.agentId);
@@ -1959,6 +2158,7 @@ export class Worker {
         ...(workerExecutionSandbox === undefined
           ? {}
           : { executionSandbox: workerExecutionSandbox }),
+        ...(mcp.codex === undefined ? {} : { mcpServers: mcp.codex.servers }),
         ...(agent.env === undefined ? {} : { env: { ...process.env, ...agent.env } }),
         ...(this.options.codexRunner === undefined
           ? {}
@@ -2015,6 +2215,9 @@ export class Worker {
           ? {}
           : { executionTimeoutMs: agent.executionTimeoutMs }),
         ...(promptEffort === undefined ? {} : { effort: promptEffort }),
+        ...(mcp.claude === undefined
+          ? {}
+          : { mcpConfigPath: mcp.claude.configPath }),
         ...(agent.env === undefined
           ? {}
           : { env: { ...process.env, ...agent.env } }),

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { InMemoryCoordinationStore } from "@coord/persistence";
 
-import { leaseQueuedWork } from "./commands.js";
+import { leaseQueuedWork, runPendingTasks } from "./commands.js";
+import { CoordinatorProject } from "./project.js";
 
 /**
  * A store that fails loudly if the control plane so much as looks at the
@@ -33,6 +37,88 @@ const request = {
   projectId: "project_local",
   baseRevision: "a".repeat(40),
 };
+
+/**
+ * A project with a repository row pointing at a path that has no git in it.
+ *
+ * The claim under test is about what the control plane *does not do*, and the
+ * sharpest way to assert that is to make doing it fail. `getCanonicalVersion`
+ * shells out to git against `repository.path`, so a path with nothing there
+ * throws — which means resolving without throwing proves git was never
+ * reached, and the companion test proves it is reached when the flag is off.
+ */
+async function projectWithUnreachableGit(): Promise<{
+  project: CoordinatorProject;
+  store: InMemoryCoordinationStore;
+  cleanup(): Promise<void>;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "clocal-"));
+  const project = await CoordinatorProject.init(path.join(root, "proj"));
+  const store = new InMemoryCoordinationStore();
+  await store.saveRepository({
+    id: "repo_1",
+    path: path.join(root, "absent-canonical.git"),
+    branch: "main",
+  });
+  return {
+    project,
+    store,
+    cleanup: async () => {
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test("with COORD_LOCAL_AGENTS_ONLY a dispatch costs the control plane no git", async () => {
+  // The claim gate is four calls further down, and the calls in between are
+  // not free: resolving the canonical version runs three git processes, one
+  // of them `rev-list --count` over the whole history. Every dispatched
+  // channel message paid for all of it before being told there was nothing to
+  // run — including every message arriving from an editor over MCP, which is
+  // the traffic Kumi-as-an-MCP-server exists to attract.
+  const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
+  process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
+  const harness = await projectWithUnreachableGit();
+  try {
+    const summary = await runPendingTasks(harness.project, harness.store, {
+      projectId: "project_local",
+      repositoryId: "repo_1",
+    });
+    assert.deepEqual(summary.claimed, []);
+    assert.equal(summary.integrated, 0);
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_AGENTS_ONLY"];
+    } else {
+      process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
+    }
+    await harness.cleanup();
+  }
+});
+
+test("unset, the same dispatch does reach the repository", async () => {
+  // The half that makes the test above mean anything. With the flag off this
+  // path is supposed to resolve the canonical version, so it must fail on a
+  // repository with no git in it. A gate that skipped the work unconditionally
+  // would pass the first test, and only this one would catch it.
+  const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
+  delete process.env["COORD_LOCAL_AGENTS_ONLY"];
+  const harness = await projectWithUnreachableGit();
+  try {
+    await assert.rejects(
+      async () =>
+        await runPendingTasks(harness.project, harness.store, {
+          projectId: "project_local",
+          repositoryId: "repo_1",
+        }),
+    );
+  } finally {
+    if (previous !== undefined) {
+      process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
+    }
+    await harness.cleanup();
+  }
+});
 
 test("with COORD_LOCAL_AGENTS_ONLY the control plane never claims", async () => {
   const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];

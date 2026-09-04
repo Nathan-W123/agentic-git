@@ -12,6 +12,7 @@ import type {
   CoordinatorDecision,
   IntegrationResult,
   ResourceLease,
+  SealedSecret,
   TaskDefinition,
 } from "@coord/shared-types";
 import { MAX_COMMAND_OUTPUT_CHARS } from "@coord/shared-types";
@@ -27,6 +28,7 @@ import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
   type CoordinationStore,
+  type CreateMcpServerInput,
 } from "./store.js";
 
 /**
@@ -181,6 +183,41 @@ async function populate(store: CoordinationStore): Promise<string> {
   await store.saveTaskStatus(run.id, TASK.id, "integrated", "Promoted");
   await store.finishRun(run.id, "completed", FINAL_VERSION);
   return run.id;
+}
+
+/**
+ * A sealed triple with a recognisable ciphertext, so a leak assertion can
+ * search a serialized record for it by name and be sure of what it found.
+ */
+function sealed(label: string): SealedSecret {
+  return {
+    iv: `iv-${label}`,
+    tag: `tag-${label}`,
+    ciphertext: `ciphertext-${label}`,
+  };
+}
+
+/** A stdio server in the default project; a test overrides what it is about. */
+function mcpServer(
+  overrides: Partial<CreateMcpServerInput> & { id: string; name: string },
+): CreateMcpServerInput {
+  return {
+    projectId: DEFAULT_PROJECT_ID,
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@example/mcp-server"],
+    values: { LOG_LEVEL: "info" },
+    createdBy: "user_admin",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function present<T>(value: T | undefined, what: string): T {
+  if (value === undefined) {
+    throw new Error(`${what} is missing`);
+  }
+  return value;
 }
 
 interface Backend {
@@ -916,6 +953,68 @@ for (const backend of backends) {
       assert.equal(afterLapse?.task.id, hers.id);
     } finally {
       await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a task reads back by id, including a question`, async () => {
+    // Reading one task used to mean listing every task on the deployment and
+    // filtering in memory — defensible once on a dashboard load, indefensible
+    // on anything polled, which is what a task's status becomes once it can be
+    // asked for from outside the app.
+    //
+    // The question half is the part worth pinning. `listSubmittedTasks`
+    // defaults to `kind: "task"` and hides questions from callers that have
+    // not asked, because those callers feed coding paths. A caller holding an
+    // id is not one of them: it already names the row, so the kind filter
+    // would only make the answer wrong.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const work = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "fix the retry loop",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const question = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "what does the retry loop do?",
+        agentId: "codex",
+        validationCommands: [],
+        kind: "question",
+        answerTo: "msg_root",
+      });
+
+      const read = await store.getSubmittedTask(work.id);
+      assert.equal(read?.id, work.id);
+      assert.equal(read?.objective, "fix the retry loop");
+      assert.equal(read?.status, "submitted");
+      assert.equal(read?.kind, "task");
+
+      const asked = await store.getSubmittedTask(question.id);
+      assert.equal(asked?.id, question.id);
+      assert.equal(asked?.kind, "question");
+      assert.equal(asked?.answerTo, "msg_root");
+
+      // An id nobody issued is absent rather than an error, so a caller
+      // polling a task somebody else cancelled gets an answer.
+      assert.equal(await store.getSubmittedTask("task_nonexistent"), undefined);
+
+      // Detached, like every other read here: editing what came back must not
+      // reach into the store's own copy.
+      const mutable = await store.getSubmittedTask(work.id);
+      assert.ok(mutable);
+      mutable.objective = "something else entirely";
+      assert.equal(
+        (await store.getSubmittedTask(work.id))?.objective,
+        "fix the retry loop",
+      );
+
+      // It follows the row rather than snapshotting it.
+      await store.cancelSubmittedTask(work.id);
+      assert.equal((await store.getSubmittedTask(work.id))?.status, "cancelled");
+    } finally {
       await cleanup();
     }
   });
@@ -1663,6 +1762,177 @@ for (const backend of backends) {
    * organization may be named, and this decides that naming it actually
    * bounds the rows.
    */
+  /**
+   * `registerWorker` writes a fresh row on every worker start, with no upsert
+   * and nothing anywhere deleting them, so the table grew with restarts rather
+   * than with machines. Every roster read and every @mention then loaded all of
+   * it to answer "who is online", which made the commonest query in the product
+   * scale with how often people had reopened their desktops.
+   *
+   * Two rules fix it, and both have to hold in all three backends or the one a
+   * real deployment runs keeps the leak.
+   */
+  test(`${backend.name}: a restart retires the machine's dead row`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "restarts@example.invalid",
+        displayName: "Owner",
+        passwordDigest: "unused",
+      });
+      const machine = {
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "the-same-laptop",
+        adapters: ["codex"],
+        version: "1",
+      };
+      const long = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+      const first = await store.registerWorker(machine);
+      // Aged deliberately rather than waited for: the row has to be past the
+      // retirement window, and the window is half an hour.
+      await store.touchWorker(first.id, long);
+      const second = await store.registerWorker(machine);
+
+      assert.deepEqual(
+        (await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID }))
+          .map((worker) => worker.id),
+        [second.id],
+        "the dead row should be gone and the new one kept",
+      );
+
+      // A different machine belonging to the same person is untouched. The
+      // retirement is per machine, not a sweep of everything that owner has.
+      const other = await store.registerWorker({ ...machine, name: "a-desktop" });
+      await store.touchWorker(second.id, long);
+      const third = await store.registerWorker(machine);
+      assert.deepEqual(
+        new Set(
+          (await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID }))
+            .map((worker) => worker.id),
+        ),
+        new Set([other.id, third.id]),
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a worker that took a task is kept, however old`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "worked@example.invalid",
+        displayName: "Owner",
+        passwordDigest: "unused",
+      });
+      await store.saveRepository(REPOSITORY);
+      const machine = {
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "did-some-work",
+        adapters: ["codex"],
+        version: "1",
+      };
+
+      const first = await store.registerWorker(machine);
+      const task = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "something that happened",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const leased = await store.leaseNextTask({
+        workerId: first.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      });
+      assert.equal(leased?.task.id, task.id);
+      // Finished, so nothing about this row is still in use. It is history
+      // rather than litter, and `work_leases.worker_id` is a foreign key: the
+      // SQL stores could not delete it even if the rule said to.
+      await store.finishWorkLease(
+        leased!.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+      await store.touchWorker(
+        first.id,
+        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      );
+
+      const second = await store.registerWorker(machine);
+      assert.deepEqual(
+        new Set(
+          (await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID }))
+            .map((worker) => worker.id),
+        ),
+        new Set([first.id, second.id]),
+        "a worker referenced by a lease must survive",
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: listWorkers can be asked only for live machines`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "live@example.invalid",
+        displayName: "Owner",
+        passwordDigest: "unused",
+      });
+      const base = {
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        adapters: ["codex"],
+        version: "1",
+      };
+      const stale = await store.registerWorker({ ...base, name: "stale" });
+      const fresh = await store.registerWorker({ ...base, name: "fresh" });
+      const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      await store.touchWorker(stale.id, hourAgo);
+
+      const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+      assert.deepEqual(
+        (
+          await store.listWorkers({
+            organizationId: DEFAULT_ORGANIZATION_ID,
+            seenAfter: cutoff,
+          })
+        ).map((worker) => worker.id),
+        [fresh.id],
+      );
+
+      // Strictly after, so a row seen exactly at the cutoff is out. The
+      // gateway's own liveness test used `<=` on the same comparison, and the
+      // two answering differently would be a difference nobody could see.
+      assert.deepEqual(
+        (
+          await store.listWorkers({
+            organizationId: DEFAULT_ORGANIZATION_ID,
+            seenAfter: hourAgo,
+          })
+        ).map((worker) => worker.id),
+        [fresh.id],
+      );
+
+      // Unasked, the filter does not apply, so the fleet view still shows a
+      // machine that is merely asleep.
+      assert.equal(
+        (await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID }))
+          .length,
+        2,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: workers list only within their organization`, async () => {
     const { store, cleanup } = await backend.open();
     try {
@@ -2001,6 +2271,8 @@ for (const backend of backends) {
         scopes: ["view", "run_task"],
         createdAt: "2026-01-01T00:00:00.000Z",
         createdBySession: "auth_1",
+        createdByToken: undefined,
+    editorVendor: undefined,
         expiresAt: "2026-06-01T00:00:00.000Z",
         lastUsedAt: undefined,
         lastUsedIp: undefined,
@@ -2016,6 +2288,8 @@ for (const backend of backends) {
         scopes: ["view"],
         createdAt: "2025-01-01T00:00:00.000Z",
         createdBySession: undefined,
+        createdByToken: undefined,
+    editorVendor: undefined,
         expiresAt: "2025-02-01T00:00:00.000Z",
         lastUsedAt: undefined,
         lastUsedIp: undefined,
@@ -5810,6 +6084,709 @@ for (const backend of backends) {
         stranger.id,
       );
       assert.equal(forStranger[general.id], 3, JSON.stringify(forStranger));
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  // ---- MCP servers -------------------------------------------------------
+  //
+  // One test per property, so a failure names the place the three stores
+  // drifted rather than "the MCP server test".
+
+  test(`${backend.name}: an MCP server's args read back as an array and values as an object`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(
+        mcpServer({
+          id: "mcp_shape",
+          name: "shape",
+          args: ["--port", "8080"],
+          values: { A: "1", B: "2" },
+        }),
+      );
+      // SQLite keeps both as JSON text; the classic drift is that text
+      // coming back unparsed, which a string-versus-array `deepEqual`
+      // failure would report as a mismatch rather than as a type.
+      for (const record of [
+        await store.getMcpServer("mcp_shape"),
+        ...(await store.listMcpServers(DEFAULT_PROJECT_ID)),
+      ]) {
+        const read = present(record, "mcp_shape");
+        assert.ok(Array.isArray(read.args), `args is ${typeof read.args}`);
+        assert.deepEqual(read.args, ["--port", "8080"]);
+        assert.equal(typeof read.values, "object", `values is ${typeof read.values}`);
+        assert.deepEqual(read.values, { A: "1", B: "2" });
+        assert.ok(Array.isArray(read.secretNames), "secretNames is not an array");
+        assert.ok(Array.isArray(read.repositoryIds), "repositoryIds is not an array");
+      }
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an MCP server is created disabled and only approval enables it`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const created = await store.createMcpServer(
+        mcpServer({ id: "mcp_flag", name: "flag" }),
+      );
+      // Strict on purpose throughout: SQLite stores 0/1, and a mapper that
+      // forgets to convert passes every truthiness check and fails the
+      // first `=== true` in a caller.
+      assert.strictEqual(created.enabled, false);
+      assert.strictEqual(
+        present(await store.getMcpServer("mcp_flag"), "mcp_flag").enabled,
+        false,
+      );
+      assert.equal(created.approvedBy, undefined);
+      assert.equal(created.approvedAt, undefined);
+
+      const approved = await store.setMcpServerApproval("mcp_flag", {
+        enabled: true,
+        approvedBy: "user_admin",
+        approvedAt: "2026-01-02T00:00:00.000Z",
+      });
+      assert.strictEqual(approved.enabled, true);
+      const read = present(await store.getMcpServer("mcp_flag"), "mcp_flag");
+      assert.strictEqual(read.enabled, true);
+      assert.equal(read.approvedBy, "user_admin");
+      assert.equal(read.approvedAt, "2026-01-02T00:00:00.000Z");
+      for (const listed of await store.listMcpServers(DEFAULT_PROJECT_ID)) {
+        assert.strictEqual(listed.enabled, true);
+      }
+
+      // An ordinary edit cannot move the flag in either direction.
+      const edited = await store.updateMcpServer("mcp_flag", {
+        args: ["--verbose"],
+        updatedAt: "2026-01-03T00:00:00.000Z",
+      });
+      assert.strictEqual(edited.enabled, true);
+      assert.equal(edited.approvedBy, "user_admin");
+      assert.equal(edited.approvedAt, "2026-01-02T00:00:00.000Z");
+
+      const disabled = await store.setMcpServerApproval("mcp_flag", {
+        enabled: false,
+        approvedBy: "user_other",
+        approvedAt: "2026-01-04T00:00:00.000Z",
+      });
+      assert.strictEqual(disabled.enabled, false);
+      assert.equal(disabled.approvedBy, undefined);
+      assert.equal(disabled.approvedAt, undefined);
+      const reread = present(await store.getMcpServer("mcp_flag"), "mcp_flag");
+      assert.strictEqual(reread.enabled, false);
+      assert.equal(reread.approvedBy, undefined);
+      assert.equal(reread.approvedAt, undefined);
+
+      await assert.rejects(
+        store.setMcpServerApproval("mcp_missing", {
+          enabled: true,
+          approvedBy: "user_admin",
+          approvedAt: "2026-01-05T00:00:00.000Z",
+        }),
+        /Unknown MCP server/,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: reaching a server from an editor is a second, separate opt-in`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(mcpServer({ id: "mcp_edit", name: "linear" }));
+      // Strict, because SQLite stores 0/1 and Postgres a boolean: a mapper
+      // that forgets to convert passes every truthiness check and fails the
+      // first `=== true` in a caller.
+      assert.strictEqual(
+        present(await store.getMcpServer("mcp_edit"), "mcp_edit").editorEnabled,
+        false,
+      );
+
+      // Approving a server for agents does not open it to editors. They are
+      // different decisions: one runs a process on a teammate's laptop after
+      // that machine consents, the other has the control plane dial the
+      // server with the project's secrets for whoever is typing.
+      await store.setMcpServerApproval("mcp_edit", {
+        enabled: true,
+        approvedBy: "user_admin",
+        approvedAt: "2026-01-02T00:00:00.000Z",
+      });
+      assert.strictEqual(
+        present(await store.getMcpServer("mcp_edit"), "mcp_edit").editorEnabled,
+        false,
+      );
+      assert.deepEqual(
+        await store.listMcpServers(DEFAULT_PROJECT_ID, {
+          editorEnabledOnly: true,
+        }),
+        [],
+      );
+
+      const opened = await store.setMcpServerEditorAccess(
+        "mcp_edit",
+        true,
+        "2026-01-03T00:00:00.000Z",
+      );
+      assert.strictEqual(opened.editorEnabled, true);
+      assert.strictEqual(opened.enabled, true);
+      assert.deepEqual(
+        (
+          await store.listMcpServers(DEFAULT_PROJECT_ID, {
+            editorEnabledOnly: true,
+          })
+        ).map((entry) => entry.id),
+        ["mcp_edit"],
+      );
+
+      // An ordinary edit moves neither flag, exactly as it moves neither
+      // half of the approval.
+      const edited = await store.updateMcpServer("mcp_edit", {
+        args: ["--verbose"],
+        updatedAt: "2026-01-04T00:00:00.000Z",
+      });
+      assert.strictEqual(edited.editorEnabled, true);
+
+      // Withdrawing the approval takes the editor's reach with it. Anything
+      // else leaves a server the approval screen shows as off still being
+      // dialled by the control plane.
+      const withdrawn = await store.setMcpServerApproval("mcp_edit", {
+        enabled: false,
+        approvedBy: "user_admin",
+        approvedAt: "2026-01-05T00:00:00.000Z",
+      });
+      assert.strictEqual(withdrawn.enabled, false);
+      assert.strictEqual(withdrawn.editorEnabled, false);
+      assert.strictEqual(
+        present(await store.getMcpServer("mcp_edit"), "mcp_edit").editorEnabled,
+        false,
+      );
+
+      // And it cannot be granted back while the approval is off: that would
+      // be arming the server through a door the approval screen does not show.
+      await assert.rejects(
+        store.setMcpServerEditorAccess("mcp_edit", true, "2026-01-06T00:00:00.000Z"),
+        /not approved/,
+      );
+      // Revoking something already revoked is not an error, so a screen can
+      // send the state it wants rather than the change it computed.
+      assert.strictEqual(
+        (
+          await store.setMcpServerEditorAccess(
+            "mcp_edit",
+            false,
+            "2026-01-07T00:00:00.000Z",
+          )
+        ).editorEnabled,
+        false,
+      );
+      await assert.rejects(
+        store.setMcpServerEditorAccess("mcp_missing", true, "2026-01-08T00:00:00.000Z"),
+        /Unknown MCP server/,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an MCP server's name is unique per project, ignoring case`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(mcpServer({ id: "mcp_a", name: "Linear" }));
+      await assert.rejects(
+        store.createMcpServer(mcpServer({ id: "mcp_b", name: "linear" })),
+        /already/,
+      );
+      await assert.rejects(
+        store.createMcpServer(mcpServer({ id: "mcp_c", name: "Linear" })),
+        /already/,
+      );
+      // The loser left nothing behind.
+      assert.equal(await store.getMcpServer("mcp_b"), undefined);
+      assert.equal(await store.getMcpServer("mcp_c"), undefined);
+
+      const other = await store.createProject({
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        slug: "other-mcp",
+        name: "Other",
+      });
+      const elsewhere = await store.createMcpServer(
+        mcpServer({ id: "mcp_d", name: "linear", projectId: other.id }),
+      );
+      assert.equal(elsewhere.name, "linear");
+      assert.equal(elsewhere.projectId, other.id);
+
+      // Renaming onto a taken name is the same collision; changing only the
+      // casing of your own name is not.
+      await store.createMcpServer(mcpServer({ id: "mcp_e", name: "github" }));
+      await assert.rejects(
+        store.updateMcpServer("mcp_e", {
+          name: "LINEAR",
+          updatedAt: "2026-01-02T00:00:00.000Z",
+        }),
+        /already/,
+      );
+      assert.equal(
+        (
+          await store.updateMcpServer("mcp_a", {
+            name: "LINEAR",
+            updatedAt: "2026-01-02T00:00:00.000Z",
+          })
+        ).name,
+        "LINEAR",
+      );
+
+      await assert.rejects(
+        store.createMcpServer(
+          mcpServer({ id: "mcp_f", name: "orphan", projectId: "project_missing" }),
+        ),
+        /Unknown project/,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: MCP servers list in name order regardless of insertion`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      // Ids, insertion order and byte order of the names all disagree with
+      // the expected order, so nothing but sorting by folded name passes.
+      await store.createMcpServer(mcpServer({ id: "mcp_a", name: "linear" }));
+      await store.createMcpServer(mcpServer({ id: "mcp_b", name: "Sentry" }));
+      await store.createMcpServer(mcpServer({ id: "mcp_c", name: "github" }));      // Case-folded: a name is unique ignoring case, so it is listed
+      // ignoring case too, rather than every capital sorting first.
+      assert.deepEqual(
+        (await store.listMcpServers(DEFAULT_PROJECT_ID)).map((server) => server.name),
+        ["github", "linear", "Sentry"],
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an MCP server lets go of a repository that is removed or unlinked`, async () => {
+    // The join row is the only thing that says "this server runs for that
+    // repository". Repository ids are derived from folder names and reused,
+    // so a row that outlived its repository would hand an approved server —
+    // secrets and all — to whatever checkout next took the same id, with
+    // nobody having attached it.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(
+        mcpServer({
+          id: "mcp_gone",
+          name: "gone-with-repo",
+          scope: "repository",
+          repositoryIds: ["r1", "r2"],
+        }),
+      );
+      await store.setMcpServerApproval("mcp_gone", {
+        enabled: true,
+        approvedBy: "user_owner",
+        approvedAt: "2026-01-01T00:00:00.000Z",
+      });
+      const attachedTo = async (repositoryId: string): Promise<string[]> =>
+        (
+          await store.listMcpServers(DEFAULT_PROJECT_ID, {
+            repositoryId,
+            enabledOnly: true,
+          })
+        ).map((server) => server.id);
+      assert.deepEqual(await attachedTo("r1"), ["mcp_gone"]);
+
+      await store.removeRepository("r1");
+      assert.deepEqual(await attachedTo("r1"), []);
+      assert.deepEqual(
+        present(await store.getMcpServer("mcp_gone"), "mcp_gone").repositoryIds,
+        ["r2"],
+      );
+
+      // Unlinking from the project is the same fact from the project's side.
+      await store.unlinkRepository(DEFAULT_PROJECT_ID, "r2");
+      assert.deepEqual(await attachedTo("r2"), []);
+      assert.deepEqual(
+        present(await store.getMcpServer("mcp_gone"), "mcp_gone").repositoryIds,
+        [],
+      );
+      // Still there, still approved: what went was the attachment, not the
+      // server or the decision about it.
+      assert.equal(present(await store.getMcpServer("mcp_gone"), "mcp_gone").enabled, true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: MCP servers attach by scope and repository`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(
+        mcpServer({
+          id: "mcp_repo",
+          name: "beta-repo",
+          scope: "repository",
+          repositoryIds: ["r1"],
+        }),
+      );
+      await store.createMcpServer(
+        mcpServer({ id: "mcp_proj", name: "alpha-project", scope: "project" }),
+      );
+      await store.createMcpServer(
+        mcpServer({ id: "mcp_none", name: "gamma-unattached", scope: "repository" }),
+      );
+      // Another project's servers never appear, whatever the filter.
+      const other = await store.createProject({
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        slug: "other-scope",
+        name: "Other",
+      });
+      await store.createMcpServer(
+        mcpServer({
+          id: "mcp_elsewhere",
+          name: "aaa-elsewhere",
+          projectId: other.id,
+          scope: "project",
+        }),
+      );
+      const ids = async (
+        filter?: { repositoryId?: string; enabledOnly?: boolean },
+      ): Promise<string[]> =>
+        (await store.listMcpServers(DEFAULT_PROJECT_ID, filter)).map(
+          (server) => server.id,
+        );
+
+      assert.deepEqual(await ids(), ["mcp_proj", "mcp_repo", "mcp_none"]);
+      assert.deepEqual(await ids({ repositoryId: "r1" }), ["mcp_proj", "mcp_repo"]);
+      assert.deepEqual(await ids({ repositoryId: "r2" }), ["mcp_proj"]);
+      const repoScoped = present(await store.getMcpServer("mcp_repo"), "mcp_repo");
+      assert.equal(repoScoped.scope, "repository");
+      assert.deepEqual(repoScoped.repositoryIds, ["r1"]);
+      assert.equal(
+        present(await store.getMcpServer("mcp_none"), "mcp_none").scope,
+        "repository",
+      );
+
+      await store.setMcpServerApproval("mcp_repo", {
+        enabled: true,
+        approvedBy: "user_admin",
+        approvedAt: "2026-01-02T00:00:00.000Z",
+      });
+      assert.deepEqual(await ids({ enabledOnly: true }), ["mcp_repo"]);
+      assert.deepEqual(await ids({ repositoryId: "r1", enabledOnly: true }), ["mcp_repo"]);
+      assert.deepEqual(await ids({ repositoryId: "r2", enabledOnly: true }), []);
+      assert.deepEqual(await ids({ enabledOnly: false }), ["mcp_proj", "mcp_repo", "mcp_none"]);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an ordinary MCP server read names its secrets and carries nothing else`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const secrets = {
+        LINEAR_API_KEY: sealed("linear"),
+        ZULU_TOKEN: sealed("zulu"),
+        ALPHA: sealed("alpha"),
+      };
+      await store.createMcpServer(
+        mcpServer({ id: "mcp_secret", name: "secret", secrets }),
+      );
+      const record = present(await store.getMcpServer("mcp_secret"), "mcp_secret");
+      assert.deepEqual(record.secretNames, ["ALPHA", "LINEAR_API_KEY", "ZULU_TOKEN"]);
+      const [listed] = await store.listMcpServers(DEFAULT_PROJECT_ID);
+      assert.deepEqual(listed?.secretNames, ["ALPHA", "LINEAR_API_KEY", "ZULU_TOKEN"]);
+
+      // Nothing that looks like a sealed secret is anywhere in the record —
+      // not the ciphertext, and not the shape that would carry one.
+      for (const json of [JSON.stringify(record), JSON.stringify(listed)]) {
+        assert.ok(!json.includes("ciphertext-"), json);
+        for (const field of ["iv", "tag", "ciphertext", "secrets"]) {
+          assert.ok(!json.includes(`"${field}"`), `${field} in ${json}`);
+        }
+      }
+
+      // The one read that does carry them returns exactly what was stored.
+      assert.deepEqual(await store.getMcpServerSecrets("mcp_secret"), secrets);
+      assert.equal(await store.getMcpServerSecrets("mcp_missing"), undefined);
+
+      // No secrets is an empty map, not a missing one.
+      await store.createMcpServer(mcpServer({ id: "mcp_bare", name: "bare" }));
+      assert.deepEqual(
+        present(await store.getMcpServer("mcp_bare"), "mcp_bare").secretNames,
+        [],
+      );
+      assert.deepEqual(await store.getMcpServerSecrets("mcp_bare"), {});
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an MCP server's secrets patch replaces, removes, and leaves alone`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(
+        mcpServer({
+          id: "mcp_patch",
+          name: "patch",
+          secrets: { A: sealed("a"), B: sealed("b") },
+        }),
+      );
+
+      const removed = await store.updateMcpServer("mcp_patch", {
+        secrets: { A: null },
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      });
+      assert.deepEqual(removed.secretNames, ["B"]);
+      assert.deepEqual(await store.getMcpServerSecrets("mcp_patch"), { B: sealed("b") });
+
+      const replaced = await store.updateMcpServer("mcp_patch", {
+        secrets: { B: sealed("b2"), C: sealed("c") },
+        updatedAt: "2026-01-03T00:00:00.000Z",
+      });
+      assert.deepEqual(replaced.secretNames, ["B", "C"]);
+      assert.deepEqual(await store.getMcpServerSecrets("mcp_patch"), {
+        B: sealed("b2"),
+        C: sealed("c"),
+      });
+
+      // A patch that says nothing about secrets leaves them exactly alone,
+      // and removing a name that was never set is not an error.
+      await store.updateMcpServer("mcp_patch", {
+        args: [],
+        updatedAt: "2026-01-04T00:00:00.000Z",
+      });
+      await store.updateMcpServer("mcp_patch", {
+        secrets: { NEVER_SET: null },
+        updatedAt: "2026-01-05T00:00:00.000Z",
+      });
+      assert.deepEqual(await store.getMcpServerSecrets("mcp_patch"), {
+        B: sealed("b2"),
+        C: sealed("c"),
+      });
+      assert.deepEqual(
+        present(await store.getMcpServer("mcp_patch"), "mcp_patch").secretNames,
+        ["B", "C"],
+      );
+
+      await assert.rejects(
+        store.updateMcpServer("mcp_missing", {
+          updatedAt: "2026-01-06T00:00:00.000Z",
+        }),
+        /Unknown MCP server/,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an MCP server edit patches what it names and clears with null`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const created = await store.createMcpServer(
+        mcpServer({ id: "mcp_edit", name: "edit" }),
+      );
+      assert.equal(created.command, "npx");
+      assert.equal(created.url, undefined);
+      assert.equal(created.updatedAt, created.createdAt);
+
+      const edited = await store.updateMcpServer("mcp_edit", {
+        name: "renamed",
+        command: null,
+        url: "https://mcp.example.invalid/sse",
+        args: ["--flag"],
+        values: { "X-Token-Header": "X-Token" },
+        scope: "project",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      });
+      assert.equal(edited.name, "renamed");
+      assert.equal(edited.command, undefined);
+      assert.equal(edited.url, "https://mcp.example.invalid/sse");
+      assert.deepEqual(edited.args, ["--flag"]);
+      assert.deepEqual(edited.values, { "X-Token-Header": "X-Token" });
+      assert.equal(edited.scope, "project");
+      assert.equal(edited.updatedAt, "2026-01-02T00:00:00.000Z");
+      assert.equal(edited.createdAt, created.createdAt);
+      assert.equal(edited.createdBy, created.createdBy);
+      assert.equal(edited.transport, created.transport);
+      assert.deepEqual(await store.getMcpServer("mcp_edit"), edited);
+
+      // An empty patch changes nothing but the timestamp, and null clears
+      // the other way too.
+      const untouched = await store.updateMcpServer("mcp_edit", {
+        url: null,
+        updatedAt: "2026-01-03T00:00:00.000Z",
+      });
+      const { url: _cleared, ...editedWithoutUrl } = edited;
+      assert.deepEqual(untouched, {
+        ...editedWithoutUrl,
+        updatedAt: "2026-01-03T00:00:00.000Z",
+      });
+      // Cleared means the key is gone, not present holding `undefined`:
+      // `deepEqual` above is strict about that, and so is JSON.
+      assert.equal("url" in untouched, false);    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an MCP server's repository list replaces wholesale`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const created = await store.createMcpServer(
+        mcpServer({
+          id: "mcp_join",
+          name: "join",
+          scope: "repository",
+          repositoryIds: ["r2", "r1", "r1"],
+        }),
+      );
+      // Sorted and deduplicated on the way in, whichever backend wrote it.
+      assert.deepEqual(created.repositoryIds, ["r1", "r2"]);
+      const attached = async (repositoryId: string): Promise<string[]> =>
+        (await store.listMcpServers(DEFAULT_PROJECT_ID, { repositoryId })).map(
+          (server) => server.id,
+        );
+      assert.deepEqual(await attached("r1"), ["mcp_join"]);
+      assert.deepEqual(await attached("r2"), ["mcp_join"]);
+
+      const moved = await store.updateMcpServer("mcp_join", {
+        repositoryIds: ["r3"],
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      });
+      assert.deepEqual(moved.repositoryIds, ["r3"]);
+      assert.deepEqual(await attached("r1"), []);
+      assert.deepEqual(await attached("r2"), []);
+      assert.deepEqual(await attached("r3"), ["mcp_join"]);
+
+      // The list survives an edit that does not mention it.
+      await store.updateMcpServer("mcp_join", {
+        args: [],
+        updatedAt: "2026-01-03T00:00:00.000Z",
+      });
+      assert.deepEqual(
+        present(await store.getMcpServer("mcp_join"), "mcp_join").repositoryIds,
+        ["r3"],
+      );
+
+      const detached = await store.updateMcpServer("mcp_join", {
+        repositoryIds: [],
+        updatedAt: "2026-01-04T00:00:00.000Z",
+      });
+      assert.deepEqual(detached.repositoryIds, []);
+      assert.deepEqual(await attached("r3"), []);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: deleting an MCP server removes its attachments, and twice is fine`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.createMcpServer(
+        mcpServer({
+          id: "mcp_gone",
+          name: "gone",
+          scope: "repository",
+          repositoryIds: ["r1"],
+          secrets: { A: sealed("a") },
+        }),
+      );
+      await store.deleteMcpServer("mcp_gone");
+      assert.equal(await store.getMcpServer("mcp_gone"), undefined);
+      assert.equal(await store.getMcpServerSecrets("mcp_gone"), undefined);
+      assert.deepEqual(await store.listMcpServers(DEFAULT_PROJECT_ID), []);
+      assert.deepEqual(
+        await store.listMcpServers(DEFAULT_PROJECT_ID, { repositoryId: "r1" }),
+        [],
+      );
+
+      await store.deleteMcpServer("mcp_gone");
+      await store.deleteMcpServer("mcp_never_existed");
+
+      // The attachments went with the row, not just the row: a server
+      // re-created under the same id with no repositories attaches to none.
+      const again = await store.createMcpServer(
+        mcpServer({ id: "mcp_gone", name: "gone", scope: "repository" }),
+      );
+      assert.deepEqual(again.repositoryIds, []);
+      assert.deepEqual(again.secretNames, []);
+      assert.deepEqual(
+        await store.listMcpServers(DEFAULT_PROJECT_ID, { repositoryId: "r1" }),
+        [],
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: MCP server reads are detached snapshots`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const args = ["a"];
+      const values: Record<string, string> = { K: "v" };
+      const secrets: Record<string, SealedSecret> = { S: sealed("s") };
+      const repositoryIds = ["r1"];
+      const created = await store.createMcpServer(
+        mcpServer({
+          id: "mcp_detached",
+          name: "detached",
+          args,
+          values,
+          secrets,
+          scope: "repository",
+          repositoryIds,
+        }),
+      );
+      const snapshot = structuredClone(created);
+
+      // Mutating what went in changes nothing that was stored...
+      args.push("b");
+      values["K"] = "changed";
+      secrets["S"] = sealed("tampered");
+      repositoryIds.push("r2");
+      assert.deepEqual(await store.getMcpServer("mcp_detached"), snapshot);
+      assert.deepEqual(await store.getMcpServerSecrets("mcp_detached"), {
+        S: sealed("s"),
+      });
+
+      // ...and neither does mutating what came out, by any read.
+      created.args.push("z");
+      created.secretNames.push("LEAK");
+      const read = present(await store.getMcpServer("mcp_detached"), "mcp_detached");
+      read.args.push("z");
+      read.values["Z"] = "z";
+      read.secretNames.push("LEAK");
+      read.repositoryIds.push("r9");
+      read.name = "renamed";
+      read.enabled = true;
+      const [listed] = await store.listMcpServers(DEFAULT_PROJECT_ID);
+      present(listed, "listed").args.push("from-list");
+      const opened = present(
+        await store.getMcpServerSecrets("mcp_detached"),
+        "secrets",
+      );
+      opened["S"] = sealed("rewritten");
+      opened["T"] = sealed("added");
+
+      assert.deepEqual(await store.getMcpServer("mcp_detached"), snapshot);
+      assert.deepEqual(
+        (await store.listMcpServers(DEFAULT_PROJECT_ID))[0],
+        snapshot,
+      );
+      assert.deepEqual(await store.getMcpServerSecrets("mcp_detached"), {
+        S: sealed("s"),
+      });
     } finally {
       await store.close();
       await cleanup();

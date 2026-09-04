@@ -352,6 +352,20 @@ export const state = {
   newApiToken: undefined,
 
   /**
+   * MCP servers this project has registered, and whether the deployment lets
+   * it register any.
+   *
+   * `mcpServersEnabled` starts undefined rather than false so the section can
+   * tell an unanswered question apart from a deployment that answered no: the
+   * first draws nothing worth acting on, the second explains the switch that
+   * is off.
+   * Secrets are never in here — the list route hands back their names and
+   * nothing else, so there is nothing a stale render could leak.
+   */
+  mcpServers: [],
+  mcpServersEnabled: undefined,
+
+  /**
    * Which colour wheel is open in Appearance, by its `data-act` prefix, or
    * `undefined` for none. One at a time: two discs on screen at once invite
    * dragging on the wrong one, and a settings card that is mostly pickers
@@ -656,6 +670,13 @@ export const state = {
    * closed, so every new turn starts folded until the reader opens it.
    */
   thinkingOpen: {},
+  /**
+   * Which adapters this computer was detected with, and what each editor's
+   * connect button last said. Both are per-session: the scan is cheap and a
+   * remembered "Connected" would outlive somebody moving to another machine.
+   */
+  machineAgents: undefined,
+  editorConnected: {},
   /** Whether a summary is unfolded, keyed by reply id. Absent means open. */
   summaryOpen: {},
   /**
@@ -2335,9 +2356,183 @@ export async function createApiToken(name) {
   return response.token;
 }
 
+/**
+ * What an editor connected to Kumi's MCP endpoint is allowed to do.
+ *
+ * Deliberately not {@link DESKTOP_TOKEN_SCOPES}. That set carries `run_task`,
+ * which is also what registering as a *worker* requires — so a token handed
+ * to an editor for filing work could instead register as a machine and lease
+ * other people's tasks. An editor needs to read the roster and submit, and
+ * `cancel_task` is authorised as `submit_task` for exactly this reason.
+ */
+export const EDITOR_TOKEN_SCOPES = ["view", "submit_task"];
+
+/**
+ * Mints a token for one editor on one machine, and hands it back once.
+ *
+ * One per editor per machine, rather than one shared secret: revoking the
+ * laptop you left on a train should not silently break the desktop you are
+ * sitting at. The name says which is which in the tokens list, because a
+ * screen full of identical rows is a screen where nobody dares revoke
+ * anything — which is what yours already looks like.
+ */
+export async function createEditorToken(label, vendor) {
+  try {
+    const response = await api("/auth/tokens", {
+      method: "POST",
+      // The vendor is recorded on the token, not only in its name. It is what
+      // lets Kumi answer a request from Codex as Codex, so a person who asks
+      // for work without naming anybody gets their own agent rather than
+      // whichever one the model picked off the roster.
+      body: {
+        name: label,
+        scopes: [...EDITOR_TOKEN_SCOPES],
+        ...(vendor === undefined ? {} : { editorVendor: vendor }),
+      },
+    });
+    await loadApiTokens();
+    return { token: response.token, readOnly: false };
+  } catch (error) {
+    if (error.code !== "scope_exceeds_role") {
+      throw error;
+    }
+  }
+  // A viewer cannot submit tasks, and a token must never grant what its owner
+  // does not have. But refusing outright made connecting an editor an
+  // owner-only act, which it is not: reading the roster and following a task
+  // are exactly what a viewer may do, and they are most of what an editor is
+  // for. So the connection is made read-only rather than refused, and the
+  // caller says so — a silent downgrade would be worse than the refusal it
+  // replaces.
+  const response = await api("/auth/tokens", {
+    method: "POST",
+    body: {
+      name: `${label} (read-only)`,
+      scopes: ["view"],
+      ...(vendor === undefined ? {} : { editorVendor: vendor }),
+    },
+  });
+  await loadApiTokens();
+  return { token: response.token, readOnly: true };
+}
+
 export async function revokeApiToken(id) {
   await api(`/auth/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
   await loadApiTokens();
+}
+
+/* -------------------------------------------------------- mcp servers ---- */
+
+/**
+ * Loads the project's MCP servers and the deployment's switch for them.
+ *
+ * Always a fresh read, the way the token list is: every mutation below calls
+ * it afterwards so the list on screen is the list the server holds, and an
+ * approval somebody else recorded a moment ago shows up rather than being
+ * papered over by a cached copy. `apiOptional` because a control plane built
+ * without this feature answers 501, and a settings section that blanks the
+ * dialog over an optional capability is worse than one that says so.
+ */
+export async function ensureMcpServers(projectId) {
+  if (!projectId) {
+    state.mcpServers = [];
+    state.mcpServersEnabled = false;
+    return state.mcpServers;
+  }
+  const response = await apiOptional(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers`,
+    { servers: [], enabled: false },
+  );
+  state.mcpServers = response.servers ?? [];
+  state.mcpServersEnabled = response.enabled === true;
+  return state.mcpServers;
+}
+
+/**
+ * The secrets textarea, one `NAME=value` per line, as the object the create
+ * route takes.
+ *
+ * Split on the first `=` only: a token that itself contains `=` (base64 does,
+ * routinely) would otherwise be cut short and fail on the agent's machine
+ * with no hint why. Blank lines and lines without `=` are ignored rather than
+ * refused, so a trailing newline is not an error. Names are trimmed, values
+ * are not — a leading space in a secret is unusual but it is the person's.
+ */
+export function parseMcpSecrets(text) {
+  const secrets = {};
+  for (const line of String(text ?? "").split(/\r?\n/u)) {
+    const at = line.indexOf("=");
+    if (at <= 0) {
+      continue;
+    }
+    const name = line.slice(0, at).trim();
+    if (name === "") {
+      continue;
+    }
+    secrets[name] = line.slice(at + 1);
+  }
+  return secrets;
+}
+
+/** The args field, space-separated, as the list the command is started with. */
+export function parseMcpArgs(text) {
+  return String(text ?? "")
+    .split(/\s+/u)
+    .filter((arg) => arg.length > 0);
+}
+
+/**
+ * Registers a server. Secrets go up in plain text over the request and are
+ * sealed on arrival; nothing here holds them after the call, and the server
+ * record that comes back carries only their names.
+ */
+export async function createMcpServer(projectId, input) {
+  const response = await api(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers`,
+    { method: "POST", body: input },
+  );
+  await ensureMcpServers(projectId);
+  return response.server;
+}
+
+/**
+ * Records that this person approves (or withdraws approval for) a server
+ * running on teammates' computers. A recorded act rather than a flag flip,
+ * which is why it has its own route instead of riding on PATCH.
+ */
+export async function approveMcpServer(projectId, id, enabled) {
+  const response = await api(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}/approval`,
+    { method: "POST", body: { enabled } },
+  );
+  await ensureMcpServers(projectId);
+  return response.server;
+}
+
+/**
+ * Opens (or closes) a server to editors connected over MCP.
+ *
+ * A second act, deliberately not folded into approval. Approving means the
+ * server runs on a teammate's own computer, beside an agent, after that
+ * computer has said yes. This means Kumi itself calls the server, with the
+ * project's key, for whoever is typing in Cursor. Different thing, different
+ * button.
+ */
+export async function shareMcpServerWithEditors(projectId, id, enabled) {
+  const response = await api(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}/editor-access`,
+    { method: "POST", body: { enabled } },
+  );
+  await ensureMcpServers(projectId);
+  return response.server;
+}
+
+export async function deleteMcpServer(projectId, id) {
+  await api(
+    `/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  await ensureMcpServers(projectId);
 }
 
 /* -------------------------------------------------------- invitations ---- */
@@ -6270,6 +6465,10 @@ export async function renameRepository(repositoryId, name) {
     } else {
       repository.displayName = response?.repository?.displayName ?? trimmed;
     }
+    // The resolved name the gateway sends alongside it, kept in step for the
+    // same reason: a row left holding the name it had before the rename is
+    // worse than one holding no name at all.
+    repository.name = response?.repository?.name ?? repositoryLabel(repositoryId);
   }
   return response?.repository;
 }
@@ -6278,6 +6477,11 @@ export async function renameRepository(repositoryId, name) {
  * What to call a repository on screen: its display name once somebody has
  * renamed it, and its id — which is what every repository is called until
  * then — otherwise.
+ *
+ * The same resolution the gateway now ships as `name`, done here as well
+ * rather than read from there, because a rename is applied to this record
+ * optimistically and the local answer has to be right before the refetch
+ * lands.
  */
 export function repositoryLabel(repositoryId) {
   const repository = state.repositories.find((repo) => repo.id === repositoryId);

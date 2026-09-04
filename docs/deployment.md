@@ -60,8 +60,9 @@ the web UI.
 | `COORD_ALLOWED_ORIGINS` | Comma-separated browser origins allowed CORS access, for a UI hosted on a different origin. | none |
 | `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. Read once at boot and then removed from the process environment, so nothing the control plane spawns can see it. | generated |
 | `COORD_CREDENTIAL_STAGING` | Writable directory where per-task vendor credential homes are created. Codex refuses to create PATH-alias helper binaries when `CODEX_HOME` sits under `/tmp`, so the control-plane image points this at `/var/cache/coord/credentials`. Unset uses the process temp directory. | process temp directory (`/var/cache/coord/credentials` in the control-plane image) |
-| `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
-| `KUMI_PAYMENTS_ENABLED` | Set to `1` to switch the payment pathway on. Off by default, and off means off: no checkout, no billing portal, no Stripe webhook, no trial, and no entitlement gate — every organization keeps full use of its repositories. Public sign-up becomes a waitlist at `POST /api/v1/waitlist`; whoever runs the deployment lets people through one at a time in Settings — Deployment, which admits that address at `POST /api/v1/auth/register` and gives it a free organization. The four `STRIPE_*` settings are only read when this is on. | off |
+| `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** It also decides whether chatting with an agent may use this deployment's own vendor login: the two are one question — whether spending the host's login on somebody else's behalf is acceptable here — and answering it only for tasks left a deployment running work on the host login while refusing to answer a question about that work. See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
+| `COORD_SYSTEM_ADMINS` | Email addresses, comma separated, granted system administration when they sign in. The only other way to become one is to be the very first account this deployment ever created — `PATCH /admin/users/:id` needs the flag it grants — so a deployment whose first account arrived some other way had no administrator and no way to appoint one. Matched case-insensitively. Removing an address does not demote anybody; that is the admin screen, deliberately, so a variable edited in a hurry cannot lock everyone out. | unset |
+| `KUMI_PAYMENTS_ENABLED` | Set to `1` to switch the payment pathway on. Off by default, and off means off: no checkout, no billing portal, no Stripe webhook, no trial, and no entitlement gate — every organization keeps full use of its repositories. Public sign-up is a waitlist at `POST /api/v1/waitlist` either way; whoever runs the deployment lets people through one at a time in Settings — Deployment. What being let through admits them to is what this switch changes: `POST /api/v1/auth/register` and a free organization when off, `POST /api/v1/auth/signup` and a card-backed trial when on. The four `STRIPE_*` settings are only read when this is on. | off |
 | `COORD_ALLOW_REGISTRATION` | Set to `0` to close self-service sign-up at `/api/v1/auth/register`. A new account owns its own organization and can run tasks, so close registration on a deployment strangers can reach unless that is intentional. Invitations are unaffected. `COORD_DISABLE_REGISTRATION=1` still closes it explicitly. | open |
 | `COORD_REQUIRE_EMAIL_CONFIRMATION` | Set to `1` to make sign-up mail a six-digit code and create the account only once that code is submitted. Off by default: sign-up creates the account immediately and signs the browser in, so a deployment with no mail configured can still take sign-ups. Only turn it on where a mail transport below is configured and tested — otherwise the code goes to the log and nobody can finish signing up. | off |
 | `COORD_MAIL_API_URL` | HTTPS endpoint of a mail provider used to send "forgotten password" links (and sign-up confirmation codes where `COORD_REQUIRE_EMAIL_CONFIRMATION` is on), e.g. `https://api.resend.com/emails`. Takes precedence over `COORD_SMTP_URL`. Prefer it on any platform that blocks outbound SMTP ports (Railway, Fly, most serverless hosts), where a relay cannot be reached and the code silently never arrives. The request body is `{from, to, subject, text}`, which every hosted provider of this shape accepts. Step by step: [setting up email](email-setup.md). | unset |
@@ -108,18 +109,54 @@ nothing and gates nothing:
   subscription. Every organization created while payments are off is written
   as `comped`.
 
-Anybody can ask for a place at `POST /api/v1/waitlist` (an address, optionally
-a name and a note — nothing that can be signed in to). Whoever runs the
-deployment sees the queue in **Settings — Deployment** and lets people through
-one at a time; approving mails that address a link and admits it — and only it
-— at `POST /api/v1/auth/register`, which builds them their own organization,
-project and comped subscription. Every other way in is unchanged: an
-invitation still works, and a comped invitation or repository grant still
-carries no charge.
+### The waitlist is the door, whichever way the deployment sells
 
-Switching `KUMI_PAYMENTS_ENABLED=1` back on restores the paid sign-up, the
-fourteen-day trial and the entitlement gate exactly as they were; the waitlist
-table and its routes stay, and `POST /api/v1/auth/register` goes back to `410`.
+Anybody can ask for a place at `POST /api/v1/waitlist` (an address, optionally
+a name and a note — nothing that can be signed in to). It answers `202` the
+same way whether the address is new, already listed, already approved or
+already has an account, so the form cannot be read one address at a time to
+find out who this deployment knows.
+
+Whoever runs the deployment sees the queue in **Settings — Deployment** and
+lets people through one at a time. Approving stamps `invited_at` and mails
+that address a link to `/app#join/<address>` — one address, resolved by the
+app to whichever door is open, so the mail does not have to know how the
+deployment is configured and turning payments on does not invalidate the
+invitations already sent. Approving twice mails once; the response's
+`approved` says which press did it.
+
+Being let through admits that address, and only that address:
+
+| | with payments **off** | with payments **on** |
+| --- | --- | --- |
+| The invitation opens | the free registration form | the trial form, prefilled |
+| It posts to | `POST /api/v1/auth/register` | `POST /api/v1/auth/signup` |
+| Which gives them | their own organization, project and a comped subscription | a Stripe checkout: card now, 14 days free, first charge on day 15 |
+| The other route answers | `501 payments_disabled` | `410 registration_retired` |
+
+Both routes carry the same gate — an address with no `invited_at` is refused
+`403 waitlist_pending`, with one message covering "never asked", "still
+waiting" and "we said no". On the paid side the gate runs **before** Stripe is
+called, so an unapproved address never reaches a checkout: there is nothing
+charged and nothing to unwind. It also runs before the duplicate-address
+answer, so the only people who can learn whether an address already has an
+account are people this deployment has already approved.
+
+Every other way in is unchanged: an invitation still works, and a comped
+invitation or repository grant still carries no charge.
+
+Switching `KUMI_PAYMENTS_ENABLED=1` on restores the paid sign-up, the
+fourteen-day trial and the entitlement gate; the waitlist table and its routes
+stay, and `POST /api/v1/auth/register` goes back to `410`. Nothing else about
+the waitlist changes — the same queue, the same button, the same link in the
+mail.
+
+**Turning payments on needs five variables set together**, and the sign-up
+route refuses with `501` naming the missing one rather than letting Stripe
+answer for it: `KUMI_PAYMENTS_ENABLED=1`, `STRIPE_SECRET_KEY`,
+`STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` and `KUMI_APP_URL` (Stripe needs an
+absolute address to send a browser back to, and the invitation mail needs one
+to build a link that is a link).
 
 ## Account email confirmation
 
@@ -245,6 +282,7 @@ Worker environment:
 | `COORD_WORKER_ROOT` | Where leased workspaces are materialized. | `.coordinator/worker` |
 | `COORD_WORKER_NAME` | Display name in the workers list. | hostname-derived |
 | `COORD_WORKER_CONCURRENCY` | How many tasks this machine runs at once. | sized from memory, at least 4 |
+| `COORD_PAUSE_ON_BATTERY` | Stop taking work while on battery. Off by default, so a laptop works whether or not it is plugged in. Set it on a machine that really does sleep unattended: a lease held by a sleeping machine is unavailable to everybody else until it expires. Know what it costs first — a worker that is not asking for work is not telling the control plane it exists either, because liveness is a side effect of the lease request, so three minutes later its owner's agents read as having no machine at all. | off |
 | `COORD_PROJECT_ID` | Only lease work for this project. | `project_local` |
 | `COORD_REPOSITORY` | Only lease work for this repository. | any |
 

@@ -95,8 +95,14 @@ async function within<T>(
         timer = setTimeout(() => {
           resolve(undefined);
         }, budgetMs);
-        // Never a reason to hold a process open for a summary.
-        timer.unref?.();
+        // Deliberately not `unref`'d. This timer is the only handle
+        // holding the loop open while a budget runs, so unref'ing it means
+        // that in a process with nothing else pending the loop empties, the
+        // race never settles, and the awaiting caller is abandoned mid
+        // decision — not "exits early", never resolves. Every budget here is
+        // bounded (500ms to 5s) and `clearTimeout` below releases it the
+        // moment the work wins, so the most this holds a process open for is
+        // one decision somebody is already waiting on.
       }),
     ]);
   } finally {

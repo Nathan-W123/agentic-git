@@ -285,8 +285,12 @@ test("every module the dashboard imports is itself served", async () => {
       continue;
     }
     const source = asset.body.toString("utf8");
+    // `[^;]*?` rather than `[\s\S]*?`: an import's `from` is inside its own
+    // statement, so it can never be reached across a semicolon. Spanning
+    // freely made any exported declaration followed by prose quoting
+    // `from "..."` read as an import of that sentence.
     for (const match of source.matchAll(
-      /(?:^|\n)\s*(?:import|export)[\s\S]*?from\s+"([^"]+)"/gu,
+      /(?:^|\n)\s*(?:import|export)[^;]*?from\s+"([^"]+)"/gu,
     )) {
       const specifier = match[1] ?? "";
       assert.equal(
@@ -507,7 +511,15 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.match(chats, /class="chan-pins open" aria-hidden="false"/u);
   assert.match(chats, /class="chan-pins-surface"/u);
   assert.match(chats, /chan-pins-list-frame" aria-hidden="false"/u);
-  assert.match(styles, /\.pins-panel \.chan-pins \{[\s\S]*display: block/u);
+  // The folding frame belongs to the transcript shelf. The panel takes the
+  // rows on their own, so it has nothing to unfold and no styles to undo the
+  // fold with — which is also how the shelf's chevron stopped being drawn in
+  // a panel it could only close.
+  assert.match(
+    chats,
+    /function pinnedMessagesPanel[\s\S]{0,600}?const pins = pinnedList\(repositoryId\);/u,
+  );
+  assert.doesNotMatch(styles, /\.pins-panel \.chan-pins \{/u);
   // The compact transcript shelf stays bounded, but the dedicated panel lets
   // its existing body scroller own the full list instead of nesting a short
   // scroller above unused space.
@@ -762,8 +774,32 @@ async function browserSource(): Promise<string> {
   return await readFile(path.join(packageRoot, "public", "app.js"), "utf8");
 }
 
+/**
+ * The dashboard shell, which is three files.
+ *
+ * `app.js` used to hold the router, the motion system and the accent colour
+ * arithmetic together. Motion moved to `motion.js` and the colour maths to
+ * `colour.js`; what these tests pin - that the behaviour is there and has
+ * the shape it is meant to have - never cared which of the three a line sat
+ * in, so asking for "app.js" here still means the whole shell.
+ */
+const SHELL_MODULES = ["app.js", "motion.js", "colour.js"];
+
 async function publicFile(name: string): Promise<string> {
-  return await readFile(path.join(packageRoot, "public", name), "utf8");
+  const wanted = name === "app.js" ? SHELL_MODULES : [name];
+  const parts = await Promise.all(
+    wanted.map(async (file) =>
+      readFile(path.join(defaultPublicDirectory(), file), "utf8"),
+    ),
+  );
+  if (name !== "app.js") {
+    return parts.join("\n");
+  }
+  // Only the shell, and only because several tests below slice a function out
+  // of it and run it: `export` is a syntax error outside a module, and the
+  // shell's own functions carry it now that two of its three files are
+  // imported rather than inlined.
+  return parts.join("\n").replaceAll(/^export /gmu, "");
 }
 
 /** Lifts one self-contained top-level function out of the browser bundle. */
@@ -1013,7 +1049,10 @@ test("settings floats above the product routes", async () => {
   assert.deepEqual(parsed, ["chats", "notifications"]);
   assert.match(source, /state\.settingsOpen === true \? settingsDialog\(\) : ""/u);
   assert.match(source, /role="dialog"[\s\S]{0,80}aria-modal="true"/u);
-  assert.match(source, /data-act="settings-section"/u);
+  // The dialog shell stays in `app.js`; its sections are rendered by
+  // `screen-settings.js`, which is where this moved to.
+  const settingsScreen = await publicFile("screen-settings.js");
+  assert.match(settingsScreen, /data-act="settings-section"/u);
   // Code is read where it is discussed — files and diffs render inline in the
   // channel transcript — so neither it nor the coordinator is a page of its
   // own, and tasks still belong to the agent that owns them.
@@ -1039,12 +1078,16 @@ test("settings exposes theme and sound effect preferences", async () => {
   const data = await publicFile("data.js");
   const ui = await publicFile("ui.js");
 
-  assert.match(app, /data-act="settings-theme"/u);
-  assert.match(app, /\["system", "System"\]/u);
+  // The rows are built by `settingRow` and `segmentedControl` now, so the
+  // action arrives as a property those helpers turn into `data-act`, and
+  // each option carries an icon beside its label. Same two controls, same
+  // two actions.
+  assert.match(app, /act: "settings-theme"/u);
+  assert.match(app, /\{ value: "system", label: "System"/u);
   assert.match(data, /export function myThemePreference\(\)/u);
   assert.match(data, /prefers-color-scheme: light/u);
 
-  assert.match(app, /data-act="settings-sounds"/u);
+  assert.match(app, /act: "settings-sounds"/u);
   assert.match(app, /Quiet cues for sent and incoming messages/u);
   assert.match(app, /localStorage\.setItem\("ag\.messageSounds"/u);
   // The inline `=== "false"` early return inside `chime` became the
@@ -1058,6 +1101,435 @@ test("settings exposes theme and sound effect preferences", async () => {
     /function soundEffectsEnabled\(\) \{\s*return window\.localStorage\.getItem\("ag\.messageSounds"\) !== "false";/u,
   );
   assert.match(ui, /function contextForChime\(\) \{\s*if \(!soundEffectsEnabled\(\)\)/u);
+});
+
+test("the settings module composes MCP servers into project controls", async () => {
+  const app = await publicFile("app.js");
+
+  // Beside App tokens, in the same category — a fourth block on the same
+  // page rather than a category of its own, because approving a server is a
+  // project-wide control in the same sense a token is.
+  assert.match(
+    app,
+    /function projectControlsSection\(\)[\s\S]{0,800}apiTokensCard\(\)\}\$\{editorMcpCard\(\)\}\$\{mcpServersCard\(\)\}/u,
+  );
+  const card = sourceOf(app, "mcpServersCard", "projectControlsSection");
+  assert.match(card, /id: "mcp-servers"/u);
+  assert.match(card, /heading: "MCP servers"/u);
+  // A deployment with the switch off says which switch, and offers no form.
+  assert.match(card, /COORD_MCP_ENABLED/u);
+  assert.match(card, /if \(enabled === false\)/u);
+  // The list row carries the audit line, not a bare toggle, and approval and
+  // removal are two different buttons with two different weights.
+  assert.match(card, /approved by/u);
+  assert.match(card, /"not approved"/u);
+  assert.match(card, /data-act="mcp-approve"/u);
+  assert.match(card, /data-act="mcp-remove"/u);
+  assert.match(app, /async function removeMcpServerConfirmed\(id\)/u);
+  // The form the create handler reads, field by field.
+  for (const field of [
+    "data-mcp-name",
+    "data-mcp-transport",
+    "data-mcp-command",
+    "data-mcp-args",
+    "data-mcp-url",
+    "data-mcp-token",
+    "data-mcp-secrets",
+    "data-mcp-scope",
+  ]) {
+    assert.match(card, new RegExp(field, "u"), `${field} should be on the form`);
+  }
+  assert.match(card, /data-act="mcp-create"/u);
+  // An http server's secret is one bearer token, not a NAME=value list: Codex
+  // can be handed a bearer token and nothing else, so a server made here has
+  // to run on every vendor. The textarea is the stdio command's environment
+  // and goes away with the stdio fields.
+  assert.match(card, /data-mcp-secrets data-mcp-stdio-only/u);
+  const create = sourceOf(app, "createMcpServerFromForm", "focusSettingsRow");
+  assert.match(
+    create,
+    /transport === "stdio"\s*\? parseMcpSecrets\([\s\S]{0,120}\)\s*: mcpBearerHeader\(read\("\[data-mcp-token\]"\)\)/u,
+  );
+  const bearer = new Function(
+    `${sourceOf(app, "mcpBearerHeader", "createMcpServerFromForm")}\nreturn mcpBearerHeader;`,
+  )() as (token: string) => Record<string, string>;
+  assert.deepEqual(bearer("  lin_api_x=y  "), { Authorization: "Bearer lin_api_x=y" });
+  assert.deepEqual(bearer("Bearer already"), { Authorization: "Bearer already" });
+  assert.deepEqual(bearer(""), {});
+  // Loaded when Settings opens, beside the tokens, and neither one failing
+  // keeps the other off the screen.
+  assert.match(
+    app,
+    // The machine scan joined them: three independent loads, none of which
+    // failing keeps the others off the screen.
+    /Promise\.allSettled\(\[\s*loadApiTokens\(\),\s*ensureMcpServers\(state\.projectId\),[\s\S]{0,600}\]\)\.then\(\(\) => render\(\)\)/u,
+  );
+});
+
+test("the editor connect card offers only what the app can write, and never a command", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+
+  // Ordered so the two directions read together: give Kumi's agents tools,
+  // and make Kumi a tool inside an editor.
+  assert.match(
+    app,
+    /apiTokensCard\(\)\}\$\{editorMcpCard\(\)\}\$\{mcpServersCard\(\)\}/u,
+  );
+  const card = sourceOf(app, "editorMcpCard", "projectControlsSection");
+  assert.match(card, /data-act="editor-connect"/u);
+  // A browser cannot write a file on the machine the editor runs on, and the
+  // card says so rather than offering a button that cannot work.
+  assert.match(card, /bridge\?\.connectEditor === undefined/u);
+
+  // The page names a vendor. It never carries a command or an address — the
+  // app decides both from the server it is signed in to, which is what stops
+  // a remote document aiming somebody's editor and its token elsewhere.
+  //
+  // It lives beside the rest of connecting an agent rather than in the shell,
+  // because that is where somebody deciding how to connect one is looking.
+  const agents = await publicFile("screen-agents.js");
+  const connect = sourceOf(agents, "connectEditorToKumi", "deviceLabel");
+  assert.match(connect, /bridge\.connectEditor\(vendor, minted\.token\)/u);
+  assert.doesNotMatch(connect, /mcp add|claude\.json|config\.toml|https:/u);
+
+  // Codex is the one vendor whose token lives in the environment rather than
+  // in the config just written, so it is the one vendor where writing the file
+  // is not the end of the job. A running program keeps the environment it
+  // started with, and restarting the computer is the single instruction that
+  // is true for both the Codex app and every terminal.
+  assert.match(connect, /vendor === "codex"/u);
+  assert.match(connect, /Restart your computer/u);
+  // And only Codex. Telling somebody with Claude or Cursor to restart their
+  // machine asks for a reboot that changes nothing, and the environment
+  // sentence is meaningless for an editor that reads its config file.
+  // Pinned on the returned strings rather than on a slice of the function,
+  // because the prose explaining the rule mentions the environment too and a
+  // looser assertion catches its own justification.
+  assert.match(
+    connect,
+    /return `\$\{scope\}Connected\. Restart \$\{label\}, then ask it to have Kumi do something\.`;/u,
+  );
+  const codexAdvice = connect.slice(connect.indexOf('if (vendor === "codex")'));
+  assert.match(codexAdvice, /Restart your computer/u);
+  // The advice somebody actually followed and it did not work is gone: closing
+  // Codex through Task Manager was true only for the Store build.
+  assert.doesNotMatch(connect, /Task Manager/u);
+
+  // The token is minted for this editor on this machine, and is never shown:
+  // nobody has to carry it anywhere, which is what makes every way of
+  // mistyping it impossible.
+  assert.match(connect, /createEditorToken\(/u);
+  assert.doesNotMatch(connect, /state\.newApiToken/u);
+
+  // And it is not the desktop worker's scope set. `run_task` also admits
+  // registering as a worker, so an editor token carrying it could lease other
+  // people's work.
+  assert.match(data, /EDITOR_TOKEN_SCOPES = \["view", "submit_task"\]/u);
+});
+
+test("an agent row reports both of the connections it can have", async () => {
+  const app = await publicFile("app.js");
+  const row = sourceOf(app, "agentProviderRow", "integrationsSection");
+
+  // Two different things, and the row used to show one. Somebody connected
+  // Codex over MCP, was told it worked, and the row above the message went on
+  // saying "Not connected" — which is true of the CLI and says nothing about
+  // what they had just done.
+  assert.match(row, /state\.editorConnected\?\.\[PROVIDER_VENDOR\[agent\.id\]\]/u);
+  assert.match(row, /statusBadge\("ok", "MCP"/u);
+  assert.match(row, /statusBadge\("warn", "MCP failed"/u);
+  // Both badges reach the row, rather than the second replacing the first.
+  assert.match(row, /status: `\$\{status\}\$\{mcp\}`/u);
+
+  // Nothing is claimed for an editor nobody has tried: absent stays absent
+  // rather than rendering as a failure.
+  assert.match(row, /editor === undefined\s*\?\s*""/u);
+
+  // And the two badges say which connection each is about. "Not connected"
+  // beside a green MCP badge reads as a contradiction rather than as two
+  // answers to two different questions.
+  assert.match(row, /const cliLabel = mcp === "" \? "Not connected" : "No CLI"/u);
+});
+
+test("the connection pipeline is free of em dashes", async () => {
+  // Asked for, and worth pinning: the copy here is written and rewritten
+  // often, and a dash reintroduced by hand is invisible in review.
+  const agents = await publicFile("screen-agents.js");
+  const app = await publicFile("app.js");
+  const visible = (source: string): string[] =>
+    source
+      .split("\n")
+      .filter((line) => line.includes("\u2014"))
+      .filter((line) => !/^\s*(?:\*|\/\/|\/\*)/u.test(line))
+      .map((line) => line.trim());
+
+  assert.deepEqual(visible(agents), [], "screen-agents.js carries the whole flow");
+  for (const [name, from, to] of [
+    ["agentProviderRow", "function agentProviderRow", "function integrationsSection"],
+    ["editorMcpCard", "function editorMcpCard", "function projectControlsSection"],
+  ] as const) {
+    const start = app.indexOf(from);
+    const end = app.indexOf(to, start);
+    assert.ok(start !== -1 && end > start, `${name} was not found`);
+    assert.deepEqual(visible(app.slice(start, end)), [], name);
+  }
+});
+
+test("connecting an agent asks which of the three connections is meant", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const app = await publicFile("app.js");
+
+  // "Connect Codex" meant three different things and the screen offered one
+  // of them, with the other two on a Settings page nobody looking at an agent
+  // would open. That ambiguity is what produced a connected agent nobody
+  // could mention, and a grey dot beside a CLI that was definitely installed.
+  // Sliced by index rather than with `sourceOf`, which anchors its end on a
+  // newline followed by `function` and so cannot see an `async function`.
+  const between = (from: string, to: string): string => {
+    const start = agents.indexOf(`function ${from}`);
+    const end = agents.indexOf(`function ${to}`, start);
+    assert.notEqual(start, -1, `${from} was not found`);
+    assert.ok(end > start, `${to} was not found after ${from}`);
+    return agents.slice(start, end);
+  };
+  const flow = between("connectProviderSomehow", "choiceRow");
+  // Each option names its own mechanism, because "connect" alone is what was
+  // ambiguous in the first place — somebody choosing the CLI and being shown a
+  // terminal sign-in should not be surprised by it. The mechanism now rides in
+  // a badge beside a plain-English heading rather than inside the heading, so
+  // the heading can say what the option does.
+  assert.match(flow, /title: "Run agents on this computer"/u);
+  assert.match(flow, /badge: "CLI"/u);
+  assert.match(flow, /title: "Connect tools"/u);
+  assert.match(flow, /badge: "MCP"/u);
+  assert.match(flow, /does not replace the CLI/u);
+  // The two MCP directions are a second question, not two more items in the
+  // first list: they are the same thing pointing opposite ways.
+  assert.match(flow, /title: `Work with Kumi from \$\{esc\(label\)\}`/u);
+  // Both halves of what that connection now is. It began as a way to file
+  // work from an editor; it is also how an editor picks work up and does it
+  // with no CLI installed, and an option that names only the first sends
+  // somebody to install a CLI they do not need.
+  assert.match(flow, /pick\s+up work waiting for it/u);
+  assert.match(flow, /title: "Give Kumi's agents tools"/u);
+  // And the direction is shown as a direction. "MCP goes both ways" is a
+  // sentence somebody has to hold in their head; an arrow is the same fact at
+  // a glance, and it is what stops two opposite options reading alike.
+  assert.match(flow, /badge: `\$\{esc\(label\)\} → Kumi`/u);
+  assert.match(flow, /badge: `Kumi → tools`/u);
+  assert.match(flow, /connectAgent\(providerId, rerender\)/u);
+  assert.match(flow, /connectEditorToKumi\(vendor, rerender\)/u);
+  // The tools direction has to actually go somewhere. `#/settings/mcp-servers`
+  // was not a route, so the one branch whose entire job is to take somebody
+  // to a screen did nothing at all — indistinguishable from choosing nothing.
+  // Navigation is handed in rather than imported, because the shell imports
+  // this module and reaching back would be a cycle.
+  assert.match(flow, /goToSettings\?\.\("project-controls", "mcp-servers"\)/u);
+  assert.doesNotMatch(flow, /location\.hash/u);
+
+  // Offered only where it can work: the editor half writes a file on the
+  // machine the editor runs on, which a browser cannot do. And when it cannot,
+  // the option says why in a badge of its own — a row at reduced opacity says
+  // only that something is wrong with it, never what.
+  assert.match(flow, /bridge\?\.connectEditor !== undefined/u);
+  assert.match(flow, /blocked: editorable/u);
+  assert.match(flow, /"Needs the desktop app"/u);
+
+  // Entered from both ways in, which is the point. Adding an agent asks, and
+  // so does the Connect button on the agents screen — the flow was reachable
+  // only from a channel's plus menu when that button went straight to the
+  // CLI path, which is not where anybody was looking.
+  assert.match(agents, /await connectProviderSomehow\(providerId, rerender, goToSettings\)/u);
+  assert.match(app, /case "agent-connect":[\s\S]{0,400}connectProviderSomehow\(value, render, openSettingsSearchResult\)/u);
+  assert.doesNotMatch(
+    app,
+    /case "agent-connect":[\s\S]{0,400}connectAgent\(value, render\)/u,
+  );
+
+  // These are decision cards, not agent tiles. They used to borrow
+  // `.agent-provider-picker`, which is a two-column grid built for the four
+  // short provider tiles: two columns of a 448px dialog left each option's
+  // prose about ten characters wide, so "CLI — run agents on this computer"
+  // wrapped to six lines and the sentence under it became a vertical ribbon.
+  // Neither choice could be read, which is a poor way to ask a question.
+  const row = between("choiceRow", "chooseFrom");
+  assert.match(flow, /class="choice-list"/u);
+  // Scoped to the markup: the prose above `choiceRow` names the old class to
+  // explain what went wrong, and a bare match would catch the explanation.
+  assert.doesNotMatch(flow, /class="agent-provider-picker"/u);
+  assert.match(row, /class="choice\$\{disabled \? " is-disabled" : ""\}"/u);
+  assert.match(row, /class="choice-note"/u);
+  const styles = await publicFile("styles.css");
+  assert.match(styles, /\.modal-card:has\(\.choice-list\)/u);
+  // Placed explicitly. Two of the four children span both rows, and letting
+  // the grid auto-place them put the heading in the 18px tick column.
+  assert.match(styles, /\.choice-head \{\n  grid-column: 2;\n  grid-row: 1;/u);
+  assert.match(styles, /\.choice-tick \{\n  grid-column: 3;\n  grid-row: 1 \/ 3;/u);
+
+  // `showModal` resolves a radio group to its checked value itself, so the
+  // chooser is a thin wrapper. It used to mirror the answer into a hidden
+  // field on every change, which was written when the modal took the last
+  // radio in document order — a bug fixed at the source, whose workaround
+  // outlived it in three places. Pinned from both ends: the wrapper stays
+  // simple only for as long as the modal keeps doing this.
+  const chooser = between("chooseFrom", "pause");
+  assert.match(chooser, /const values = await showModal\(spec\)/u);
+  assert.doesNotMatch(chooser, /addEventListener/u);
+  const ui = await publicFile("ui.js");
+  assert.match(ui, /if \(field\.type === "radio"\) \{[\s\S]{0,200}if \(field\.checked\)/u);
+});
+
+test("a viewer can still connect an editor, read-only, and is told so", async () => {
+  const data = await publicFile("data.js");
+  const agents = await publicFile("screen-agents.js");
+
+  // A token must never grant what its owner does not have, so a viewer asking
+  // for `submit_task` is correctly refused. Refusing the whole connection on
+  // that basis was the mistake: reading the roster and following a task are
+  // exactly what a viewer may do, and they are most of what an editor is for.
+  const mint = data.slice(
+    data.indexOf("export async function createEditorToken"),
+    data.indexOf("export async function revokeApiToken"),
+  );
+  assert.notEqual(mint, "", "createEditorToken should be findable");
+  assert.match(mint, /scope_exceeds_role/u);
+  assert.match(mint, /scopes: \["view"\]/u);
+  assert.match(mint, /readOnly: true/u);
+  // Anything else still throws: only this one refusal has a narrower answer.
+  assert.match(mint, /if \(error\.code !== "scope_exceeds_role"\)[\s\S]{0,40}throw error/u);
+
+  // And it is said, not swallowed. A silent downgrade would be worse than the
+  // refusal it replaces, because the first sign would be an editor that
+  // cannot file work with no explanation.
+  const connect = agents.slice(
+    agents.indexOf("function connectEditorToKumi"),
+    agents.indexOf("function deviceLabel"),
+  );
+  assert.match(connect, /minted\.readOnly/u);
+  // Every outcome is said where the person is standing, and said in something
+  // they close. A toast cleared itself after six seconds, which is the wrong
+  // carrier for the one instruction that decides whether the connection works
+  // — the Codex advice was missed exactly that way.
+  assert.match(connect, /await showModal\(/u);
+  assert.doesNotMatch(connect, /toast\(/u);
+  assert.match(connect, /confirm: "Close"/u);
+  assert.match(connect, /read only/u);
+  assert.match(connect, /developer access/u);
+
+  // Both outcomes, not just the happy one.
+  assert.match(connect, /is connected`/u);
+  assert.match(connect, /was not connected`/u);
+});
+
+test("the catalogue pins every version and fills the form rather than creating", async () => {
+  const app = await publicFile("app.js");
+  const card = sourceOf(app, "mcpServersCard", "projectControlsSection");
+  assert.match(card, /data-act="mcp-pick"/u);
+
+  // Every stdio entry names an exact version. `npx -y <package>` without one
+  // resolves per machine, so each teammate downloads whatever was published
+  // that morning and runs it under their own account — the single worst
+  // hazard in this whole feature, and the one a typed form invites.
+  const catalogue = app.slice(
+    app.indexOf("const MCP_CATALOGUE = ["),
+    app.indexOf("];", app.indexOf("const MCP_CATALOGUE = [")),
+  );
+  assert.notEqual(catalogue, "", "the catalogue should be findable");
+  const packages = catalogue.match(/"(?:-y|@[^"]+)"/gu) ?? [];
+  const named = packages.filter((entry) => entry.startsWith('"@'));
+  assert.ok(named.length > 0, "no packages in the catalogue");
+  for (const entry of named) {
+    assert.match(entry, /@\d+\.\d+\.\d+"$/u, `${entry} is not pinned to a version`);
+  }
+  assert.doesNotMatch(catalogue, /@latest/u);
+
+  // Picking fills the form and stops. What is being agreed to is a program
+  // starting on every teammate's computer, so the command stays visible and
+  // approval remains a second, separate act.
+  const fill = sourceOf(app, "fillMcpFormFrom", "createMcpServerFromForm");
+  assert.match(fill, /data-mcp-command/u);
+  assert.match(fill, /data-mcp-args/u);
+  assert.doesNotMatch(fill, /createMcpServer\(|approveMcpServer\(/u);
+});
+
+test("the settings search index finds MCP servers under project controls", async () => {
+  const settings = await publicFile("screen-settings.js");
+
+  const row = settings.slice(
+    settings.indexOf('row: "mcp-servers"'),
+    settings.indexOf("];", settings.indexOf('row: "mcp-servers"')),
+  );
+  assert.notEqual(row, "", "the index should carry an mcp-servers row");
+  assert.match(row, /section: "project-controls"/u);
+  assert.match(row, /label: "MCP servers"/u);
+  for (const word of ["mcp", "tools", "linear", "sentry", "server", "approve"]) {
+    assert.match(row, new RegExp(`"${word}"`, "u"), `${word} should be a synonym`);
+  }
+});
+
+test("the MCP data functions hit the project's mcp-servers routes", async () => {
+  const data = await publicFile("data.js");
+
+  assert.match(data, /export async function ensureMcpServers\(projectId\)/u);
+  assert.match(data, /export async function createMcpServer\(projectId, input\)/u);
+  assert.match(data, /export async function approveMcpServer\(projectId, id, enabled\)/u);
+  assert.match(data, /export async function deleteMcpServer\(projectId, id\)/u);
+  assert.match(data, /state\.mcpServersEnabled = response\.enabled === true/u);
+
+  const listPath =
+    "`/projects/${encodeURIComponent(projectId)}/mcp-servers`";
+  const itemPath =
+    "`/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}`";
+  const approvalPath =
+    "`/projects/${encodeURIComponent(projectId)}/mcp-servers/${encodeURIComponent(id)}/approval`";
+  const between = (from: string, to: string) =>
+    data.slice(
+      data.indexOf(`export async function ${from}`),
+      data.indexOf(`export async function ${to}`),
+    );
+  const ensure = between("ensureMcpServers", "createMcpServer");
+  assert.ok(ensure.includes(listPath), "the list is read from the list route");
+  const create = between("createMcpServer", "approveMcpServer");
+  assert.ok(create.includes(listPath), "create posts to the list route");
+  assert.match(create, /method: "POST"/u);
+  const approve = between("approveMcpServer", "deleteMcpServer");
+  assert.ok(approve.includes(approvalPath), "approval has its own route");
+  assert.match(approve, /method: "POST", body: \{ enabled \}/u);
+  const remove = data.slice(
+    data.indexOf("export async function deleteMcpServer"),
+    data.indexOf("/* ---", data.indexOf("export async function deleteMcpServer")),
+  );
+  assert.ok(remove.includes(itemPath), "delete addresses one server");
+  assert.match(remove, /method: "DELETE"/u);
+});
+
+test("MCP secrets go up as NAME=value and never as a sealed record", async () => {
+  const data = await publicFile("data.js");
+  const app = await publicFile("app.js");
+
+  // The client sends plain values and lets the server seal them. A client
+  // that sent a `ciphertext` would be a client with a sealing key, and there
+  // is exactly one place that key lives.
+  const create = sourceOf(app, "createMcpServerFromForm", "focusSettingsRow");
+  assert.doesNotMatch(create, /ciphertext/u);
+  assert.doesNotMatch(data, /ciphertext/u);
+  assert.match(create, /input\.secrets = secrets/u);
+  assert.match(create, /parseMcpSecrets\(/u);
+
+  // The textarea parser, lifted out and run: first `=` only, so a value that
+  // itself contains `=` survives.
+  const start = data.indexOf("export function parseMcpSecrets");
+  const end = data.indexOf("\nexport function", start + 1);
+  assert.notEqual(start, -1);
+  const parse = new Function(
+    `${data.slice(start, end).replace("export ", "")}\nreturn parseMcpSecrets;`,
+  )() as (text: string) => Record<string, string>;
+  assert.deepEqual(
+    parse("LINEAR_API_KEY=lin_api_abc\n\nTOKEN=a=b==\nno-equals\n =orphan\n"),
+    { LINEAR_API_KEY: "lin_api_abc", TOKEN: "a=b==" },
+  );
+  assert.deepEqual(parse(""), {});
 });
 
 test("sound effects confirm real sends and reserve interruptions for live arrivals", async () => {
@@ -1295,9 +1767,12 @@ test("people and agents only animate downward when the sidebar expands", async (
     css,
     /\.chats-shell\.chan-collapsed \.chan-roster \{\s*grid-template-rows: 0fr;/u,
   );
+  // Channels joined the same rule, so the `:is()` list is read for the two
+  // members this test is about rather than matched whole. What is being
+  // asserted is unchanged: the two sections have somewhere to travel from.
   assert.match(
     css,
-    /\.chats-shell\.chan-collapsed :is\(\.chan-sec-people, \.chan-sec-agents\),[\s\S]{0,120}transform: translateY\(-10px\);/u,
+    /\.chats-shell\.chan-collapsed :is\([^)]*\.chan-sec-people[^)]*\.chan-sec-agents[^)]*\),[\s\S]{0,200}transform: translateY\(-10px\);/u,
   );
   assert.match(
     css,
@@ -1340,7 +1815,7 @@ test("each roster is compact, unlabelled when empty, and folds on its heading", 
   // People and agents are drawn at the same, smaller face — the two rosters
   // must not disagree about how big somebody in the room is.
   assert.match(chats, /avatar\(name, 22, name, me \? myAvatar\(\) : undefined\)/u);
-  assert.match(chats, /agentFace\(agent, 22\)/u);
+  assert.match(chats, /statusAgentFace\(agent, 22/u);
   assert.match(css, /\.roster-row \.status-dot \{[\s\S]{0,80}width: 6px;/u);
   assert.match(css, /\.roster-row-main \{[\s\S]{0,120}padding: 4px 8px;/u);
 
@@ -1536,7 +2011,10 @@ test("the phone drawer closes when a sidebar destination opens", async () => {
   // through the helper before it renders, and the helper must still forget the
   // reply target and shut the drawer — a shell that stayed open over the
   // conversation it just opened is the failure this guards.
-  assert.match(dm, /openUserDirectMessage\(value\);\s*render\(\);/u);
+  assert.match(
+    dm,
+    /if \(!openUserDirectMessage\(value\)\) \{[\s\S]{0,40}\}[\s\S]{0,80}render\(\);/u,
+  );
   const openDm = app.slice(
     app.indexOf("function openUserDirectMessage"),
     app.indexOf("function showDirectMessageMenu"),
@@ -2220,29 +2698,77 @@ test("a connected agent can have its CLI checked without disconnecting", async (
  * Somebody connected three agents that way and was told three times that it
  * had worked; every one of them then accepted work and did none of it.
  */
-test("connecting checks the machine before it reports success", async () => {
+test("nothing is created until the machine says it can run the agent", async () => {
   const agents = await publicFile("screen-agents.js");
   const connect = agents.slice(
     agents.indexOf("async function connectLocalAgent"),
+    agents.indexOf("const REFUSAL"),
+  );
+
+  // The order is the whole point, and it used to be the other way round: the
+  // agent and its call sign were minted the moment Connect was pressed, and
+  // the machine was asked afterwards. Somebody was left holding a named agent
+  // in every channel that could not run, told so by a toast that cleared
+  // itself in six seconds.
+  const asked = connect.indexOf("await verifyMachineFor(");
+  const made = connect.indexOf("await createLocalAgent(");
+  assert.notEqual(asked, -1, "the machine must be asked");
+  assert.notEqual(made, -1, "the agent is still created somewhere");
+  assert.ok(asked < made, "the machine must be asked before anything is created");
+
+  // And the refusal must actually stop. An ordering that asks first and
+  // creates anyway is the same bug with a longer wait in front of it.
+  const refused = connect.indexOf('if (verdict !== "ready")');
+  assert.ok(refused > asked && refused < made, "a refusal must return before creating");
+
+  // Said in a dialog, not a toast. This is the end of a flow somebody
+  // started, and the reason they have no agent is the one sentence they need
+  // — six seconds in a corner is the wrong carrier for it.
+  assert.match(connect.slice(refused, made), /showModal\(/u);
+
+  // Every verdict has something to say. A state added to the checker without
+  // a sentence here would surface as an empty dialog, which is worse than the
+  // toast it replaced.
+  const checker = agents.slice(
+    agents.indexOf("async function verifyMachineFor"),
+  );
+  const verdicts = new Set(
+    [...checker.matchAll(/return "([a-z-]+)";/gu)].map((match) => match[1]),
+  );
+  verdicts.delete("ready");
+  const refusals = agents.slice(agents.indexOf("const REFUSAL"));
+  for (const verdict of verdicts) {
+    assert.match(
+      refusals.slice(0, 2_400),
+      new RegExp(`["']?${verdict}["']?:`, "u"),
+      `${verdict} has no sentence in REFUSAL`,
+    );
+  }
+});
+
+test("the sign-in is offered, then checked rather than assumed", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const settle = agents.slice(
+    agents.indexOf("async function settleLogin"),
     agents.indexOf("export async function disconnectAgent"),
   );
 
-  // Order is the whole fix: the machine, then the message.
-  const setup = connect.indexOf("await finishLocalSetup(");
-  const said = connect.indexOf("toast(outcome.text");
-  assert.notEqual(setup, -1, "the machine must be checked during connect");
-  assert.ok(setup < said, "it must be checked before anything claims success");
+  // Offering a remedy is not evidence it worked. The old flow opened the
+  // sign-in terminal and returned "ready" whatever happened next — including
+  // when the person closed it untouched.
+  const offered = settle.indexOf("await bridge.signIn?.(");
+  const rechecked = settle.indexOf("await bridge.login(vendor)", offered);
+  assert.notEqual(offered, -1, "the sign-in must still be offered");
+  assert.ok(rechecked > offered, "the login must be re-read after the sign-in");
 
-  // And the message distinguishes the outcomes rather than always cheering.
-  assert.match(connect, /is not installed on this machine yet/u);
-  assert.match(connect, /Open the Kumi app on the machine that will run it/u);
-  assert.match(connect, /could not be added to every repository/u);
-
-  // The report is earned, not assumed: an install that was declined or failed
-  // must not come back as ready just because an installer was offered.
-  const finish = agents.slice(agents.indexOf("async function finishLocalSetup"));
-  assert.match(finish.slice(0, 2_600), /const after = await bridge\.detected\(\)/u);
-  assert.match(finish.slice(0, 2_600), /\? "ready" : "missing"/u);
+  // The three browser-session vendors pass on the strength of the CLI alone,
+  // and that is a decision rather than an oversight: their login state is not
+  // readable from here at all, so refusing on it would make them permanently
+  // impossible to connect.
+  assert.match(settle, /state === "unknowable"/u);
+  // "could not ask" is never folded into "the answer is no" — they send
+  // somebody to two different places.
+  assert.match(settle, /return "unknown"/u);
 });
 
 /**
@@ -2287,14 +2813,24 @@ test("a credential-less agent is listed in channels and offered to rooms", async
  * channel closed under a reloading window — and returning quietly is the whole
  * of "I pressed it and nothing happened".
  */
-test("check the CLI says something when the machine cannot be asked", async () => {
+test("check the CLI answers with the same check connecting uses", async () => {
   const agents = await publicFile("screen-agents.js");
-  const setup = agents.slice(agents.indexOf("async function finishLocalSetup"));
-  assert.match(setup.slice(0, 2_600), /detected === undefined/u);
-  assert.match(
-    setup.slice(0, 2_600),
-    /Could not ask this machine what is installed/u,
+  // A bounded window from the function's own start: `verifyMachineFor` is
+  // defined above this one, so slicing between them reads backwards and
+  // matches nothing at all.
+  const setup = agents.slice(
+    agents.indexOf("async function finishLocalSetup"),
+    agents.indexOf("async function finishLocalSetup") + 1_400,
   );
+  // One checker, so the button on a connected row and the flow that creates
+  // an agent cannot disagree about whether it can run. This used to offer the
+  // sign-in and then answer "ready" regardless — the one control whose job is
+  // to say why an agent does not work, unable to tell a live login from an
+  // absent one.
+  assert.match(setup, /await verifyMachineFor\(providerId, rerender\)/u);
+  assert.match(setup, /REFUSAL\[verdict\]/u);
+  // And it says the good news too, or a working machine answers with silence.
+  assert.match(setup, /can run on this machine/u);
 });
 
 test("a conversation is scoped to one user's own provider connection", async () => {
@@ -2388,7 +2924,7 @@ test("adding another agent always begins with a provider choice", async () => {
   assert.match(agents, /await connectAgent\(providerId, rerender\)/u);
   assert.match(
     app,
-    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render\);/u,
+    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render, openSettingsSearchResult\);/u,
   );
 
   // A connection belongs to this account. A host CLI login (`connected`) is
@@ -3140,14 +3676,18 @@ test("a connected agent is not painted as a working one", async () => {
   assert.match(chatHeader, /agentFace\(agent, 34, \{ status: agent\.status, progress \}\)/u);
   assert.doesNotMatch(chatHeader, /<span class="dot/u);
 
-  // The full agents screen still writes a separate status word and dot, and
-  // an idle connection remains amber there rather than green.
-  assert.match(agents, /agent\.presence === "idle"\s*\?\s*"orange"/u);
+  // The amber-for-idle dot went with the agents screen itself, which is a
+  // retired route — `settings floats above the product routes` guards that
+  // retirement, so it is not re-asserted here. `screen-agents.js` owns only
+  // credential setup now; agent activity is shown where the work happens.
+  const settingsScreen = await publicFile("screen-settings.js");
+  assert.doesNotMatch(agents, /renderAgents/u);
 
-  // And the count that opens the agents screen says what it counts.
-  assert.match(agents, /label: "Connected agents",/u);
+  // The count that opens the connections list still says what it counts: a
+  // stored credential is not an agent that is doing anything.
+  assert.match(settingsScreen, /label: "Connected agents",/u);
   assert.equal(
-    /label: "Active agents",/u.test(agents),
+    /label: "Active agents",/u.test(settingsScreen),
     false,
     "a stored credential is not an active agent",
   );
@@ -3506,12 +4046,13 @@ test("the theme is driven by custom properties rather than per-component colour"
  * default accent read at 2:1 and a chosen yellow at 1.1:1.
  */
 test("accent text is legible on the light theme's own paper, whatever the accent", async () => {
-  const app = await browserSource();
-  const start = app.indexOf("function channels");
-  const end = app.indexOf("\nfunction currentAgent", start);
-  assert.notEqual(start, -1, "the colour helpers were not found in app.js");
-  assert.notEqual(end, -1, "currentAgent no longer follows the colour helpers");
-  const block = app.slice(start, end);
+  // The whole of `colour.js`, which is exactly the helpers this needs. It
+  // used to be sliced out of `app.js` between two neighbouring functions,
+  // which meant an unrelated reordering could silently empty the block.
+  const block = (
+    await readFile(path.join(packageRoot, "public", "colour.js"), "utf8")
+  ).replaceAll(/^export /gmu, "");
+  assert.match(block, /function channels\(/u, "colour.js lost its helpers");
   const lift = <T>(name: string): T =>
     new Function(`${block}\nreturn ${name};`)() as T;
   const readableOn = lift<(a: string, g: string, t: number) => string>(
@@ -3588,6 +4129,22 @@ test("the product is named Kumi throughout the browser surface", async () => {
       `${file} still has the old spelling`,
     );
   }
+
+  // A rename reaches the settings pages too. These rows printed the
+  // repository id, which is the handle the routes and the mirror directory
+  // are keyed by — so the workspace renamed to Kumi introduced itself as
+  // LATTICE on the two pages whose whole job is to say which workspace this
+  // is. They resolve the name the way every other surface does now.
+  const app = await publicFile("app.js");
+  assert.doesNotMatch(
+    app,
+    /term: "(?:Repository|Channel open)", value: repository\?\.id/u,
+  );
+  assert.equal(
+    (app.match(/repositoryLabel\(repository\.id\)/gu) ?? []).length,
+    2,
+    "the settings identity rows should name the workspace, not key it",
+  );
 });
 
 test("the standalone logo follows the theme without changing the wordmark or appearing in the channel rail", async () => {
@@ -4485,7 +5042,7 @@ test("a direct message can send image-only and mixed text/image content", async 
     /dm: \{[\s\S]*draft: "dmDraft",[\s\S]*counter: "dmAttaching",[\s\S]*input: "dm-input"/u,
   );
   assert.match(dmPanel, /draftText\(state\.dmDraft\)/u);
-  assert.match(dmPanel, /messageBody\([\s\S]{0,100}message\.content/u);
+  assert.match(dmPanel, /messageFoldClip\([\s\S]{0,120}message\.content,[\s\S]{0,80}messageBody\(shown/u);
   assert.match(submit, /const draft = state\.dmDraft\.trim\(\)/u);
   assert.match(submit, /draft\.length === 0/u);
   assert.match(submit, /sendDirectMessage\(other, draft, referencedMessageId\)/u);
@@ -5126,11 +5683,17 @@ test("an invite link opened in a running session enters the invitation flow", as
   const body = app.slice(start, app.indexOf("\n/* ---", start));
   const invitation = body.indexOf("handleInviteLink");
   const signedOutShell = body.indexOf('const authRoot = $("#auth-root")');
-  const ordinaryRoute = body.indexOf("const route = window.location.hash");
+  const ordinaryRoute = body.indexOf("const route = (window.location.hash");
 
   assert.match(app, /addEventListener\("hashchange", applyHash\)/u);
   assert.match(body, /\^#invite\\\/\.\+\$/u);
-  assert.notEqual(invitation, -1);
+  // Each landmark asserted present before it is ordered against another: a
+  // missing one is -1, which sorts before everything and turns "this comes
+  // first" into a pass, or -- as here -- into a failure that reads as a
+  // behaviour change rather than as a renamed line.
+  assert.notEqual(invitation, -1, "applyHash should still take invite links");
+  assert.notEqual(signedOutShell, -1, "applyHash should still reach the signed-out shell");
+  assert.notEqual(ordinaryRoute, -1, "applyHash should still read the ordinary route");
   assert.ok(invitation < signedOutShell);
   assert.ok(invitation < ordinaryRoute);
 });
@@ -5763,6 +6326,8 @@ test("the run fills the agent working, at the front of the stack", async () => {
     "planTranscriptReplies",
     "threadReplyTurns",
     "channelAuthor",
+    "agentOwnerOffline",
+    "threadIsPaused",
     "agentFace",
     "avatar",
     "currentUserName",
@@ -5786,6 +6351,11 @@ test("the run fills the agent working, at the front of the stack", async () => {
       name: reply.author,
       agent: reply.agent === true ? { id: reply.author } : undefined,
     }),
+    // This test's premise is an agent that is working: its owner has a
+    // machine and the thread is not paused. `screen-chats.js` imports both
+    // for real; only this synthetic scope needs them handed in.
+    () => false,
+    () => false,
     (
       agent: { id: string },
       _size: number,
@@ -6384,7 +6954,7 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   // The header counted the whole organization — and, before that had loaded,
   // only the reader. Both it and the sidebar now count this room.
   assert.match(chats, /function channelPeopleFor/u);
-  assert.match(chats, /const people = channelPeopleFor\(repositoryId\)/u);
+  assert.match(chats, /const people = channelPeopleFor\(activeRepositoryId\)/u);
   assert.match(chats, /const people = channelPeopleFor\(activeRepositoryId\)/u);
   assert.doesNotMatch(
     /function conversationHeader[\s\S]*?\n\}/u.exec(chats)?.[0] ?? "",
@@ -7072,10 +7642,15 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   // The sidebar answers from the tasks rather than the messages: only the open
   // channel has its messages loaded, so a badge read from those would be right
   // for the room already on screen and absent for every other.
-  const channelHeld = data.slice(
-    data.indexOf("export function channelAwaitsGoAhead"),
-    data.indexOf("/** Records a `channel-typing` frame from somebody else. */"),
-  );
+  // Bounded by the next declaration, not by a comment: this used to end at a
+  // one-line comment that has since been expanded into a block, so `indexOf`
+  // returned -1 and `slice(start, -1)` quietly took the whole rest of the
+  // file. The assertions below then described `data.js`, not this function.
+  const heldStart = data.indexOf("export function channelAwaitsGoAhead");
+  const heldEnd = data.indexOf("export function noteTyping", heldStart);
+  assert.notEqual(heldStart, -1, "channelAwaitsGoAhead should still exist");
+  assert.notEqual(heldEnd, -1, "channelAwaitsGoAhead should have a boundary");
+  const channelHeld = data.slice(heldStart, heldEnd);
   assert.match(channelHeld, /state\.tasks\.some/u);
   assert.equal(/channelMessagesFor/u.test(channelHeld), false);
 
@@ -7154,7 +7729,13 @@ test("completed-work responses use an accessible inline pill while ordinary refe
   assert.match(row, /const completedReference =/u);
   assert.match(row, /completedReference === ""/u);
   assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
-  assert.match(row, /messageBodyWithIcons\(entry, repositoryId\)\}\$\{completedReference\}/u);
+  // The body is rewritten before it is drawn — the reference is lifted out
+  // of the text and rendered as the pill — so the entry reaches
+  // `messageBodyWithIcons` with its content replaced rather than whole.
+  assert.match(
+    row,
+    /messageBodyWithIcons\(\{ \.\.\.entry, content: shown \}, repositoryId\)\}\$\{completedReference\}/u,
+  );
 
   const pill = /\n\.cmsg-completed-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(pill, undefined, "completed work has its own inline treatment");
@@ -7827,10 +8408,14 @@ test("a provider with no model list still lets a model be named", async () => {
   // The agent panel's chips became labelled fields in the profile redesign, so
   // the slice is anchored on `field("Model", ...)` now. Same control, same
   // action, same question: what happens on a provider that lists nothing.
-  const chip = chats.slice(
-    chats.indexOf('field(\n      "Model"'),
-    chats.indexOf('field(\n      "Reasoning"'),
-  );
+  // Anchored on the function rather than on `field(\n      "Model"`, whose
+  // indentation is what actually moved. A slice bounded by whitespace is a
+  // slice that reformatting silently empties.
+  const zoneStart = chats.indexOf("function agentRuntimeZone(");
+  const zoneEnd = chats.indexOf('"Reasoning"', zoneStart);
+  assert.notEqual(zoneStart, -1, "the agent runtime zone should still exist");
+  assert.notEqual(zoneEnd, -1, "the model field should still precede reasoning");
+  const chip = chats.slice(zoneStart, zoneEnd);
   assert.match(chip, /customModel/u);
   assert.match(chip, /miniEditable\(\s*"channel-agent-model"/u);
   assert.match(chat, /providerAllowsCustomModel\(agent\?\.id\)/u);
@@ -8144,8 +8729,18 @@ test("the transcript reads in a column rather than across the window", async () 
   // A message run edge to edge on a wide screen is a message read twice: the
   // eye leaves the end of one line with nowhere to land on the next. Day
   // separators still span the panel so "Today" is not left-shifted short.
-  assert.match(css, /--room-column: 940px;/u);
-  assert.match(css, /--message-max: 100%;/u);
+  // The bound, not its value. `--room-column` was 940px and is the panel's
+  // own width now — a deliberate reversal, with the reason written above the
+  // declaration: a fixed measure left long posts wrapping beside a large
+  // empty area. What has to stay true is that rows are bounded by a named
+  // column at all, rather than running to the window's edge.
+  assert.match(css, /--room-column: [^;]+;/u);
+  assert.match(css, /--message-max: [^;]+;/u);
+  assert.match(
+    css,
+    /max-width: var\(--room-column\);/u,
+    "message rows are still held to the column rather than the window",
+  );
   assert.match(
     css,
     /\.chan-messages \{[\s\S]{0,400}padding: 12px 18px 20px;/u,

@@ -12,11 +12,13 @@ import type {
   CoordinatorDecision,
   FilePatchStatus,
   IntegrationResult,
+  McpServerTransport,
   PlanAdmission,
   ProjectId,
   ResourceLease,
   ScopeChangeDecision,
   ScopeChangeRequest,
+  SealedSecret,
   SequencedAuditEvent,
   TaskDefinition,
   TouchedFileSample,
@@ -383,12 +385,196 @@ export interface ApiTokenRecord {
   createdAt: string;
   /** Session that minted it, so a compromised session's tokens can be traced. */
   createdBySession: string | undefined;
+  /**
+   * Token that minted it, for the one case where a credential may mint
+   * another: the desktop app, connecting an editor on the machine it runs on.
+   *
+   * Set means this token dies when that one is revoked. That is what keeps
+   * revocation meaningful — the rule a token minting tokens would otherwise
+   * break — and it is why only a token with none of its own may mint.
+   */
+  createdByToken: string | undefined;
+  /**
+   * The editor this token was minted for, when it was minted for one.
+   *
+   * Recorded at mint rather than read back off the name, which the app writes
+   * as "Codex on <device>" and a person is free to change. It is what lets
+   * `submit_task` know a request came from Codex and address that person's
+   * Codex agent, instead of making the model invent an assignment from a
+   * roster it has no business choosing from.
+   */
+  editorVendor: string | undefined;
   expiresAt: string | undefined;
   lastUsedAt: string | undefined;
   lastUsedIp: string | undefined;
   revokedAt: string | undefined;
   revokedReason: string | undefined;
 }
+
+/**
+ * Which of a project's repositories an MCP server attaches to: every one of
+ * them, or only the ones listed on the record.
+ */
+export type McpServerScope = "project" | "repository";
+
+/**
+ * One MCP server a project has configured for its agents, as an ordinary
+ * read returns it.
+ *
+ * `secretNames` is the only thing this record says about secrets: which
+ * names are set, so a screen can show that `LINEAR_API_KEY` is configured
+ * and offer to replace it. Never a ciphertext, never a plaintext. The sealed
+ * triples come back from `getMcpServerSecrets` and from nowhere else, so a
+ * listing handed to a browser, written into a log, or serialized into an
+ * audit event carries nothing worth stealing even when the caller forgot to
+ * strip it. `values` is the part that is not secret — a stdio server's
+ * environment, an HTTP server's headers — and travels in the open.
+ *
+ * `enabled` is false on create and only `setMcpServerApproval` moves it.
+ * Enabling is the security decision: it is what turns a row into a process
+ * that will start on a teammate's laptop. Keeping it out of
+ * `updateMcpServer` means there is exactly one method to grep for when
+ * asking who can arm a server, and an edit to a command line cannot arm one
+ * as a side effect. `approvedBy` and `approvedAt` are set together with
+ * `enabled` and cleared with it, so they always describe the approval in
+ * force and never one that was withdrawn.
+ *
+ * `repositoryIds` is what a `repository`-scoped server attaches to. A
+ * project-wide one keeps whatever list it was given but attaches everywhere
+ * regardless, so narrowing it later is a change of `scope`, not of the list.
+ */
+export interface McpServerRecord {
+  id: string;
+  projectId: ProjectId;
+  name: string;
+  transport: McpServerTransport;
+  /** stdio only. A bare executable name or an absolute path; never a shell. */
+  command?: string;
+  /** stdio only. */
+  args: string[];
+  /** http only. */
+  url?: string;
+  values: Record<string, string>;
+  secretNames: string[];
+  enabled: boolean;
+  /**
+   * Whether this server may also be reached from an editor, through Kumi's
+   * own MCP endpoint.
+   *
+   * A second opt-in rather than a consequence of `enabled`, because it is a
+   * different decision with a different blast radius. `enabled` means the
+   * server runs on a teammate's machine, beside an agent, after that machine's
+   * owner has consented, scoped to one lease. This means the *control plane*
+   * dials it, with the project's secrets, for whoever is typing in Cursor.
+   * Approving the first must not silently grant the second.
+   *
+   * Only ever true alongside `enabled`: a server nobody has approved at all
+   * is not reachable from anywhere.
+   */
+  editorEnabled: boolean;
+  scope: McpServerScope;
+  repositoryIds: string[];
+  approvedBy?: UserId;
+  approvedAt?: string;
+  createdBy: UserId;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A server's sealed secrets, keyed by the env or header name each opens into. */
+export type McpServerSecrets = Record<string, SealedSecret>;
+
+export interface CreateMcpServerInput {
+  id: string;
+  projectId: ProjectId;
+  name: string;
+  transport: McpServerTransport;
+  command?: string;
+  args?: string[];
+  url?: string;
+  values?: Record<string, string>;
+  secrets?: McpServerSecrets;
+  scope?: McpServerScope;
+  repositoryIds?: string[];
+  createdBy: UserId;
+  createdAt: string;
+}
+
+/**
+ * A partial edit. `null` clears `command` or `url`; an absent key leaves a
+ * field alone. In `secrets` a sealed triple replaces that name, `null`
+ * removes it, and names not mentioned keep what they had — so a screen that
+ * only ever sees names can replace one secret without holding the others.
+ * `repositoryIds` replaces the list wholesale. There is no `enabled` here on
+ * purpose; see `McpServerRecord`.
+ */
+export interface UpdateMcpServerInput {
+  name?: string;
+  command?: string | null;
+  args?: string[];
+  url?: string | null;
+  values?: Record<string, string>;
+  secrets?: Record<string, SealedSecret | null>;
+  scope?: McpServerScope;
+  repositoryIds?: string[];
+  updatedAt: string;
+}
+
+/**
+ * The names an ordinary read reports for a server's secrets — sorted, so
+ * two stores that keep the map in different orders describe it identically.
+ */
+export function mcpSecretNames(secrets: McpServerSecrets): string[] {
+  return Object.keys(secrets).sort();
+}
+
+/**
+ * Applies a secrets patch: a sealed triple replaces that name, `null`
+ * removes it, and everything not mentioned survives.
+ *
+ * One definition for every store, because "which secret did that edit
+ * delete" is exactly the kind of semantics three implementations drift on,
+ * and the drift here would either leak a secret the admin thought was gone
+ * or destroy one they thought was kept.
+ */
+export function applyMcpSecretsPatch(
+  current: McpServerSecrets,
+  patch: Record<string, SealedSecret | null> | undefined,
+): McpServerSecrets {
+  const merged: McpServerSecrets = { ...current };
+  for (const [name, secret] of Object.entries(patch ?? {})) {
+    if (secret === null) {
+      delete merged[name];
+    } else {
+      merged[name] = {
+        iv: secret.iv,
+        tag: secret.tag,
+        ciphertext: secret.ciphertext,
+      };
+    }
+  }
+  return merged;
+}
+
+/**
+ * Repository ids as every store keeps them: deduplicated and sorted, so the
+ * join table's primary key cannot reject a list that named one repository
+ * twice, and a record reads back the same whichever backend wrote it.
+ */
+export function normalizeMcpRepositoryIds(ids: readonly string[]): string[] {
+  return [...new Set(ids)].sort();
+}
+
+/**
+ * How long a worker row must have been silent before it can be retired.
+ *
+ * Comfortably past both windows that matter: a worker stops counting as live
+ * after three minutes, and a lease it might have been holding expires after
+ * five. Thirty leaves a wide margin for a machine that is merely slow to poll,
+ * because deleting a row a live process is still using would fail its next
+ * lease with an unknown-worker error rather than anything legible.
+ */
+export const WORKER_RETIREMENT_MS = 30 * 60 * 1000;
 
 export interface WorkerRecord {
   id: string;
@@ -1694,6 +1880,22 @@ export interface CoordinationStore {
     repositoryId: string,
   ): Promise<boolean>;
 
+  /**
+   * Records a machine as available, and retires that machine's dead rows.
+   *
+   * A fresh id every time, deliberately: two processes on one machine must not
+   * share a row, or they share its lease accounting and whichever registered
+   * last decides which adapters the pair is said to have.
+   *
+   * The retirement is what stops the table growing with restarts. Only rows
+   * that are genuinely finished go: same owner, same organization, same
+   * machine name, no heartbeat for long enough that they cannot be live and
+   * cannot hold an unexpired lease, and no lease row pointing at them at all.
+   * That last condition is not optional. `work_leases.worker_id` is a foreign
+   * key, so a worker that ever took a task is part of the history and stays.
+   * What is deleted is exactly the accumulation this was leaking: a desktop
+   * opened, closed, and opened again without work ever arriving.
+   */
   registerWorker(input: {
     userId: UserId;
     organizationId: string;
@@ -1708,7 +1910,23 @@ export interface CoordinationStore {
    * rather than by the caller: an unfiltered call returns every worker on the
    * deployment, so anything serving a user must pass one.
    */
-  listWorkers(filter?: { organizationId?: string }): Promise<WorkerRecord[]>;
+  /**
+   * Registered workers, newest heartbeat first.
+   *
+   * `seenAfter` is not a convenience. Liveness is asked on every roster read
+   * and on every @mention, and answering it meant loading the whole table and
+   * filtering in memory: `registerWorker` writes a fresh row on every worker
+   * start with no upsert, so that table grows with restarts rather than with
+   * machines. Pushed into the query it is served by
+   * `workers_by_organization (organization_id, last_seen_at DESC)`, which
+   * already exists, and the cost of the hot path stops depending on how many
+   * dead rows are behind it.
+   */
+  listWorkers(filter?: {
+    organizationId?: string;
+    /** Only workers whose last heartbeat is strictly after this ISO instant. */
+    seenAfter?: string;
+  }): Promise<WorkerRecord[]>;
   getWorker(id: string): Promise<WorkerRecord | undefined>;
   touchWorker(id: string, at: string): Promise<void>;
 
@@ -1872,9 +2090,76 @@ export interface CoordinationStore {
   /** Newest first. Revoked tokens are included so history stays auditable. */
   listApiTokens(userId: UserId): Promise<ApiTokenRecord[]>;
   touchApiToken(id: string, at: string, ipAddress: string): Promise<void>;
+  /**
+   * Revokes a token and everything it minted.
+   *
+   * The cascade is the whole reason a token is allowed to mint at all. One
+   * level deep, because a minted token may not mint.
+   */
   revokeApiToken(id: string, at: string, reason: string): Promise<void>;
   /** Removes tokens that expired before `now`; returns how many were deleted. */
   deleteExpiredApiTokens(now: string): Promise<number>;
+
+  /**
+   * Records a server a project has configured. Created disabled: see
+   * `McpServerRecord` for why enabling is a separate act. Throws
+   * `Unknown project: …` when the project row does not exist, and an error
+   * whose message contains "already" when the project has a server of that
+   * name in any casing.
+   */
+  createMcpServer(input: CreateMcpServerInput): Promise<McpServerRecord>;
+  getMcpServer(id: string): Promise<McpServerRecord | undefined>;
+  /**
+   * The sealed triples, exactly as stored — the one read that carries
+   * ciphertext. For the code that opens them into a lease, and for nothing
+   * that renders a page.
+   */
+  getMcpServerSecrets(id: string): Promise<McpServerSecrets | undefined>;
+  /**
+   * Ordered by name. With `repositoryId`, the servers that attach to that
+   * repository: every project-scoped one plus the repository-scoped ones
+   * whose list includes it. `enabledOnly` is what a lease asks for.
+   */
+  listMcpServers(
+    projectId: ProjectId,
+    filter?: {
+      repositoryId?: string;
+      enabledOnly?: boolean;
+      /** Both opt-ins. What the editor tool proxy asks for. */
+      editorEnabledOnly?: boolean;
+    },
+  ): Promise<McpServerRecord[]>;
+  /** Throws `Unknown MCP server: …`. Cannot move `enabled`. */
+  updateMcpServer(
+    id: string,
+    patch: UpdateMcpServerInput,
+  ): Promise<McpServerRecord>;
+  /**
+   * The one way `enabled` moves. Enabling records who approved and when;
+   * disabling clears both, so the record never shows a name beside "off".
+   * Disabling also clears `editorEnabled`, because a withdrawn approval that
+   * left a server still reachable from an editor would be a withdrawal in
+   * name only. Throws `Unknown MCP server: …`.
+   */
+  setMcpServerApproval(
+    id: string,
+    approval: { enabled: boolean; approvedBy: UserId; approvedAt: string },
+  ): Promise<McpServerRecord>;
+  /**
+   * The one way `editorEnabled` moves, and it can only move up while
+   * `enabled` is true: granting editor access to a server nobody approved
+   * would arm it through a door the approval screen does not show. Turning
+   * `enabled` off through {@link setMcpServerApproval} takes editor access
+   * with it, so there is no state where a withdrawn approval leaves a server
+   * still reachable. Throws `Unknown MCP server: …`.
+   */
+  setMcpServerEditorAccess(
+    id: string,
+    enabled: boolean,
+    at: string,
+  ): Promise<McpServerRecord>;
+  /** Removes the server and its repository attachments. Absent is not an error. */
+  deleteMcpServer(id: string): Promise<void>;
 
   createAuthSession(session: AuthSessionRecord): Promise<void>;
   getAuthSession(id: string): Promise<AuthSessionRecord | undefined>;
@@ -1920,6 +2205,22 @@ export interface CoordinationStore {
   getRepository(id: string): Promise<StoredRepository | undefined>;
 
   submitTask(input: SubmitTaskInput): Promise<SubmittedTask>;
+  /**
+   * One task by id.
+   *
+   * Deliberately unlike {@link listSubmittedTasks}, which defaults to
+   * `kind: "task"` and so hides questions from every caller that has not asked
+   * for them. An id names exactly one row and the caller already has it, so
+   * there is nothing to protect them from: a question asked for by id is
+   * returned.
+   *
+   * Added because the alternative was in the code and being used — the gateway
+   * read a single task by listing every task on the deployment and filtering
+   * in memory. That is defensible once on a dashboard load and indefensible on
+   * something polled, which is what a task's status becomes the moment it can
+   * be asked for from outside.
+   */
+  getSubmittedTask(taskId: TaskId): Promise<SubmittedTask | undefined>;
   listSubmittedTasks(filter?: SubmittedTaskFilter): Promise<SubmittedTask[]>;
   /**
    * Atomically claims submitted work for one repository.

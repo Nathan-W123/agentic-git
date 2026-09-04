@@ -522,6 +522,118 @@ svg.ui-icon {
   text-align: right;
 }
 
+/* The returning-user path is deliberately one compact card: brand, task,
+   fields, and recovery all stay within a single reading order. The other
+   auth screens retain the shared shell above because their longer copy and
+   additional fields benefit from the looser layout. */
+.auth-login-shell {
+  padding: 24px;
+  background:
+    radial-gradient(circle at 50% 0%, var(--accent-wash), transparent 34rem),
+    var(--bg);
+}
+
+.auth-login {
+  width: 100%;
+  max-width: 408px;
+  display: grid;
+  gap: 18px;
+}
+
+.auth-login-header {
+  display: grid;
+  gap: 18px;
+  text-align: center;
+}
+
+.auth-login-brand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+.auth-login-header h1 {
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.auth-login-header p {
+  margin-top: 7px;
+  color: var(--text-3);
+  font-size: 14px;
+}
+
+.auth-login-card {
+  gap: 18px;
+  padding: 28px;
+  border-color: var(--border-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 20px 48px rgb(0 0 0 / 20%);
+}
+
+.auth-login-card .field {
+  gap: 8px;
+}
+
+.auth-login-card .input {
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 9px;
+}
+
+.auth-login-password {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-login-password .link-muted {
+  justify-self: end;
+}
+
+.auth-login-card .btn {
+  min-height: 44px;
+  margin-top: 2px;
+}
+
+.auth-login-card .form-msg {
+  margin: -4px 0;
+}
+
+.auth-login-footer {
+  padding-top: 17px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.auth-login-desktop {
+  justify-self: center;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.auth-login-desktop:hover {
+  color: var(--accent-bright);
+}
+
+@media (max-width: 480px) {
+  .auth-login-shell {
+    align-items: start;
+    padding: 32px 16px;
+  }
+
+  .auth-login-card {
+    padding: 22px;
+  }
+}
+
 /* ------------------------------------------------------------ buttons ---- */
 
 .btn {
@@ -5155,7 +5267,7 @@ button.chip.lg:hover {
   /* The hold belongs to this app for its whole length. A long press over
      text otherwise raises the platform's selection magnifier and copy bubble
      on top of the bar the same press is opening, and the two fight for the
-     finger. The words are still copyable: "Copy text" is the first thing in
+     finger. The words are still copyable: "Copy message" is the first thing in
      the row's own menu. */
   .cmsg-row:not(.cmsg-system),
   .dm-msg {
@@ -5821,36 +5933,6 @@ button.chip.lg:hover {
   overflow: hidden;
 }
 
-.chan-pins-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 14px;
-  background: none;
-  border: none;
-  color: var(--text-2);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.chan-pins-head svg {
-  width: 14px;
-  height: 14px;
-}
-
-.chan-pins-head [data-icon="chevronDown"] {
-  transition: transform 180ms ease;
-}
-
-.chan-pins.open .chan-pins-head [data-icon="chevronDown"] {
-  transform: rotate(180deg);
-}
-
-.chan-pins-head .spacer {
-  flex: 1;
-}
-
 .chan-pins-list-frame {
   display: grid;
   grid-template-rows: 0fr;
@@ -5875,7 +5957,6 @@ button.chip.lg:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .chan-pins,
-  .chan-pins-head [data-icon="chevronDown"],
   .chan-pins-list-frame {
     transition: none;
   }
@@ -10996,6 +11077,209 @@ dialog.modal[open]::backdrop {
   padding: 12px 0;
 }
 
+/* ── Decision cards ──────────────────────────────────────────────────────
+   A dialog that asks somebody to choose between two things they have to
+   read about first. Not `.agent-provider-picker`, which these borrowed and
+   which is a two-column grid built for the four short agent tiles: each
+   option's prose ended up in a column about ten characters wide, so
+   "CLI — run agents on this computer" wrapped to six lines and the sentence
+   under it became a ribbon. Nobody could read either choice, which is a poor
+   way to ask a question.
+
+   So: one option per row, the full width of the dialog, sized for a
+   sentence. The dialog itself widens to fit — `.modal-card` is 448px, which
+   is right for a name and two buttons and cramped for a decision. */
+.modal-card:has(.choice-list) {
+  width: 552px;
+}
+
+.choice-list {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.choice {
+  position: relative;
+  display: grid;
+  /* Icon, prose, tick. The prose column is `minmax(0, 1fr)` so a long word
+     wraps instead of widening the row past the dialog. */
+  grid-template-columns: 30px minmax(0, 1fr) 18px;
+  align-items: start;
+  gap: 0 13px;
+  padding: 14px 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  cursor: pointer;
+  transition:
+    background var(--motion-pop) ease,
+    border-color var(--motion-pop) ease;
+}
+
+.choice:hover:not(.is-disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.choice:has(input:checked) {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+
+.choice:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.choice-mark {
+  /* Every cell placed explicitly. Auto-placement cannot do this: two of the
+     four children span both rows, and letting the grid guess put the heading
+     in the 18px tick column and the tick in the middle of the row. */
+  grid-column: 1;
+  grid-row: 1 / 3;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  color: var(--accent-bright);
+}
+
+.choice:has(input:checked) .choice-mark {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.choice-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* The heading row: what this option does, then a badge naming it. The badge
+   carries the jargon so the heading does not have to — "CLI", "MCP", or the
+   direction an MCP connection actually runs in, which is the one fact that
+   makes two opposite options tell themselves apart at a glance. */
+.choice-head {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.choice-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.choice-badge {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.choice:has(input:checked) .choice-badge {
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
+/* Says why an option cannot be picked, in the option itself. A row at 0.7
+   opacity says only that something is wrong with it. */
+.choice-badge.is-blocked {
+  border-color: var(--border-soft);
+  color: var(--text-4);
+}
+
+.choice-note {
+  grid-column: 2;
+  grid-row: 2;
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* The radio, drawn. Selection used to be a background tint alone, which on a
+   pre-checked first option reads as "already done" rather than "this is what
+   you are about to do". */
+.choice-tick {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  align-self: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  background: var(--bg-card);
+}
+
+.choice:has(input:checked) .choice-tick {
+  border-color: var(--accent);
+  border-width: 5px;
+  background: var(--bg-card);
+}
+
+.choice.is-disabled {
+  cursor: default;
+  background: var(--bg-card);
+  border-color: var(--border-soft);
+}
+
+.choice.is-disabled .choice-mark {
+  color: var(--text-4);
+}
+
+.choice.is-disabled .choice-title,
+.choice.is-disabled .choice-note {
+  color: var(--text-4);
+}
+
+.choice.is-disabled .choice-tick {
+  border-color: var(--border-soft);
+}
+
+@media (max-width: 560px) {
+  .choice {
+    grid-template-columns: 30px minmax(0, 1fr);
+    gap: 0 12px;
+  }
+
+  /* The tick is the first thing to go: on a narrow dialog the row's own
+     highlight already says which is chosen, and the prose needs the width
+     more than the dot does. */
+  .choice-tick {
+    display: none;
+  }
+
+  .choice-head,
+  .choice-note {
+    grid-column: 2;
+  }
+}
+
 @media (max-width: 520px) {
   .agent-provider-picker {
     grid-template-columns: 1fr;
@@ -13760,16 +14044,10 @@ dialog.modal[open]::backdrop {
   color: var(--text-3);
 }
 
-.pins-panel .chan-pins {
-  display: block;
-  visibility: visible;
-  opacity: 1;
-  border: 0;
-}
-
 /* The compact shelf above a conversation keeps its own 132px scroller so it
-   cannot squeeze the transcript. Inside the dedicated panel, the panel body
-   is already the scroller; let the pin list grow into that available height
+   cannot squeeze the transcript, and folds away inside a collapsing frame.
+   The panel takes the rows on their own — no frame to unfold, and the panel
+   body is already the scroller — so the list grows into the height it has
    instead of clipping after a few rows and leaving the rest of it empty. */
 .pins-panel .chan-pins-list {
   max-height: none;
@@ -15580,6 +15858,32 @@ dialog.modal[open]::backdrop {
 .st-row-stacked .st-row-control {
   margin: 8px 0 0;
   display: block;
+  width: 100%;
+}
+
+/* The new-server form: several fields under one stacked row. A grid rather
+   than the row's inline control strip, because five inputs side by side is a
+   form nobody can read, let alone fill in on a phone. */
+/* The catalogue row: a wrap of small buttons, not a grid of cards. What is
+   being offered is a shortcut into the form below, and anything larger would
+   read as the thing itself. */
+.st-mcp-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.st-mcp-form {
+  display: grid;
+  gap: 8px;
+}
+
+.st-mcp-form > div {
+  display: grid;
+  gap: 8px;
+}
+
+.st-mcp-form .input {
   width: 100%;
 }
 

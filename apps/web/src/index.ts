@@ -292,6 +292,11 @@ async function serve(
   const providerChat = new ProviderChatService(project, {
     credentials,
     callSigns: store,
+    // Read below, and passed here too: chat and work ask the same question of
+    // the same deployment, and answering it in one place only is what let a
+    // deployment run tasks on its own login while refusing to answer a
+    // question about them.
+    hostLogin: process.env["COORD_CREDENTIAL_POLICY"] === "host-login",
   });
   const repositoryChatContext = async (repositoryId: string | undefined) => {
     if (repositoryId === undefined) {
@@ -849,7 +854,15 @@ async function serve(
         { repositories, intelligence },
       );
     },
-    ...workerOperations(project, store, { repositories, intelligence }),
+    // The same sealer the gateway seals MCP secrets with, so what one route
+    // stores the lease can open. Two stores opened on the same directory
+    // would agree on the key; passing the one object makes that a fact
+    // rather than a coincidence.
+    ...workerOperations(project, store, {
+      repositories,
+      intelligence,
+      sealer: credentials.sealer(),
+    }),
     async dockerStatus() {
       try {
         const result = await runProcess(
@@ -894,6 +907,7 @@ async function serve(
     // switch off nothing is gated on a subscription at all — so a deployment
     // runs exactly as it did before payment existed.
     paymentsEnabled: payments,
+    secretSealer: credentials.sealer(),
     ...(stripeSecretKey === undefined
       ? {}
       : { stripe: new HttpStripeClient(stripeSecretKey) }),

@@ -345,6 +345,15 @@ export const SETTINGS_SEARCH_INDEX = [
     description: "Sign a Kumi app on your machine into this account.",
     synonyms: ["token", "api key", "desktop", "cli", "revoke", "secret"],
   },
+  {
+    row: "mcp-servers",
+    section: "project-controls",
+    group: "MCP servers",
+    label: "MCP servers",
+    description:
+      "Programs your agents can reach while they work, approved per project.",
+    synonyms: ["mcp", "tools", "linear", "sentry", "server", "approve"],
+  },
 ];
 
 /**

@@ -1,3 +1,153 @@
+### 0.5.15 — an agent you have is an agent that runs
+
+Connecting an agent used to hand you the agent first and ask this computer
+about it afterwards. Press Connect and a named agent appeared on every roster
+before a single question had been put to the machine that was supposed to run
+it. If the CLI was missing, or installed and signed out, you were told so by a
+message that cleared itself six seconds later, and the agent stayed: in every
+channel, mentionable by anyone, and unable to do anything at all. The first
+your colleagues learned of it was work that went nowhere.
+
+That was a deliberate choice once, on the reasoning that an agent which is
+there and greyed out is honest. It is not. Grey is not a thing the person
+mentioning it can see.
+
+So the order is reversed. This app is asked whether the CLI is here and
+whether it is signed in, and only then is the agent created and named. The
+install and the sign-in are still offered on the way through, because that is
+the whole of the remaining setup and you are already standing there, but
+neither is taken on trust: each is checked again afterwards, since offering a
+remedy is not evidence that it worked. Every way out before the end leaves
+your account exactly as it was, and the reason you have no agent is a dialog
+you close rather than a message that vanishes.
+
+The sign-in is genuinely read. Claude is asked for its auth status and its
+answer parsed, Codex for its login status, Gemini for the credentials on
+disk. Cursor, Copilot and Kiro sign in through a browser session nothing here
+can inspect, so they are connected on what can be established, which is that
+the CLI is present, and the app says so rather than guessing.
+
+Connecting an editor over MCP now ends in a dialog too, and the agent list
+shows both connections an agent can have instead of only one. A Codex you had
+just connected over MCP used to say "Not connected" on its own row, which was
+true of its CLI and silent about what you had done.
+
+And the Codex advice is fixed. Codex reads its token from your account's
+environment rather than from the config file this app writes, so writing the
+file is not the end of the job for that one vendor. The instruction is to
+restart your computer, which is true for both the Codex app and every
+terminal. It no longer tells you to end Codex in Task Manager, and it no
+longer appears for Claude or Cursor, where restarting anything at all changes
+nothing.
+
+A note on order: this app has to be updated before a new CLI agent can be
+connected. A build that cannot answer the sign-in question is treated as
+unable to answer rather than as a yes, which is the whole point. Agents you
+already have keep working, and MCP connections are unaffected.
+
+### 0.5.14 — connect an editor with a button
+
+Kumi can now be used from inside Claude Code, Codex or Cursor: ask one of
+them to have Kumi do something and it files the task in a channel here,
+with the thread following it exactly as if you had typed it in Kumi.
+
+Setting that up used to mean copying a command out of a chat window and
+pasting it into a terminal, and every way of getting it slightly wrong
+failed silently hours later. The scope flag defaults to the folder you
+happened to be in, so the connection works from your home directory and
+is simply absent in your repository. A pasted placeholder keeps its angle
+brackets. The word Bearer goes missing. All three arrive as an
+unexplained 401 with nothing pointing at the cause.
+
+So Settings now lists the editors it found on this computer, and a button
+does the whole thing: it mints a token that can file work and nothing
+else, writes that editor's own config file, and tells you to restart it.
+Your files are merged rather than replaced — your projects, your history,
+your other MCP servers and your model settings all survive — and the
+token never appears on screen, because nobody has to carry it anywhere.
+
+Each editor on each machine gets its own token, named for both, so
+revoking the laptop you left somewhere does not break the desktop you are
+sitting at.
+
+The other direction got the same treatment. Adding a tool for your own
+agents meant typing a name, a command, arguments, a version and a scope,
+and any one of them being wrong failed quietly on somebody else's
+computer. Settings now offers a short list of known servers — Context7,
+Playwright, GitHub, Sentry — and picking one fills the form with a pinned
+version. It fills it rather than creating it, because what you are
+agreeing to is that program starting on every teammate's machine, and the
+command should be legible before you approve it.
+
+Also in this build: a machine now joins the organization that actually
+has a repository rather than whichever the server listed first, which is
+what left an invited teammate's agents grey with the app insisting it was
+running; and the app says which project and organization it joined.
+
+### 0.5.13 — an unplugged laptop is still a laptop
+
+Two silences, both of which made a working machine look like a missing one.
+
+An unplugged laptop did not run anything. The worker checked the power
+source before asking for work and, on battery, declined — the thinking being
+that a laptop which sleeps mid-task holds its lease until it expires.
+
+What that missed is that asking for work is also the only thing telling the
+control plane this machine exists. So an unplugged laptop did not read as a
+machine that was waiting. It read as no machine at all: agents grey, mentions
+answered with "nothing will pick this up yet", and an offer to install a CLI
+already sitting on the disk — the whole time somebody was sitting in front of
+it, lid open, perfectly able to work.
+
+Weighed properly, that is much worse than what it was avoiding. A lease lost
+to standby costs one requeue after five minutes, and the room is told. So a
+laptop now works whether or not it is plugged in. A machine that really does
+sleep unattended can still opt out with `COORD_PAUSE_ON_BATTERY=1`, and when
+it does, the log says so rather than leaving you to guess.
+
+The second: the Agents menu said "Running agents on this machine" whether it
+had found both your CLIs or one of them, and the log never mentioned the
+subject. The list of CLIs a machine reports is exactly what decides whether
+an agent is reachable, so a machine that found one of two would take work
+for that one and report the other as having no machine anywhere. The menu
+now names them, the log names them on every start, and an empty list — a
+worker that will never be given a single task, however healthy it looks —
+says so outright with both halves of the comparison printed.
+
+Also: Claude installed natively is now Claude the app can see.
+
+### 0.5.12 — your project's tools, on your say-so
+
+A project can now give its agents MCP servers — a Linear server, a Sentry
+server, a GitHub server — from Settings → Project controls. Approving one
+there is a recorded decision about the project's agents. It is not a decision
+about your computer, and this app treats the two differently.
+
+The first time a task arrives carrying a server your computer has not agreed
+to, the agent runs without it and this app asks you: here is what would start
+here, or what would be talked to, under your account. Say yes and the next
+task runs with it; say not now and nothing changes. What you agree to is that
+exact server — if the project later changes what `github` runs, you are asked
+again, and told that it moved rather than that something new appeared. Agents
+→ Forget Allowed MCP Servers takes every yes back.
+
+Nothing about this runs on the server. The control plane keeps the server's
+definition and its sealed secrets, and hands them only to the machine of the
+person who submitted the task; the program itself starts on that machine, as
+the agent always has.
+
+Also in this build: a message that opens with "can you" and does not end in a
+question mark is treated as an instruction, not a question, so it gets a
+thread and starts at once instead of being answered in the channel minutes
+later. Questions your machine answers now show in the worker log, answered or
+failed, so a quiet channel is no longer a mystery.
+
+Two things to know. Codex can be handed a bearer token and nothing else, so an
+http server that needs some other header runs only under Claude. And this app
+now speaks worker protocol 4: it still works against a control plane on 3, it
+just runs without tools until that control plane is updated — the thread says
+so when it happens.
+
 ### 0.5.11 — your machine runs four agents, not one
 
 Send three requests and one of them ran. The other two sat in the queue until

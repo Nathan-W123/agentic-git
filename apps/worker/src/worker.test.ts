@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import type { PowerState } from "./power.js";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
 import type { CodexProcessRunner } from "@coord/adapter-codex";
-import { CoordinatorProject } from "@coord/cli/project";
+import { CoordinatorProject, mcpServerDigest } from "@coord/cli/project";
 import { workerOperations } from "@coord/cli/worker-operations";
 import {
   DEFAULT_ORGANIZATION_ID,
@@ -14,10 +15,7 @@ import {
   SqliteCoordinationStore,
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
-import type {
-  AgentPlan,
-  CanonicalChangeNotice,
-} from "@coord/shared-types";
+import type { AgentPlan, CanonicalChangeNotice, ResolvedMcpServer } from "@coord/shared-types";
 
 /** Mirrors the worker's internal cache entry, which is not exported. */
 interface CachedPlanEntry {
@@ -1743,4 +1741,406 @@ test("cache work on one repository never overlaps", async (t) => {
     "after",
   );
   assert.equal(guarded.cacheChains.size, 0);
+});
+
+/**
+ * A stand-in for the Claude CLI: records its argv, answers planning with a
+ * plan and execution with a completion, and edits the one file. What it is
+ * given on the command line is the whole of what this test is about.
+ */
+const FAKE_CLAUDE = [
+  `#!${process.execPath}`,
+  'import fs from "node:fs";',
+  'import path from "node:path";',
+  "fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');",
+  'process.stdin.setEncoding("utf8");',
+  'process.stdin.on("data", () => {});',
+  'process.stdin.on("end", () => {',
+  '  let result;',
+  '  if (process.argv.includes("--permission-mode")) {',
+  "    result = {",
+  '      taskId: "task_stand_in", objective: "raise the value",',
+  '      expectedFiles: ["src/value.js"], expectedSymbols: ["value"],',
+  '      dependencies: [], commands: [], externalAccess: [], riskLevel: "low",',
+  "    };",
+  "  } else {",
+  '    fs.writeFileSync(path.join(process.cwd(), "src", "value.js"), "export const value = 2;\\n", "utf8");',
+  "    result = {",
+  '      outcome: "completed", symbolsChanged: ["value"], explanation: "raised with claude",',
+  '      requestId: "", additionalFiles: [], additionalSymbols: [], additionalApis: [],',
+  '      additionalSchemas: [], additionalConfigKeys: [], additionalTests: [],',
+  '      additionalServices: [], reason: "",',
+  "    };",
+  "  }",
+  '  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(result) }) + "\\n");',
+  "});",
+  "",
+].join("\n");
+
+test("a run that ends badly says so in the log, and where it got to", async (t) => {
+  // The success line was the only one a run could produce, so a task that
+  // died left the log identical to a task still working: a start line, then
+  // nothing, forever. Three separate evenings of this were spent asking "is
+  // it stuck or is it thinking" with no way to tell.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { command: "definitely-not-a-real-binary" },
+  };
+  await runtime.project.save();
+
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...parts: unknown[]) => {
+    said.push(parts.map(String).join(" "));
+  };
+  t.after(() => {
+    console.log = log;
+  });
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const worker = makeWorker(runtime);
+  await worker.register();
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, false);
+
+  const failure = said.find((line) => line.includes("failed after"));
+  assert.ok(failure, `no failure line among:\n${said.join("\n")}`);
+  assert.match(failure, new RegExp(task.id, "u"));
+  // Which phase it got to, which is most of the diagnosis. This fixture
+  // fetched and checked out fine and died spawning the agent, so the last
+  // phase it completed is the checkout — and "reached checkout" is the
+  // difference between looking at the network and looking at the CLI.
+  assert.match(failure, /reached checkout/u);
+  assert.match(failure, /fetch [\d.]+s/u, "and where the time went");
+  // And the reason itself, rather than a bare "failed".
+  assert.match(failure, /definitely-not-a-real-binary|ENOENT|spawn/u);
+});
+
+test("a laptop works on battery unless its owner says otherwise", async (t) => {
+  // The default was the other way round, and the caution cost more than it
+  // saved. Declining never contacts the control plane, and that contact is
+  // the only thing telling it this machine exists — so an unplugged laptop
+  // was not a machine that was waiting, it was no machine at all three
+  // minutes later, while somebody sat in front of it perfectly able to work.
+  // A lease lost to standby costs one requeue, announced in the room.
+  const runtime = await startRuntime(t);
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...parts: unknown[]) => {
+    said.push(parts.map(String).join(" "));
+  };
+  t.after(() => {
+    console.log = log;
+  });
+
+  const power = { read: async (): Promise<PowerState> => "battery" };
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const laptop = makeWorker(runtime, { powerSource: power });
+  await laptop.register();
+  assert.equal((await laptop.runOnce()).worked, true);
+  assert.deepEqual(
+    said.filter((line) => /not claiming work/u.test(line)),
+    [],
+  );
+
+  // And a machine that really does sleep unattended can still say so.
+  const paused = makeWorker(runtime, {
+    powerSource: power,
+    pauseOnBattery: true,
+  });
+  await paused.register();
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise it again",
+    agentId: "local",
+    validationCommands: [],
+  });
+  assert.equal((await paused.runOnce()).worked, false);
+  // Once per change of state, not once per poll: this runs every few seconds.
+  assert.equal((await paused.runOnce()).worked, false);
+  const refusals = said.filter((line) => /not claiming work/u.test(line));
+  assert.equal(refusals.length, 1, said.join("\n"));
+  assert.match(refusals[0] ?? "", /battery/u);
+  assert.match(refusals[0] ?? "", /COORD_PAUSE_ON_BATTERY/u);
+});
+
+test("a worker says which adapters it advertised, and an empty list is loud", async (t) => {
+  // The intersection of "what the config lists" and "what the host says this
+  // machine has" is what the control plane matches work against, and also
+  // what it decides an agent's reachability by. Empty, it produces a worker
+  // that registers, polls forever, is offered nothing, and reports itself as
+  // running — while every one of that person's agents is drawn as having no
+  // machine. Nothing about the symptom points at the list, so the list has to
+  // say itself.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "claude" },
+    theirs: { adapter: "codex" },
+  };
+  await runtime.project.save();
+
+  const both = makeWorker(runtime, { adapters: ["claude", "codex"] });
+  await both.register();
+  assert.deepEqual([...both.advertisedAdapters].sort(), ["claude", "codex"]);
+
+  // The host narrows it: a machine with only Codex installed advertises only
+  // Codex, however many agents the config lists.
+  const one = makeWorker(runtime, { adapters: ["codex"] });
+  await one.register();
+  assert.deepEqual([...one.advertisedAdapters], ["codex"]);
+
+  // And a host naming something the config has no agent for intersects to
+  // nothing. This is the state worth seeing, and it is reachable.
+  const none = makeWorker(runtime, { adapters: ["nonesuch"] });
+  await none.register();
+  assert.deepEqual([...none.advertisedAdapters], []);
+});
+
+test("a worker takes work from a control plane one protocol behind it, and refuses one two behind", async (t) => {
+  // Protocol 4 added MCP servers to the lease, which are optional: a control
+  // plane still on 3 never sends any, and the task it hands over is as good
+  // as ever. Refusing it would strand every desktop that updated before the
+  // server did. Protocol 3 is the floor because that is where plan admission
+  // arrived, and a control plane without it would have work done first and
+  // thrown away on conflict afterwards.
+  const runtime = await startRuntime(t);
+  let announced = 3;
+  class OlderControlPlane extends WorkerClient {
+    public override async lease(
+      ...args: Parameters<WorkerClient["lease"]>
+    ): ReturnType<WorkerClient["lease"]> {
+      const assignment = await super.lease(...args);
+      return assignment === undefined
+        ? undefined
+        : { ...assignment, protocolVersion: announced };
+    }
+  }
+  const worker = makeWorker(runtime, {
+    client: new OlderControlPlane({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+  });
+  await worker.register();
+
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const behindByOne = await worker.runOnce();
+  assert.equal(behindByOne.accepted, true, behindByOne.reason);
+
+  announced = 2;
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise it again",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const behindByTwo = await worker.runOnce();
+  assert.equal(behindByTwo.accepted, false);
+  assert.match(String(behindByTwo.reason ?? ""), /plan admission/u);
+});
+
+test("a Claude worker loads the lease's MCP servers from scratch, strictly, and commits none of it", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the stand-in CLI is a shebang script");
+    return;
+  }
+  const runtime = await startRuntime(t);
+  const log = path.join(runtime.root, "claude-argv.jsonl");
+  const fake = path.join(runtime.root, "fake-claude.mjs");
+  await writeFile(fake, FAKE_CLAUDE, { encoding: "utf8", mode: 0o755 });
+  runtime.project.config.agents = {
+    local: { adapter: "claude", command: fake, env: { FAKE_CLAUDE_LOG: log } },
+  };
+  runtime.project.config.mcp = { allow: "all" };
+  await runtime.project.save();
+
+  // The control plane under test predates the field, so the lease is given
+  // its servers on the way in — the shape the worker receives is the same.
+  const offered: ResolvedMcpServer[] = [
+    {
+      name: "github",
+      transport: "http",
+      url: "https://mcp.example/github",
+      headers: { Authorization: "Bearer ghp_opened_secret" },
+    },
+  ];
+  class LeaseWithServers extends WorkerClient {
+    public override async lease(
+      ...args: Parameters<WorkerClient["lease"]>
+    ): ReturnType<WorkerClient["lease"]> {
+      const assignment = await super.lease(...args);
+      return assignment === undefined
+        ? undefined
+        : { ...assignment, mcpServers: offered };
+    }
+  }
+  const worker = makeWorker(runtime, {
+    client: new LeaseWithServers({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+  });
+  await worker.register();
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with claude",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+
+  const argvs = (await readFile(log, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+  assert.equal(argvs.length, 2);
+  for (const argv of argvs) {
+    const at = argv.indexOf("--mcp-config");
+    assert.ok(at >= 0, `${argv.join(" ")} carries no --mcp-config`);
+    const configPath = argv[at + 1] ?? "";
+    assert.equal(argv[at + 2], "--strict-mcp-config");
+    // Beside the workspace, under the run's scratch, never inside the tree
+    // the changeset is collected from.
+    assert.equal(path.basename(configPath), "claude.json");
+    assert.equal(path.basename(path.dirname(configPath)), "mcp");
+    assert.equal(configPath.includes(`${path.sep}workspace${path.sep}`), false);
+    assert.equal(argv.some((arg) => arg.includes("ghp_opened_secret")), false);
+  }
+  // Removed with the run.
+  await assert.rejects(access(argvs[0]?.[argvs[0].indexOf("--mcp-config") + 1] ?? ""));
+
+  const storedTask = (await runtime.store.listSubmittedTasks()).find(
+    (entry) => entry.id === task.id,
+  );
+  const run = await runtime.store.getRun(storedTask?.runId ?? "");
+  assert.deepEqual(
+    run?.changeSets[0]?.patches.map((patch) => patch.path),
+    ["src/value.js"],
+  );
+  const progress = (await runtime.store.listAudit())
+    .filter((event) => event.type === "agent_progress")
+    .map((event) => String(event.data["message"]));
+  assert.ok(progress.includes("Running with tools: github."), progress.join("\n"));
+
+  // The same machine, told to run nothing: the servers are still offered,
+  // the agent runs without them, and the room hears why — and so does the
+  // desktop app, by name, because the room cannot change this machine's
+  // allowlist and the app can put the question to the person who can.
+  runtime.project.config.mcp = { allow: [] };
+  await rm(log, { force: true });
+  const host = process as { parentPort?: unknown };
+  const hostMessages: unknown[] = [];
+  host.parentPort = {
+    postMessage(message: unknown) {
+      hostMessages.push(message);
+    },
+  };
+  t.after(() => {
+    delete host.parentPort;
+  });
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with claude again",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const withheld = await worker.runOnce();
+  assert.equal(withheld.accepted, true, withheld.reason);
+  const later = (await readFile(log, "utf8")).trim().split("\n");
+  assert.ok(later.length >= 2);
+  for (const line of later) {
+    assert.equal((JSON.parse(line) as string[]).includes("--mcp-config"), false);
+  }
+  const explained = (await runtime.store.listAudit())
+    .filter((event) => event.type === "agent_progress")
+    .map((event) => String(event.data["message"]));
+  assert.ok(
+    explained.includes(
+      "This project offers MCP servers github; this machine has not allowed them. Kumi on that machine will ask its owner.",
+    ),
+    explained.join("\n"),
+  );
+  const digest = mcpServerDigest(offered[0] as ResolvedMcpServer);
+  assert.deepEqual(
+    hostMessages.filter(
+      (message) => (message as { type?: string }).type === "mcp-offered",
+    ),
+    [
+      {
+        type: "mcp-offered",
+        servers: [
+          {
+            name: "github",
+            digest,
+            summary: "github: talks to https://mcp.example/github",
+          },
+        ],
+      },
+    ],
+  );
+
+  // The owner says yes to *this* github. The next task runs with it.
+  runtime.project.config.mcp = { allow: [{ name: "github", digest }] };
+  await rm(log, { force: true });
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with claude, allowed",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const allowedRun = await worker.runOnce();
+  assert.equal(allowedRun.accepted, true, allowedRun.reason);
+  for (const line of (await readFile(log, "utf8")).trim().split("\n")) {
+    assert.ok((JSON.parse(line) as string[]).includes("--mcp-config"), line);
+  }
+
+  // Then the project redefines github — same name, different place. What
+  // the owner agreed to is not what is on offer now, so it is withheld as
+  // if never allowed, and the room and the app both hear that it changed
+  // rather than that something new appeared.
+  offered[0] = { ...(offered[0] as ResolvedMcpServer), url: "https://mcp.example/elsewhere" };
+  hostMessages.length = 0;
+  await rm(log, { force: true });
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with claude, redefined",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const redefined = await worker.runOnce();
+  assert.equal(redefined.accepted, true, redefined.reason);
+  for (const line of (await readFile(log, "utf8")).trim().split("\n")) {
+    assert.equal((JSON.parse(line) as string[]).includes("--mcp-config"), false, line);
+  }
+  const afterChange = (await runtime.store.listAudit())
+    .filter((event) => event.type === "agent_progress")
+    .map((event) => String(event.data["message"]));
+  assert.ok(
+    afterChange.includes(
+      "This project offers MCP servers github; this machine has not allowed them (github changed since it was allowed here). Kumi on that machine will ask its owner.",
+    ),
+    afterChange.join("\n"),
+  );
+  const reoffered = hostMessages.find(
+    (message) => (message as { type?: string }).type === "mcp-offered",
+  ) as { servers: Array<{ digest: string; summary: string }> } | undefined;
+  assert.notEqual(reoffered?.servers[0]?.digest, digest);
+  assert.equal(reoffered?.servers[0]?.summary, "github: talks to https://mcp.example/elsewhere");
 });

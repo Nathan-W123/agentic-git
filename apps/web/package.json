@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit && node ../../scripts/check-public-syntax.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && node ../../scripts/check-public-syntax.mjs && node ../../scripts/check-frontend-reachability.mjs",
     "test": "node --test dist/*.test.js",
     "start": "node dist/index.js"
   },
