@@ -133,3 +133,69 @@ test("a refused image is undefined rather than a failed run", async () => {
     undefined,
   );
 });
+
+test("a non-JSON error page becomes a control-plane error that quotes it", async () => {
+  // The failure this replaces killed a worker on somebody's laptop and left
+  // nothing behind: JSON.parse ran before the status was read, so a proxy's
+  // HTML page raised a SyntaxError, which is not retryable and not a
+  // ControlPlaneError, and it exited the process out of `register`.
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async () =>
+      new Response("<html><body>502 Bad Gateway</body></html>", {
+        status: 502,
+      }),
+  });
+
+  await assert.rejects(
+    client.register({
+      organizationId: "org_1",
+      name: "laptop",
+      adapters: ["codex"],
+      version: "1.0.0",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ControlPlaneError");
+      assert.match(error.message, /502 Bad Gateway/u);
+      return true;
+    },
+  );
+});
+
+test("registration that carries no worker id is refused by name", async () => {
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async () => new Response(null, { status: 204 }),
+  });
+
+  await assert.rejects(
+    client.register({
+      organizationId: "org_1",
+      name: "laptop",
+      adapters: ["codex"],
+      version: "1.0.0",
+    }),
+    /reply carried no worker id/u,
+  );
+});
+
+test("a successful reply that is not JSON is reported, not returned", async () => {
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async () => new Response("not json at all", { status: 200 }),
+  });
+
+  await assert.rejects(
+    client.register({
+      organizationId: "org_1",
+      name: "laptop",
+      adapters: ["codex"],
+      version: "1.0.0",
+    }),
+    /not JSON: not json at all/u,
+  );
+});

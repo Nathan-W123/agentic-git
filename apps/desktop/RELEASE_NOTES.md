@@ -1,3 +1,34 @@
+### 0.5.16 — a quiet log is an answer, not an absence
+
+Somebody asked why their prompt did nothing, was told to open the worker log,
+and found the last entry was from two days ago. The obvious reading is that
+the worker has been fine and idle. It is the wrong one. The log is opened
+further down, once there is a child process whose output is worth keeping, so
+every reason the worker never got that far reached only a line of text in a
+menu and was replaced by the next one. A file that is quiet because nothing
+happened and a file that is quiet because nothing started look identical.
+
+The three stops that happen before the worker exists now write themselves into
+that file: a build that shipped without a worker, no agent CLI found on this
+machine, and a control plane that would not say which tenant this machine
+belongs to. Each says what it was and what to do about it, in the place people
+are already being sent.
+
+The status line in the menu is fixed too. Node prints an experimental-feature
+warning about SQLite on every start, and it arrives on the same stream as the
+worker's own output, so it became the last thing said and therefore the
+machine's status. An app that was running perfectly well reported a warning
+about a database feature as its state. Startup noise is now recognised and
+skipped, and the line falls back to the last thing the worker actually said.
+
+Two fixes from the last round are in a shipped build for the first time.
+Writing the Codex environment variable calls `setx`, which on some Windows
+machines never returns; it is now given ten seconds and then killed, so
+connecting an agent cannot hang the app indefinitely. And the app reports its
+own version — visible in Settings, and attached to the machine it registers —
+so "which build is that laptop on" has an answer that does not require asking
+the person sitting at it.
+
 ### 0.5.15 — an agent you have is an agent that runs
 
 Connecting an agent used to hand you the agent first and ask this computer

@@ -579,3 +579,71 @@ test("setting the Codex environment variable cannot wait for ever", async () => 
     "error, exit and timeout must all settle the promise",
   );
 });
+
+/**
+ * The three stops that used to leave the log empty.
+ *
+ * `openWorkerLog` runs once there is a child to keep the output of, so every
+ * reason the worker never got that far reached only the menu — which holds one
+ * line and is replaced by the next. Somebody asked why their prompt did
+ * nothing, opened the log they were pointed at, and found the newest entry was
+ * two days old. A worker that never started and a worker that is running fine
+ * wrote exactly the same thing: nothing.
+ */
+test("a worker that never starts says so in the log people are sent to", async () => {
+  const worker = await readFile(path.join(electronDir, "worker.mjs"), "utf8");
+  const body = worker.slice(
+    worker.indexOf("async function startWorkerOnce"),
+    worker.indexOf("const log = await openWorkerLog()"),
+  );
+  assert.ok(body.length > 0, "startWorkerOnce must still precede the log");
+
+  // Every pre-spawn stop goes through the helper rather than straight to the
+  // menu. Counted, so a fourth one added later is caught here.
+  const bare = [...body.matchAll(/onEvent\?\.\(\{\s*state: "stopped"/gu)].length;
+  assert.equal(bare, 0, "a stop before the worker exists must reach the log");
+  assert.ok(
+    [...body.matchAll(/await stopped\(/gu)].length >= 3,
+    "the bundle, no-CLI and tenancy stops each report",
+  );
+
+  // And the helper writes without claiming a worker started, which is the one
+  // thing the header openWorkerLog writes would get wrong here.
+  const helper = worker.slice(worker.indexOf("async function appendWorkerLog"));
+  assert.match(helper, /appendFile\(/u);
+  assert.doesNotMatch(
+    helper.slice(0, helper.indexOf("async function openWorkerLog")),
+    /worker started/u,
+  );
+});
+
+/**
+ * The status line is the one place a person is told why their machine is idle.
+ *
+ * Every line the child printed was promoted to it, and every worker prints
+ * Node's SQLite warning the instant it starts — so the answer to "why is
+ * nothing happening" was replaced, within milliseconds of every launch, by a
+ * sentence about an experimental feature. Somebody read that line off the menu
+ * while the failure that mattered sat in the log underneath it.
+ */
+test("Node's own warnings cannot become the worker's status", async () => {
+  const worker = await readFile(path.join(electronDir, "worker.mjs"), "utf8");
+
+  // The filter exists, and is applied where output becomes status.
+  assert.match(worker, /function isRuntimeNoise\(/u);
+  const heard = worker.slice(
+    worker.indexOf("const heard = (line)"),
+    worker.indexOf("child.stdout?.on("),
+  );
+  assert.match(heard, /isRuntimeNoise\(/u, "the status line must filter");
+  assert.match(heard, /log\?\.write\(text\)/u, "the log still keeps everything");
+
+  // The two shapes seen in the wild, both emitted by every worker on start.
+  const noise = worker.slice(worker.indexOf("function isRuntimeNoise("));
+  assert.match(noise, /\^\\\(node:/u, "(node:2520) ... must be filtered");
+  assert.match(noise, /trace-warnings/u, "the follow-up line must be filtered");
+  assert.match(noise, /ExperimentalWarning:/u);
+
+  // And nothing here matches an error, which must still reach the menu.
+  assert.doesNotMatch(noise, /ControlPlaneError|permission/u);
+});

@@ -356,6 +356,24 @@ test("an idle worker reports no work rather than failing", async (t) => {
   assert.deepEqual(await worker.runOnce(), { worked: false });
 });
 
+test("registering twice enrols the machine once", async (t) => {
+  // Both `main` and `run` register, so this ran on every start of every
+  // worker: two rows milliseconds apart, and the second of them the first
+  // request to reuse the connection — the one exchange a middlebox on the
+  // path could mishandle after letting the first through.
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+
+  const first = await worker.register();
+  const second = await worker.register();
+
+  assert.equal(second, first);
+  const workers = await runtime.store.listWorkers({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+  });
+  assert.equal(workers.length, 1);
+});
+
 test("a worker executes a leased task end to end over HTTP", async (t) => {
   const runtime = await startRuntime(t);
   const worker = makeWorker(runtime);
