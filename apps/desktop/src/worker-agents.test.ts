@@ -237,11 +237,15 @@ test("each preload global is exposed independently of the others", async () => {
   const preload = await readFile(path.join(electronDir, "preload.cjs"), "utf8");
 
   // Every exposure goes through the guard, so none can be fatal to the rest.
+  // Counted rather than listed, so a global added without the guard is caught
+  // here rather than discovered as a page missing something it never said.
+  const exposures = (preload.match(/^expose\(/gmu) ?? []).length;
   assert.equal(
-    (preload.match(/^expose\(/gmu) ?? []).length,
-    3,
-    "all three globals must be exposed through the guard",
+    exposures,
+    (preload.match(/^expose\("[A-Z_]+"/gmu) ?? []).length,
+    "every exposure must name a global",
   );
+  assert.equal(exposures, 4, "server, version, token and the install bridge");
   assert.doesNotMatch(
     preload,
     /^contextBridge\.exposeInMainWorld/mu,
@@ -250,6 +254,9 @@ test("each preload global is exposed independently of the others", async () => {
   // The one that can genuinely fail, and the one whose loss is invisible.
   assert.match(preload, /expose\("KUMI_TOKEN", \(\) => ipcRenderer\.sendSync/u);
   assert.match(preload, /expose\("KUMI_INSTALL", \(\) => \(\{/u);
+  // The build the page is running in. Its own exposure, because an app that
+  // cannot say which version it is must still be an app that works.
+  assert.match(preload, /expose\("KUMI_VERSION", \(\) => argument\("kumi-version"\)\)/u);
   // A failure is said somewhere a person can find it, not swallowed.
   assert.match(preload, /could not expose \$\{name\}/u);
 });

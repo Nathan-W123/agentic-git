@@ -238,6 +238,12 @@ async function startWorkerOnce(here, session, onEvent) {
       COORD_ORGANIZATION: tenancy.organizationId,
       COORD_PROJECT_ROOT: root,
       COORD_WORKER_NAME: deviceName(),
+      // The installed build, so the fleet can say which machine is on which.
+      // There is no auto-update, so an install stays where it was until
+      // somebody downloads another one, and the first question about an agent
+      // behaving like an older one is which version it actually is. Nothing
+      // could answer that before this line: every worker registered "0.0.0".
+      COORD_WORKER_VERSION: app.getVersion(),
       // What this machine actually has. The project config the worker reads
       // has a default agent backfilled for every vendor it lacks, so without
       // this the worker would register for Cursor and Kiro on a machine that

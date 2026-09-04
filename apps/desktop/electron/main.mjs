@@ -702,7 +702,14 @@ async function openDashboard() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      additionalArguments: [`--kumi-server=${session.server}`],
+      additionalArguments: [
+        `--kumi-server=${session.server}`,
+        // So the page can name the build it is running in. An app with
+        // no auto-update is an app somebody is on an old copy of, and
+        // "download the latest" is a much better sentence when it can
+        // say which one they have.
+        `--kumi-version=${app.getVersion()}`,
+      ],
     },
   });
   // Anything the dashboard wants to open elsewhere opens in the real browser
