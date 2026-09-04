@@ -850,7 +850,9 @@ function appBridgeDetail() {
       ? "the whole bridge"
       : bridge.detected === undefined
         ? "the machine check"
-        : "nothing";
+        : bridge.login === undefined
+          ? "the vendor login check"
+          : "nothing";
   return `Kumi app ${version}; missing: ${missing}.`;
 }
 
@@ -885,6 +887,10 @@ async function verifyMachineFor(providerId, rerender) {
       return undefined;
     });
   if (detected === undefined) {
+    // Set here as well as in the `catch`, because a bridge that *resolves*
+    // with nothing never rejects and so never reached that handler — one of
+    // two ways this refusal could still arrive with nothing under it.
+    machineDetail ??= "This machine did not say what is installed on it.";
     return "unknown";
   }
   if (!detected.includes(vendor)) {
@@ -899,8 +905,11 @@ async function verifyMachineFor(providerId, rerender) {
   // build that created agents without checking anything, so believing it here
   // would reinstate exactly the behaviour this replaces.
   if (bridge.login === undefined) {
-    machineDetail = "This build of the app cannot read a vendor login.";
-    return "unknown";
+    // Old, not unknowable. "Try again, and if it keeps happening restart the
+    // Kumi app" is advice that cannot work: restarting the same installer
+    // brings back the same missing bridge, and this is the one refusal whose
+    // remedy is a download. Answered as `stale-app` so it says so.
+    return "stale-app";
   }
   const first = await bridge.login(vendor).catch((error) => {
     machineDetail = `Asking ${vendor} about its login failed: ${
@@ -937,9 +946,11 @@ async function settleLogin(verdict, vendor, bridge, providerId) {
     // `readVendorLogin` says why in `detail` — a timeout, an ENOENT, a spawn
     // the operating system refused. Collapsing that to the word "unknown" is
     // what made this dialog unactionable from anywhere but the machine.
-    if (typeof verdict.detail === "string" && verdict.detail !== "") {
-      machineDetail = `${vendor}: ${verdict.detail}`;
-    }
+    machineDetail =
+      typeof verdict.detail === "string" && verdict.detail !== ""
+        ? `${vendor}: ${verdict.detail}`
+        : `${vendor}: the check answered "${String(verdict.state)}", which ` +
+          "Kumi does not know how to read.";
     return "unknown";
   }
   const now = await showModal({
