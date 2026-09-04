@@ -807,6 +807,29 @@ const REFUSAL = {
 };
 
 /**
+ * Which build of the desktop app this page is running inside, if any.
+ *
+ * Read from the User-Agent first, and that order is the whole point: the app
+ * has appended `KumiDesktop/<version>` to it since long before it exposed a
+ * version to the page, so this answers for installs already out there rather
+ * than only for ones built after somebody thought to ask. `KUMI_VERSION` is
+ * the newer, exact source and wins where it exists.
+ *
+ * `undefined` in a browser, which is not a missing version — there is no
+ * desktop app to have one.
+ */
+export function desktopVersion() {
+  const exposed = window.KUMI_VERSION;
+  if (typeof exposed === "string" && exposed !== "") {
+    return exposed;
+  }
+  const stamped = /\bKumiDesktop\/([0-9][0-9A-Za-z.+-]*)/u.exec(
+    typeof navigator === "undefined" ? "" : (navigator.userAgent ?? ""),
+  );
+  return stamped?.[1];
+}
+
+/**
  * What the page can actually see of the app it is running in.
  *
  * Read from the globals rather than described in prose, so the sentence is
@@ -840,10 +863,7 @@ function refusalDetail(verdict) {
 let machineDetail;
 
 function appBridgeDetail() {
-  const version =
-    typeof window.KUMI_VERSION === "string" && window.KUMI_VERSION !== ""
-      ? window.KUMI_VERSION
-      : "not reported by this build";
+  const version = desktopVersion() ?? "not reported by this build";
   const bridge = window.KUMI_INSTALL;
   const missing =
     bridge === undefined
