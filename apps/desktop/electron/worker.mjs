@@ -288,7 +288,21 @@ async function startWorkerOnce(here, session, onEvent) {
   const heard = (line) => {
     const text = String(line);
     log?.write(text);
-    onEvent?.({ state: "running", detail: text.trim() });
+    // Kept out of the menu, kept in the log. The status line is the one place
+    // a person is told why their machine is not working, and every worker
+    // prints Node's SQLite warning the moment it starts — so the answer to
+    // "why is nothing happening" was reliably replaced, within milliseconds,
+    // by a sentence about an experimental feature that is not the problem and
+    // never will be. Somebody read that line while the failure that mattered
+    // sat in the log underneath it.
+    const meaningful = text
+      .split("\n")
+      .map((part) => part.trim())
+      .filter((part) => part !== "" && !isRuntimeNoise(part));
+    const last = meaningful[meaningful.length - 1];
+    if (last !== undefined) {
+      onEvent?.({ state: "running", detail: last });
+    }
   };
   child.stdout?.on("data", heard);
   child.stderr?.on("data", heard);
@@ -557,6 +571,21 @@ function deviceName() {
 
 function describe(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Node talking about itself, rather than the worker talking about the work.
+ *
+ * Only the lines every run emits regardless of what happens, so a real
+ * message is never mistaken for one of these. The log keeps them either way;
+ * what this decides is whether a line is allowed to *be* the status.
+ */
+function isRuntimeNoise(line) {
+  return (
+    /^\(node:\d+\)/u.test(line) ||
+    /^\(Use `.*--trace-warnings/u.test(line) ||
+    /^ExperimentalWarning:/u.test(line)
+  );
 }
 
 /** Where the worker's own account of itself is kept. */

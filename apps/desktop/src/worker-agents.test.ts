@@ -616,3 +616,34 @@ test("a worker that never starts says so in the log people are sent to", async (
     /worker started/u,
   );
 });
+
+/**
+ * The status line is the one place a person is told why their machine is idle.
+ *
+ * Every line the child printed was promoted to it, and every worker prints
+ * Node's SQLite warning the instant it starts — so the answer to "why is
+ * nothing happening" was replaced, within milliseconds of every launch, by a
+ * sentence about an experimental feature. Somebody read that line off the menu
+ * while the failure that mattered sat in the log underneath it.
+ */
+test("Node's own warnings cannot become the worker's status", async () => {
+  const worker = await readFile(path.join(electronDir, "worker.mjs"), "utf8");
+
+  // The filter exists, and is applied where output becomes status.
+  assert.match(worker, /function isRuntimeNoise\(/u);
+  const heard = worker.slice(
+    worker.indexOf("const heard = (line)"),
+    worker.indexOf("child.stdout?.on("),
+  );
+  assert.match(heard, /isRuntimeNoise\(/u, "the status line must filter");
+  assert.match(heard, /log\?\.write\(text\)/u, "the log still keeps everything");
+
+  // The two shapes seen in the wild, both emitted by every worker on start.
+  const noise = worker.slice(worker.indexOf("function isRuntimeNoise("));
+  assert.match(noise, /\^\\\(node:/u, "(node:2520) ... must be filtered");
+  assert.match(noise, /trace-warnings/u, "the follow-up line must be filtered");
+  assert.match(noise, /ExperimentalWarning:/u);
+
+  // And nothing here matches an error, which must still reach the menu.
+  assert.doesNotMatch(noise, /ControlPlaneError|permission/u);
+});
