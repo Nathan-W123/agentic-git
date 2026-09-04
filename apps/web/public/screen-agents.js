@@ -347,6 +347,23 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
     vendor !== undefined &&
     (bridge.connectable ?? ["claude", "codex", "cursor"]).includes(vendor);
 
+  // Whether the CLI half can be finished from wherever this is being read.
+  //
+  // It cannot from a phone. Kumi installs to a home screen as a standalone
+  // app, so somebody can be *in the Kumi app*, press Connect, and be told to
+  // go and open the Kumi app. Refused here, before the flow rather than after
+  // it, exactly as the direction dialog below already refuses the editor half.
+  //
+  // `KUMI_SERVER` is what keeps this from blocking the case that matters
+  // most: the desktop app whose bridge is missing when it should not be. That
+  // is a fault, not a place, and greying the row out would take away the one
+  // button that produces a diagnosis of it. Somewhere with no app at all is
+  // the only thing refused up front.
+  const cliable =
+    bridge?.detected !== undefined ||
+    window.KUMI_SERVER !== undefined ||
+    state.localAgentsOnly !== true;
+
   // One option per row, each with a mark, a heading, the badge that carries
   // the jargon, and a sentence. `showModal` resolves a radio group to its
   // checked value on its own, so there is no hidden mirror field to keep in
@@ -361,17 +378,25 @@ export async function connectProviderSomehow(providerId, rerender, goToSettings)
       ${choiceRow({
         group: "connectionKind",
         value: "cli",
-        checked: true,
+        checked: cliable,
+        disabled: !cliable,
         mark: "terminal",
         title: "Run agents on this computer",
         badge: "CLI",
-        note: `Installs ${esc(label)}'s command-line tool and signs it in. This
-          is the one that makes the agent exist: @mention it and the work
-          happens here, on your machine, on your own subscription.`,
+        blocked: cliable ? undefined : "Needs the desktop app",
+        note: cliable
+          ? `Installs ${esc(label)}'s command-line tool and signs it in. This
+             is the one that makes the agent exist: @mention it and the work
+             happens here, on your machine, on your own subscription.`
+          : `An agent runs on a computer, and only that computer can say
+             whether it is set up. Open Kumi's desktop app on the machine that
+             will run this agent and connect it there. You can still send it
+             work from here afterwards.`,
       })}
       ${choiceRow({
         group: "connectionKind",
         value: "mcp",
+        checked: !cliable,
         mark: "link",
         title: "Connect tools",
         badge: "MCP",
@@ -692,7 +717,11 @@ async function connectLocalAgent(providerId, rerender) {
     await showModal({
       title: `${label} was not connected`,
       subtitle: REFUSAL[verdict]?.subtitle ?? "This machine could not be checked.",
-      body: `<p class="modal-hint">${REFUSAL[verdict]?.body ?? ""}</p>`,
+      body: `<p class="modal-hint">${REFUSAL[verdict]?.body ?? ""}</p>${
+        REFUSAL[verdict]?.detail === undefined
+          ? ""
+          : `<p class="modal-hint">${esc(REFUSAL[verdict].detail())}</p>`
+      }`,
       confirm: "Close",
       cancel: "",
     });
@@ -754,8 +783,9 @@ const REFUSAL = {
       happen here. Finish it and press Connect again. No agent was created, and
       nothing on your account changed.`,
   },
-  // Apart from `no-app` because the advice is the opposite; the reason they
-  // are different is at the `verifyMachineFor` return that picks between them.
+  // Apart from `no-app` because the advice is the opposite, and carrying a
+  // `detail` because this is the refusal somebody reports to a colleague who
+  // cannot see their screen. See `appBridgeDetail`.
   "stale-app": {
     subtitle: "This copy of the Kumi app cannot check the CLI.",
     repair: `The app is running, but the part of it that inspects this machine
@@ -765,6 +795,7 @@ const REFUSAL = {
       did not load, so Kumi cannot see whether the CLI is there. Download the
       latest version and open it again, then press Connect. Nothing was
       created here, and your agents and their names are kept.`,
+    detail: () => appBridgeDetail(),
   },
   unknown: {
     subtitle: "This machine could not be asked.",
@@ -775,6 +806,28 @@ const REFUSAL = {
       happening restart the Kumi app.`,
   },
 };
+
+/**
+ * What the page can actually see of the app it is running in.
+ *
+ * Read from the globals rather than described in prose, so the sentence is
+ * evidence instead of a guess. `KUMI_VERSION` is only in builds that expose
+ * it, and saying so is itself the answer for a build old enough to lack it.
+ */
+function appBridgeDetail() {
+  const version =
+    typeof window.KUMI_VERSION === "string" && window.KUMI_VERSION !== ""
+      ? window.KUMI_VERSION
+      : "not reported by this build";
+  const bridge = window.KUMI_INSTALL;
+  const missing =
+    bridge === undefined
+      ? "the whole bridge"
+      : bridge.detected === undefined
+        ? "the machine check"
+        : "nothing";
+  return `Kumi app ${version}; missing: ${missing}.`;
+}
 
 /**
  * What this machine can say about running one agent, before anything is made.
