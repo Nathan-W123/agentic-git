@@ -749,10 +749,8 @@ function renderAuth() {
                    placeholder="COORD_BOOTSTRAP_TOKEN"></label>`
               }
                <label class="field"><span>Your name</span>
-                 <input class="input" name="displayName" autocomplete="name" required></label>
-               <label class="field"><span>Team name <span class="field-optional">optional</span></span>
-                 <input class="input" name="organizationName"
-                   placeholder="Defaults to your name"></label>`
+                 <input class="input" name="displayName" autocomplete="name"
+                   required></label>`
             : register
               ? `<label class="field"><span>Your name</span>
                    <input class="input" name="displayName" autocomplete="name" required></label>
@@ -1357,7 +1355,6 @@ async function submitBootstrap(form) {
   if (!confirmationsMatch(data)) {
     return;
   }
-  const organizationName = String(data.get("organizationName") ?? "").trim();
   try {
     // The one-time token authenticates the request itself, so it travels as a
     // header rather than as part of the record being created.
@@ -1377,9 +1374,9 @@ async function submitBootstrap(form) {
         confirmEmail: String(data.get("confirmEmail") ?? ""),
         password: String(data.get("password") ?? ""),
         confirmPassword: String(data.get("confirmPassword") ?? ""),
-        // Omitted rather than sent empty, so the server picks its default
-        // instead of naming a team the empty string.
-        ...(organizationName === "" ? {} : { organizationName }),
+        // No team name is sent, because first-run setup no longer asks for
+        // one: the server names the deployment's organization after the owner
+        // creating it, and renaming a team is a settings screen away.
       },
     });
     authMode = "login";
