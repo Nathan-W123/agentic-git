@@ -116,6 +116,7 @@ import {
 import { billableSeats, paymentsEnabled, TRIAL_DAYS } from "./billing.js";
 import {
   arbitrationLine,
+  arbitrationReleaseLine,
   type DeferredRef,
 } from "./arbitration-line.js";
 import {
@@ -336,6 +337,7 @@ import {
   AGENT_AUTHORED_ROOT_KINDS,
   ATTACHMENT_REFERENCE,
   CHANNEL_ANSWER_CONTEXT,
+  CHANNEL_ARBITRATION_PREFIX,
   CHANNEL_CEREMONIAL_EVENTS,
   CHANNEL_COMPLETED_WORK_PREFIX,
   CHANNEL_HOLD_PREFIX,
@@ -474,6 +476,33 @@ interface OpenAgentQuestion {
   askedAt: string;
   deadlineAt: string;
   questions: AgentQuestion[];
+}
+
+/**
+ * One arbitration line standing somewhere, and what it takes to take it back.
+ *
+ * A hold is normally the held agent's own reply inside its thread, so removing
+ * it needs the root as well as the reply. The room-level line the coordinator
+ * posts when no agent account resolves — and every notice older deployments
+ * left behind — is a root of its own, and has no `replyId`.
+ */
+interface StandingArbitrationNotice {
+  projectId: string;
+  repositoryId: string;
+  /** The thread root, when this is a reply; the notice itself otherwise. */
+  messageId: string;
+  /** Set only when the notice is a reply inside a thread. */
+  replyId?: string;
+  /** The task the line is about — the held one, for a hold. */
+  taskId: string;
+  content: string;
+  kind: "hold" | "advisory";
+  /**
+   * The other tasks the line names, when this process is the one that posted
+   * it. Empty after a restart, which is exactly what it means: the line is
+   * still findable, but who it was about is no longer known.
+   */
+  alsoNamed: readonly string[];
 }
 
 /**
@@ -1528,11 +1557,11 @@ export class ApiGateway {
 
   private auditRetentionTimer: NodeJS.Timeout | undefined;
   /**
-   * The coordinator's temporary conflict lines currently standing in a room,
-   * by message id.
+   * The temporary conflict lines currently standing, by the id of the entry
+   * that carries each — a reply's own id when it is one, a root's otherwise.
    *
    * Each is true only while its collision is live, so each records what would
-   * end it. A `hold` — "starts once that one is done" — ends as soon as either
+   * end it. A `hold` — "I'll start once they're done" — ends as soon as either
    * end of it does: the held task stops, or the work it names finishes. An
    * `advisory` — "working on related things but can run together" — is about
    * two runs being in flight, so it ends when both of them have stopped.
@@ -1540,22 +1569,13 @@ export class ApiGateway {
    * already standing in rooms still have to retire on their own condition.
    *
    * Memory only, and deliberately not the sole record: a hold routinely
-   * outlives the process that announced it, which is why the notice also
-   * carries its task on the message and `reconcileArbitrationNotices` can
+   * outlives the process that announced it, which is why the line can also be
+   * found from the thread it hangs in and `reconcileArbitrationNotices` can
    * finish the job without this map.
    */
   private readonly arbitrationNotices = new Map<
     string,
-    {
-      projectId: string;
-      repositoryId: string;
-      /** The task the line is about — the held one, for a hold. */
-      taskId: string;
-      content: string;
-      kind: "hold" | "advisory";
-      /** The other tasks the line names. */
-      alsoNamed: readonly string[];
-    }
+    StandingArbitrationNotice
   >();
   /**
    * The audit-log position the auditor has consumed, in memory.
@@ -10624,18 +10644,24 @@ export class ApiGateway {
   }
 
   /**
-   * The room-level announcement of one admission decision.
+   * The held agent's own account of one admission decision, in its thread.
    *
-   * Spoken by the room, not by an agent. Neither agent decided this — the
-   * coordinator did, and putting the sentence in an agent's mouth would make
-   * it look like agents negotiate with each other.
+   * It used to be a line in the room under the coordinator's name, on the
+   * argument that the coordinator made the decision and putting it in an
+   * agent's mouth would suggest agents negotiate with each other. What that
+   * produced was a referee's announcement floating in the channel beside the
+   * threads it was about, and a person following one agent's work watched it
+   * go quiet with the explanation somewhere else entirely. Whether the
+   * coordinator or the agent decided is not the reader's question; "why has
+   * this stopped" is, and the thread is where it is asked.
    *
-   * One sentence: the two agents, and what happens next. Every earlier version
-   * spent a second and third clause justifying the decision — "so it is
-   * narrowing its plan", "It starts the moment that lands" — which read as the
-   * coordinator explaining itself to a room that only wanted to know the
-   * order. The blocker may have finished between the event and this lookup —
-   * the announcement still stands, it just reads as history.
+   * So the agent says it, in the first person, where its other lines are: "I'll
+   * start once they're done". It is still one sentence — the other agent, and
+   * what happens next. Every earlier version spent a second and third clause
+   * justifying the decision, which read as the coordinator explaining itself
+   * to a room that only wanted to know the order. The blocker may have
+   * finished between the event and this lookup — the line still stands, it
+   * just reads as history.
    *
    * Two agents is the ordinary case, not the only one. One agent given two
    * tasks that collide is arbitrated exactly like two agents that do, and the
@@ -10643,13 +10669,18 @@ export class ApiGateway {
    * wait for @Hades to go first": a true decision phrased as a stranger's
    * quarrel, naming the one thing the reader already knew and none of what
    * they needed. So when both sides resolve to one agent it is said as what it
-   * is — one agent, two tasks, and the order it will take them in — with the
-   * tasks told apart by what each was asked to do.
+   * is — two tasks, and the order they will be taken in — with the tasks told
+   * apart by what each was asked to do.
+   *
+   * Answers whether the thread has now been told, so the caller can leave the
+   * generic narration of the same event unsaid: a thread does not need to be
+   * handed "waiting my turn" and "looks like @Codex has the same files open"
+   * one after the other about a single admission.
    */
   private async announceArbitration(
     watched: { projectId: string; repositoryId: string; taskId: string },
     data: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const describe = await this.channelAgentNamer(
       watched.projectId,
       watched.repositoryId,
@@ -10729,25 +10760,121 @@ export class ApiGateway {
     const status = String(data["status"] ?? "");
     const approved =
       status === "approved" || status === "approved_with_constraints";
-    if (approved && data["partial"] !== true) {
-      // A sequencing notice describes a temporary condition. Once the held
-      // task can run, remove that condition from the room instead of leaving
-      // stale history behind and adding a second "starts now" announcement.
-      await this.replaceArbitrationNotice(watched);
-      return;
-    }
-    const line = arbitrationLine({
+    // Whose voice this is decides the sentence, so it is settled before the
+    // sentence is written rather than after.
+    const speaker = await this.arbitrationNoticeThread(watched);
+    const announcement = {
       held,
       blockedByNames: blockers,
       holderNames: holders,
       heldWork,
       blockerWork,
       status,
+      firstPerson: speaker !== undefined,
       partial: data["partial"] === true,
       grantedFiles: fileList(data["grantedFiles"]),
       deferred,
-    });
-    await this.replaceArbitrationNotice(watched, line, blockedBy);
+    };
+    if (approved && data["partial"] !== true) {
+      // The hold described a temporary condition, and the condition is over.
+      // In a thread that is worth a sentence — the agent said it was waiting,
+      // so it says what it is doing now, and the stale line goes rather than
+      // standing above its own contradiction. In the room the line is only
+      // ever removed: nobody there is following this particular run, and a
+      // second announcement about it starting is the noise that moving these
+      // into threads was meant to end.
+      let spoken = false;
+      await this.replaceArbitrationNotice(
+        watched,
+        (prior) => {
+          // Nothing standing, or nothing standing in a thread, or nobody left
+          // to say it: all three are simply a withdrawal, because a release
+          // only means anything as the same voice that said it was waiting.
+          if (prior?.replyId === undefined || speaker === undefined) {
+            return undefined;
+          }
+          spoken = true;
+          // Named from what the hold recorded, not from this event: an
+          // approval carries no `blockedBy`, because from its own point of
+          // view there is nothing left to be blocked by.
+          const cleared = prior.alsoNamed.slice(0, 2);
+          return {
+            content: arbitrationReleaseLine({
+              ...announcement,
+              blockedByNames: [...new Set(cleared.map(describe.name))],
+              blockerWork:
+                cleared.length > 0
+                  ? [...new Set(cleared.map(describe.objective))].join(" and ")
+                  : blockerWork,
+            }),
+            alsoNamed: [],
+          };
+        },
+        speaker,
+      );
+      return spoken;
+    }
+    const content = arbitrationLine(announcement);
+    await this.replaceArbitrationNotice(
+      watched,
+      () => ({ content, alsoNamed: blockedBy }),
+      speaker,
+    );
+    return speaker !== undefined;
+  }
+
+  /**
+   * The thread an arbitration line belongs in, and the agent that speaks it.
+   *
+   * Both halves have to resolve or there is nothing to say in an agent's name:
+   * a thread with no agent behind it would put first-person words under
+   * whoever last posted, and an agent with no thread has nowhere to say them.
+   * Either failure falls back to the room-level coordinator line, which is
+   * what this used to be for everybody.
+   *
+   * The account is resolved from the task rather than taken from the watcher's
+   * `authorId`, because that field is whoever caused the watch to exist — for
+   * a run resumed from the dashboard it is the person who pressed play, and
+   * putting an agent's sentence under their name is worse than saying it in
+   * the room.
+   */
+  private async arbitrationNoticeThread(watched: {
+    projectId: string;
+    repositoryId: string;
+    taskId: string;
+  }): Promise<{ messageId: string; authorId: string } | undefined> {
+    const task = (
+      await this.options.store
+        .listSubmittedTasks({ repositoryId: watched.repositoryId })
+        .catch((): SubmittedTask[] => [])
+    ).find((entry) => entry.id === watched.taskId);
+    if (task === undefined) {
+      return undefined;
+    }
+    const agent = await this.watchedTaskAgent(task).catch(() => undefined);
+    if (agent === undefined) {
+      return undefined;
+    }
+    // The live watch first: it holds the root this run is already narrating
+    // into, which is the thread the reader has open. `conversationId` is the
+    // same fact on the row for a run this process is not following, and the
+    // scan is what is left for a task whose thread predates that column.
+    let messageId =
+      this.watchedChannelTasks.get(watched.taskId)?.messageId ??
+      task.conversationId;
+    if (messageId === undefined) {
+      messageId = (
+        await this.options.store
+          .listChannelMessages(watched.repositoryId, "", { limit: 50 })
+          .catch((): ChannelMessage[] => [])
+      ).find((message) => message.taskId === watched.taskId)?.id;
+    }
+    return messageId === undefined
+      ? undefined
+      : {
+          messageId,
+          authorId: `${agent.ownerId}:${agent.provider}`,
+        };
   }
 
   /**
@@ -10821,59 +10948,89 @@ export class ApiGateway {
   }
 
   /**
-   * Keeps at most one temporary sequencing notice for a held task.
+   * Keeps at most one temporary sequencing line standing for a held task.
    *
-   * The prior notice is looked for in the room as well as in memory. A hold
+   * The prior line is looked for in the thread as well as in memory. A hold
    * routinely outlives the process that announced it — this deployment
    * restarts on every deploy, and being held is precisely a state that waits —
    * so trusting the Map alone meant a restart both stranded the old line and
    * posted a second one beside it the next time the same task was arbitrated.
+   *
+   * What replaces it is asked for rather than passed in, because the answer
+   * depends on what was standing: a release only has anything to say if there
+   * was a hold to release, and it names the work it was waiting on from what
+   * that hold recorded. Answering nothing withdraws and leaves the thread
+   * quiet, which is what every ending does.
    */
   private async replaceArbitrationNotice(
     watched: { projectId: string; repositoryId: string; taskId: string },
-    content?: string,
-    blockedBy: readonly string[] = [],
+    next?: (prior: StandingArbitrationNotice | undefined) =>
+      | { content: string; alsoNamed: readonly string[] }
+      | undefined,
+    speaker?: { messageId: string; authorId: string },
   ): Promise<void> {
-    const remembered = [...this.arbitrationNotices.entries()].find(
-      ([, notice]) =>
-        notice.kind === "hold" && notice.taskId === watched.taskId,
-    );
-    const prior =
-      remembered === undefined
-        ? await this.findArbitrationNotice(watched)
-        : { messageId: remembered[0], ...remembered[1] };
-    if (content !== undefined && prior?.content === content) {
+    const prior = await this.findArbitrationNotice(watched);
+    const replacement = next?.(prior);
+    if (replacement !== undefined && prior?.content === replacement.content) {
       return;
     }
     if (prior !== undefined) {
-      await this.dropArbitrationNotice({
-        projectId: prior.projectId,
-        repositoryId: prior.repositoryId,
-        messageId: prior.messageId,
-      });
-      this.arbitrationNotices.delete(prior.messageId);
+      await this.dropArbitrationNotice(prior);
+      this.arbitrationNotices.delete(prior.replyId ?? prior.messageId);
     }
-    if (content === undefined) {
+    if (replacement === undefined) {
       return;
     }
-    const message = await this.appendChannelEntry({
-      projectId: watched.projectId,
-      repositoryId: watched.repositoryId,
-      kind: "system",
-      authorId: "coordinator",
-      content,
-      // Recorded on the message, not just remembered: this is what a fresh
-      // process matches on to find a notice its predecessor left standing.
-      taskId: watched.taskId,
-    });
-    this.arbitrationNotices.set(message.id, {
-      projectId: watched.projectId,
-      repositoryId: watched.repositoryId,
-      taskId: watched.taskId,
-      content,
-      kind: "hold",
-      alsoNamed: blockedBy,
-    });
+    const { content, alsoNamed } = replacement;
+    const posted: { messageId: string; replyId?: string } =
+      speaker === undefined
+        ? // No agent account resolved, so the room says it in its own name and
+          // carries the task on the message — the shape every notice had
+          // before these moved into threads, and the only one a line with
+          // nobody to attribute it to can take.
+          {
+            messageId: (
+              await this.appendChannelEntry({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                kind: "system",
+                authorId: "coordinator",
+                content,
+                taskId: watched.taskId,
+              })
+            ).id,
+          }
+        : {
+            messageId: speaker.messageId,
+            // The agent's own kind, so the bubble is the agent's: this is the
+            // same account it gives of everything else it does, and the reader
+            // already knows who is speaking from the name on it.
+            replyId: (
+              await this.appendChannelThreadReply({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                messageId: speaker.messageId,
+                kind: "agent",
+                authorId: speaker.authorId,
+                content,
+              })
+            ).id,
+          };
+    // Only a marked line is remembered, because the marker is the whole of
+    // what makes one findable again — an unmarked one (the release) is a
+    // statement about something that happened, and is never taken back.
+    if (content.startsWith(CHANNEL_ARBITRATION_PREFIX)) {
+      this.arbitrationNotices.set(posted.replyId ?? posted.messageId, {
+        projectId: watched.projectId,
+        repositoryId: watched.repositoryId,
+        messageId: posted.messageId,
+        ...(posted.replyId === undefined ? {} : { replyId: posted.replyId }),
+        taskId: watched.taskId,
+        content,
+        kind: "hold",
+        alsoNamed,
+      });
+    }
   }
 
   /**
@@ -10897,58 +11054,109 @@ export class ApiGateway {
   }
 
   /**
-   * The room's own copy of a hold this process may not remember posting.
+   * The hold standing for this task, whether or not this process posted it.
    *
-   * Newest first: what is being replaced is whatever the room was last told
-   * about this task's collision, and an older line about the same one is
+   * Memory first, because it is exact and free. Failing that the thread and
+   * the room are read, which is the case that matters: a hold routinely
+   * outlives the process that announced it, and after a restart the only
+   * record left is the line itself.
+   *
+   * Newest first in both, because what is being replaced is whatever was last
+   * said about this task's collision, and an older line about the same one is
    * exactly what a second announcement would otherwise sit beside.
    */
   private async findArbitrationNotice(watched: {
     projectId: string;
     repositoryId: string;
     taskId: string;
-  }): Promise<
-    | {
-        projectId: string;
-        repositoryId: string;
-        messageId: string;
-        content: string;
-      }
-    | undefined
-  > {
+  }): Promise<StandingArbitrationNotice | undefined> {
+    const remembered = [...this.arbitrationNotices.values()]
+      .reverse()
+      .find(
+        (notice) =>
+          notice.kind === "hold" && notice.taskId === watched.taskId,
+      );
+    if (remembered !== undefined) {
+      return remembered;
+    }
     const messages =
       (await this.options.store
         .listChannelMessages(watched.repositoryId, "", { limit: 50 })
         .catch(() => undefined)) ?? [];
+    // Only a hold is replaced by a hold. An advisory line about the same task
+    // is a different statement with a different end condition, and silently
+    // swapping one for the other would lose the record that two agents were
+    // allowed to overlap.
+    const isHold = (entry: {
+      kind: string;
+      authorId: string;
+      content: string;
+    }): boolean =>
+      isCoordinatorNotice(entry) &&
+      arbitrationNoticeKind(entry.content) === "hold";
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
-      if (
-        message !== undefined &&
-        message.taskId === watched.taskId &&
-        isCoordinatorNotice(message) &&
-        // Only a hold is replaced by a hold. An advisory line about the same
-        // task is a different statement with a different end condition, and
-        // silently swapping one for the other would lose the room's record
-        // that two agents were allowed to overlap.
-        arbitrationNoticeKind(message.content) === "hold"
-      ) {
+      if (message === undefined || message.taskId !== watched.taskId) {
+        continue;
+      }
+      // The thread's own replies before the root, because that is where a
+      // hold is written now. The root form is the room-level fallback, and
+      // every notice a deployment before this one left behind.
+      const replies = message.replies ?? [];
+      for (let at = replies.length - 1; at >= 0; at -= 1) {
+        const reply = replies[at];
+        if (reply !== undefined && isHold(reply)) {
+          return {
+            projectId: watched.projectId,
+            repositoryId: watched.repositoryId,
+            messageId: message.id,
+            replyId: reply.id,
+            taskId: watched.taskId,
+            content: reply.content,
+            kind: "hold",
+            alsoNamed: [],
+          };
+        }
+      }
+      if (isHold(message)) {
         return {
           projectId: watched.projectId,
           repositoryId: watched.repositoryId,
           messageId: message.id,
+          taskId: watched.taskId,
           content: message.content,
+          kind: "hold",
+          alsoNamed: [],
         };
       }
     }
     return undefined;
   }
 
-  /** One notice removed from the room, and the removal broadcast. */
+  /** One notice removed, and the removal broadcast. */
   private async dropArbitrationNotice(notice: {
     projectId: string;
     repositoryId: string;
     messageId: string;
+    replyId?: string;
   }): Promise<void> {
+    if (notice.replyId !== undefined) {
+      await this.options.store.deleteChannelReply(
+        notice.repositoryId,
+        notice.messageId,
+        notice.replyId,
+      );
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_reply_deleted",
+        data: {
+          projectId: notice.projectId,
+          repositoryId: notice.repositoryId,
+          messageId: notice.messageId,
+          replyId: notice.replyId,
+        },
+      });
+      return;
+    }
     await this.options.store.deleteChannelMessage(
       notice.repositoryId,
       notice.messageId,
@@ -10999,55 +11207,91 @@ export class ApiGateway {
         return status === undefined || TASK_STATUSES_PAST_STOPPING.has(status);
       };
       for (const message of messages) {
-        if (!isCoordinatorNotice(message)) {
-          continue;
-        }
         const subject = message.taskId;
         if (subject === undefined) {
-          // Written before notices carried their task. Nothing to decide it
-          // against, and guessing from the words is how the room ends up
-          // losing a line that is still true.
+          // Written before notices carried their task, or a thread that has
+          // none. Nothing to decide it against, and guessing from the words is
+          // how a line that is still true ends up lost.
           continue;
         }
-        const tracked = this.arbitrationNotices.get(message.id);
-        const others = tracked?.alsoNamed ?? [];
-        const kind = tracked?.kind ?? arbitrationNoticeKind(message.content);
-        // A hold is over as soon as either end of it is: the held task has
-        // stopped needing to be told when it starts, or the work it was
-        // waiting on has finished. An advisory line describes two runs being
-        // in flight together, so it waits for both of them to stop. A notice
-        // this process did not post — the restart case — knows only its own
-        // subject, which is what the message itself records.
-        const over =
-          kind === "advisory"
-            ? [subject, ...others].every((id) => settled(id))
-            : settled(subject) ||
-              (others.length > 0 && others.every((id) => settled(id)));
-        if (!over) {
-          continue;
+        // A hold hangs in the held task's own thread now, so both places are
+        // read: the replies for what this deployment writes, the root itself
+        // for the room-level fallback and for every notice an older
+        // deployment left standing.
+        const candidates: {
+          id: string;
+          entry: { kind: string; authorId: string; content: string };
+          replyId?: string;
+        }[] = [
+          ...(message.replies ?? []).map((reply) => ({
+            id: reply.id,
+            entry: reply,
+            replyId: reply.id,
+          })),
+          { id: message.id, entry: message },
+        ];
+        const notices = candidates.filter((candidate) =>
+          isCoordinatorNotice(candidate.entry),
+        );
+        for (const notice of notices) {
+          const tracked = this.arbitrationNotices.get(notice.id);
+          const others = tracked?.alsoNamed ?? [];
+          const kind =
+            tracked?.kind ?? arbitrationNoticeKind(notice.entry.content);
+          // A hold is over as soon as either end of it is: the held task has
+          // stopped needing to be told when it starts, or the work it was
+          // waiting on has finished. An advisory line describes two runs being
+          // in flight together, so it waits for both of them to stop. A notice
+          // this process did not post — the restart case — knows only its own
+          // subject, which is what the thread it hangs in records.
+          const over =
+            kind === "advisory"
+              ? [subject, ...others].every((id) => settled(id))
+              : settled(subject) ||
+                (others.length > 0 && others.every((id) => settled(id)));
+          if (!over) {
+            continue;
+          }
+          await this.dropArbitrationNotice({
+            projectId: message.projectId,
+            repositoryId: repository.id,
+            messageId: message.id,
+            ...(notice.replyId === undefined
+              ? {}
+              : { replyId: notice.replyId }),
+          }).catch(() => undefined);
+          this.arbitrationNotices.delete(notice.id);
         }
-        await this.dropArbitrationNotice({
-          projectId: message.projectId,
-          repositoryId: repository.id,
-          messageId: message.id,
-        }).catch(() => undefined);
-        this.arbitrationNotices.delete(message.id);
       }
     }
   }
 
   /**
-   * The room-level account of a canonical-moved replan.
+   * The agent's own account of a canonical-moved replan.
    *
    * Names the winner by looking up which task's promotion produced the
    * revision this one is now replanning against — the event itself only
    * knows the revision, and "another task landed first" is a worse sentence
    * than the objective of the task that did.
+   *
+   * Said in the replanning agent's thread, in its own voice, for the same
+   * reason the holds are: starting over is the sort of thing the person
+   * waiting on this work needs explained where they are already looking, and
+   * a referee's summary in the channel was reaching everybody except them.
+   * The room-level line under the coordinator's name is what is left when no
+   * agent account resolves.
+   *
+   * Unmarked, and so never withdrawn: this is the past tense about something
+   * that happened, and it stays as the record of why an agent started again.
+   *
+   * Answers whether the thread has been told, so the caller can leave the
+   * generic "something moved underneath me" unsaid beside the version that
+   * says what moved.
    */
   private async announceReplay(
     watched: { projectId: string; repositoryId: string; taskId: string },
     data: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const tasks = await this.options.store.listSubmittedTasks({
       repositoryId: watched.repositoryId,
     });
@@ -11069,29 +11313,58 @@ export class ApiGateway {
         (record.event.data as Record<string, unknown>)["revision"] ===
         data["revision"],
     )?.event.taskId;
+    // The agent that landed, by the name the room calls it — the same resolver
+    // the holds use, which falls back to the winning task's objective when
+    // nobody is connected for it rather than naming the wrong agent.
+    const describe = await this.channelAgentNamer(
+      watched.projectId,
+      watched.repositoryId,
+    );
     // Not "${held} and ${held}": one agent's own two tasks can race each
     // other to canonical, and a task that lost to itself is replanning on top
     // of its own result — which the one-sided sentence already says.
-    const candidate = objectiveOf(winnerTaskId);
-    const winner = candidate === held ? undefined : candidate;
+    const candidate =
+      winnerTaskId === undefined ? undefined : describe.name(winnerTaskId);
+    const winner =
+      candidate === undefined || candidate === describe.name(watched.taskId)
+        ? undefined
+        : candidate;
     const files = (Array.isArray(data["changedFiles"]) ? data["changedFiles"] : [])
       .filter((entry): entry is string => typeof entry === "string")
       .slice(0, 3);
     const fileClause =
       files.length === 0 ? "code it was building against" : files.join(", ");
-    await this.appendChannelEntry({
+    const speaker = await this.arbitrationNoticeThread(watched);
+    if (speaker === undefined) {
+      await this.appendChannelEntry({
+        projectId: watched.projectId,
+        repositoryId: watched.repositoryId,
+        kind: "system",
+        authorId: "coordinator",
+        content:
+          winner === undefined
+            ? `${held} was building against ${fileClause}, which just ` +
+              `changed underneath it — it is replanning on top of the new code.`
+            : `${held} and ${winner} were working on ${fileClause} at the ` +
+              `same time. ${winner} landed first, so ${held} is replanning on ` +
+              `top of its result rather than overwriting it.`,
+      });
+      return false;
+    }
+    await this.appendChannelThreadReply({
       projectId: watched.projectId,
       repositoryId: watched.repositoryId,
-      kind: "system",
-      authorId: "coordinator",
+      messageId: speaker.messageId,
+      kind: "agent",
+      authorId: speaker.authorId,
       content:
         winner === undefined
-          ? `⚖️ ${held} was building against ${fileClause}, which just ` +
-            `changed underneath it — it is replanning on top of the new code.`
-          : `⚖️ ${held} and ${winner} were working on ${fileClause} at the ` +
-            `same time. ${winner} landed first, so ${held} is replanning on ` +
-            `top of its result rather than overwriting it.`,
+          ? `I was building against ${fileClause}, which just changed ` +
+            `underneath me — I'm replanning on top of the new code.`
+          : `${winner} landed on ${fileClause} while I was working on it, ` +
+            `so I'm replanning on top of that rather than overwriting it.`,
     });
+    return true;
   }
 
   /**
@@ -11248,34 +11521,28 @@ export class ApiGateway {
                 .catch(() => undefined);
             }
           }
-          // An arbitration is room news, not thread news. The thread gets the
-          // agent's own account below either way; this is the room being told
-          // that the coordinator held one task behind another — which the
-          // person whose task was *not* held has no thread open to learn
-          // from. It is the referee's call, so it speaks in the room's voice
-          // rather than an agent's.
-          if (
-            // Approved events pass too: `announceArbitration` speaks on an
-            // approval only when it releases a previously-announced hold —
-            // the room that was told "it starts the moment that lands"
-            // deserves the moment itself.
+          // An arbitration is thread news: the person waiting on this run is
+          // reading its thread, and being held behind another agent is the
+          // whole of why it has gone quiet. The agent says it itself, naming
+          // the one it is waiting for.
+          //
+          // Approved events pass too: `announceArbitration` speaks on an
+          // approval only when it releases a hold it already announced — the
+          // thread that was told "I'll start once they're done" deserves the
+          // moment it does.
+          //
+          // The replan account is the same move for the same reason: the race
+          // the lease cannot see, where two agents planned at the same moment,
+          // neither plan existed when the other was admitted, both executed,
+          // and the second to finish is redoing its work on top of the first.
+          // "Something moved underneath me" is what the thread was told; which
+          // work moved, and whose, was told to the room instead.
+          const spokenInThread =
             record.event.type === "plan_admitted"
-          ) {
-            await this.announceArbitration(watched, data).catch(() => undefined);
-          }
-          // The race the lease cannot see: two agents planned at the same
-          // moment, neither plan existed when the other was admitted, both
-          // executed, and the second to finish is now redoing its work on top
-          // of the first. The exact-base check catches it every time — but it
-          // announced itself only inside the loser's thread, so the room
-          // watched two agents "both working fine" and then one of them
-          // silently start over.
-          if (
-            record.event.type === "replan_requested" &&
-            typeof data["revision"] === "string"
-          ) {
-            await this.announceReplay(watched, data).catch(() => undefined);
-          }
+              ? await this.announceArbitration(watched, data).catch(() => false)
+              : record.event.type === "replan_requested" &&
+                typeof data["revision"] === "string" &&
+                (await this.announceReplay(watched, data).catch(() => false));
           // Answer the thread marker when the gate is decided, wherever it
           // was decided. A reviewer clearing it from the Approvals screen
           // never posts a reply, so the audit stream supplies the matching
@@ -11293,7 +11560,14 @@ export class ApiGateway {
           }
           const terminal =
             CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined;
-          const narrated = narrateTaskEvent(record.event.type, data);
+          // The generic line for an admission is left unsaid when the agent
+          // has just said the specific one. "Waiting my turn — files this plan
+          // needs are leased to another task in flight" and "Looks like @Codex
+          // has the same files open — I'll start once they're done" are the
+          // same sentence twice, and only one of them names anybody.
+          const narrated = spokenInThread
+            ? undefined
+            : narrateTaskEvent(record.event.type, data);
           if (narrated === undefined) {
             // Some terminal events are intentionally silent. They still have
             // to retire the task's working state and mark its root complete;

@@ -44,20 +44,26 @@ export const CHANNEL_PAUSED_PREFIX = "⏸ Paused";
  */
 export const CHANNEL_PLAN_LAPSED_PREFIX = "⌛ Plan expired";
 /**
- * How the coordinator's arbitration lines open, and how they are found again.
+ * How the arbitration lines open, and how they are found again.
  *
- * Every one of them describes a condition rather than an event — "starts once
- * that one is done", "can run together" — so each is only true while the
+ * Every one of them describes a condition rather than an event — "I'll start
+ * once they're done", "can run together" — so each is only true while the
  * collision it describes is live. They are withdrawn rather than left as
  * history, and the withdrawal has to survive the process that posted them:
- * a deploy in the middle of a hold used to strand its notice in the room
- * forever, because the only record of which message to delete was a Map in
- * the memory that just died. The prefix plus the notice's `taskId` is what
- * lets a fresh process recognise its predecessor's lines.
+ * a deploy in the middle of a hold used to strand its notice forever, because
+ * the only record of which message to delete was a Map in the memory that just
+ * died. The prefix plus the thread it hangs in is what lets a fresh process
+ * recognise its predecessor's lines.
  *
- * The replan account (`announceReplay`) deliberately does not carry it: that
- * one is written in the past tense about something that already happened, and
- * stays as the room's record of why an agent started over.
+ * The marker is not shown to anybody. The browser strips it and draws the
+ * words as the agent's own speech, which is what they are now — a hold is the
+ * held agent saying in its own thread what it found in its way. The mark is
+ * for this code, not for the reader.
+ *
+ * Two lines about the same collision deliberately do not carry it: the replan
+ * account (`announceReplay`) and the release that answers a hold are both
+ * written in the past tense about something that already happened, and stay
+ * as the thread's record of why an agent started over or stood still.
  */
 export const CHANNEL_ARBITRATION_PREFIX = "⚖️";
 /**

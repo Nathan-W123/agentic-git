@@ -220,15 +220,29 @@ export function subChannelVisibility(raw: unknown): SubChannelVisibility {
   return "read_only";
 }
 
+/**
+ * Is this one of the arbitration notices, wherever it was posted?
+ *
+ * Two authors write them now. The ordinary one is the held task's own agent,
+ * replying in its own thread — that is what the marker opens today. The
+ * room-level `system` line under the coordinator's name is the fallback for a
+ * task whose agent account cannot be resolved, and the shape every notice
+ * older deployments left standing still has.
+ *
+ * `agent` rather than any reply kind, deliberately: the run's own narration of
+ * the same admission is `progress` and opens with the same marker, and it is
+ * not a notice — nothing withdraws it, because it is written as an account of
+ * a moment rather than a claim about the present.
+ */
 export function isCoordinatorNotice(message: {
   kind: string;
   authorId: string;
   content: string;
 }): boolean {
   return (
-    message.kind === "system" &&
-    message.authorId === "coordinator" &&
-    message.content.startsWith(CHANNEL_ARBITRATION_PREFIX)
+    message.content.startsWith(CHANNEL_ARBITRATION_PREFIX) &&
+    ((message.kind === "system" && message.authorId === "coordinator") ||
+      message.kind === "agent")
   );
 }
 
