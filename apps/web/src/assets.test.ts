@@ -8318,7 +8318,11 @@ test("a phone shows stable global chrome and an in-flow conversation header", as
   assert.match(app, /class="global-search"/u);
   assert.match(
     css,
-    /@media \(max-width: 600px\) \{[\s\S]*?\.topbar \{[\s\S]*?height: calc\(54px \+ var\(--safe-top\)\)/u,
+    /@media \(max-width: 600px\) \{[\s\S]*?\.topbar \{[\s\S]*?height: calc\(48px \+ var\(--safe-top\)\)/u,
+  );
+  assert.match(
+    css,
+    /@media \(max-width: 600px\) \{[\s\S]*?\.global-search \{[\s\S]*?min-height: 40px;/u,
   );
   assert.match(
     css,
