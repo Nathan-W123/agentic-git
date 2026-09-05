@@ -40,6 +40,165 @@ export interface ValidationCommand {
   executable: string;
   args: string[];
   label: string;
+  /**
+   * What passing this command establishes.
+   *
+   * `functionality` — the default, and what a test suite is — means a pass is
+   * evidence the code does something. `integrity` means the command checks the
+   * shape of the patch rather than the behaviour of the program: a whitespace
+   * check, a formatter, a linter. Both are worth running and only one of them
+   * is evidence that the task landed.
+   *
+   * The distinction exists because the default project config ships an
+   * integrity check and nothing else, so a project nobody has configured
+   * produced a green "Validation: patch integrity(exit 0)" trailer for free —
+   * a pass that had established nothing, recorded identically to a passing
+   * test suite.
+   */
+  proves?: "functionality" | "integrity";
+}
+
+/**
+ * A command that narrows validation to what a change actually affects.
+ *
+ * The full suite is the safe default precisely because selection needs a
+ * dependency graph, and a test skipped in error looks exactly like a test that
+ * passed. So the graph is not Kumi's to guess: the project supplies a command
+ * that already knows — `jest --findRelatedTests`, a `bazel query`, whatever
+ * its build system offers — and the changed paths are appended to it.
+ *
+ * Used for the baseline run and the fail-to-pass check, where the question is
+ * only ever about the changed code. The full `validationCommands` still gate
+ * the merge, so a selector that misses something costs a slower signal rather
+ * than a silent pass.
+ */
+export interface AffectedTestCommand {
+  executable: string;
+  /** Changed repository paths are appended to these. */
+  args: string[];
+  label: string;
+}
+
+/**
+ * How much a validation run actually established about a change.
+ *
+ * `IntegrationStatus` answers "may this land"; this answers "on what
+ * evidence". They were the same field, so a task that executed nothing and a
+ * task that passed a real suite were both recorded as integrated, and no
+ * query could separate them afterwards.
+ *
+ * Ordered by strength:
+ * - `none` — no validation commands were configured. Nothing ran.
+ * - `integrity` — commands ran, but every one of them checks the patch rather
+ *   than the program. The code was never executed.
+ * - `executed` — at least one functional command ran and passed. Whether it
+ *   exercised *this change* is a further question this tier does not answer.
+ * - `demonstrated` — a functional command that failed before the change
+ *   passes after it. The strongest thing integration can say on its own: the
+ *   change did something, and what it did was the point.
+ */
+export type ValidationEvidence =
+  | "none"
+  | "integrity"
+  | "executed"
+  | "demonstrated";
+
+/**
+ * A test the change nominates as proof it did what was asked.
+ *
+ * The strongest measured intervention in the literature: an independently
+ * supplied reproduction test, used as a filter on candidate patches, roughly
+ * doubles precision (SWT-Bench; replicated at Google across six languages).
+ * The contract is mechanical and needs no model and no oracle — the test must
+ * fail at canonical and pass with the change.
+ *
+ * Optional, and its absence is never a failure. Generating a valid
+ * fail-to-pass test succeeds a minority of the time even for systems built to
+ * do it, so requiring one would refuse most honest work. A task that supplies
+ * one gets a stronger claim recorded; a task that does not is unproven, which
+ * is what it always was.
+ */
+export interface ReproductionTest {
+  /** Repository path of the test, for the record. */
+  path: string;
+  executable: string;
+  args: string[];
+  label: string;
+}
+
+/**
+ * Whether a nominated reproduction test kept its side of the contract.
+ *
+ * `attested` only when it genuinely failed before and passes after. Anything
+ * else is reported as what it was, because a test that passes at canonical
+ * proves nothing about the change and a test that still fails is worse.
+ */
+export interface ReproductionAttestation {
+  path: string;
+  failedBefore: boolean;
+  passesAfter: boolean;
+  attested: boolean;
+  explanation: string;
+}
+
+/**
+ * The same validation commands, run against canonical before the patch.
+ *
+ * One measurement cannot tell "fixed it" from "broke nothing" from "was
+ * already broken". Two can. This is the before half, and the fields below are
+ * the comparison it makes possible — the reason to pay for a second run
+ * rather than the run itself.
+ */
+export interface ValidationBaseline {
+  /** The revision the baseline was taken at. */
+  revision: string;
+  /** Whether these results were reused from an earlier run at this revision. */
+  cached: boolean;
+  results: CommandResult[];
+  /**
+   * Commands that failed before the change and pass after it.
+   *
+   * The fail-to-pass signal. Empty is not a failure — plenty of good changes
+   * add code nothing was failing over — but a non-empty list is the only
+   * evidence integration can produce that the change did what was asked
+   * rather than merely not breaking anything.
+   */
+  nowPassing: string[];
+  /**
+   * Commands that failed before and still fail.
+   *
+   * Not this task's doing, and previously indistinguishable from a regression
+   * it caused.
+   */
+  alreadyFailing: string[];
+}
+
+/**
+ * What happened when the change's own edits to its graders were set aside.
+ *
+ * An agent that edits the tests that judge it is not necessarily cheating: the
+ * task may be to change behaviour, and the test may encode the old contract.
+ * But it must be visible, because "passes with the tests it rewrote" and
+ * "passes the tests as they were" are different claims and were being recorded
+ * as the same one.
+ */
+export interface GraderEditReport {
+  /** Test, fixture and validator-config paths this change touched. */
+  paths: string[];
+  /**
+   * Validation re-run with those paths reset to canonical.
+   *
+   * Absent when the second run could not be made — the change deletes a
+   * grader, say — which is itself reported rather than read as a pass.
+   */
+  withoutEdits?: CommandResult[];
+  /**
+   * True when validation passes with the change's grader edits and fails
+   * without them. The case worth a human's attention: legitimate when the
+   * contract genuinely moved, and exactly what moving the goalposts looks
+   * like.
+   */
+  passesOnlyWithEdits: boolean;
 }
 
 export interface TaskDefinition {
@@ -1061,6 +1220,20 @@ export interface IntegrationResult {
   salvagedDeferred?: FilePatch[];
   /** Files that landed in part, having been split at the conflicting hunks. */
   salvagedDividedFiles?: string[];
+  /**
+   * What the validation run established, as opposed to whether it passed.
+   *
+   * Always present on a result that reached validation. Absent on the early
+   * returns — a stale base, a conflict — where no validation was attempted and
+   * saying `none` would claim a measurement nobody took.
+   */
+  evidence?: ValidationEvidence;
+  /** The before half of the two-sided run, when one was taken. */
+  baseline?: ValidationBaseline;
+  /** Present only when the change touched files that grade it. */
+  graderEdits?: GraderEditReport;
+  /** Present only when the change nominated a reproduction test. */
+  reproduction?: ReproductionAttestation;
   explanation: string;
 }
 
