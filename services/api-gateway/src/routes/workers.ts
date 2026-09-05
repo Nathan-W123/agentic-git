@@ -60,16 +60,16 @@ import type { AuthenticatedRouteRequest } from "./context.js";
  * and that is the one place the answer is not.
  */
 const REGISTRATION_REFUSALS: Readonly<
-  Record<RefusalReason, (workspace: string) => string>
+  Record<RefusalReason, (organization: string) => string>
 > = {
-  "no-standing": (workspace) =>
-    `This account cannot run agents in ${workspace}. Ask an administrator ` +
-    "to invite you to it, or to a repository in it, as a developer or " +
-    "above — view-only access cannot run work.",
-  entitlement: (workspace) =>
-    `${workspace} is read-only because its subscription has lapsed or its ` +
-    "trial has ended, so no agent can run in it. Your own access is fine " +
-    "and changing your role will not help — its plan needs renewing.",
+  "no-standing": (organization) =>
+    `This account cannot run agents in ${organization}. Ask an ` +
+    "administrator to invite you to it, or to a repository in it, as a " +
+    "developer or above — view-only access cannot run work.",
+  entitlement: (organization) =>
+    `${organization} is read-only because its subscription has lapsed or ` +
+    "its trial has ended, so no agent can run in it. Your own access is " +
+    "fine and changing your role will not help — its plan needs renewing.",
   "token-scope": () =>
     "This sign-in cannot run agents. Sign out of the desktop app and sign " +
     "in again to renew it.",
@@ -161,14 +161,20 @@ export async function routeWorkers(
       const named = await gw.options.store
         .getOrganization(organizationId)
         .catch(() => undefined);
-      const workspace =
+      // "Organization", not "workspace". The web app already uses workspace
+      // for a repository's working area — its files, its changeset, its rail
+      // — and the screen somebody reads this and then goes looking for is
+      // labelled Organization. A message in the product's other vocabulary
+      // sends them to the wrong settings page, which is the failure this
+      // whole sentence exists to prevent.
+      const organization =
         named?.name === undefined || named.name.trim().length === 0
-          ? "that workspace"
-          : `the "${named.name}" workspace`;
+          ? "that organization"
+          : `the "${named.name}" organization`;
       throw new HttpError(
         403,
         "forbidden",
-        REGISTRATION_REFUSALS[reason](workspace),
+        REGISTRATION_REFUSALS[reason](organization),
       );
     });
     const adapters = body["adapters"];

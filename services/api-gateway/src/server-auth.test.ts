@@ -985,7 +985,14 @@ test("a refused worker is told which of the three things is wrong, and where", a
   );
   assert.equal(lapsed.status, 403);
   const said = String(lapsed.data.error?.message ?? "");
-  assert.match(said, /Refused's Workspace/u, "it must name the workspace");
+  assert.match(said, /Refused's Workspace/u, "it must name the organization");
+  assert.match(
+    said,
+    /organization/u,
+    "in the product's own word for a tenant — the web app spends " +
+      '"workspace" on a repository\'s working area, and the settings screen ' +
+      "this sends somebody to is labelled Organization",
+  );
   assert.match(said, /subscription|trial/u, "it must name the cause");
   assert.match(
     said,
