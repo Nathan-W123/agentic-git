@@ -912,3 +912,113 @@ test("invalid and malformed tokens are refused", async (t) => {
  * The remote worker protocol, exercised the way a worker actually uses it:
  * bearer token only, no cookies, lease -> bundle -> result.
  */
+
+test("a refused worker is told which of the three things is wrong, and where", async (t) => {
+  // One sentence used to answer three unrelated questions. "You do not have
+  // permission to perform this action" is true of a stranger, of a member
+  // whose organization stopped paying, and of a token minted too narrow, and
+  // it is the only thing written anywhere — a log file on the machine that
+  // will not start, with a stack trace under it.
+  //
+  // It cost an afternoon. A co-founder's worker was refused; he was promoted
+  // to developer, then to admin, and neither changed anything, because his
+  // desktop had quietly registered against the personal organization that
+  // signing up had created for him rather than against the team's. The
+  // refusal was about a workspace nobody was looking at. So the workspace is
+  // named, and the cause is distinguished.
+  const previous = process.env["KUMI_PAYMENTS_ENABLED"];
+  process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["KUMI_PAYMENTS_ENABLED"];
+    } else {
+      process.env["KUMI_PAYMENTS_ENABLED"] = previous;
+    }
+  });
+
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const member = await runtime.store.createUser({
+    email: "refused@example.com",
+    displayName: "Refused",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  // An organization of their own, unpaid, exactly as signing up leaves one.
+  const alone = await runtime.store.createOrganization({
+    slug: "refused-workspace",
+    name: "Refused's Workspace",
+  });
+  await runtime.store.saveMembership({
+    organizationId: alone.id,
+    userId: member.id,
+    role: "owner",
+  });
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: member.email, password: PASSWORD },
+  });
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "their machine", scopes: ["view", "run_task"] },
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.data.token as string;
+
+  // Owner of it, and still refused: the role was never what was missing.
+  const lapsed = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: alone.id,
+        name: "their-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(lapsed.status, 403);
+  const said = String(lapsed.data.error?.message ?? "");
+  assert.match(said, /Refused's Workspace/u, "it must name the workspace");
+  assert.match(said, /subscription|trial/u, "it must name the cause");
+  assert.match(
+    said,
+    /changing your role will not help/u,
+    "it must say the thing they are about to try twice does not work",
+  );
+  assert.doesNotMatch(
+    said,
+    /invite/u,
+    "an owner must not be told to get themselves invited",
+  );
+
+  // The other cause, same route: somewhere they hold nothing at all.
+  const stranger = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "their-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(stranger.status, 403);
+  const elsewhere = String(stranger.data.error?.message ?? "");
+  assert.match(elsewhere, /invite/u, "a stranger is told how to get standing");
+  assert.doesNotMatch(
+    elsewhere,
+    /subscription|trial/u,
+    "and is told nothing about that organization's billing",
+  );
+});

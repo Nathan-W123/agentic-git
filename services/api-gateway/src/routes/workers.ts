@@ -24,7 +24,9 @@ import {
   assertTokenScope,
   authorizeOrganizationOrGrant,
   authorizeProject,
+  explainOrganizationRefusal,
 } from "../authorization.js";
+import type { RefusalReason } from "../authorization.js";
 import {
   HttpError,
   objectBody,
@@ -47,6 +49,31 @@ import {
 } from "../gateway-util.js";
 import type { ApiGateway } from "../server.js";
 import type { AuthenticatedRouteRequest } from "./context.js";
+
+/**
+ * What to say to a worker whose registration was refused, by cause.
+ *
+ * Each one names the remedy rather than the rule, because the reader is a
+ * person whose machine will not start and not a developer of this system.
+ * `entitlement` deliberately says the access is intact: the first thing
+ * anybody does on being told they lack permission is go looking at roles,
+ * and that is the one place the answer is not.
+ */
+const REGISTRATION_REFUSALS: Readonly<
+  Record<RefusalReason, (workspace: string) => string>
+> = {
+  "no-standing": (workspace) =>
+    `This account cannot run agents in ${workspace}. Ask an administrator ` +
+    "to invite you to it, or to a repository in it, as a developer or " +
+    "above — view-only access cannot run work.",
+  entitlement: (workspace) =>
+    `${workspace} is read-only because its subscription has lapsed or its ` +
+    "trial has ended, so no agent can run in it. Your own access is fine " +
+    "and changing your role will not help — its plan needs renewing.",
+  "token-scope": () =>
+    "This sign-in cannot run agents. Sign out of the desktop app and sign " +
+    "in again to renew it.",
+};
 
 export async function routeWorkers(
   gw: ApiGateway,
@@ -87,27 +114,62 @@ export async function routeWorkers(
       principal,
       organizationId,
       "run_task",
-    ).catch((error: unknown) => {
-      // Said properly, because of where it is read. This is the first call
-      // a worker ever makes and the only place its failure appears is a
-      // log file on somebody's own machine, with no page around it to
-      // explain anything. The generic "You do not have permission to
-      // perform this action" sent two people hunting through networks,
-      // reinstalls and vendor logins for a problem that was an unfinished
-      // invitation.
-      if (
-        error instanceof AuthenticationError &&
-        error.code === "forbidden"
-      ) {
+    ).catch(async (error: unknown) => {
+      // Said properly, because of where it is read. This is the first call a
+      // worker ever makes, and the only place its failure appears is a log
+      // file on somebody's own machine with no page around it to explain
+      // anything. The generic "You do not have permission to perform this
+      // action" sent two people hunting through networks, reinstalls and
+      // vendor logins for a problem that was an unfinished invitation.
+      //
+      // One message was not enough. The same nine words are the answer to
+      // three unrelated questions, and the first rewrite here assumed the
+      // commonest one — so an organization that had simply stopped paying
+      // told its members to get themselves invited, and promoting one of
+      // them to admin changed nothing, because the role was never what was
+      // missing. `explainOrganizationRefusal` distinguishes them; it runs
+      // only here, only after the refusal, and only about the standing of
+      // the caller reading it.
+      if (!(error instanceof AuthenticationError)) {
+        throw error;
+      }
+      if (error.code === "token_scope_missing") {
         throw new HttpError(
           403,
-          "forbidden",
-          "This account cannot run agents in that workspace. Ask an " +
-            "administrator to invite you to it, or to a repository in it, " +
-            "as a developer or above — view-only access cannot run work.",
+          "token_scope_missing",
+          "This sign-in cannot run agents. Sign out of the desktop app and " +
+            "sign in again to renew it.",
         );
       }
-      throw error;
+      if (error.code !== "forbidden") {
+        throw error;
+      }
+      const reason = await explainOrganizationRefusal(
+        gw.options.store,
+        principal,
+        organizationId,
+        "run_task",
+      );
+      // Named, because which workspace this is about turned out to be the
+      // whole answer once. Signing up creates an organization, so anybody
+      // invited to a team belongs to at least two, and the desktop app picks
+      // between them by looking for repositories rather than for somewhere
+      // this account may actually work. A worker that had quietly chosen the
+      // personal organization nobody pays for reported a refusal that read
+      // as being about the team's — so its admins promoted the person, twice,
+      // in the workspace the worker was never asking about.
+      const named = await gw.options.store
+        .getOrganization(organizationId)
+        .catch(() => undefined);
+      const workspace =
+        named?.name === undefined || named.name.trim().length === 0
+          ? "that workspace"
+          : `the "${named.name}" workspace`;
+      throw new HttpError(
+        403,
+        "forbidden",
+        REGISTRATION_REFUSALS[reason](workspace),
+      );
     });
     const adapters = body["adapters"];
     if (

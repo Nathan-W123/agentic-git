@@ -91,6 +91,16 @@ let stayAwake = false;
 let failures = 0;
 let restartTimer;
 /**
+ * The control plane's reason for refusing this worker, while it stands.
+ *
+ * Needed because `heard` below reports every line the child writes as
+ * evidence that it is running — which is right for the log it narrates and
+ * exactly wrong for a refusal, the one message that means the opposite. The
+ * refusal arrives as a signal rather than on stderr, and this holds it in
+ * front of the noise until the worker actually registers.
+ */
+let refusal;
+/**
  * The MCP servers this process has already asked about, and whether it is
  * asking right now.
  *
@@ -261,6 +271,12 @@ async function startWorkerOnce(here, session, onEvent) {
   const heard = (line) => {
     const text = String(line);
     log?.write(text);
+    // Still written to the log — the retry countdown belongs there — but not
+    // shown, because a worker that is being refused is not running and every
+    // line it prints while waiting would say that it is.
+    if (refusal !== undefined) {
+      return;
+    }
     onEvent?.({ state: "running", detail: text.trim() });
   };
   child.stdout?.on("data", heard);
@@ -277,6 +293,18 @@ async function startWorkerOnce(here, session, onEvent) {
     } else if (message?.type === "idle") {
       busy = false;
       reconsiderAwake();
+    } else if (message?.type === "registration-refused") {
+      // The child is alive and waiting, not dead, so this is deliberately not
+      // a restart: restarting a refused worker only refuses it again sooner.
+      // It heals when somebody with administrative access fixes the thing the
+      // sentence names, and the worker notices by itself.
+      refusal = String(message.detail ?? "").trim();
+      onEvent?.({
+        state: "stopped",
+        detail: refusal.length === 0 ? "Registration was refused." : refusal,
+      });
+    } else if (message?.type === "registered") {
+      refusal = undefined;
     } else if (message?.type === "mcp-offered") {
       // The child ran without these and has said so to the room; the one
       // thing it cannot do is ask the person whose machine this is.
@@ -286,6 +314,7 @@ async function startWorkerOnce(here, session, onEvent) {
 
   child.once("exit", (code) => {
     busy = false;
+    refusal = undefined;
     reconsiderAwake();
     const ranForMs = Date.now() - startedAt;
     child = undefined;

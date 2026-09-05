@@ -375,6 +375,70 @@ export async function authorizeOrganizationOrGrant(
 }
 
 /**
+ * Why a caller was refused, once they already have been.
+ *
+ * {@link assertPermission} answers every "no" with the same sentence on
+ * purpose. A lapsed subscription is not a different kind of refusal from a
+ * missing invitation, and neither one should be probeable from outside: a 403
+ * that distinguished them would report an organization's billing state to
+ * anybody who could guess its id.
+ *
+ * That is right for the API and wrong for exactly one reader — the person
+ * whose worker will not start, looking at a log file on their own machine
+ * with nine words and a stack trace to go on. Those nine words are true of an
+ * uninvited stranger, of a developer whose organization stopped paying, and
+ * of a token that was minted too narrow, and the remedies have nothing in
+ * common. An admin told to invite somebody who is already an admin spends the
+ * afternoon on the wrong problem; promoting them again does not help, because
+ * the role was never what was missing.
+ *
+ * So this sits deliberately off the authorization path. It runs only after a
+ * refusal, only where the answer is read by the refused party about their own
+ * standing, and it re-derives from what that caller already holds rather than
+ * reporting what the check saw.
+ */
+export type RefusalReason =
+  /** No membership here, and no grant on any repository this organization owns. */
+  | "no-standing"
+  /** Standing enough — folded to `viewer` because the organization cannot spend. */
+  | "entitlement"
+  /** The role carries it; this particular credential was not given it. */
+  | "token-scope";
+
+export async function explainOrganizationRefusal(
+  store: CoordinationStore,
+  principal: AuthenticatedPrincipal,
+  organizationId: string,
+  permission: Permission,
+): Promise<RefusalReason> {
+  const grants = await grantsInOrganization(store, principal, organizationId);
+  // The stored role, entitlement deliberately not applied: the whole question
+  // here is whether entitlement is what took the permission away, so reading
+  // it through `entitledRole` would answer "no-standing" to every lapsed
+  // organization and lose the distinction this function exists to draw.
+  const stored = higherRole(
+    roleFor(principal, organizationId),
+    grants.reduce<OrganizationRole | undefined>(
+      (highest, grant) => higherRole(highest, grant.role),
+      undefined,
+    ),
+  );
+  if (stored === undefined || !ROLE_PERMISSIONS[stored].has(permission)) {
+    return "no-standing";
+  }
+  // Reachable only in principle from the organization checks, which assert the
+  // scope after the permission and so throw `token_scope_missing` rather than
+  // `forbidden`. Answered anyway, because a caller that gets this far holds a
+  // sufficient role and a credential that does not carry the permission, and
+  // saying "your subscription" to them would be a lie.
+  const token = principal.token;
+  if (token !== undefined && !token.scopes.includes(permission)) {
+    return "token-scope";
+  }
+  return "entitlement";
+}
+
+/**
  * Authorizes a project, honouring per-repository grants.
  *
  * Access comes from either of two places now: an organization role, which
