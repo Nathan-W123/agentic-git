@@ -334,10 +334,36 @@ export async function authorizeOrganizationOrGrant(
   // carries them, and carries them unnarrowed.
   const stored = roleFor(principal, organizationId);
   if (stored !== undefined) {
-    const role = await entitledRole(store, principal, organization, stored);
+    // Comped grants are read here too, and that is the whole of this branch's
+    // history. It used to return before ever looking at them, so a comp only
+    // reached somebody with no membership at all — which made joining an
+    // organization a downgrade. Invited for free to a repository in an
+    // organization whose trial had run out, a person could submit work all
+    // day, because `authorizeProject` takes the higher of the entitled role
+    // and the comped one; the moment their machine tried to register, this
+    // function folded them to `viewer` and refused. Same person, same
+    // organization, same minute, two answers. The comment below has always
+    // said a comped grant stands on its own "exactly as it does in
+    // `authorizeProject` and `authorizeRepository`" — and it did, on the one
+    // path a member could never take.
+    const compedElsewhere = (
+      await grantsInOrganization(store, principal, organizationId)
+    )
+      .filter((grant) => grant.comped)
+      .reduce<OrganizationRole | undefined>(
+        (highest, grant) => higherRole(highest, grant.role),
+        undefined,
+      );
+    const role = higherRole(
+      await entitledRole(store, principal, organization, stored),
+      compedElsewhere,
+    );
     assertPermission(role, permission);
     assertTokenScope(principal, permission);
-    return { organization, role, repositories: undefined };
+    // Still unnarrowed. A membership reaches every repository the
+    // organization owns, and a comp that only raised the role back up does
+    // not take that away.
+    return { organization, role: role ?? stored, repositories: undefined };
   }
 
   // Somebody holding nothing here folds to no role at all, and

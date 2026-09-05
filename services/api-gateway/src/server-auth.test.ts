@@ -1099,3 +1099,132 @@ test("the organization listing says where this account could actually work", asy
     "and a comped membership in the team's is",
   );
 });
+
+test("joining an organization does not take away a free invitation", async (t) => {
+  // Two answers about one person, in one organization, in the same minute.
+  //
+  // `authorizeProject` takes the higher of the entitled role and the comped
+  // one, so somebody invited for free could submit work all day even after
+  // the organization's trial ran out. `authorizeOrganizationOrGrant` returned
+  // on the membership branch before it ever looked at grants, so the moment
+  // their machine tried to register it folded them to `viewer` and refused —
+  // "You do not have permission to perform this action", every few minutes,
+  // in a log file. Being a member was strictly worse than being a guest.
+  //
+  // It cost an afternoon and two promotions. A role was never what was
+  // missing: an organization that cannot spend folds every role, admin and
+  // owner alike.
+  const previous = process.env["KUMI_PAYMENTS_ENABLED"];
+  process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["KUMI_PAYMENTS_ENABLED"];
+    } else {
+      process.env["KUMI_PAYMENTS_ENABLED"] = previous;
+    }
+  });
+
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const shared = await invitableRepository(owner, "comped-shared");
+  // The organization stopped paying. Nobody swept anything; the row says so.
+  await runtime.store.saveSubscription({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    status: "canceled",
+  });
+
+  const guest = await runtime.store.createUser({
+    email: "comped@example.com",
+    displayName: "Comped",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  // Invited for free to a repository, and then made a member — the ordinary
+  // shape of a co-founder who was added to the team afterwards.
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: shared,
+    userId: guest.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    comped: true,
+    createdAt: new Date().toISOString(),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: guest.id,
+    role: "admin",
+  });
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: guest.email, password: PASSWORD },
+  });
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "their machine", scopes: ["view", "run_task"] },
+  });
+  assert.equal(minted.status, 201);
+
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    minted.data.token as string,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "their-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(
+    registered.status,
+    201,
+    "a comped grant must carry a member exactly as it carries a guest",
+  );
+
+  // And the comp is still only a comp: somebody holding nothing but a lapsed
+  // membership is refused, which is the behaviour this must not undo.
+  const plain = await runtime.store.createUser({
+    email: "plain@example.com",
+    displayName: "Plain",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: plain.id,
+    role: "admin",
+  });
+  const plainClient = new TestClient(runtime.origin);
+  await plainClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: plain.email, password: PASSWORD },
+  });
+  const plainToken = await plainClient.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "their machine", scopes: ["view", "run_task"] },
+  });
+  const refused = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    plainToken.data.token as string,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "other-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(refused.status, 403, "an unpaid organization is still read-only");
+  assert.match(
+    String(refused.data.error?.message ?? ""),
+    /subscription|trial/u,
+    "and says so, rather than sending an admin to be invited again",
+  );
+});
