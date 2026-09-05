@@ -1228,3 +1228,87 @@ test("joining an organization does not take away a free invitation", async (t) =
     "and says so, rather than sending an admin to be invited again",
   );
 });
+
+test("deployment administration can be taken back, not only given", async (t) => {
+  // The grant and the revoke are one menu item that reads
+  // `person.user.systemAdmin` to decide which of the two it is. The roster
+  // projected `{id, displayName}` and dropped the flag, so the answer was
+  // always `undefined`, so the item always said "Make deployment admin" —
+  // and the revoke, whose route, client call and handler all exist, could
+  // not be reached from anywhere in the product.
+  //
+  // That mattered more than a missing button usually does. A system
+  // administrator reaches every organization on the deployment, which widens
+  // what a desktop app can discover and quietly changes which organization
+  // somebody's machine registers into. Granting it to unstick one person
+  // sent their worker to a different tenant, where every lease poll was
+  // refused and their agent went grey — with no way to undo the grant.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "roster-admin");
+
+  const mate = await runtime.store.createUser({
+    email: "mate@example.com",
+    displayName: "Mate",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: mate.id,
+    role: "admin",
+  });
+  assert.equal(bootstrapped.user.systemAdmin, true, "the first user runs the deployment");
+
+  const rosterPath =
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}` +
+    `/repositories/${repositoryId}/channel/agents`;
+
+  const before = await owner.request(rosterPath);
+  assert.equal(before.status, 200);
+  const findMate = (data: { people?: Array<{ userId: string; user?: { systemAdmin?: boolean } }> }) =>
+    (data.people ?? []).find((person) => person.userId === mate.id);
+  assert.equal(
+    findMate(before.data)?.user?.systemAdmin,
+    false,
+    "an ordinary member reads as not an administrator, not as unknown",
+  );
+
+  await owner.request(`/api/v1/admin/users/${mate.id}`, {
+    method: "PATCH",
+    body: { systemAdmin: true },
+  });
+
+  const after = await owner.request(rosterPath);
+  assert.equal(
+    findMate(after.data)?.user?.systemAdmin,
+    true,
+    "and once granted the roster says so, which is what draws the revoke",
+  );
+
+  // Withheld from everybody else. The item is only drawn for an
+  // administrator, so nobody else's roster needs to name who runs this
+  // deployment.
+  const plain = new TestClient(runtime.origin);
+  await plain.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: mate.email, password: PASSWORD },
+  });
+  await owner.request(`/api/v1/admin/users/${mate.id}`, {
+    method: "PATCH",
+    body: { systemAdmin: false },
+  });
+  const asMate = await plain.request(rosterPath);
+  assert.equal(asMate.status, 200);
+  const seenByMate = (asMate.data.people ?? []) as Array<{
+    userId: string;
+    user?: Record<string, unknown>;
+  }>;
+  const seesOwner = seenByMate.find((person) => person.userId === bootstrapped.user.id);
+  assert.ok(seesOwner !== undefined, "the owner is still in the room");
+  assert.equal(
+    "systemAdmin" in (seesOwner.user ?? {}),
+    false,
+    "a non-administrator is told no more than before",
+  );
+});
