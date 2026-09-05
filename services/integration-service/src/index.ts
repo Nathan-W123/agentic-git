@@ -10,6 +10,9 @@ import {
   type ValidationBaseline,
   type ValidationCommand,
   type ValidationEvidence,
+  type AffectedTestCommand,
+  type ReproductionTest,
+  type ReproductionAttestation,
 } from "@coord/shared-types";
 import {
   emitPatch,
@@ -34,6 +37,22 @@ export interface IntegrateChangeSetInput {
   integrationRoot: string;
   changeSet: ChangeSet;
   validationCommands: ValidationCommand[];
+  /**
+   * Narrows the before-run to the tests the change affects.
+   *
+   * The full `validationCommands` still gate the merge; this only makes the
+   * baseline affordable on a repository whose suite is slow, by asking the
+   * project's own tooling which tests are implicated rather than guessing
+   * from an import graph Kumi knows to be incomplete.
+   */
+  affectedTestCommand?: AffectedTestCommand;
+  /**
+   * A test the change offers as proof it did what was asked.
+   *
+   * Run at canonical, where it must fail, and again with the change, where it
+   * must pass. Optional: absence is unproven, never failure.
+   */
+  reproductionTest?: ReproductionTest;
   commitMessage: string;
   /**
    * Who wrote the change, recorded as the commit's author.
@@ -302,9 +321,24 @@ export class IntegrationService {
     repositoryId: string,
     revision: string,
     commands: readonly ValidationCommand[],
+    affected?: { command: AffectedTestCommand; paths: readonly string[] },
   ): Promise<ValidationBaseline | undefined> {
     if (this.options.skipBaseline === true || commands.length === 0) {
       return undefined;
+    }
+    // A project that can name the tests its change affects pays for those
+    // instead of the whole suite. The narrowed command replaces the
+    // configured ones for this run only — the full set still gates the merge,
+    // so a selector that misses something costs a weaker before-signal rather
+    // than an unchecked promotion.
+    if (affected !== undefined && affected.paths.length > 0) {
+      commands = [
+        {
+          executable: affected.command.executable,
+          args: [...affected.command.args, ...affected.paths],
+          label: affected.command.label,
+        },
+      ];
     }
     const cached = this.baselines.get(repositoryId, revision, commands);
     if (cached !== undefined) {
@@ -691,7 +725,39 @@ export class IntegrationService {
       input.repository.id,
       previousVersion.revision,
       input.validationCommands,
+      input.affectedTestCommand === undefined
+        ? undefined
+        : {
+            command: input.affectedTestCommand,
+            paths: declaredEntries
+              .filter((entry) => entry.status !== "deleted")
+              .map((entry) => entry.path),
+          },
     );
+    // The before half of the reproduction contract, taken in the same window
+    // and for the same reason: this workspace is at canonical now and will not
+    // be again once the patch goes in.
+    const reproductionBefore =
+      input.reproductionTest === undefined
+        ? undefined
+        : await this.runValidationCommand(integrationWorkspace, {
+            executable: input.reproductionTest.executable,
+            args: input.reproductionTest.args,
+            label: input.reproductionTest.label,
+          });
+    if (reproductionBefore !== undefined) {
+      // Same restore as the baseline, and for the same reason: a test is not
+      // guaranteed to leave the tree alone.
+      await this.repositories
+        .getGitClient()
+        .run([
+          "-C",
+          integrationWorkspace.path,
+          "reset",
+          "--hard",
+          previousVersion.revision,
+        ]);
+    }
     // What integration is actually promoting. These start as everything the
     // changeset declared and narrow only if a conflict is salvaged, in which
     // case the tree must match what survived rather than what was submitted.
@@ -925,7 +991,37 @@ export class IntegrationService {
       }
     }
 
-    const evidence = validationEvidence(input.validationCommands, baseline);
+    let reproduction: ReproductionAttestation | undefined;
+    if (
+      input.reproductionTest !== undefined &&
+      reproductionBefore !== undefined
+    ) {
+      const after = await this.runValidationCommand(integrationWorkspace, {
+        executable: input.reproductionTest.executable,
+        args: input.reproductionTest.args,
+        label: input.reproductionTest.label,
+      });
+      const failedBefore = reproductionBefore.exitCode !== 0;
+      const passesAfter = after.exitCode === 0;
+      reproduction = {
+        path: input.reproductionTest.path,
+        failedBefore,
+        passesAfter,
+        attested: failedBefore && passesAfter,
+        explanation: failedBefore
+          ? passesAfter
+            ? "Failed at canonical and passes with this change"
+            : "Failed at canonical and still fails with this change"
+          : passesAfter
+            ? "Passed at canonical, so it does not demonstrate this change"
+            : "Did not pass at canonical or with this change",
+      };
+    }
+
+    const evidence =
+      reproduction?.attested === true
+        ? "demonstrated"
+        : validationEvidence(input.validationCommands, baseline);
 
     // Did this change edit the things that judge it, and does it still pass
     // without those edits?
@@ -1049,6 +1145,14 @@ export class IntegrationService {
       // could previously see "Validation: patch integrity(exit 0)" and had no
       // way to know it meant the program was never executed.
       { key: "Validation-Evidence", value: evidence },
+      ...(reproduction === undefined
+        ? []
+        : [
+            {
+              key: "Reproduction-Test",
+              value: `${reproduction.path} — ${reproduction.explanation}`,
+            },
+          ]),
       ...(baseline === undefined || baseline.nowPassing.length === 0
         ? []
         : [
@@ -1135,6 +1239,7 @@ export class IntegrationService {
       evidence,
       ...(baseline === undefined ? {} : { baseline }),
       ...(graderEdits === undefined ? {} : { graderEdits }),
+      ...(reproduction === undefined ? {} : { reproduction }),
       ...(salvage === undefined
         ? {}
         : {

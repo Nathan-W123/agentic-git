@@ -8,7 +8,11 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import type { ResolvedMcpServer, ValidationCommand } from "@coord/shared-types";
+import type {
+  AffectedTestCommand,
+  ResolvedMcpServer,
+  ValidationCommand,
+} from "@coord/shared-types";
 import {
   openCoordinationStore,
   type CoordinationStore,
@@ -136,6 +140,15 @@ export interface ProjectConfig {
   defaultAgent?: string;
   /** Commands every task must pass before its changeset can be promoted. */
   validationCommands: ValidationCommand[];
+  /**
+   * How to ask this repository which tests a set of changed files affects.
+   *
+   * Optional, and absent means the before-run uses the full
+   * `validationCommands`. Supplied, it is used for the baseline and the
+   * fail-to-pass comparison only — never to decide what gates the merge, so a
+   * selector that under-reports costs wall clock rather than coverage.
+   */
+  affectedTestCommand?: AffectedTestCommand;
   agents: Record<string, AgentConfig>;
   sandbox?: SandboxConfig;
   /**

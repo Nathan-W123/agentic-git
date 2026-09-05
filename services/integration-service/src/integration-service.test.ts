@@ -679,3 +679,113 @@ test("a baseline is reused at a revision that has already been measured", async 
     undefined,
   );
 });
+
+test("a reproduction test is attested only when it failed before and passes after", async () => {
+  // The strongest measured filter in the literature, and it is mechanical:
+  // no model, no oracle, just the same test run either side of the change.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-repro-"));
+  try {
+    const fixture = await gradedFixture(root);
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const workspace = await fixture.workspaces.create({
+      taskId: "task_repro",
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    const changeSet = await fixture.workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "make the reproduction pass",
+    });
+
+    const result = await new IntegrationService(
+      fixture.repositories,
+      fixture.workspaces,
+    ).integrate({
+      repository: fixture.repository,
+      integrationRoot: fixture.integrationRoot,
+      changeSet,
+      validationCommands: [],
+      reproductionTest: {
+        path: "test/value.test.js",
+        executable: process.execPath,
+        args: ["test/value.test.js"],
+        label: "reproduction",
+      },
+      commitMessage: "coord: fix the value",
+    });
+
+    assert.equal(result.status, "integrated");
+    assert.equal(result.reproduction?.failedBefore, true);
+    assert.equal(result.reproduction?.passesAfter, true);
+    assert.equal(result.reproduction?.attested, true);
+    // An attested reproduction is the strongest thing integration can say,
+    // and it says it even with no validation commands configured at all.
+    assert.equal(result.evidence, "demonstrated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a reproduction test that already passed proves nothing and says so", async () => {
+  // The failure mode this contract exists to catch: a test that was green
+  // before the change is not evidence about the change, however green it is
+  // afterwards.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-repro-vacuous-"));
+  try {
+    const fixture = await gradedFixture(root);
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const workspace = await fixture.workspaces.create({
+      taskId: "task_vacuous",
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "other.js"),
+      "export const other = 1;\n",
+      "utf8",
+    );
+    const changeSet = await fixture.workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["other"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "add an unrelated file",
+    });
+
+    const result = await new IntegrationService(
+      fixture.repositories,
+      fixture.workspaces,
+    ).integrate({
+      repository: fixture.repository,
+      integrationRoot: fixture.integrationRoot,
+      changeSet,
+      validationCommands: [],
+      reproductionTest: {
+        // Always passes, so it can never demonstrate anything.
+        path: "test/trivial.js",
+        executable: process.execPath,
+        args: ["-e", "process.exit(0)"],
+        label: "reproduction",
+      },
+      commitMessage: "coord: add an unrelated file",
+    });
+
+    assert.equal(result.status, "integrated");
+    assert.equal(result.reproduction?.failedBefore, false);
+    assert.equal(result.reproduction?.attested, false);
+    assert.match(result.reproduction?.explanation ?? "", /does not demonstrate/u);
+    assert.equal(result.evidence, "none");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

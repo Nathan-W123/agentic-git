@@ -59,6 +59,27 @@ export interface ValidationCommand {
 }
 
 /**
+ * A command that narrows validation to what a change actually affects.
+ *
+ * The full suite is the safe default precisely because selection needs a
+ * dependency graph, and a test skipped in error looks exactly like a test that
+ * passed. So the graph is not Kumi's to guess: the project supplies a command
+ * that already knows — `jest --findRelatedTests`, a `bazel query`, whatever
+ * its build system offers — and the changed paths are appended to it.
+ *
+ * Used for the baseline run and the fail-to-pass check, where the question is
+ * only ever about the changed code. The full `validationCommands` still gate
+ * the merge, so a selector that misses something costs a slower signal rather
+ * than a silent pass.
+ */
+export interface AffectedTestCommand {
+  executable: string;
+  /** Changed repository paths are appended to these. */
+  args: string[];
+  label: string;
+}
+
+/**
  * How much a validation run actually established about a change.
  *
  * `IntegrationStatus` answers "may this land"; this answers "on what
@@ -81,6 +102,44 @@ export type ValidationEvidence =
   | "integrity"
   | "executed"
   | "demonstrated";
+
+/**
+ * A test the change nominates as proof it did what was asked.
+ *
+ * The strongest measured intervention in the literature: an independently
+ * supplied reproduction test, used as a filter on candidate patches, roughly
+ * doubles precision (SWT-Bench; replicated at Google across six languages).
+ * The contract is mechanical and needs no model and no oracle — the test must
+ * fail at canonical and pass with the change.
+ *
+ * Optional, and its absence is never a failure. Generating a valid
+ * fail-to-pass test succeeds a minority of the time even for systems built to
+ * do it, so requiring one would refuse most honest work. A task that supplies
+ * one gets a stronger claim recorded; a task that does not is unproven, which
+ * is what it always was.
+ */
+export interface ReproductionTest {
+  /** Repository path of the test, for the record. */
+  path: string;
+  executable: string;
+  args: string[];
+  label: string;
+}
+
+/**
+ * Whether a nominated reproduction test kept its side of the contract.
+ *
+ * `attested` only when it genuinely failed before and passes after. Anything
+ * else is reported as what it was, because a test that passes at canonical
+ * proves nothing about the change and a test that still fails is worse.
+ */
+export interface ReproductionAttestation {
+  path: string;
+  failedBefore: boolean;
+  passesAfter: boolean;
+  attested: boolean;
+  explanation: string;
+}
 
 /**
  * The same validation commands, run against canonical before the patch.
@@ -1173,6 +1232,8 @@ export interface IntegrationResult {
   baseline?: ValidationBaseline;
   /** Present only when the change touched files that grade it. */
   graderEdits?: GraderEditReport;
+  /** Present only when the change nominated a reproduction test. */
+  reproduction?: ReproductionAttestation;
   explanation: string;
 }
 
