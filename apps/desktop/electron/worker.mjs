@@ -230,7 +230,8 @@ async function startWorkerOnce(here, session, onEvent) {
     state: "running",
     detail:
       `Joined ${tenancy.projectName ?? tenancy.projectId ?? "the default project"} ` +
-      `(${tenancy.organizationId}).`,
+      `(${process.env.COORD_ORGANIZATION?.trim() || tenancy.organizationId})` +
+      `${process.env.COORD_ORGANIZATION?.trim() ? ", set by COORD_ORGANIZATION" : ""}.`,
   });
 
   const root = workerRoot();
@@ -245,7 +246,15 @@ async function startWorkerOnce(here, session, onEvent) {
       ...process.env,
       COORD_SERVER: session.server,
       COORD_TOKEN: session.token,
-      COORD_ORGANIZATION: tenancy.organizationId,
+      // Discovery, unless somebody has overruled it. Set last it always won,
+      // so the documented way to point a worker at a particular tenant —
+      // `COORD_ORGANIZATION`, which the worker itself reads and
+      // `docs/deployment/desktop-worker.md` describes — did nothing at all
+      // through the app, silently. That is the wrong shape for an escape
+      // hatch: the moment discovery chooses wrong is the moment somebody
+      // needs one, and there was none short of running the bundle by hand.
+      COORD_ORGANIZATION:
+        process.env.COORD_ORGANIZATION?.trim() || tenancy.organizationId,
       COORD_PROJECT_ROOT: root,
       COORD_WORKER_NAME: deviceName(),
       // What this machine actually has. The project config the worker reads

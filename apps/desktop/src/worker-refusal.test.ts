@@ -67,3 +67,30 @@ test("a refused worker is not restarted at it", async () => {
     "a refusal is waited out by the child, not restarted by the host",
   );
 });
+
+test("COORD_ORGANIZATION overrules discovery, and is said out loud", async () => {
+  // It was documented, the worker itself reads it, and through the app it did
+  // nothing whatsoever: the child's environment was built as `{...process.env,
+  // COORD_ORGANIZATION: tenancy.organizationId}`, so discovery — set last —
+  // always won. Silently. That is the wrong shape for an escape hatch, since
+  // the moment discovery chooses wrong is exactly the moment somebody needs
+  // one, and there was none short of running the bundle by hand.
+  const source = await readFile(workerSource, "utf8");
+
+  assert.match(
+    source,
+    /COORD_ORGANIZATION:\s*\n?\s*process\.env\.COORD_ORGANIZATION\?\.trim\(\) \|\| tenancy\.organizationId/u,
+    "an explicit organization must beat the discovered one",
+  );
+  // Ordering is the whole bug: it has to be read after the spread, not before.
+  const spread = source.indexOf("...process.env,");
+  const override = source.indexOf("COORD_ORGANIZATION:");
+  assert.ok(spread !== -1 && override > spread, "and must be set after the spread");
+
+  assert.match(
+    source,
+    /set by COORD_ORGANIZATION/u,
+    "and the status line must say when it was, or the override is as " +
+      "invisible as the bug it exists for",
+  );
+});

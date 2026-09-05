@@ -1022,3 +1022,73 @@ test("a refused worker is told which of the three things is wrong, and where", a
     "and is told nothing about that organization's billing",
   );
 });
+
+test("the organization listing says where this account could actually work", async (t) => {
+  // The desktop app has to choose between these, and it chose by counting
+  // repositories — so a machine landed in the personal organization signing
+  // up had made for its owner, which had never been paid for, and was refused
+  // on its first call. Nothing in this listing could have told it otherwise:
+  // a role would not have, because an organization that cannot spend folds
+  // every role to `viewer`, owners included. So the answer here is the same
+  // question registration asks, asked in advance.
+  const previous = process.env["KUMI_PAYMENTS_ENABLED"];
+  process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["KUMI_PAYMENTS_ENABLED"];
+    } else {
+      process.env["KUMI_PAYMENTS_ENABLED"] = previous;
+    }
+  });
+
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+
+  const member = await runtime.store.createUser({
+    email: "twotenants@example.com",
+    displayName: "Two Tenants",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const personal = await runtime.store.createOrganization({
+    slug: "two-tenants-personal",
+    name: "Personal",
+  });
+  // Owner of their own, unpaid — and a developer in the team's, which is not.
+  await runtime.store.saveMembership({
+    organizationId: personal.id,
+    userId: member.id,
+    role: "owner",
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: member.id,
+    role: "developer",
+    comped: true,
+  });
+  assert.ok(bootstrapped.user.id !== member.id);
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: member.email, password: PASSWORD },
+  });
+  const listed = await client.request("/api/v1/organizations");
+  assert.equal(listed.status, 200);
+
+  const rows = listed.data.organizations as Array<{
+    id: string;
+    canRunWork?: boolean;
+  }>;
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  assert.equal(
+    byId.get(personal.id)?.canRunWork,
+    false,
+    "owning an organization that cannot spend is not being able to work in it",
+  );
+  assert.equal(
+    byId.get(DEFAULT_ORGANIZATION_ID)?.canRunWork,
+    true,
+    "and a comped membership in the team's is",
+  );
+});
