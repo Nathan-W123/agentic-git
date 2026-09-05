@@ -277,6 +277,40 @@ Accepted work never writes canonical directly:
 A stale compare-and-swap or failed command leaves canonical unchanged. Cleanup
 errors are recorded without rewriting an already-known integration outcome.
 
+Step 4 runs twice: once at canonical before the patch, once after. One
+measurement cannot separate "this change fixed something" from "this change
+broke nothing" from "this was already broken", and the second run is close to
+free — a change that passes and promotes makes canonical the tree those
+commands just passed on, so the after of one task is the before of the next.
+
+### What passing validation does and does not establish
+
+**It does not mean the work is correct.** Kumi makes concurrent agents safe;
+it does not make them right, and those are different claims.
+
+Published measurements put the gap at roughly 8–20%: patches that pass a real,
+human-written project suite are semantically wrong that often, measured
+independently by four groups on the most curated corpus in the field. Worse,
+existing suites frequently do not execute the changed code at all — 27% of
+agent-changed lines covered in Python, 61.5% in Java, with 64.8% of Python
+changes having no existing test touch them.
+
+So `status: integrated` means the change applied cleanly at current canonical,
+matched what its agent declared, and did not fail whatever the project
+configured. It has never meant more than that, and the result now records
+`evidence` saying which of those it actually was:
+
+| Evidence | What ran |
+| --- | --- |
+| `none` | No validation commands were configured. Nothing executed. |
+| `integrity` | Commands ran, but every one checks the patch rather than the program — a formatter, a whitespace check. |
+| `executed` | A functional command ran and passed. Whether it exercised *this* change is a further question. |
+| `demonstrated` | Something that was failing before this change passes after it, or a nominated reproduction test failed at canonical and passes here. |
+
+Only `demonstrated` is evidence the change did what was asked. The others are
+evidence it did not obviously break anything, which is worth having and is not
+the same thing.
+
 ### Approvals are off by default
 
 Step 2 consults the project's approval policy, and **a project that has not
