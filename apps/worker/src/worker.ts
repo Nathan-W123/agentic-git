@@ -705,7 +705,15 @@ export class Worker {
     }
     const assignment = await this.options.client.lease(
       workerId,
-      this.options.projectId ?? DEFAULT_PROJECT_ID,
+      // Nothing, where nothing was configured — and the control plane then
+      // searches every project this account can work in.
+      //
+      // It used to fall back to the default project, which was a guess about
+      // where the work would be, made by the side that cannot know. A machine
+      // whose host had picked wrong polled one project forever and never saw
+      // a task filed in any other, including by the person sitting at it. A
+      // deployment that pins `COORD_PROJECT_ID` still pins exactly one.
+      this.options.projectId,
       this.options.repositoryId,
       // Opting in is what makes this worker able to receive a question at
       // all. A build that does not send this is served work only, by an

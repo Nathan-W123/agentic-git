@@ -281,40 +281,23 @@ export async function routeWorkers(
     if (worker === undefined || worker.userId !== principal.user.id) {
       throw new HttpError(404, "not_found", "Worker was not found");
     }
-    const projectId =
-      stringField(body["projectId"], "projectId", { max: 120 }) ?? "";
-    // `repositories` is not decoration. A collaborator invited to one
-    // repository has no organization role, reaches this project through
-    // that grant alone, and `authorizeProject` folds every grant they hold
-    // here into one role to answer "can they reach the project at all".
-    // That answer must not become "and may therefore run anything in it":
-    // the narrowing is passed down to the lease, which is the only place
-    // that decides what a machine is handed.
-    const { project, repositories } = await authorizeProject(
-      gw.options.store,
-      principal,
-      projectId,
-      "run_task",
-    );
-    // Deliberately not compared against `worker.organizationId`.
+    // Optional, and that is the point.
     //
-    // It used to be, to keep a machine out of a tenant that had never
-    // admitted it to its fleet. The property was real; the mechanism was
-    // wrong, because the organization on a worker is chosen by the desktop
-    // app at start — before any task exists — from whichever organization it
-    // guessed. A person who belongs to two teams therefore had one of them
-    // silently unreachable from their own laptop, and when a wider account
-    // made the guess wider still, a machine registered into a stranger's
-    // organization and sat there polling: alive, healthy, and invisible to
-    // the team it was bought for.
+    // A worker used to have to name one, and the desktop app answered from a
+    // guess made at start — before any task existed, from whichever
+    // organization it had picked. So a machine polled one project forever and
+    // was deaf to work filed anywhere else its owner could reach, including
+    // by the person sitting at it. The task already knows its own project;
+    // the worker was simply asking before that was allowed to matter.
     //
-    // `authorizeProject` above is the honest form of the same property. It
-    // has already established that this account may run work in this project,
-    // through membership or through a grant, and under local execution the
-    // machine is that account's own. So the invariant enforced now is "a
-    // machine runs only what its owner is entitled to run", which is
-    // strictly what was meant, and does not depend on a guess made before
-    // the work existed.
+    // Sent, it is still honoured exactly as before: a deployment that pins a
+    // worker to one project keeps doing so, and every older build keeps
+    // sending it.
+    const requestedProject =
+      stringField(body["projectId"], "projectId", {
+        max: 120,
+        optional: true,
+      }) ?? "";
 
     const nowIso = new Date().toISOString();
     // Reclaim anything a dead worker was holding before handing out new
@@ -322,6 +305,14 @@ export async function routeWorkers(
     // it is the caller that almost always settles the row, and it used to
     // discard it.
     await gw.expireLeasesAndSay(nowIso);
+    // Before any project is resolved, not after one is authorized.
+    //
+    // A machine that reached this route is alive, and whether some project
+    // then hands it work is a different question. Touched on the far side of
+    // that, a worker whose polls were being refused never had its heartbeat
+    // written at all: it aged out after three minutes and its owner's agents
+    // went grey, while its own status line still said "polling". Liveness is
+    // about the machine; work is about the project.
     await gw.options.store.touchWorker(workerId, nowIso);
 
     const repositoryId = stringField(body["repositoryId"], "repositoryId", {
@@ -357,61 +348,131 @@ export async function routeWorkers(
         "This deployment does not support remote workers",
       );
     }
-    const assignment = await leaseOperation({
-      workerId,
-      projectId,
-      actorId: principal.user.id,
-      ...(repositoryId === undefined ? {} : { repositoryId }),
-      ...(repositories === undefined ? {} : { repositories }),
-      ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
-      ...(protocolVersion === undefined ? {} : { protocolVersion }),
-    });
-    if (assignment === undefined) {
-      // 204 rather than an empty 200 so a polling worker can branch on the
-      // status code without parsing a body.
-      response.writeHead(204).end();
+
+    // Every project this account could be handed work in, or the one it
+    // named. Enumerated here rather than guessed on the machine, because
+    // this is the only side that knows what exists.
+    const candidates =
+      requestedProject !== ""
+        ? [requestedProject]
+        : (
+            await Promise.all(
+              (await gw.reachableOrganizations(principal)).map(
+                async (organization) =>
+                  await gw
+                    .reachableProjects(principal, organization.id, false)
+                    .catch((): [] => []),
+              ),
+            )
+          )
+            .flat()
+            .map((project) => project.id);
+
+    for (const projectId of candidates) {
+      // `repositories` is not decoration. A collaborator invited to one
+      // repository has no organization role, reaches this project through
+      // that grant alone, and `authorizeProject` folds every grant they hold
+      // here into one role to answer "can they reach the project at all".
+      // That answer must not become "and may therefore run anything in it":
+      // the narrowing is passed down to the lease, which is the only place
+      // that decides what a machine is handed.
+      //
+      // A project the caller cannot work in is skipped rather than refused,
+      // because with no project named this list is a search and not a claim.
+      // One the caller *did* name still refuses, so nothing that used to be
+      // an error quietly becomes an empty queue.
+      const authorized = await authorizeProject(
+        gw.options.store,
+        principal,
+        projectId,
+        "run_task",
+      ).catch((error: unknown) => {
+        if (requestedProject !== "") {
+          throw error;
+        }
+        return undefined;
+      });
+      if (authorized === undefined) {
+        continue;
+      }
+      const { repositories } = authorized;
+      // Deliberately not compared against `worker.organizationId`.
+      //
+      // It used to be, to keep a machine out of a tenant that had never
+      // admitted it to its fleet. The property was real; the mechanism was
+      // wrong, because the organization on a worker is chosen by the desktop
+      // app at start — before any task exists — from whichever organization
+      // it guessed. A person who belongs to two teams therefore had one of
+      // them silently unreachable from their own laptop, and when a wider
+      // account made the guess wider still, a machine registered into a
+      // stranger's organization and sat there polling: alive, healthy, and
+      // invisible to the team it was bought for.
+      //
+      // `authorizeProject` above is the honest form of the same property. It
+      // has already established that this account may run work in this
+      // project, through membership or through a grant, and under local
+      // execution the machine is that account's own. So the invariant
+      // enforced now is "a machine runs only what its owner is entitled to
+      // run", which is strictly what was meant, and does not depend on a
+      // guess made before the work existed.
+      const assignment = await leaseOperation({
+        workerId,
+        projectId,
+        actorId: principal.user.id,
+        ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(repositories === undefined ? {} : { repositories }),
+        ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
+        ...(protocolVersion === undefined ? {} : { protocolVersion }),
+      });
+      if (assignment === undefined) {
+        continue;
+      }
+      // Checked again on the way out, against the same two bounds this
+      // iteration was authorized on. `leaseWork` is an operation a deployment
+      // supplies, and an authorization that only holds because one
+      // implementation remembered to apply it is not an authorization. The
+      // repository half matters most: it is the only thing standing between a
+      // grant on one repository and an agent run from the repository beside
+      // it, on this person's laptop, with their vendor login.
+      if (
+        assignment.task.projectId !== projectId ||
+        assignment.lease.projectId !== projectId
+      ) {
+        await gw.options.store.finishWorkLease(
+          assignment.lease.id,
+          "released",
+          new Date().toISOString(),
+          "control-plane project mismatch",
+        );
+        throw new HttpError(
+          500,
+          "invalid_assignment",
+          "Worker assignment escaped its authorized project",
+        );
+      }
+      if (
+        repositories !== undefined &&
+        !repositories.has(assignment.task.repositoryId)
+      ) {
+        await gw.options.store.finishWorkLease(
+          assignment.lease.id,
+          "released",
+          new Date().toISOString(),
+          "control-plane repository mismatch",
+        );
+        throw new HttpError(
+          500,
+          "invalid_assignment",
+          "Worker assignment escaped its authorized repositories",
+        );
+      }
+      gw.sendJson(response, 200, assignment);
       return true;
     }
-    // Checked again on the way out, against the same two bounds the
-    // request was authorized on. `leaseWork` is an operation a deployment
-    // supplies, and an authorization that only holds because one
-    // implementation remembered to apply it is not an authorization. The
-    // repository half matters most: it is the only thing standing between a
-    // grant on one repository and an agent run from the repository beside
-    // it, on this person's laptop, with their vendor login.
-    if (
-      assignment.task.projectId !== projectId ||
-      assignment.lease.projectId !== projectId
-    ) {
-      await gw.options.store.finishWorkLease(
-        assignment.lease.id,
-        "released",
-        new Date().toISOString(),
-        "control-plane project mismatch",
-      );
-      throw new HttpError(
-        500,
-        "invalid_assignment",
-        "Worker assignment escaped its authorized project",
-      );
-    }
-    if (
-      repositories !== undefined &&
-      !repositories.has(assignment.task.repositoryId)
-    ) {
-      await gw.options.store.finishWorkLease(
-        assignment.lease.id,
-        "released",
-        new Date().toISOString(),
-        "control-plane repository mismatch",
-      );
-      throw new HttpError(
-        500,
-        "invalid_assignment",
-        "Worker assignment escaped its authorized repositories",
-      );
-    }
-    gw.sendJson(response, 200, assignment);
+
+    // 204 rather than an empty 200 so a polling worker can branch on the
+    // status code without parsing a body.
+    response.writeHead(204).end();
     return true;
   }
 
