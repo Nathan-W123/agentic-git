@@ -4982,7 +4982,7 @@ test("the channel composer highlights mentions and previews pasted images", asyn
   assert.match(app, /addEventListener\("paste"/u);
   assert.match(app, /clipboardData\?\.items/u);
   assert.match(app, /item\.getAsFile\(\)/u);
-  assert.match(app, /event\.preventDefault\(\);[\s\S]{0,80}attachChannelImages/u);
+  assert.match(app, /event\.preventDefault\(\);[\s\S]{0,80}attachChannelFiles/u);
   assert.match(app, /case "channel-attachment-remove"/u);
   assert.match(chats, /function draftAttachmentPreviews/u);
   assert.match(chats, /class="composer-attachments"/u);
@@ -5055,7 +5055,7 @@ test(
   "direct-message attachment removal and successful sends clear previews without leaking drafts between conversations",
   async () => {
     const app = await browserSource();
-    const attachStart = app.indexOf("async function attachChannelImages");
+    const attachStart = app.indexOf("async function attachChannelFiles");
     const attachEnd = app.indexOf(
       "\nconst previewsWatched",
       attachStart,

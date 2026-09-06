@@ -6560,25 +6560,70 @@ export async function loadPreview(repositoryId) {
 }
 
 /**
- * Stores one image and answers with the reference a message carries.
+ * Stores one file and answers with the reference a message carries.
  *
  * The bytes go up as the body with their own content type — no multipart, no
- * form encoding — because the endpoint takes one image and the browser
- * already knows what it is. What comes back is inserted into the draft as
+ * form encoding — because the endpoint takes one file and the browser already
+ * knows what it is. What comes back is inserted into the draft as
  * `![name](attachment:<id>)`, which is the one pattern the transcript renders
  * and the one the gateway rewrites into a path an agent can open.
+ *
+ * The type is passed in rather than read off the file, because a browser does
+ * not always know: Windows reports nothing at all for a `.md`, and a `.zip`
+ * arrives as `application/x-zip-compressed` or as nothing depending on what
+ * is in the registry. The caller resolves that from the name; the store still
+ * checks the bytes against whatever is claimed here, so a wrong claim is
+ * refused rather than believed.
  */
-export async function uploadAttachment(repositoryId, file) {
+export async function uploadAttachment(
+  repositoryId,
+  file,
+  contentType = file.type,
+) {
   const response = await api(repositoryPath(repositoryId, "/attachments"), {
     method: "POST",
     body: file,
-    contentType: file.type,
+    contentType,
   });
   const id = response?.id;
   if (typeof id !== "string" || id === "") {
-    throw new Error("The image was not stored");
+    throw new Error("The file was not stored");
   }
   return id;
+}
+
+/**
+ * Sends a zipped local repository up, and answers with what it became.
+ *
+ * The third way a workspace comes into being, beside creating an empty one
+ * and importing from GitHub. The archive travels as the body for the same
+ * reason an attachment does, and the two things the server cannot read out of
+ * it — what to call it, and which branch — ride in the query string.
+ *
+ * Whatever `.git` the archive contains comes with it, so a repository that
+ * has been worked on locally arrives with its history rather than as a first
+ * commit of its current state.
+ */
+export async function uploadRepositoryArchive(archive, { id, branch } = {}) {
+  const query = new URLSearchParams();
+  if (id !== undefined && id !== "") {
+    query.set("id", id);
+  }
+  if (branch !== undefined && branch !== "") {
+    query.set("branch", branch);
+  }
+  const search = query.toString();
+  const response = await api(
+    `/projects/${encodeURIComponent(state.projectId)}/repositories/upload${
+      search === "" ? "" : `?${search}`
+    }`,
+    {
+      method: "POST",
+      body: archive,
+      contentType: "application/zip",
+    },
+  );
+  return response?.repository;
 }
 
 /**

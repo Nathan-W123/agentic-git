@@ -795,21 +795,41 @@ function statusAgentFace(agent, size, repositoryId, indicator = {}) {
 }
 
 /**
- * Message text, with any images it refers to drawn underneath it.
+ * Message text, with any files it refers to drawn underneath it.
  *
  * Messages are plain text and stay plain text — this is not markdown, and
  * nothing here interprets anything else somebody typed. The only pattern read
  * is `![alt](attachment:<id>)`, and the id is matched against the exact shape
  * the store issues before it is used at all: thirty-two hex characters and one
- * of four extensions. Anything else is left as the literal text it was, which
- * is what keeps a message that merely talks about the syntax from becoming an
- * image tag.
+ * of the allowlisted extensions. Anything else is left as the literal text it
+ * was, which is what keeps a message that merely talks about the syntax from
+ * becoming an image tag.
  *
  * Kept out of the record because the alternative was a column and a migration
  * on three backends to hold what is, in the end, a reference.
  */
 const ATTACHMENT_PATTERN =
-  /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
+  /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp|zip|md))\)/gu;
+
+// Whether an attachment is something to draw or something to hand over.
+//
+// The reference syntax is the same for both — it was written for images and
+// every message already in every channel uses it — so what a reference
+// becomes on screen is decided by the extension the store put in the id, and
+// never by anything a message says about itself.
+//
+// Written directly under the pattern, and with these comments rather than
+// doc blocks, because both are part of reading a reference: the clipboard
+// tests lift that pattern and everything up to the next doc block out of this
+// file and run it, and a helper left behind here is a helper missing there.
+function attachmentIsImage(id) {
+  return /\.(?:png|jpg|gif|webp)$/u.test(String(id ?? ""));
+}
+
+// What a file with no alt text is called, which depends on what it is.
+function attachmentFallbackName(id) {
+  return attachmentIsImage(id) ? "Attached image" : "Attached file";
+}
 
 /**
  * The shape of every attachment this browser has already drawn once.
@@ -924,6 +944,32 @@ function attachmentImage(base, image) {
 }
 
 /**
+ * One attachment that is not a picture, as a row you can take away.
+ *
+ * A ZIP has nothing to show and a Markdown file would be a wall of text in
+ * the middle of a conversation, so both are a name, a size-less chip and a
+ * link. `download` rather than a new tab: the route answers these with
+ * `Content-Disposition: attachment` anyway, and a tab that opens and
+ * immediately closes itself is a worse way to learn that.
+ */
+function attachmentFileChip(base, file) {
+  const kind = String(file.id ?? "").split(".").pop() ?? "";
+  // What it lands in the downloads folder as. The alt text is the name it was
+  // uploaded under with its extension taken off — see where the reference is
+  // written — so the extension goes back on, and a file saved from a
+  // conversation opens by double-clicking it like any other.
+  const saveAs = file.alt.toLowerCase().endsWith(`.${kind}`)
+    ? file.alt
+    : `${file.alt}.${kind}`;
+  return `<a class="cmsg-file" href="${esc(base + file.id)}"
+             download="${esc(saveAs)}" data-attachment="${esc(file.id)}"
+             ><span class="cmsg-file-icon" aria-hidden="true">${icon(
+               kind === "md" ? "file" : "layers",
+             )}</span><span class="cmsg-file-name">${esc(file.alt)}</span
+             ><span class="cmsg-file-kind">${esc(kind.toUpperCase())}</span></a>`;
+}
+
+/**
  * The three helpers below take the draft rather than reading one.
  *
  * Three composers stage images now — the channel bar, the thread panel's reply
@@ -940,7 +986,7 @@ function draftAttachments(repositoryId, draft = state.chatDraft) {
     `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
   return [...String(draft ?? "").matchAll(ATTACHMENT_PATTERN)].map((match) => ({
     reference: match[0],
-    alt: match[1] || "Attached image",
+    alt: match[1] || attachmentFallbackName(match[2]),
     id: match[2],
     src: base + match[2],
   }));
@@ -973,12 +1019,23 @@ function draftAttachmentPreviews(
   if (attachments.length === 0) {
     return "";
   }
-  return `<div class="composer-attachments" aria-label="Attached images">${attachments
+  return `<div class="composer-attachments" aria-label="Attached files">${attachments
     .map(
-      (attachment) => `<div class="composer-attachment">
-        <img ${imagesNeedFetching() ? "data-src" : "src"}="${esc(attachment.src)}"
+      (attachment) => `<div class="composer-attachment${
+        attachmentIsImage(attachment.id) ? "" : " composer-attachment-file"
+      }">
+        ${
+          // A staged picture is shown; a staged ZIP has nothing to show, so
+          // it gets the same icon it will carry in the transcript rather than
+          // a broken image where the thumbnail would have been.
+          attachmentIsImage(attachment.id)
+            ? `<img ${imagesNeedFetching() ? "data-src" : "src"}="${esc(attachment.src)}"
           alt="${esc(attachment.alt)}"
-          data-attachment="${esc(attachment.id)}" decoding="async">
+          data-attachment="${esc(attachment.id)}" decoding="async">`
+            : `<span class="composer-attachment-icon" aria-hidden="true">${icon(
+                String(attachment.id).endsWith(".md") ? "file" : "layers",
+              )}</span>`
+        }
         <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
         <button type="button" class="composer-attachment-remove"
           data-act="${esc(removeAct)}" data-value="${esc(attachment.id)}"
@@ -1237,21 +1294,31 @@ function messageBody(content, repositoryId, mentions) {
   // metadata yet. The current roster is the same source the picker uses, so
   // it is the accurate fallback until the server copy arrives.
   const resolvedMentions = mentions ?? channelParticipants(repositoryId);
-  const images = [];
+  const attached = [];
   let stripped = text;
   for (const match of text.matchAll(ATTACHMENT_PATTERN)) {
-    images.push({ alt: match[1] ?? "", id: match[2] ?? "" });
+    attached.push({
+      alt: match[1] || attachmentFallbackName(match[2]),
+      id: match[2] ?? "",
+    });
     stripped = stripped.replace(match[0], "");
   }
-  if (images.length === 0) {
+  if (attached.length === 0) {
     return richText(text, resolvedMentions);
   }
   const base =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
+  // Pictures first and then the rest, rather than in the order the references
+  // happen to sit in the text. A picture is part of what was said and a ZIP
+  // is something handed over with it, so a message carrying both reads as the
+  // words, then what they are about, then what came attached.
+  const images = attached.filter((one) => attachmentIsImage(one.id));
+  const files = attached.filter((one) => !attachmentIsImage(one.id));
   return (
     richText(stripped.trim(), resolvedMentions) +
-    images.map((image) => attachmentImage(base, image)).join("")
+    images.map((image) => attachmentImage(base, image)).join("") +
+    files.map((file) => attachmentFileChip(base, file)).join("")
   );
 }
 
@@ -2611,20 +2678,27 @@ function replyPreviewText(entry) {
 
   let attachmentCount = 0;
   let attachmentLabel = "";
+  // What a message full of attachments and nothing else is called. A room
+  // where the only thing posted was a ZIP should not say "2 attached images".
+  let everyAttachmentIsAnImage = true;
   const visible = String(entry?.content ?? "")
-    .replace(ATTACHMENT_PATTERN, (_reference, alt) => {
+    .replace(ATTACHMENT_PATTERN, (_reference, alt, id) => {
       attachmentCount += 1;
       attachmentLabel ||= String(alt ?? "").trim();
+      everyAttachmentIsAnImage &&= /\.(?:png|jpg|gif|webp)$/u.test(
+        String(id ?? ""),
+      );
       return " ";
     })
     .replace(/\s+/gu, " ")
     .trim();
+  const noun = everyAttachmentIsAnImage ? "image" : "file";
   const line =
     visible ||
     (attachmentCount === 1
-      ? attachmentLabel || "Attached image"
+      ? attachmentLabel || `Attached ${noun}`
       : attachmentCount > 1
-        ? `${attachmentCount} attached images`
+        ? `${attachmentCount} attached ${noun}s`
         : "");
   return line.length > 80 ? `${line.slice(0, 77)}…` : line;
 }
@@ -4098,7 +4172,7 @@ function messageAttachments(content) {
   return [...String(content ?? "").matchAll(ATTACHMENT_PATTERN)].map(
     (match) => ({
       reference: match[0],
-      alt: match[1] || "Attached image",
+      alt: match[1] || attachmentFallbackName(match[2]),
       id: match[2],
     }),
   );
@@ -4135,6 +4209,10 @@ function messageClipboardText(content, repositoryId) {
  * rather than reusing `messageBody`, whose markup is for this page: its
  * `<img>` carries a path, and in the desktop shell it carries `data-src` and
  * no source at all, so pasted anywhere else it would arrive broken.
+ *
+ * A file that is not a picture goes as a named link. Pasting an `<img>` for a
+ * ZIP would arrive as a broken image icon wherever it landed, which says less
+ * than its name does.
  */
 function messageClipboardHtml(content, repositoryId, mentions) {
   const attachments = messageAttachments(content);
@@ -4152,7 +4230,9 @@ function messageClipboardHtml(content, repositoryId, mentions) {
       .map((attachment) => {
         const source = esc(attachmentUrl(repositoryId, attachment.id));
         const alt = esc(attachment.alt);
-        return `<a href="${source}"><img src="${source}" alt="${alt}"></a>`;
+        return attachmentIsImage(attachment.id)
+          ? `<a href="${source}"><img src="${source}" alt="${alt}"></a>`
+          : `<a href="${source}">${alt}</a>`;
       })
       .join("")
   );
@@ -4811,7 +4891,7 @@ function composer(repositoryId) {
              file input cannot be styled into this bar, and a label would take
              the click before the delegated handler ever saw it. -->
         <input type="file" data-act="channel-attach-input" accept="image/png,
-          image/jpeg,image/gif,image/webp" multiple hidden>
+          image/jpeg,image/gif,image/webp,application/zip,.zip,text/markdown,.md" multiple hidden>
         ${iconButton("plus", {
           act: "composer-plus",
           value: "channel",
@@ -4819,7 +4899,7 @@ function composer(repositoryId) {
           cls: "composer-plus",
         })}
         ${state.attaching > 0
-          ? `<span class="composer-note">attaching ${esc(String(state.attaching))} image(s)…</span>`
+          ? `<span class="composer-note">attaching ${esc(String(state.attaching))} file(s)…</span>`
           : ""}
         <span class="spacer"></span>
         ${composerCount("channel", state.chatDraft)}
@@ -7034,14 +7114,14 @@ function dmPanel() {
           placeholder="Message ${esc(name)}...">${esc(draftText(state.dmDraft))}</textarea>
         <div class="composer-bar">
           <input type="file" data-act="dm-attach-input" accept="image/png,
-            image/jpeg,image/gif,image/webp" multiple hidden>
+            image/jpeg,image/gif,image/webp,application/zip,.zip,text/markdown,.md" multiple hidden>
           ${iconButton("paperclip", {
             act: "dm-attach",
-            title: "Attach images",
+            title: "Attach files",
             small: true,
           })}
           ${(state.dmAttaching ?? 0) > 0
-            ? `<span class="composer-note">attaching ${esc(String(state.dmAttaching))} image(s)…</span>`
+            ? `<span class="composer-note">attaching ${esc(String(state.dmAttaching))} file(s)…</span>`
             : ""}
           <span class="spacer"></span>
           ${composerCount("dm", state.dmDraft)}
@@ -7286,14 +7366,14 @@ function threadPanel(repositoryId, selectedMessageId) {
                the image picker directly because attaching is the only thing
                this composer adds to a message. -->
           <input type="file" data-act="channel-thread-attach-input" accept="image/png,
-            image/jpeg,image/gif,image/webp" multiple hidden>
+            image/jpeg,image/gif,image/webp,application/zip,.zip,text/markdown,.md" multiple hidden>
           ${iconButton("plus", {
             act: "thread-attach",
-            title: "Attach images",
+            title: "Attach files",
             small: true,
           })}
           ${state.threadAttaching > 0
-            ? `<span class="composer-note">attaching ${esc(String(state.threadAttaching))} image(s)…</span>`
+            ? `<span class="composer-note">attaching ${esc(String(state.threadAttaching))} file(s)…</span>`
             : ""}
           <span class="spacer"></span>
           ${composerCount("thread", state.threadDraft)}
@@ -8324,13 +8404,16 @@ export function renderChats() {
       ${emptyState(
         "chatBubble",
         "No workspaces yet",
-        "Create or import a repository to open its workspace, with channels, people, agents, threads, and files together.",
+        "Create, import, or copy in a repository to open its workspace, with channels, people, agents, threads, and files together.",
         `<button class="btn btn-primary" data-act="repo-create" style="margin-top:6px">${icon(
           "plus",
         )} Create new repository</button>
         <button class="btn" data-act="repo-connect">${icon(
           "link",
-        )} Import from GitHub</button>`,
+        )} Import from GitHub</button>
+        <button class="btn" data-act="repo-upload">${icon(
+          "folder",
+        )} Copy from this computer</button>`,
       )}
     </div></div></div>`;
   }

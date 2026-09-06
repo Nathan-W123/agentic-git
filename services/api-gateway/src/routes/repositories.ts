@@ -31,6 +31,7 @@ import {
   API_PREFIX,
 } from "../http-util.js";
 import {
+  MAX_REPOSITORY_ARCHIVE_BYTES,
   REPOSITORY_PICTURE_MAX_CHARS,
   ROLES,
 } from "../gateway-util.js";
@@ -172,6 +173,88 @@ export async function routeRepositories(
         projectId,
         repositoryId: repository.id,
         provider: "github",
+        actorId: principal.user.id,
+      },
+    });
+    gw.sendJson(response, 201, { repository: publicRepository(repository) });
+    return true;
+  }
+
+  // A repository copied from somebody's own machine, as a ZIP.
+  //
+  // The bytes are the body rather than a multipart form for the same reason
+  // the attachment route takes them that way: there is one file, the browser
+  // already knows what it is, and a form encoding would only add a parser
+  // between the upload and the disk. The id and branch ride in the query
+  // string because the body is not JSON and cannot carry them.
+  //
+  // Gated exactly as the GitHub import is — `import_repository` — because it
+  // is the same act: registering a new canonical repository in this project.
+  const uploadMatch = matchPath(
+    path,
+    new RegExp(
+      `^${API_PREFIX}/projects/([^/]+)/repositories/upload$`,
+      "u",
+    ),
+  );
+  if (uploadMatch !== undefined && method === "POST") {
+    const projectId = uploadMatch[0] ?? "";
+    const { project } = await authorizeProject(
+      gw.options.store,
+      principal,
+      projectId,
+      "import_repository",
+    );
+    const importLocalArchive = gw.options.operations.importLocalArchive;
+    if (importLocalArchive === undefined) {
+      throw new HttpError(
+        501,
+        "not_supported",
+        "This deployment cannot take a repository as an upload",
+      );
+    }
+    // An absent parameter and one left blank mean the same thing here — the
+    // caller did not choose — and `stringField` refuses an empty string, so
+    // they are collapsed before it sees them.
+    const query = (name: string): string | undefined => {
+      const value = url.searchParams.get(name);
+      return value === null || value.trim() === "" ? undefined : value;
+    };
+    const id = stringField(query("id"), "id", { max: 80, optional: true });
+    const branch = stringField(query("branch"), "branch", {
+      max: 240,
+      optional: true,
+    });
+    const bytes = await gw.readBinary(
+      request,
+      MAX_REPOSITORY_ARCHIVE_BYTES,
+      "That repository archive is too large",
+    );
+    if (bytes.length === 0) {
+      throw new HttpError(400, "invalid_request", "The archive was empty");
+    }
+    const repository = await gw.performOperation(
+      "repository_import_failed",
+      async () =>
+        await importLocalArchive({
+          projectId,
+          bytes,
+          ...(id === undefined ? {} : { id }),
+          ...(branch === undefined ? {} : { branch }),
+          actorId: principal.user.id,
+        }),
+    );
+    await gw.markChannelMembershipChosen(repository.id);
+    await gw.options.store.appendAudit(undefined, {
+      type: "repository_imported",
+      data: {
+        organizationId: project.organizationId,
+        projectId,
+        repositoryId: repository.id,
+        // Beside "github", and the reason this record has a provider at all:
+        // where a repository came from is the question an audit of one is
+        // most often asked.
+        provider: "local",
         actorId: principal.user.id,
       },
     });

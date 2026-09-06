@@ -27,11 +27,12 @@ test("the thread composer can take an image at all", async () => {
   const chats = await publicFile("screen-chats.js");
   const composer = chats.slice(chats.indexOf("function threadPanel("));
   assert.notEqual(composer, "", "screen-chats.js should still render a thread panel");
-  // The picker itself, restricted to the same four raster types the store
-  // allows — SVG is a document that can carry script and stays out.
+  // The picker itself, restricted to what the store allows — four raster
+  // image types, ZIP archives and Markdown. SVG is a document that can carry
+  // script and stays out.
   assert.match(
     composer,
-    /data-act="channel-thread-attach-input"[^>]*accept="image\/png,\s*image\/jpeg,image\/gif,image\/webp"/su,
+    /data-act="channel-thread-attach-input"[^>]*accept="image\/png,\s*image\/jpeg,image\/gif,image\/webp,application\/zip,\.zip,text\/markdown,\.md"/su,
   );
   // And a control that clicks it, since a bare file input cannot be styled
   // into the bar and a label would swallow the click before the delegated
@@ -39,7 +40,7 @@ test("the thread composer can take an image at all", async () => {
   // retaining the thread's direct attachment action.
   assert.match(composer, /iconButton\("plus", \{\s*act: "thread-attach"/u);
   assert.match(composer, /act: "thread-attach"/u);
-  // Staged images are shown above the box, each with its own remove button.
+  // Staged files are shown above the box, each with its own remove button.
   assert.match(composer, /removeAct: "thread-attachment-remove"/u);
 });
 
@@ -72,7 +73,7 @@ test("the two composers upload by one path, into two drafts", async () => {
   // "attaching…" note reads, and which textarea gets the caret back.
   assert.match(app, /const ATTACH_TARGETS = \{[^}]*channel: \{/su);
   assert.match(app, /thread: \{\s*draft: "threadDraft",/su);
-  assert.match(app, /async function attachChannelImages\(files, target = "channel"\)/u);
+  assert.match(app, /async function attachChannelFiles\(files, target = "channel"\)/u);
   // Both pickers reach it, and so does a paste into either box — which is how
   // most screenshots actually arrive.
   assert.match(app, /picker\?\.dataset\?\.act === "channel-thread-attach-input"/u);
@@ -86,7 +87,7 @@ test("the two composers upload by one path, into two drafts", async () => {
   );
   assert.match(
     app,
-    /attachChannelImages\(\s*files,\s*act === "channel-thread-input"\s*\? "thread"/u,
+    /attachChannelFiles\(\s*files,\s*act === "channel-thread-input"\s*\? "thread"/u,
   );
 });
 

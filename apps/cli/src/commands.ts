@@ -35,9 +35,12 @@ import type {
 } from "@coord/persistence";
 import { DEFAULT_ORGANIZATION_ID, DEFAULT_PROJECT_ID } from "@coord/persistence";
 import {
+  extractZipArchive,
   normalizeGitHubRepository,
+  readZipEntries,
   RepositoryService,
   sanitizeChildEnv,
+  singleRootDirectory,
   type CanonicalRepository,
 } from "@coord/repository-service";
 import type { TaskDefinition } from "@coord/shared-types";
@@ -818,6 +821,118 @@ export async function repoImportGitHub(
     }
     throw error;
   }
+}
+
+/**
+ * The shape of a local repository arriving as bytes rather than as a path.
+ *
+ * `archive` is a ZIP of a folder from somebody's own machine. The control
+ * plane has no access to that machine, so the folder travels; everything
+ * after unpacking is the ordinary local import that `coord repo add` has
+ * always done, `.git` history and all.
+ */
+export interface RepoImportArchiveOptions {
+  archive: Buffer;
+  id?: string;
+  branch?: string;
+  projectId?: string;
+  setDefault?: boolean;
+  /** The authenticated caller importing this repository, if there is one. */
+  createdBy?: string;
+}
+
+/**
+ * An id from a folder name, which is a person's word and not an identifier.
+ *
+ * Ids key every row and name a directory, so they are narrow on purpose. A
+ * folder called "My Project (old)" still has to become something, and the
+ * something is what it obviously reads as rather than a refusal — the person
+ * asked to import a folder, not to name a database key.
+ */
+function repositoryIdFromName(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/gu, "-")
+    .replace(/^[^a-z0-9]+/u, "")
+    .replace(/-+$/u, "")
+    .slice(0, MAX_REPOSITORY_ID_LENGTH);
+  return slug === "" ? "workspace" : slug;
+}
+
+/**
+ * Imports a zipped local repository as canonical.
+ *
+ * The archive is unpacked into a temporary directory and handed to `repoAdd`,
+ * so a folder that was already a Git repository keeps its history — `repoAdd`
+ * only creates an initial commit when what it is given has none. A folder
+ * that was never a repository becomes one with a single initial commit, which
+ * is the same thing greenfield creation produces.
+ *
+ * Nothing survives this call outside the project: the temporary extraction is
+ * removed whether or not the import succeeded, and canonical is the bare
+ * mirror `repoAdd` wrote.
+ */
+export async function repoImportArchive(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  options: RepoImportArchiveOptions,
+): Promise<StoredRepository> {
+  const staging = await mkdtemp(path.join(os.tmpdir(), "coord-archive-"));
+  try {
+    const unpacked = path.join(staging, "source");
+    const extracted = await extractZipArchive(options.archive, unpacked);
+    if (extracted.files === 0) {
+      throw new Error(
+        "That archive has no files in it. Zip the repository folder itself, " +
+          "not an empty directory.",
+      );
+    }
+    // Zipping a folder gives `project/...`, and importing that verbatim would
+    // produce a repository holding one directory. The wrapper is stripped when
+    // there is exactly one, and its name is the obvious default id.
+    const root = singleRootDirectory(readZipEntries(options.archive));
+    const sourcePath =
+      root === undefined ? unpacked : path.join(unpacked, root);
+    const id = repositoryIdFromName(options.id ?? root ?? "workspace");
+    // The branch the uploaded repository is actually on. Without this, a
+    // repository whose branch is master — or anything else — is refused for
+    // not having a main, which is a strange thing to tell somebody about
+    // their own history.
+    const branch = options.branch ?? (await archiveBranch(sourcePath));
+    return await repoAdd(project, store, {
+      sourcePath,
+      id,
+      ...(branch === undefined ? {} : { branch }),
+      ...(options.projectId === undefined
+        ? {}
+        : { projectId: options.projectId }),
+      ...(options.setDefault === undefined
+        ? {}
+        : { setDefault: options.setDefault }),
+      ...(options.createdBy === undefined
+        ? {}
+        : { createdBy: options.createdBy }),
+    });
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+/** Which branch an unpacked repository is on, when it is one at all. */
+async function archiveBranch(sourcePath: string): Promise<string | undefined> {
+  const git = new RepositoryService().getGitClient();
+  const head = await git.run(
+    ["-C", sourcePath, "symbolic-ref", "--quiet", "--short", "HEAD"],
+    { allowFailure: true },
+  );
+  if (head.exitCode !== 0) {
+    // Not a repository, or a detached HEAD. Either way there is no branch
+    // name to carry over, and `repoAdd` decides what happens next.
+    return undefined;
+  }
+  const branch = head.stdout.trim();
+  return branch === "" ? undefined : branch;
 }
 
 export async function resolveRepository(

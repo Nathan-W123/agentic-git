@@ -1972,6 +1972,14 @@ export function showModal({
           }
           continue;
         }
+        // A file input's `value` is `C:\fakepath\name`, which is the browser
+        // refusing to say where the file is and is of no use to anybody. The
+        // files themselves are the answer, and a dialog that offers a picker
+        // has to be able to read them.
+        if (field.type === "file") {
+          values[field.name] = [...(field.files ?? [])];
+          continue;
+        }
         values[field.name] =
           field.type === "checkbox" ? field.checked : field.value;
       }

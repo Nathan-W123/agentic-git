@@ -181,6 +181,26 @@ export interface ApiOperations {
     actorId: string;
   }): Promise<StoredRepository>;
   /**
+   * A repository from somebody's own machine, arriving as a ZIP.
+   *
+   * The third way in beside greenfield creation and a GitHub import, and the
+   * only one that works for a project which has never been pushed anywhere.
+   * The bytes are a zipped folder; a `.git` inside it is kept, so the history
+   * survives the trip, and a folder that was never a repository becomes one
+   * with a single initial commit.
+   *
+   * Optional like the rest of the filesystem-backed operations: a deployment
+   * with no canonical storage of its own cannot take one, and the screen
+   * offers the choice only where this exists.
+   */
+  importLocalArchive?(input: {
+    projectId: string;
+    bytes: Buffer;
+    id?: string;
+    branch?: string;
+    actorId: string;
+  }): Promise<StoredRepository>;
+  /**
    * Brings canonical up to date with the GitHub remote it was imported
    * from — the other half of export, and what unblocks a push refused
    * because the remote moved. Optional the same way the GitHub connection

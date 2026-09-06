@@ -122,13 +122,16 @@ export const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome", "progress"
 export const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
 
 /**
- * An image in a message, in the one form the channel writes and reads.
+ * A file in a message, in the one form the channel writes and reads.
  *
  * The id shape is checked here as well as in the store, because this match is
  * what decides whether a filesystem path is pasted into an agent's objective.
+ * The extension set is the store's allowlist and has to stay it: an id whose
+ * suffix this accepts and the store does not would resolve to nothing, and one
+ * the store accepts and this does not would reach an agent as punctuation.
  */
 export const ATTACHMENT_REFERENCE =
-  /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
+  /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp|zip|md))\)/gu;
 
 /**
  * A message as the local classifier should read it: the words, without the

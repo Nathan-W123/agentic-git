@@ -24,6 +24,17 @@ import { CHANNEL_ARBITRATION_PREFIX } from "./task-narration.js";
 export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
 /**
+ * A whole repository arriving as one ZIP, which is a different size of thing
+ * from a file dropped into a conversation.
+ *
+ * Two hundred megabytes: comfortably a real project with its history, and
+ * still small enough that one upload cannot fill the volume canonical lives
+ * on. Above this the answer is to push the repository to GitHub and import it
+ * from there, which is the path that streams instead of buffering.
+ */
+export const MAX_REPOSITORY_ARCHIVE_BYTES = 200 * 1024 * 1024;
+
+/**
  * Far shorter than an audit's, because somebody is watching a button.
  *
  * Rewriting text that is already on the screen is a small ask of a model, and

@@ -214,6 +214,7 @@ import {
   createRepository,
   openRepository,
   syncRepositoryFromGitHub,
+  uploadRepository,
 } from "./screen-repos.js";
 import {
   closeFile,
@@ -3641,7 +3642,36 @@ const ATTACH_TARGETS = {
 };
 
 /**
- * Puts images in the draft, as the reference a message carries, and says
+ * What the store will take, and what this browser should call each thing.
+ *
+ * A browser's own idea of a file's type is unreliable exactly where it
+ * matters: Windows reports nothing at all for `.md`, and a `.zip` arrives as
+ * `application/zip`, `application/x-zip-compressed` or nothing depending on
+ * what is in the registry. So the name decides for the two formats where that
+ * happens, and the browser's answer is trusted only for images, where it is
+ * derived from the bytes.
+ *
+ * This is a claim, not a verdict. The store checks the bytes against whatever
+ * is claimed here and refuses a file that is not what it says it is — see
+ * `attachments.ts`, where the allowlist actually lives.
+ */
+function attachmentContentType(file) {
+  const type = String(file.type ?? "").split(";")[0].trim().toLowerCase();
+  if (["image/png", "image/jpeg", "image/gif", "image/webp"].includes(type)) {
+    return type;
+  }
+  const name = String(file.name ?? "").toLowerCase();
+  if (name.endsWith(".zip")) {
+    return "application/zip";
+  }
+  if (name.endsWith(".md") || name.endsWith(".markdown")) {
+    return "text/markdown";
+  }
+  return undefined;
+}
+
+/**
+ * Puts files in the draft, as the reference a message carries, and says
  * plainly what it would not take.
  *
  * Uploaded one at a time and appended as they land, so a slow one does not
@@ -3650,18 +3680,21 @@ const ATTACH_TARGETS = {
  * anyway — this is one of the few places a composer render is the point
  * rather than the cost.
  */
-async function attachChannelImages(files, target = "channel") {
+async function attachChannelFiles(files, target = "channel") {
   const where = ATTACH_TARGETS[target] ?? ATTACH_TARGETS.channel;
   const repositoryId = activeChannelId();
   const dmUserId = target === "dm" ? state.activeDm : undefined;
-  const images = files.filter((file) => file.type.startsWith("image/"));
+  const allowed = files
+    .map((file) => ({ file, contentType: attachmentContentType(file) }))
+    .filter((entry) => entry.contentType !== undefined);
   // Named, not counted. Dropping a screenshot and a log together attached the
   // screenshot and said nothing at all about the log — the message went out
   // referring to a file that was never uploaded, and the sender had no way to
-  // know. The allowlist itself is deliberately short and is not widened here:
-  // that crosses a security boundary `attachments.ts` keeps on purpose and
-  // deserves its own review.
-  const skipped = files.filter((file) => !file.type.startsWith("image/"));
+  // know. The allowlist is still deliberately short: images, ZIP archives and
+  // Markdown, and nothing that a browser might decide to execute.
+  const skipped = files.filter(
+    (file) => attachmentContentType(file) === undefined,
+  );
   if (skipped.length > 0) {
     const named = skipped
       .slice(0, 3)
@@ -3670,22 +3703,22 @@ async function attachChannelImages(files, target = "channel") {
     toast(
       `Not attached: ${named}${
         skipped.length > 3 ? ` and ${skipped.length - 3} more` : ""
-      } — only PNG, JPEG, GIF and WebP images can be attached.`,
+      } — only images, .zip archives and .md files can be attached.`,
       "error",
     );
   }
   if (
     repositoryId === undefined ||
-    images.length === 0 ||
+    allowed.length === 0 ||
     (target === "dm" && dmUserId === undefined)
   ) {
     return;
   }
-  state[where.counter] = (state[where.counter] ?? 0) + images.length;
+  state[where.counter] = (state[where.counter] ?? 0) + allowed.length;
   render();
-  for (const file of images) {
+  for (const { file, contentType } of allowed) {
     try {
-      const id = await uploadAttachment(repositoryId, file);
+      const id = await uploadAttachment(repositoryId, file, contentType);
       // A DM upload belongs to the person whose panel started it. If the
       // reader opens a different conversation before the bytes arrive, do
       // not append the old reference to the new person's draft.
@@ -3698,7 +3731,7 @@ async function attachChannelImages(files, target = "channel") {
         draft === "" || draft.endsWith("\n") ? "" : "\n"
       }![${alt}](attachment:${id})\n`;
     } catch (error) {
-      toast(error.message ?? "That image could not be attached.", "error");
+      toast(error.message ?? "That file could not be attached.", "error");
     } finally {
       state[where.counter] = Math.max(0, (state[where.counter] ?? 1) - 1);
       render();
@@ -8604,7 +8637,7 @@ function typeIntoComposer(character, opened) {
   }
   const at = input.selectionStart ?? input.value.length;
   const attachments = state.chatDraft.match(
-    /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+    /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp|zip|md)\)/gu,
   );
   state.chatDraft = `${input.value.slice(0, at)}${character}${input.value.slice(at)}${
     attachments === null ? "" : `\n${attachments.join("\n")}\n`
@@ -9121,6 +9154,9 @@ document.addEventListener("click", (event) => {
     case "repo-connect":
       void connectRepository(render);
       return;
+    case "repo-upload":
+      void uploadRepository(render);
+      return;
     case "open-repo":
       invalidateCode();
       openRepository(value, navigate);
@@ -9238,6 +9274,12 @@ document.addEventListener("click", (event) => {
       showMenu(node, [
         { act: "repo-create", label: "Create new repository", iconName: "cloud" },
         { act: "repo-connect", label: "Connect external repository", iconName: "link" },
+        {
+          act: "repo-upload",
+          label: "Copy from this computer",
+          hint: "A folder, with its Git history",
+          iconName: "folder",
+        },
       ]);
       return;
     case "channel-open":
@@ -9978,7 +10020,7 @@ document.addEventListener("click", (event) => {
         // characters just put in front of them: the mirror kept showing the
         // old sentence while the caret stood a whole "@agents " to its right.
         const attachments = state.chatDraft.match(
-          /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+          /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp|zip|md)\)/gu,
         );
         const written = `@${address} ${input.value.replace(
           new RegExp(`^@${address}\\s*`, "u"),
@@ -11573,7 +11615,7 @@ document.addEventListener("change", (event) => {
         : picker.dataset.act === "dm-attach-input"
           ? "dm"
           : "channel";
-    void attachChannelImages(
+    void attachChannelFiles(
       [...(picker.files ?? [])],
       target,
     );
@@ -11688,7 +11730,7 @@ document.addEventListener("paste", (event) => {
     return;
   }
   event.preventDefault();
-  void attachChannelImages(
+  void attachChannelFiles(
     files,
     act === "channel-thread-input"
       ? "thread"
@@ -11833,7 +11875,7 @@ document.addEventListener("input", (event) => {
     // submitted, and re-rendering the panel on every keystroke is what made
     // typing lag in the channel composer.
     const attachments = String(state.dmDraft ?? "").match(
-      /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+      /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp|zip|md)\)/gu,
     );
     state.dmDraft = `${node.value}${
       attachments === null ? "" : `\n${attachments.join("\n")}\n`

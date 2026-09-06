@@ -8451,6 +8451,79 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   background: var(--bg-inset);
 }
 
+/* A file that is not a picture, under the words that came with it.
+
+   Sized like the message rather than like an image: an archive has nothing to
+   show, so the row is exactly as wide as its name needs and stops. The whole
+   chip is the link, because a name you cannot click is a name you have to ask
+   somebody to send again. */
+.cmsg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(420px, 100%);
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-2);
+  color: var(--text-1);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.cmsg-file:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-inset);
+}
+
+.cmsg-file-icon {
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+}
+
+.cmsg-file-icon .ui-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.cmsg-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* What it is, in the quietest voice on the row: the name is what somebody
+   reads, and the format is only there to say what will land in Downloads. */
+.cmsg-file-kind {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-3);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+/* The same file staged in a composer. The thumbnail slot holds an icon
+   instead, so the row keeps the height every other staged attachment has and
+   the strip does not jump as one is added. */
+.composer-attachment-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 5px;
+  background: var(--bg-inset);
+  color: var(--text-3);
+}
+
+.composer-attachment-icon .ui-icon {
+  width: 17px;
+  height: 17px;
+}
+
 /* The running app's address, in the workspace's navigation under the row that
    started it. Indented to that row's label rather than its glyph, so it reads
    as belonging to the control above instead of as a third destination. Shown

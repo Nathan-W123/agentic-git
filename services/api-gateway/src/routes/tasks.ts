@@ -506,9 +506,10 @@ export async function routeTasks(
     return true;
   }
 
-  // Images in a channel. Scoped to a repository so the permission question
-  // is the one already answered for everything else in that room: whoever
-  // may read the channel may read what was posted into it.
+  // Files in a channel — images, ZIP archives and Markdown. Scoped to a
+  // repository so the permission question is the one already answered for
+  // everything else in that room: whoever may read the channel may read what
+  // was posted into it.
   // One pattern per shape rather than an optional trailing group: `matchPath`
   // maps every group through `decodeURIComponent`, so a group that did not
   // participate comes back as the *string* "undefined" and no branch tests
@@ -538,7 +539,7 @@ export async function routeTasks(
       throw new HttpError(
         501,
         "not_supported",
-        "This deployment cannot store images",
+        "This deployment cannot store attachments",
       );
     }
     if (method === "POST" && attachmentItemMatch === undefined) {
@@ -550,7 +551,11 @@ export async function routeTasks(
         "run_task",
       );
       const contentType = request.headers["content-type"] ?? "";
-      const bytes = await gw.readBinary(request, MAX_ATTACHMENT_BYTES);
+      const bytes = await gw.readBinary(
+        request,
+        MAX_ATTACHMENT_BYTES,
+        "That file is too large to attach",
+      );
       const id = await gw.performOperation(
         "attachment_rejected",
         async () => await operations.attachmentSave!({ bytes, contentType }),
@@ -568,7 +573,7 @@ export async function routeTasks(
       );
       const found = await operations.attachmentRead(attachmentId);
       if (found === undefined) {
-        throw new HttpError(404, "not_found", "That image was not found");
+        throw new HttpError(404, "not_found", "That file was not found");
       }
       // `nosniff` matters more here than anywhere else in this API: the
       // content type is derived from an allowlist rather than from the
@@ -577,7 +582,25 @@ export async function routeTasks(
       response.setHeader("Content-Type", found.contentType);
       response.setHeader("Content-Length", String(found.bytes.length));
       response.setHeader("X-Content-Type-Options", "nosniff");
-      response.setHeader("Content-Disposition", "inline");
+      // An image is drawn in the page it was posted into; anything else is
+      // downloaded rather than rendered. That is a second lock beside
+      // `nosniff` on the types added after images: whatever a browser decides
+      // Markdown or a ZIP is, it decides it about a file on disk rather than
+      // about a document on this origin.
+      //
+      // The filename is the store's own id and is re-checked against that
+      // shape here rather than assumed, because it arrived in a URL. Anything
+      // else is downloaded under a generic name, which is a worse name and
+      // not a quote inside a header.
+      const named = /^[0-9a-f]{32}\.[a-z0-9]{1,8}$/u.test(attachmentId)
+        ? attachmentId
+        : "attachment";
+      response.setHeader(
+        "Content-Disposition",
+        found.contentType.startsWith("image/")
+          ? "inline"
+          : `attachment; filename="${named}"`,
+      );
       response.setHeader("Cache-Control", "private, max-age=31536000, immutable");
       response.writeHead(200);
       response.end(found.bytes);
