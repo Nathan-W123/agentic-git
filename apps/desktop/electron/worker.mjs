@@ -28,7 +28,7 @@
 import { app, powerMonitor, powerSaveBlocker, utilityProcess } from "electron";
 import { spawnSync } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdir, rename, stat } from "node:fs/promises";
+import { appendFile, mkdir, rename, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -186,9 +186,30 @@ export async function startWorker(here, session, onEvent) {
 
 async function startWorkerOnce(here, session, onEvent) {
   stopping = false;
+
+  /**
+   * A stop that happens before the worker exists, written down anyway.
+   *
+   * The log is opened further down, once there is a child whose output to
+   * keep — so every reason the worker never got that far reached only the
+   * menu, which holds one line and is replaced by the next. Somebody asked
+   * why their prompt did nothing, opened the log they were told to open, and
+   * found the last entry was from two days ago: the file was not quiet
+   * because the worker was fine, it was quiet because the worker never
+   * started, and those look identical when nothing writes.
+   *
+   * So the three stops below say so here, in the file people are sent to.
+   */
+  const stopped = async (event) => {
+    await appendWorkerLog(
+      `worker did not start: ${event.detail ?? event.reason ?? "no reason given"}`,
+    );
+    onEvent?.(event);
+  };
+
   const bundle = bundlePath(here);
   if (!(await exists(bundle))) {
-    onEvent?.({
+    await stopped({
       state: "stopped",
       detail: "This build shipped without a worker. Run `npm run bundle:worker`.",
     });
@@ -203,7 +224,7 @@ async function startWorkerOnce(here, session, onEvent) {
     // of text in a menu nobody opens. Somebody would install the app, connect
     // an agent, watch it accept work and never do any, and have no way at all
     // to find out that nothing on the machine could run it.
-    onEvent?.({
+    await stopped({
       state: "stopped",
       reason: "no-cli",
       detail:
@@ -216,7 +237,7 @@ async function startWorkerOnce(here, session, onEvent) {
   try {
     tenancy = await discoverTenancy(session.server, session.token, getJson);
   } catch (error) {
-    onEvent?.({ state: "stopped", detail: describe(error) });
+    await stopped({ state: "stopped", detail: describe(error) });
     return;
   }
 
@@ -257,6 +278,12 @@ async function startWorkerOnce(here, session, onEvent) {
         process.env.COORD_ORGANIZATION?.trim() || tenancy.organizationId,
       COORD_PROJECT_ROOT: root,
       COORD_WORKER_NAME: deviceName(),
+      // The installed build, so the fleet can say which machine is on which.
+      // There is no auto-update, so an install stays where it was until
+      // somebody downloads another one, and the first question about an agent
+      // behaving like an older one is which version it actually is. Nothing
+      // could answer that before this line: every worker registered "0.0.0".
+      COORD_WORKER_VERSION: app.getVersion(),
       // What this machine actually has. The project config the worker reads
       // has a default agent backfilled for every vendor it lacks, so without
       // this the worker would register for Cursor and Kiro on a machine that
@@ -280,13 +307,31 @@ async function startWorkerOnce(here, session, onEvent) {
   const heard = (line) => {
     const text = String(line);
     log?.write(text);
-    // Still written to the log — the retry countdown belongs there — but not
-    // shown, because a worker that is being refused is not running and every
-    // line it prints while waiting would say that it is.
+    // Two ways the one status line gets taken away from the person reading
+    // it, and both are handled here.
+    //
+    // A refusal first, because it outranks everything: a worker being told it
+    // may not register is not running, and every line it prints while waiting
+    // out the retry would say that it is. Held until the worker actually
+    // registers.
     if (refusal !== undefined) {
       return;
     }
-    onEvent?.({ state: "running", detail: text.trim() });
+    // Then the noise. The status line is the one place a person is told why
+    // their machine is not working, and every worker prints Node's SQLite
+    // warning the moment it starts — so the answer to "why is nothing
+    // happening" was reliably replaced, within milliseconds, by a sentence
+    // about an experimental feature that is not the problem and never will
+    // be. Somebody read that line while the failure that mattered sat in the
+    // log underneath it.
+    const meaningful = text
+      .split("\n")
+      .map((part) => part.trim())
+      .filter((part) => part !== "" && !isRuntimeNoise(part));
+    const last = meaningful[meaningful.length - 1];
+    if (last !== undefined) {
+      onEvent?.({ state: "running", detail: last });
+    }
   };
   child.stdout?.on("data", heard);
   child.stderr?.on("data", heard);
@@ -570,6 +615,21 @@ function describe(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Node talking about itself, rather than the worker talking about the work.
+ *
+ * Only the lines every run emits regardless of what happens, so a real
+ * message is never mistaken for one of these. The log keeps them either way;
+ * what this decides is whether a line is allowed to *be* the status.
+ */
+function isRuntimeNoise(line) {
+  return (
+    /^\(node:\d+\)/u.test(line) ||
+    /^\(Use `.*--trace-warnings/u.test(line) ||
+    /^ExperimentalWarning:/u.test(line)
+  );
+}
+
 /** Where the worker's own account of itself is kept. */
 export function workerLogPath() {
   return path.join(app.getPath("userData"), "worker.log");
@@ -583,6 +643,30 @@ export function workerLogPath() {
  * that grows without bound on a machine running agents all day is a bug of its
  * own.
  */
+/**
+ * One line into the worker log, without a worker to hang it on.
+ *
+ * `openWorkerLog` exists to receive a child's output and stamps a "worker
+ * started" header, which is the wrong thing to write when the point is that
+ * one never did. This appends a timestamped line and nothing else.
+ *
+ * Failures are swallowed for the same reason they are there: a log that
+ * cannot be written must not be the thing that stops a worker starting, and
+ * this is called on the path that is already reporting a stop.
+ */
+async function appendWorkerLog(line) {
+  try {
+    await mkdir(path.dirname(workerLogPath()), { recursive: true });
+    await appendFile(
+      workerLogPath(),
+      `\n--- ${new Date().toISOString()} ${line} ---\n`,
+      "utf8",
+    );
+  } catch {
+    // Deliberately silent. See above.
+  }
+}
+
 async function openWorkerLog() {
   const file = workerLogPath();
   try {

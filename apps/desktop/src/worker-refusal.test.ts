@@ -38,10 +38,19 @@ test("a refusal is shown, and is not overwritten by the worker's own noise", asy
     /message\?\.type === "registered"\)\s*\{\s*refusal = undefined;/u,
     "and stop showing it once the worker is actually registered",
   );
-  assert.match(
-    source,
-    /if \(refusal !== undefined\) \{\s*return;\s*\}[\s\S]{0,120}?state: "running"/u,
-    "the stdout handler must not paint over a standing refusal",
+  // Ordering, not proximity. A noise filter sits between these two now, and
+  // more may follow; what has to hold is that the refusal is checked before
+  // anything in this handler can report the worker as running.
+  const heard =
+    /const heard = \(line\) => \{([\s\S]*?)\n  \};/u.exec(source)?.[1] ?? "";
+  assert.notEqual(heard, "", "the stdout handler must exist to be checked");
+  const guard = heard.indexOf("refusal !== undefined");
+  const running = heard.indexOf('state: "running"');
+  assert.ok(guard !== -1, "the handler must consult the refusal");
+  assert.ok(running !== -1, "and must otherwise report the worker running");
+  assert.ok(
+    guard < running,
+    "the refusal must be checked before anything reports the worker running",
   );
   assert.match(
     source,

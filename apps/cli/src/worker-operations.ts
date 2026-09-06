@@ -26,6 +26,7 @@ import {
   isDeferredScopeFollowUp,
   assessReplay,
   buildTaskHandoff,
+  filesOutsideClaim,
   recordTaskHandoff,
   splitChangeSet,
   withheldPatchRecord,
@@ -319,6 +320,12 @@ export interface WorkResultServices {
   /** Reads what a canonical advance changed, to decide whether it matters. */
   intelligence?: CodeIntelligenceService;
   integrationRoot?: string;
+  /**
+   * Arbitrates a frozen claim's widening, on the one result path that can
+   * produce one. Injected for the same reason the other three operations take
+   * it: a test needs to watch the decision, not only its consequence.
+   */
+  admissions?: PlanAdmissionController;
 }
 
 /**
@@ -417,6 +424,114 @@ async function failClaimedTask(
   if (current?.status === "claimed") {
     await store.completeSubmittedTask(taskId, "failed", runId);
   }
+}
+
+/**
+ * Re-arbitrates work a frozen claim permits but no longer occupies.
+ *
+ * The in-process coordinator has done this since frozen claims existed
+ * (`widenFrozenClaim`); the remote path never has, and the gap is a real hole
+ * rather than a stylistic difference. A claim frozen from observation carries
+ * the *directories* its holder was working in, and `claimCoversPath` — which
+ * is what `assertChangeSetWithinPlan` consults — reads those directories as
+ * approval. But arbitration stopped treating them as a hold, so a path under
+ * one may since have been granted to somebody else, and the validator waves it
+ * through on the strength of a prefix.
+ *
+ * `claimOccupiesPath`, which `filesOutsideClaim` uses, is the stricter reading:
+ * a frozen claim occupies only the files it names. The difference between the
+ * two is exactly the set of files this has to ask about, and asking is the
+ * whole of the fix — a file still free is granted here and the run continues,
+ * a file somebody else holds ends the lease. Silence was the only wrong answer,
+ * because it puts two tasks in one file with nothing anywhere saying so.
+ *
+ * Returns the plan to enforce against: the widened one when a widening was
+ * granted, the original otherwise. Throws when it was refused, which the
+ * caller's existing catch turns into a failed lease — the same outcome the
+ * in-process path produces by throwing from the same decision.
+ */
+async function widenFrozenClaimForResult(input: {
+  store: CoordinationStore;
+  plan: AgentPlan;
+  granted: ChangeSet;
+  task: SubmittedTask;
+  lease: WorkLease;
+  planRevision: number;
+  baseVersion: CanonicalVersion;
+  repository: CanonicalRepository;
+  repositories: RepositoryService;
+  intelligence: CodeIntelligenceService;
+  admissions: PlanAdmissionController;
+}): Promise<AgentPlan> {
+  const kind = input.plan.claim?.kind;
+  if (kind !== "frozen" && kind !== "declared") {
+    return input.plan;
+  }
+  const escaped = filesOutsideClaim(
+    input.plan,
+    input.granted.patches.map((patch) => patch.path),
+  );
+  if (escaped.length === 0) {
+    return input.plan;
+  }
+  const revisedPlan: AgentPlan = {
+    ...input.plan,
+    expectedFiles: [...input.plan.expectedFiles, ...escaped].sort(),
+  };
+  // Told which lease this task holds, or the authority takes its "no durable
+  // lease, so nothing to arbitrate against" path and admits unconditionally —
+  // which would leave this function looking like it ran and deciding nothing.
+  const authority = new LeasePlanAuthority({
+    store: input.store,
+    leaseIdForTask: new Map([[input.task.id, input.lease.id]]),
+    repositories: input.repositories,
+    intelligence: input.intelligence,
+    admissions: input.admissions,
+  });
+  const answer = await authority.admit({
+    task: {
+      id: input.task.id,
+      objective: input.task.objective,
+      agentId: input.task.agentId,
+      validationCommands: input.task.validationCommands,
+      ...(input.task.projectId === undefined
+        ? {}
+        : { projectId: input.task.projectId }),
+      ...(input.task.context === undefined
+        ? {}
+        : { context: input.task.context }),
+    },
+    plan: revisedPlan,
+    planRevision: input.planRevision + 1,
+    baseVersion: input.baseVersion,
+    repository: input.repository,
+    ...(input.task.projectId === undefined
+      ? {}
+      : { projectId: input.task.projectId }),
+    revising: true,
+    // All or nothing, as every mid-run caller asks: a narrower grant would
+    // leave a file somebody else holds inside the plan the changeset is then
+    // validated against, which is the hole this closes wearing a second face.
+    partialAdmission: false,
+  });
+  if (answer.outcome !== "admitted" || answer.admission !== undefined) {
+    const explanation =
+      answer.outcome === "admitted"
+        ? (answer.admission?.explanation ?? "")
+        : answer.explanation;
+    throw new Error(
+      `Work outside the frozen claim could not be kept: ${escaped.join(", ")} ` +
+        `overlaps work running elsewhere in this repository: ${explanation}`,
+    );
+  }
+  // No run exists yet on this path — it is created after validation — so the
+  // audit is written against no run rather than deferred until one is.
+  await trace(input.store, undefined, "plan_revised", input.task.id, {
+    revision: input.planRevision + 1,
+    reason: "frozen_claim_widened",
+    expectedFiles: revisedPlan.expectedFiles,
+  });
+  return revisedPlan;
 }
 
 async function trace(
@@ -2843,6 +2958,7 @@ export async function acceptWorkResult(
     services.integrations ?? new IntegrationService(repositories);
   const intelligence =
     services.intelligence ?? new CodeIntelligenceService(repositories);
+  const admissions = services.admissions ?? new PlanAdmissionController();
   const leaseAtStart = await store.getWorkLease(input.leaseId);
   if (leaseAtStart === undefined) {
     throw new Error(`Unknown lease: ${input.leaseId}`);
@@ -3047,7 +3163,9 @@ export async function acceptWorkResult(
   // changeset is held to. Under a partial admission this is already the
   // reduced plan, which is exactly the point — the contract is what was
   // granted, not what was asked for.
-  const plan = admitted.plan;
+  // Reassigned by the frozen-claim widening below, which is the one place the
+  // contract can legitimately grow between admission and enforcement.
+  let plan = admitted.plan;
   const deferred = deferredFilePaths(admitted.admission);
   // Only needed when the admission withheld something finer than a file, and
   // then it must be the *base* revision's index: a hunk's old side is measured
@@ -3105,6 +3223,22 @@ export async function acceptWorkResult(
     if (split.escaped.length > 0) {
       throw new ScopeExpansionError(split.escaped);
     }
+    // Before the validator, not after, and for the same reason the in-process
+    // path orders it this way: a granted widening puts the escaped files into
+    // the plan, which is what the next line then checks against.
+    plan = await widenFrozenClaimForResult({
+      store,
+      plan,
+      granted: split.granted,
+      task,
+      lease: leaseAtStart,
+      planRevision: admitted.admission.planRevision,
+      baseVersion,
+      repository,
+      repositories,
+      intelligence,
+      admissions,
+    });
     assertChangeSetWithinPlan(plan, split.granted);
   } catch (error) {
     return await rejectWorkerResult(
@@ -3157,10 +3291,16 @@ export async function acceptWorkResult(
   // through to integration, whose three-way apply merges disjoint hunks for
   // free and reports a real conflict otherwise. The paid replan becomes the
   // fallback instead of the default.
+  //
+  // `COORD_STRICT_PLAN_REBASE=1` restores the unconditional requeue, the same
+  // switch and the same spelling the plan path and the in-process coordinator
+  // already use. It was missing from this path alone, which is the one where
+  // an over-optimistic answer costs a promoted result rather than a replan.
   const currentBeforeRun = await repositories.getCanonicalVersion(repository);
   if (
     currentBeforeRun.revision !== baseVersion.revision &&
-    (await replay(currentBeforeRun)).semantic.length > 0
+    (process.env["COORD_STRICT_PLAN_REBASE"] === "1" ||
+      (await replay(currentBeforeRun)).semantic.length > 0)
   ) {
     return await requeueForCanonicalChange(
       store,

@@ -3247,7 +3247,7 @@ test("a deferred waiter plans against the holder's in-progress edits", async () 
     assert.equal(revisingAdmits, 0);
     const speculative = agent.replanRequests.filter(
       (request) =>
-        request.canonicalChange.reason.includes("in progress") &&
+        request.canonicalChange?.reason.includes("in progress") === true &&
         (request.holderWorkingChanges ?? []).some(
           (change) => change.path === "src/a.txt",
         ),
@@ -3349,8 +3349,9 @@ test("a waiter speculates once against an unchanged holder, not once a wave", as
 
     assert.equal(result.tasks[0]?.status, "integrated");
     assert.ok(admits > DEFERRALS, "the waiter did wait through every wave");
-    const speculative = agent.replanRequests.filter((request) =>
-      request.canonicalChange.reason.includes("in progress"),
+    const speculative = agent.replanRequests.filter(
+      (request) =>
+        request.canonicalChange?.reason.includes("in progress") === true,
     );
     // One. The first speculation is the one worth paying for; the repeats buy
     // nothing, because there is nothing new to plan against.
@@ -3517,7 +3518,7 @@ test("a waiter plans while the holder is still coding, not after it", async () =
         sessionId: string,
         request: ReplanRequest,
       ): Promise<AgentPlan> {
-        if (request.canonicalChange.reason.includes("in progress")) {
+        if (request.canonicalChange?.reason.includes("in progress") === true) {
           editing.seenByWaiter.push(editing.now);
         }
         return await super.requestReplan(sessionId, request);

@@ -86,6 +86,27 @@ export interface McpToolDeps {
    * run tasks at all, where filing is still perfectly useful.
    */
   takeFiledTask?(taskId: string): Promise<McpTakenTask | undefined>;
+  /**
+   * Files work for the calling editor itself, with no agent to address.
+   *
+   * The editor path was never supposed to need a CLI — `takeEditorWork`
+   * builds the worker row it leases with from the vendor alone. What it does
+   * need is a task stamped with that vendor, and the only way `submit_task`
+   * could make one was by posting an `@mention`, which meant an agent row had
+   * to exist to be the addressee. Somebody whose Codex agent had never been
+   * created was therefore asked to hand their own prompt to a colleague's
+   * Claude.
+   *
+   * So the vendor is named directly and the room still sees the message. The
+   * task threads under it exactly as a mention's would.
+   */
+  fileForEditor?(input: {
+    projectId: string;
+    repositoryId: string;
+    channel?: string;
+    objective: string;
+    vendor: string;
+  }): Promise<{ taskId: string; channelSlug: string } | undefined>;
   /** Every repository this caller may see, across their projects. */
   listRepositories(): Promise<McpRepository[]>;
   /** The mentionable roster of one room, with liveness. */
@@ -340,10 +361,55 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
           ? (own ??
             // No editor to fall back on. One agent in the room is not a
             // guess; more than one is, so it asks.
-            (roster.length === 1 ? roster[0] : undefined))
+            //
+            // Only when there is no editor. With one, this convenience was
+            // the bug in miniature: a single agent in the room was handed a
+            // prompt typed into somebody else's editor, which is the exact
+            // substitution the whole path exists to prevent — and it beat the
+            // editor to it even though the editor can do the work itself.
+            (editor === undefined && roster.length === 1 ? roster[0] : undefined))
           : roster.find(
               (agent) => agent.name.toLowerCase() === agentName.toLowerCase(),
             );
+      // The caller is an editor, nobody was named, and it has no agent of its
+      // own here. It is still the thing at the keyboard, so it does the work
+      // rather than being sent to ask whether a colleague's agent should.
+      //
+      // Only for an editor. An MCP client that is not one has nothing to fall
+      // back to and keeps the roster question exactly as it was.
+      if (
+        target === undefined &&
+        agentName === undefined &&
+        editor !== undefined &&
+        deps.fileForEditor !== undefined &&
+        deps.takeFiledTask !== undefined
+      ) {
+        const filed = await deps.fileForEditor({
+          projectId: found.projectId,
+          repositoryId: found.repository.id,
+          ...(channel === undefined ? {} : { channel }),
+          objective,
+          vendor: editor,
+        });
+        if (filed !== undefined) {
+          const taken = await deps.takeFiledTask(filed.taskId).catch(() => undefined);
+          if (taken !== undefined) {
+            return mcpText(
+              [
+                `Filed in #${filed.channelSlug} and taken by you — there is no ` +
+                  `${editor} agent of yours in ${repositoryLabel(found)}, and ` +
+                  "you are the one being asked. Do it here.",
+                "",
+                takenTaskBrief(taken),
+              ].join("\n"),
+            );
+          }
+          return mcpText(
+            `Filed in #${filed.channelSlug}. Task ${filed.taskId}. Something ` +
+              "else picked it up before you could; task_status follows it.",
+          );
+        }
+      }
       if (target === undefined && agentName === undefined) {
         return mcpText(
           roster.length === 0

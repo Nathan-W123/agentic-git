@@ -65,6 +65,10 @@ function expose(name, build) {
 
 expose("KUMI_SERVER", () => argument("kumi-server"));
 
+// Read from the same place and exposed on its own, so an app that
+// cannot say which build it is stays an app that works.
+expose("KUMI_VERSION", () => argument("kumi-version"));
+
 // Asked for over IPC rather than read off this process's command line. A
 // renderer's arguments are visible to anything that can list processes —
 // `/proc/<pid>/cmdline` is world-readable on Linux — and a token legible to

@@ -231,3 +231,33 @@ test("assessReplay against a residual treats a covered holder landing as unsurpr
   assert.deepEqual(residual.semantic, []);
   assert.deepEqual(residual.textual, []);
 });
+
+test("a plan with an uncomputable read set treats every advance as semantic", () => {
+  // Absence of evidence, not evidence of absence. `dependencies` is empty on
+  // both plans below; only one of them knows that means anything.
+  const advanced = advance({ changedFiles: ["src/elsewhere.ts"] });
+
+  const guessing = assessReplay(plan(), changeSet(), advanced);
+  assert.deepEqual(guessing.semantic, []);
+
+  const honest = assessReplay(
+    plan({ dependenciesUnknown: true }),
+    changeSet(),
+    advanced,
+  );
+  assert.deepEqual(honest.semantic, ["file:src/elsewhere.ts"]);
+  assert.deepEqual(honest.textual, []);
+});
+
+test("a known-empty read set still replays a textual overlap", () => {
+  // The optimisation this must not cost: a plan whose read set was genuinely
+  // computed keeps the cheap answer, and an advance on a file it also wrote
+  // stays textual rather than being promoted to semantic.
+  const assessment = assessReplay(
+    plan(),
+    changeSet(["src/a.ts"]),
+    advance({ changedFiles: ["src/a.ts"] }),
+  );
+  assert.deepEqual(assessment.semantic, []);
+  assert.deepEqual(assessment.textual, ["file:src/a.ts"]);
+});

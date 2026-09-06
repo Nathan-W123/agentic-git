@@ -72,6 +72,7 @@ import {
   type PowerSource,
   type PowerState,
 } from "./power.js";
+import { liftLocalImages } from "./attachments.js";
 
 /**
  * The oldest control plane this worker will take work from.
@@ -565,6 +566,25 @@ export class Worker {
   private readonly pauseOnBattery: boolean;
 
   public async register(): Promise<string> {
+    // Registering twice was never intended and was never harmless.
+    //
+    // `main` registers so it can print which worker it is, and `run` opened by
+    // registering again, so every worker in every fleet enrolled itself twice
+    // on every start — two rows, milliseconds apart, no upsert behind them.
+    // The fleet table therefore counted restarts double, which is a nuisance,
+    // and the second call did something worse than duplicate the first: it was
+    // the first request to reuse the connection the first one opened. Anything
+    // on the path that tolerates a fresh connection and mishandles the second
+    // exchange on it — a proxy, a TLS-inspecting antivirus — met that call and
+    // not the one before it, and a throw there exits the process before the
+    // worker has asked for work even once.
+    //
+    // So the second call answers from what the first one learned. Idempotent
+    // rather than removed, because both callers legitimately want the id and
+    // neither should have to know which of them got there first.
+    if (this.identity !== undefined) {
+      return this.identity.id;
+    }
     const configured = new Set(
       Object.values(this.options.project.config.agents).map(
         (agent) => agent.adapter ?? "generic-cli",
@@ -829,7 +849,7 @@ export class Worker {
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
-      const admission = await this.awaitAdmission(run, assignment, planned.plan);
+      const admission = await this.awaitAdmission(run, assignment, planned);
       laps.mark("admission");
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
@@ -967,6 +987,34 @@ export class Worker {
    * What comes back is the agent's own explanation, and the guard below is
    * the point of the whole method.
    */
+  /**
+   * The agent's words, with any pictures it wrote turned into pictures.
+   *
+   * Applied to everything an agent says rather than only to its ending,
+   * because narration is where a screenshot is usually offered: "here is what
+   * the page looks like" arrives while the run is still going, and holding it
+   * back until the summary would show it long after it answered anything.
+   *
+   * Never allowed to fail a run. `liftLocalImages` already swallows its own
+   * failures per marker; this catches the rest, and returns what the agent
+   * actually said.
+   */
+  private async withImages(
+    leaseId: string,
+    workspacePath: string,
+    text: string,
+  ): Promise<string> {
+    try {
+      return await liftLocalImages(text, {
+        workspacePath,
+        upload: async (bytes, contentType) =>
+          await this.options.client.attachImage(leaseId, bytes, contentType),
+      });
+    } catch {
+      return text;
+    }
+  }
+
   private async answerQuestion(
     run: Run,
     assignment: WorkAssignment,
@@ -998,7 +1046,15 @@ export class Worker {
     if (said.length === 0 || readsAsCompletionNotice(said, assignment.task.objective)) {
       throw new Error("The agent produced no answer of its own");
     }
-    return said;
+    // After the emptiness check, not before. A marker becomes a much shorter
+    // `attachment:` reference, and an answer that is only a picture would
+    // otherwise have its length judged on the rewritten text rather than on
+    // what the agent actually produced.
+    return await this.withImages(
+      assignment.lease.id,
+      planned.workspacePath,
+      said,
+    );
   }
 
   /**
@@ -1012,8 +1068,9 @@ export class Worker {
   private async awaitAdmission(
     run: Run,
     assignment: WorkAssignment,
-    plan: AgentPlan,
+    planned: PlannedWork,
   ): Promise<PlanAdmission> {
+    let plan = planned.plan;
     const budget =
       this.options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
     const approvalBudget =
@@ -1059,6 +1116,32 @@ export class Worker {
       if (this.stopping || run.cancellationRequested) {
         break;
       }
+      // `sequenced` and `blocked` are different answers and deserve different
+      // moves. Sequenced means somebody is holding these resources and will
+      // finish, so waiting is right and the resubmission is a bare HTTP call
+      // with the agent idle. Blocked means ordering cannot separate the two —
+      // waiting buys the identical refusal, forever, which is what the
+      // protocol has always documented as "plan again" and what the worker
+      // has never done.
+      //
+      // The refusal already says which task holds what, on which resources, so
+      // the agent has everything it needs to ask for less. Nothing here caps
+      // the replans: the coordinator escalates a twice-blocked plan to
+      // `sequenced` with "do not narrow this further", and that lands in the
+      // condition above as a wait. The bound is the arbitration's to set.
+      const narrowed =
+        admission.status === "blocked"
+          ? await this.narrowAfterRefusal(planned, assignment, admission)
+          : undefined;
+      if (narrowed !== undefined) {
+        plan = narrowed;
+        // The narrowed plan is now *the* plan, not a variant of it submitted
+        // for admission. Execution collects a changeset against it and the
+        // result reports it alongside, and the control plane refuses a result
+        // whose reported plan claims anything the admitted one did not — so
+        // leaving the old one here would trade a deferral for a failed task.
+        planned.plan = narrowed;
+      }
       admission = await this.options.client.submitPlan(
         assignment.lease.id,
         plan,
@@ -1066,6 +1149,48 @@ export class Worker {
       extend(admission);
     }
     return admission;
+  }
+
+  /**
+   * Asks the agent for a narrower plan, given why the last one was refused.
+   *
+   * Returns `undefined` when the agent could not be asked or answered with
+   * nothing usable — the caller then resubmits what it had, which is the old
+   * behaviour and still a legitimate outcome: a blocker that clears on its own
+   * makes the unchanged plan admissible.
+   *
+   * Failure is swallowed on purpose. A replan is an optimisation over waiting,
+   * and an adapter that cannot produce one must not turn a deferral into a
+   * failed task.
+   */
+  private async narrowAfterRefusal(
+    planned: PlannedWork,
+    assignment: WorkAssignment,
+    admission: PlanAdmission,
+  ): Promise<AgentPlan | undefined> {
+    try {
+      const revised = await planned.adapter.requestReplan(planned.sessionId, {
+        taskId: assignment.task.id,
+        previousPlan: planned.plan,
+        refusal: {
+          status: admission.status,
+          explanation: admission.explanation,
+          blockedBy: [...admission.blockedBy],
+          conflicts: structuredClone(admission.conflicts),
+        },
+        constraints: [...admission.constraints],
+      });
+      // Bound to the leased task the same way the first plan is: the objective
+      // the control plane compares against is the assigned one, and a model's
+      // rephrasing of it belongs in `intent`.
+      return {
+        ...revised,
+        taskId: assignment.task.id,
+        objective: assignment.task.objective,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   private async waitForAdmissionRetry(
@@ -1865,7 +1990,11 @@ export class Worker {
             // run; see `WorkerClient.progress`.
             await this.options.client.progress(
               assignment.lease.id,
-              event.message,
+              await this.withImages(
+                assignment.lease.id,
+                planned.workspacePath,
+                event.message,
+              ),
             );
             return;
           }

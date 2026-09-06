@@ -69,6 +69,7 @@ import {
 import {
   AGENT_ACCOUNT_PREFIX,
   ANSWER_NOT_STATUS_DIRECTIVE,
+  SHOW_IMAGES_DIRECTIVE,
   assertProjectPolicy,
   createId,
   deriveCallSign,
@@ -2671,6 +2672,42 @@ export class ApiGateway {
       },
       listRepositories: async () => await this.mcpRepositories(principal),
       callerEditor: () => editorBehind(principal.token),
+      fileForEditor: async (input) => {
+        const submit = this.options.operations.submitTask;
+        if (submit === undefined) {
+          return undefined;
+        }
+        const channelId = await this.mcpChannelId(
+          input.repositoryId,
+          input.channel,
+        );
+        // Posted first, and without a mention, so nothing is dispatched by
+        // the room: the task below is created against the vendor directly.
+        // The room still sees what was asked for, which is the half of this
+        // path that was never about who runs it.
+        const posted = await this.postChannelMessageAndDispatch({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          channelId,
+          content: input.objective,
+          principal,
+          rethrowDispatchErrors: true,
+        });
+        const task = await submit({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          objective: input.objective,
+          // No `agentId`. This is the shape the field exists for: the caller
+          // knows which vendor should run it and has no business knowing the
+          // deployment's configured agent names.
+          vendor: input.vendor as AgentVendor,
+          actorId: principal.user.id,
+          // Threaded under the message, so the work reads in the room the way
+          // a mention's would rather than appearing from nowhere.
+          conversationId: posted.message.id,
+        });
+        return { taskId: task.id, channelSlug: posted.channel.slug };
+      },
       takeFiledTask: async (taskId) => {
         const vendor = editorBehind(principal.token);
         return vendor === undefined
@@ -6088,6 +6125,7 @@ export class ApiGateway {
           [
             await this.describeAttachments(visibleObjective),
             ANSWER_NOT_STATUS_DIRECTIVE,
+            SHOW_IMAGES_DIRECTIVE,
             ...(input.brief === true ? [KEEP_IT_SIMPLE_DIRECTIVE] : []),
             ...(input.forceQuestion === true ? [FORCE_QUESTION_MARKER] : []),
           ].join("\n\n"),

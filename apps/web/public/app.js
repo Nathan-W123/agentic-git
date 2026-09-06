@@ -235,6 +235,7 @@ import {
   checkLocalCli,
   connectEditorToKumi,
   connectProviderSomehow,
+  desktopVersion,
   disconnectAgent,
   installVendorCli,
   connectGitHubAccount,
@@ -890,9 +891,8 @@ function renderAuth() {
                    placeholder="COORD_BOOTSTRAP_TOKEN"></label>`
               }
                <label class="field"><span>Your name</span>
-                 <input class="input" name="displayName" autocomplete="name" required></label>
-               <label class="field"><span>Team name</span>
-                 <input class="input" name="organizationName" value="Local team" required></label>`
+                 <input class="input" name="displayName" autocomplete="name"
+                   required></label>`
             : register
               ? `<label class="field"><span>Your name</span>
                    <input class="input" name="displayName" autocomplete="name" required></label>
@@ -1553,11 +1553,13 @@ async function submitBootstrap(form) {
       headers: { "X-Bootstrap-Token": String(data.get("token") ?? "").trim() },
       body: {
         displayName: String(data.get("displayName") ?? ""),
-        organizationName: String(data.get("organizationName") ?? ""),
         email: String(data.get("email") ?? ""),
         confirmEmail: String(data.get("confirmEmail") ?? ""),
         password: String(data.get("password") ?? ""),
         confirmPassword: String(data.get("confirmPassword") ?? ""),
+        // No team name is sent, because first-run setup no longer asks for
+        // one: the server names the deployment's organization after the owner
+        // creating it, and renaming a team is a settings screen away.
       },
     });
     authMode = "login";
@@ -2708,10 +2710,20 @@ function apiTokensCard() {
           aria-label="Token name">
         <button type="button" class="btn btn-sm btn-primary" data-act="token-create">Create</button>`,
     })}${settingRow({
+      row: "desktop-app",
       label: "Kumi for desktop",
+      // The version, where somebody can read it without having to make
+      // something fail first. There was nowhere at all to look: no About box,
+      // no menu item, and an app that cannot update itself — so "which build
+      // are you on" could not be answered by the person being asked, which is
+      // the question every report about a desktop behaviour starts with.
       description:
-        "Mac, Windows and Linux. It signs itself in through your browser, so it needs none of the tokens below.",
-      control: `<a class="btn btn-sm" href="/download" target="_blank" rel="noopener">Download</a>`,
+        desktopVersion() === undefined
+          ? "Mac, Windows and Linux. It signs itself in through your browser, so it needs none of the tokens below."
+          : `Version ${esc(desktopVersion())}, running now. It signs itself in through your browser, so it needs none of the tokens below.`,
+      control: `<a class="btn btn-sm" href="/download" target="_blank" rel="noopener">${
+        desktopVersion() === undefined ? "Download" : "Check for a newer one"
+      }</a>`,
     })}${
       tokens.length === 0
         ? `<div class="st-inline-empty">${icon("lock")}<span>No tokens yet.</span></div>`

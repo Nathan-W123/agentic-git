@@ -349,6 +349,39 @@ function analyzeScript(
       }
     }
 
+    // What a type implements or extends is a reference, and frequently the
+    // only one it will ever have.
+    //
+    // `referencedSymbols` was populated from one place — the identifier of a
+    // bare call — so `implements AuditStore` contributed nothing at all. That
+    // is fine where the import resolves, because the import edge already says
+    // the two files are connected. It is not fine anywhere else:
+    // `resolveImport` gives up on any specifier that does not start with a
+    // dot, so in a repository using path aliases or workspace packages a class
+    // and the interface it implements have *no* recorded relation of any kind.
+    // The decomposer then reads two unrelated modules, splits them into
+    // separate tasks, and the conflict detector scores the pair at zero —
+    // concurrency this system manufactured and then could not see.
+    //
+    // `new X()` is here for the same reason and is the same size of fix: it is
+    // a use of a symbol that produces no call edge.
+    if (
+      (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) &&
+      node.heritageClauses !== undefined
+    ) {
+      for (const clause of node.heritageClauses) {
+        for (const type of clause.types) {
+          if (ts.isIdentifier(type.expression)) {
+            referencedSymbols.add(type.expression.text);
+          }
+        }
+      }
+    }
+
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
+      referencedSymbols.add(node.expression.text);
+    }
+
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       symbols.add(node.name.text);
       // The whole statement, not just the declarator: `export const value = 1`
@@ -1232,8 +1265,36 @@ export class CodeIntelligenceService {
     const dependencyFiles = index.edges
       .filter((edge) => selected.has(edge.fromFile) && edge.toFile !== undefined)
       .map((edge) => `file:${edge.toFile}`);
+    // Whether enrichment had anything to work from.
+    //
+    // Every source this draws on hangs off `files`, so a plan whose declared
+    // paths are all new — the exact shape task decomposition produces — comes
+    // out with `dependencies` holding only what the agent typed, and nothing
+    // anywhere distinguishes that from a plan genuinely depending on nothing.
+    // `assessReplay` then asks whether an advance touched anything this plan
+    // depends on, gets "no" from an empty set, and reads it as proof of
+    // independence. It is proof of blindness.
+    //
+    // The same distinction `symbolRangesUnknown` draws a hundred lines above,
+    // for the same reason and in the same words: "declares nothing" is safe to
+    // enforce against, "could not read" is emphatically not.
+    //
+    // Narrowed to files that could have carried a dependency in the first
+    // place. A plan over `.txt`, `.md` or anything else outside
+    // `SOURCE_EXTENSIONS` has an empty read set because prose has no imports,
+    // not because anything failed to read it — calling that blind would put
+    // every documentation task on the pessimistic path permanently, for a
+    // hazard it cannot have. What is left is the real case: source files that
+    // should have been in the index and were not, because they are new, or
+    // skipped by the byte budget, or in a language that is scanned rather than
+    // parsed.
+    const couldHaveDependencies = plan.expectedFiles.some((file) =>
+      SOURCE_EXTENSIONS.has(path.posix.extname(file).toLowerCase()),
+    );
+    const blind = couldHaveDependencies && files.length === 0;
     const enriched: AgentPlan = {
       ...structuredClone(plan),
+      ...(blind ? { dependenciesUnknown: true } : {}),
       // Kept before it is widened, because the widening is lossy in the one
       // place it matters. Every symbol of every declared file goes into
       // `expectedSymbols` below, which is what makes two plans comparable —

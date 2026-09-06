@@ -1,3 +1,54 @@
+### 0.5.17 — a quiet log is an answer, not an absence
+
+Somebody asked why their prompt did nothing, was told to open the worker log,
+and found the last entry was from two days ago. The obvious reading is that
+the worker has been fine and idle. It is the wrong one. The log is opened
+further down, once there is a child process whose output is worth keeping, so
+every reason the worker never got that far reached only a line of text in a
+menu and was replaced by the next one. A file that is quiet because nothing
+happened and a file that is quiet because nothing started look identical.
+
+The three stops that happen before the worker exists now write themselves into
+that file: a build that shipped without a worker, no agent CLI found on this
+machine, and a control plane that would not say which tenant this machine
+belongs to. Each says what it was and what to do about it, in the place people
+are already being sent.
+
+And the worker itself stopped dying of an answer it could not read. A machine
+enrolled nine times in half an hour and never once asked for work — the fleet
+table has the rows, each with its last heartbeat equal to its registration to
+the millisecond, so nothing it did ever reached the queue. Three things in
+that gap could end a process and none of them could say so.
+
+It registered twice on every start, because two different places both wanted
+to know which worker this was; the second of those calls was the first request
+to reuse the connection the first one opened, which is the one exchange
+anything in between — a proxy, an antivirus reading TLS — can let through
+fresh and mishandle on reuse. It parsed every reply as JSON before looking at
+the status, so a proxy's error page arrived as a parser crash rather than an
+error, taking the process down and destroying the page that would have named
+whoever sent it. And it trusted that a reply to a registration contained a
+worker, so an empty one failed a line later as a missing property, blaming the
+wrong file.
+
+None of those is proven to be what stopped that machine. Each of them would
+have, and none of them would have left a sentence behind. Now they do.
+
+The status line in the menu is fixed too. Node prints an experimental-feature
+warning about SQLite on every start, and it arrives on the same stream as the
+worker's own output, so it became the last thing said and therefore the
+machine's status. An app that was running perfectly well reported a warning
+about a database feature as its state. Startup noise is now recognised and
+skipped, and the line falls back to the last thing the worker actually said.
+
+Two fixes from the last round are in a shipped build for the first time.
+Writing the Codex environment variable calls `setx`, which on some Windows
+machines never returns; it is now given ten seconds and then killed, so
+connecting an agent cannot hang the app indefinitely. And the app reports its
+own version — visible in Settings, and attached to the machine it registers —
+so "which build is that laptop on" has an answer that does not require asking
+the person sitting at it.
+
 ### 0.5.15 — an agent you have is an agent that runs
 
 Connecting an agent used to hand you the agent first and ask this computer

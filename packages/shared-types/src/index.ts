@@ -40,6 +40,165 @@ export interface ValidationCommand {
   executable: string;
   args: string[];
   label: string;
+  /**
+   * What passing this command establishes.
+   *
+   * `functionality` — the default, and what a test suite is — means a pass is
+   * evidence the code does something. `integrity` means the command checks the
+   * shape of the patch rather than the behaviour of the program: a whitespace
+   * check, a formatter, a linter. Both are worth running and only one of them
+   * is evidence that the task landed.
+   *
+   * The distinction exists because the default project config ships an
+   * integrity check and nothing else, so a project nobody has configured
+   * produced a green "Validation: patch integrity(exit 0)" trailer for free —
+   * a pass that had established nothing, recorded identically to a passing
+   * test suite.
+   */
+  proves?: "functionality" | "integrity";
+}
+
+/**
+ * A command that narrows validation to what a change actually affects.
+ *
+ * The full suite is the safe default precisely because selection needs a
+ * dependency graph, and a test skipped in error looks exactly like a test that
+ * passed. So the graph is not Kumi's to guess: the project supplies a command
+ * that already knows — `jest --findRelatedTests`, a `bazel query`, whatever
+ * its build system offers — and the changed paths are appended to it.
+ *
+ * Used for the baseline run and the fail-to-pass check, where the question is
+ * only ever about the changed code. The full `validationCommands` still gate
+ * the merge, so a selector that misses something costs a slower signal rather
+ * than a silent pass.
+ */
+export interface AffectedTestCommand {
+  executable: string;
+  /** Changed repository paths are appended to these. */
+  args: string[];
+  label: string;
+}
+
+/**
+ * How much a validation run actually established about a change.
+ *
+ * `IntegrationStatus` answers "may this land"; this answers "on what
+ * evidence". They were the same field, so a task that executed nothing and a
+ * task that passed a real suite were both recorded as integrated, and no
+ * query could separate them afterwards.
+ *
+ * Ordered by strength:
+ * - `none` — no validation commands were configured. Nothing ran.
+ * - `integrity` — commands ran, but every one of them checks the patch rather
+ *   than the program. The code was never executed.
+ * - `executed` — at least one functional command ran and passed. Whether it
+ *   exercised *this change* is a further question this tier does not answer.
+ * - `demonstrated` — a functional command that failed before the change
+ *   passes after it. The strongest thing integration can say on its own: the
+ *   change did something, and what it did was the point.
+ */
+export type ValidationEvidence =
+  | "none"
+  | "integrity"
+  | "executed"
+  | "demonstrated";
+
+/**
+ * A test the change nominates as proof it did what was asked.
+ *
+ * The strongest measured intervention in the literature: an independently
+ * supplied reproduction test, used as a filter on candidate patches, roughly
+ * doubles precision (SWT-Bench; replicated at Google across six languages).
+ * The contract is mechanical and needs no model and no oracle — the test must
+ * fail at canonical and pass with the change.
+ *
+ * Optional, and its absence is never a failure. Generating a valid
+ * fail-to-pass test succeeds a minority of the time even for systems built to
+ * do it, so requiring one would refuse most honest work. A task that supplies
+ * one gets a stronger claim recorded; a task that does not is unproven, which
+ * is what it always was.
+ */
+export interface ReproductionTest {
+  /** Repository path of the test, for the record. */
+  path: string;
+  executable: string;
+  args: string[];
+  label: string;
+}
+
+/**
+ * Whether a nominated reproduction test kept its side of the contract.
+ *
+ * `attested` only when it genuinely failed before and passes after. Anything
+ * else is reported as what it was, because a test that passes at canonical
+ * proves nothing about the change and a test that still fails is worse.
+ */
+export interface ReproductionAttestation {
+  path: string;
+  failedBefore: boolean;
+  passesAfter: boolean;
+  attested: boolean;
+  explanation: string;
+}
+
+/**
+ * The same validation commands, run against canonical before the patch.
+ *
+ * One measurement cannot tell "fixed it" from "broke nothing" from "was
+ * already broken". Two can. This is the before half, and the fields below are
+ * the comparison it makes possible — the reason to pay for a second run
+ * rather than the run itself.
+ */
+export interface ValidationBaseline {
+  /** The revision the baseline was taken at. */
+  revision: string;
+  /** Whether these results were reused from an earlier run at this revision. */
+  cached: boolean;
+  results: CommandResult[];
+  /**
+   * Commands that failed before the change and pass after it.
+   *
+   * The fail-to-pass signal. Empty is not a failure — plenty of good changes
+   * add code nothing was failing over — but a non-empty list is the only
+   * evidence integration can produce that the change did what was asked
+   * rather than merely not breaking anything.
+   */
+  nowPassing: string[];
+  /**
+   * Commands that failed before and still fail.
+   *
+   * Not this task's doing, and previously indistinguishable from a regression
+   * it caused.
+   */
+  alreadyFailing: string[];
+}
+
+/**
+ * What happened when the change's own edits to its graders were set aside.
+ *
+ * An agent that edits the tests that judge it is not necessarily cheating: the
+ * task may be to change behaviour, and the test may encode the old contract.
+ * But it must be visible, because "passes with the tests it rewrote" and
+ * "passes the tests as they were" are different claims and were being recorded
+ * as the same one.
+ */
+export interface GraderEditReport {
+  /** Test, fixture and validator-config paths this change touched. */
+  paths: string[];
+  /**
+   * Validation re-run with those paths reset to canonical.
+   *
+   * Absent when the second run could not be made — the change deletes a
+   * grader, say — which is itself reported rather than read as a pass.
+   */
+  withoutEdits?: CommandResult[];
+  /**
+   * True when validation passes with the change's grader edits and fails
+   * without them. The case worth a human's attention: legitimate when the
+   * contract genuinely moved, and exactly what moving the goalposts looks
+   * like.
+   */
+  passesOnlyWithEdits: boolean;
 }
 
 export interface TaskDefinition {
@@ -182,6 +341,22 @@ export interface AgentPlan {
    * coordinator-issued claim takes.
    */
   claim?: PlanClaim;
+  /**
+   * Set when the read set could not be computed, as opposed to being empty.
+   *
+   * Enrichment builds `dependencies` from the indexed form of the files a plan
+   * declares. A plan whose declared files are all new, or outside the indexed
+   * languages, matches nothing — so it comes back with whatever the agent
+   * typed and no way to tell that apart from a plan that genuinely reads
+   * nothing. Everything downstream that asks "did this advance touch anything
+   * I depend on" would then answer "no" out of ignorance and call it safety.
+   *
+   * Absent rather than `false` when the set is known, and deliberately outside
+   * {@link CompleteAgentPlan}'s `Required` for the same reason `declared` is:
+   * there is no honest default, because absent and false do not mean the same
+   * thing.
+   */
+  dependenciesUnknown?: boolean;
 }
 
 /**
@@ -669,10 +844,43 @@ export interface HolderWorkingChange {
   absolutePath?: string;
 }
 
+/**
+ * Why a plan was refused, in the words the arbitration already produced.
+ *
+ * The coordinator writes a refusal an agent could act on — which task holds
+ * what, on which resources, and an instruction to narrow — and until now it
+ * reached nobody. A blocked worker slept and resubmitted the same plan, which
+ * bought the same refusal, because the only thing it read off the answer was
+ * how long to wait. Asking the same question on a timer is not a retry.
+ *
+ * Carried rather than flattened to prose because the resource lists are the
+ * actionable part: "this file, held by that task" is what a narrower plan is
+ * built from, and a sentence about it is not.
+ */
+export interface PlanRefusal {
+  status: PlanAdmissionStatus;
+  explanation: string;
+  /** Tasks holding what this plan asked for. */
+  blockedBy: TaskId[];
+  /** What collided, and on which resources. Empty when nothing structural did. */
+  conflicts: ConflictAssessment[];
+}
+
 export interface ReplanRequest {
   taskId: TaskId;
   previousPlan: AgentPlan;
-  canonicalChange: CanonicalChangeNotice;
+  /**
+   * What moved underneath the previous plan, when something did.
+   *
+   * Optional because canonical moving is no longer the only reason to replan.
+   * A refusal is the other one, and there the base has not moved at all — so
+   * an adapter with no notice rebuilds its planning workspace at the version
+   * it already holds, and says nothing to the model about a change that did
+   * not happen.
+   */
+  canonicalChange?: CanonicalChangeNotice;
+  /** Set when the coordinator refused this task's plan. */
+  refusal?: PlanRefusal;
   constraints: string[];
   /**
    * In-progress edits from holders this task is deferred behind.
@@ -1012,6 +1220,20 @@ export interface IntegrationResult {
   salvagedDeferred?: FilePatch[];
   /** Files that landed in part, having been split at the conflicting hunks. */
   salvagedDividedFiles?: string[];
+  /**
+   * What the validation run established, as opposed to whether it passed.
+   *
+   * Always present on a result that reached validation. Absent on the early
+   * returns — a stale base, a conflict — where no validation was attempted and
+   * saying `none` would claim a measurement nobody took.
+   */
+  evidence?: ValidationEvidence;
+  /** The before half of the two-sided run, when one was taken. */
+  baseline?: ValidationBaseline;
+  /** Present only when the change touched files that grade it. */
+  graderEdits?: GraderEditReport;
+  /** Present only when the change nominated a reproduction test. */
+  reproduction?: ReproductionAttestation;
   explanation: string;
 }
 
@@ -1146,10 +1368,33 @@ export const KEEP_IT_SIMPLE_DIRECTIVE =
  * added at the dispatch site and not added here silently stops being
  * stripped, so both ends are declared together.
  */
+/**
+ * How to put a picture in front of somebody, rather than a path to one.
+ *
+ * An agent asked for a screenshot takes one and then says where it went —
+ * which is an absolute path on a machine the person asking is very often not
+ * sitting at, read on a phone. The bytes existed and the room could have
+ * shown them; nothing told the agent that was possible.
+ *
+ * Deliberately a path in the workspace, not an upload API. The agent already
+ * writes files there, the worker already knows where there is, and a marker
+ * in ordinary prose works identically across every vendor because it is only
+ * text. `liftLocalImages` in the worker turns the marker into a stored
+ * attachment on the way past; a marker whose file never appeared is left
+ * alone and reads as the filename it already was.
+ */
+export const SHOW_IMAGES_DIRECTIVE =
+  "To show someone an image — a screenshot, a chart, a diagram you rendered " +
+  "— write the file inside the workspace and reference it in your reply as " +
+  "![caption](relative/path.png). It is posted into the room as a picture. " +
+  "PNG, JPEG, GIF or WebP, under 8 MB, at most four per message. A path in " +
+  "prose is not an image: nobody reading this can open your filesystem.";
+
 export const COORDINATOR_DIRECTIVES: readonly string[] = [
   ANSWER_NOT_STATUS_DIRECTIVE,
   KEEP_IT_SIMPLE_DIRECTIVE,
   DO_NOT_CODE_DIRECTIVE,
+  SHOW_IMAGES_DIRECTIVE,
   FORCE_QUESTION_MARKER,
 ];
 
@@ -2311,13 +2556,20 @@ export function assertChangeSet(value: unknown): asserts value is ChangeSet {
  * than an agent describing it, which is untrue of every plan an agent wrote.
  */
 export type CompleteAgentPlan = Required<
-  Omit<AgentPlan, "grounding" | "claim" | "declared">
+  Omit<AgentPlan, "grounding" | "claim" | "declared" | "dependenciesUnknown">
 > &
   // `declared` keeps its optionality on purpose: absent is not the same as
   // empty. Absent says this plan was never enriched, so the `expected*` lists
   // are still the agent's own words; a list present but empty says the agent
   // named none of that kind. Filling it in here would erase that.
-  Pick<AgentPlan, "grounding" | "claim" | "declared">;
+  //
+  // `dependenciesUnknown` is here for the same reason and needs it more:
+  // defaulting it to `false` would assert that the read set is trustworthy on
+  // every plan that never went near enrichment.
+  Pick<
+    AgentPlan,
+    "grounding" | "claim" | "declared" | "dependenciesUnknown"
+  >;
 
 /** Returns a detached plan with every optional resource collection populated. */
 export function completeAgentPlan(plan: AgentPlan): CompleteAgentPlan {

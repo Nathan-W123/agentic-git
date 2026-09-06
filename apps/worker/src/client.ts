@@ -55,6 +55,18 @@ export class ControlPlaneError extends Error {
  * A `ControlPlaneError` is an answer from a control plane that was reached, and
  * is never a transport failure however unwelcome its status.
  */
+/**
+ * As much of an unexpected body as is worth putting in an error message.
+ *
+ * Whitespace is collapsed because the bodies this quotes are usually HTML,
+ * and an error line that wraps over twenty is read as noise and skipped —
+ * which would waste the one piece of evidence that says who answered.
+ */
+function snippet(text: string): string {
+  const flat = text.replace(/\s+/gu, " ").trim();
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+}
+
 export function isTransportFailure(error: unknown): boolean {
   if (
     !(error instanceof Error) ||
@@ -214,6 +226,8 @@ export class WorkerClient {
     init: {
       method?: string;
       body?: unknown;
+      /** Raw bytes to send instead of JSON, with the type they really are. */
+      binary?: { bytes: Buffer; contentType: string };
       expectBinary?: boolean;
       timeoutMs?: number;
     } = {},
@@ -254,6 +268,7 @@ export class WorkerClient {
     init: {
       method?: string;
       body?: unknown;
+      binary?: { bytes: Buffer; contentType: string };
       expectBinary?: boolean;
       timeoutMs?: number;
     },
@@ -261,7 +276,9 @@ export class WorkerClient {
     const headers = new Headers({
       Authorization: `Bearer ${this.options.token}`,
     });
-    if (init.body !== undefined) {
+    if (init.binary !== undefined) {
+      headers.set("Content-Type", init.binary.contentType);
+    } else if (init.body !== undefined) {
       headers.set("Content-Type", "application/json");
     }
 
@@ -280,9 +297,11 @@ export class WorkerClient {
         headers,
         signal: controller.signal,
         redirect: "error",
-        ...(init.body === undefined
-          ? {}
-          : { body: JSON.stringify(init.body) }),
+        ...(init.binary !== undefined
+          ? { body: new Uint8Array(init.binary.bytes) }
+          : init.body === undefined
+            ? {}
+            : { body: JSON.stringify(init.body) }),
       });
 
       if (response.status === 204) {
@@ -296,14 +315,52 @@ export class WorkerClient {
       }
 
       const text = await response.text();
-      const json: unknown = text.length === 0 ? undefined : JSON.parse(text);
+      // Parsed defensively, and the status is read first.
+      //
+      // This used to be a bare `JSON.parse(text)` above the status check, on
+      // the reasonable-sounding assumption that a control plane answers in
+      // JSON. Everything between a worker and the control plane is entitled to
+      // answer instead: a proxy's HTML error page, an antivirus interception
+      // notice, a load balancer's plain-text 502. Each of those arrived as a
+      // `SyntaxError`, which is not a `ControlPlaneError`, so it was not a
+      // retryable transport failure either — it went straight up through
+      // `register` and killed the process, and the only thing anybody could
+      // see afterwards was a worker that had enrolled and never asked for
+      // work. The body that would have explained it was discarded by the
+      // parser that failed on it.
+      //
+      // So the body is now evidence rather than a precondition. A failed
+      // parse on an error status leaves the status to speak, and a failed
+      // parse on a success status says so and quotes what arrived, which is
+      // the one thing that identifies whatever is answering for the server.
+      let json: unknown;
+      let parsed = text.length === 0;
+      if (!parsed) {
+        try {
+          json = JSON.parse(text);
+          parsed = true;
+        } catch {
+          json = undefined;
+        }
+      }
       if (!response.ok) {
         const error = (json as { error?: { code?: string; message?: string } })
           ?.error;
         throw new ControlPlaneError(
           response.status,
           error?.code ?? "request_failed",
-          error?.message ?? `Request to ${path} failed with ${response.status}`,
+          error?.message ??
+            `Request to ${path} failed with ${response.status}${
+              parsed ? "" : `: ${snippet(text)}`
+            }`,
+        );
+      }
+      if (!parsed) {
+        throw new ControlPlaneError(
+          response.status,
+          "unreadable_response",
+          `Request to ${path} answered ${response.status} with a body that is ` +
+            `not JSON: ${snippet(text)}`,
         );
       }
       return { status: response.status, json };
@@ -373,7 +430,24 @@ export class WorkerClient {
       method: "POST",
       body: input,
     });
-    return json as WorkerIdentity;
+    // Checked rather than asserted, because the cast was load-bearing and
+    // wrong. A 204, or a 200 with an empty body from something answering in
+    // the server's place, left `json` undefined; the cast said otherwise, and
+    // the failure surfaced one line later in `Worker.register` as
+    // `Cannot read properties of undefined (reading 'id')` — a stack trace
+    // pointing at the caller, blaming the wrong file, and killing the worker
+    // before its first poll. Naming what was missing costs four lines.
+    const identity = json as Partial<WorkerIdentity> | undefined;
+    if (identity === undefined || typeof identity.id !== "string") {
+      throw new ControlPlaneError(
+        502,
+        "unreadable_response",
+        "Registration was accepted but the reply carried no worker id. " +
+          "Something on the network may be answering in the control plane's " +
+          "place.",
+      );
+    }
+    return identity as WorkerIdentity;
   }
 
   /** Returns undefined when the queue is empty, signalled by a 204. */
@@ -689,6 +763,32 @@ export class WorkerClient {
       });
     } catch {
       // Deliberately silent. See above.
+    }
+  }
+
+  /**
+   * Stores one image the agent produced, and answers with its id.
+   *
+   * `undefined` rather than a throw on every failure: an oversized PNG, a
+   * control plane too old to know the route, a store the deployment never
+   * configured. The caller is decorating a message with a picture, and a
+   * message that arrives with a filename where a picture was meant is a much
+   * better outcome than a run that failed over a screenshot.
+   */
+  public async attachImage(
+    leaseId: string,
+    bytes: Buffer,
+    contentType: string,
+  ): Promise<string | undefined> {
+    try {
+      const { json } = await this.request(
+        `/api/v1/workers/leases/${leaseId}/attachment`,
+        { method: "POST", binary: { bytes, contentType } },
+      );
+      const id = (json as { id?: unknown } | undefined)?.id;
+      return typeof id === "string" && id !== "" ? id : undefined;
+    } catch {
+      return undefined;
     }
   }
 }
