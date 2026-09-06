@@ -192,3 +192,48 @@ test("settings name the workspace the way the rest of the shell names it", async
   assert.match(invitations, /repositoryLabel\(invite\.repositoryId\)/u);
   assert.doesNotMatch(invitations, /invite\.repositoryId \?\? "every channel"/u);
 });
+
+test("the workspace panel counts the channel it names, not the organization", async () => {
+  // Three nested things share one word on this screen — an organization, a
+  // project, and a repository — and the People row reported the outermost
+  // while the two rows above it named the inner two.
+  //
+  // That is not a cosmetic mismatch. Somebody invited to a repository holds a
+  // grant and no organization membership, so they are in the channel, in its
+  // roster, mentionable and running agents, and absent from this number. It
+  // read "1 member" for a workspace two people were working in, and nobody
+  // suspected the invitation had only ever reached the innermost of the
+  // three.
+  const app = await publicFile("app.js");
+  const row = /\{\s*term: "People",([\s\S]*?)\n        \},/u.exec(app)?.[1] ?? "";
+  assert.notEqual(row, "", "the People row must exist to be checked");
+
+  assert.match(
+    row,
+    /state\.channelPeople\?\.\[repository\.id\]/u,
+    "it must count the roster of the channel the row above names",
+  );
+  // The roster the server sends is built from memberships and grants
+  // together, so counting it is what makes a repository collaborator appear.
+  assert.match(
+    row,
+    /state\.members/u,
+    "falling back to the organization only when no channel is open",
+  );
+  // Precedence, not merely presence. A version that consults the membership
+  // list first and falls back to the roster reads almost identically and is
+  // the original bug with an extra branch: the organization has a member, so
+  // the roster is never reached.
+  assert.match(
+    row,
+    /roster \?\? state\.members/u,
+    "the roster is the answer and the membership list is the fallback, " +
+      "not the other way around",
+  );
+  assert.doesNotMatch(
+    row,
+    /"members?"/u,
+    'and it counts people rather than "members", which is the word that made ' +
+      "an organization's membership sound like the channel",
+  );
+});

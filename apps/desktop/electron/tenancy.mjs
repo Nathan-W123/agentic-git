@@ -20,6 +20,10 @@
  * invited to a team belongs to at least two. See {@link placeOfWork} for what
  * separates them.
  *
+ * Two things separate them, in order. First whether this account could run
+ * work there at all, which is the question registration will ask and the one
+ * that used not to be asked here. Then whether anything is there to work on.
+ *
  * `getJson` is a parameter so this can be exercised without a server.
  */
 export async function discoverTenancy(server, token, getJson) {
@@ -30,8 +34,23 @@ export async function discoverTenancy(server, token, getJson) {
   if (candidates.length === 0) {
     throw new Error("This account is not a member of any organization");
   }
+  // Ordered before anything else is asked. Repositories were the only thing
+  // this looked at, and a machine that joined an organization it cannot work
+  // in is refused on its very first call — over and over, in a log file, with
+  // a sentence about a workspace nobody was looking at. Its owner was
+  // promoted to developer and then to admin, and neither helped, because a
+  // role was never what was missing: an organization that cannot spend folds
+  // every role to `viewer`, owners included.
+  //
+  // `canRunWork` is what registration itself checks, asked in advance. A
+  // control plane too old to answer omits it, and `!== false` keeps every
+  // such organization a candidate — this must not turn an upgrade of the app
+  // into a machine that can no longer find anywhere to work.
+  const workable = candidates.filter((entry) => entry.canRunWork !== false);
+  const searched = workable.length > 0 ? workable : candidates;
+
   let fallback;
-  for (const organization of candidates) {
+  for (const organization of searched) {
     const found = await placeOfWork(server, token, organization.id, getJson);
     if (found === undefined) {
       continue;
@@ -44,7 +63,7 @@ export async function discoverTenancy(server, token, getJson) {
     // repository, and passed over while any of them do.
     fallback = fallback ?? { organizationId: organization.id, ...found };
   }
-  return fallback ?? { organizationId: candidates[0].id };
+  return fallback ?? { organizationId: searched[0].id };
 }
 
 /**

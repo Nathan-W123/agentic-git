@@ -24,7 +24,9 @@ import {
   assertTokenScope,
   authorizeOrganizationOrGrant,
   authorizeProject,
+  explainOrganizationRefusal,
 } from "../authorization.js";
+import type { RefusalReason } from "../authorization.js";
 import {
   HttpError,
   objectBody,
@@ -48,6 +50,31 @@ import {
 } from "../gateway-util.js";
 import type { ApiGateway } from "../server.js";
 import type { AuthenticatedRouteRequest } from "./context.js";
+
+/**
+ * What to say to a worker whose registration was refused, by cause.
+ *
+ * Each one names the remedy rather than the rule, because the reader is a
+ * person whose machine will not start and not a developer of this system.
+ * `entitlement` deliberately says the access is intact: the first thing
+ * anybody does on being told they lack permission is go looking at roles,
+ * and that is the one place the answer is not.
+ */
+const REGISTRATION_REFUSALS: Readonly<
+  Record<RefusalReason, (organization: string) => string>
+> = {
+  "no-standing": (organization) =>
+    `This account cannot run agents in ${organization}. Ask an ` +
+    "administrator to invite you to it, or to a repository in it, as a " +
+    "developer or above — view-only access cannot run work.",
+  entitlement: (organization) =>
+    `${organization} is read-only because its subscription has lapsed or ` +
+    "its trial has ended, so no agent can run in it. Your own access is " +
+    "fine and changing your role will not help — its plan needs renewing.",
+  "token-scope": () =>
+    "This sign-in cannot run agents. Sign out of the desktop app and sign " +
+    "in again to renew it.",
+};
 
 export async function routeWorkers(
   gw: ApiGateway,
@@ -88,27 +115,68 @@ export async function routeWorkers(
       principal,
       organizationId,
       "run_task",
-    ).catch((error: unknown) => {
-      // Said properly, because of where it is read. This is the first call
-      // a worker ever makes and the only place its failure appears is a
-      // log file on somebody's own machine, with no page around it to
-      // explain anything. The generic "You do not have permission to
-      // perform this action" sent two people hunting through networks,
-      // reinstalls and vendor logins for a problem that was an unfinished
-      // invitation.
-      if (
-        error instanceof AuthenticationError &&
-        error.code === "forbidden"
-      ) {
+    ).catch(async (error: unknown) => {
+      // Said properly, because of where it is read. This is the first call a
+      // worker ever makes, and the only place its failure appears is a log
+      // file on somebody's own machine with no page around it to explain
+      // anything. The generic "You do not have permission to perform this
+      // action" sent two people hunting through networks, reinstalls and
+      // vendor logins for a problem that was an unfinished invitation.
+      //
+      // One message was not enough. The same nine words are the answer to
+      // three unrelated questions, and the first rewrite here assumed the
+      // commonest one — so an organization that had simply stopped paying
+      // told its members to get themselves invited, and promoting one of
+      // them to admin changed nothing, because the role was never what was
+      // missing. `explainOrganizationRefusal` distinguishes them; it runs
+      // only here, only after the refusal, and only about the standing of
+      // the caller reading it.
+      if (!(error instanceof AuthenticationError)) {
+        throw error;
+      }
+      if (error.code === "token_scope_missing") {
         throw new HttpError(
           403,
-          "forbidden",
-          "This account cannot run agents in that workspace. Ask an " +
-            "administrator to invite you to it, or to a repository in it, " +
-            "as a developer or above — view-only access cannot run work.",
+          "token_scope_missing",
+          "This sign-in cannot run agents. Sign out of the desktop app and " +
+            "sign in again to renew it.",
         );
       }
-      throw error;
+      if (error.code !== "forbidden") {
+        throw error;
+      }
+      const reason = await explainOrganizationRefusal(
+        gw.options.store,
+        principal,
+        organizationId,
+        "run_task",
+      );
+      // Named, because which workspace this is about turned out to be the
+      // whole answer once. Signing up creates an organization, so anybody
+      // invited to a team belongs to at least two, and the desktop app picks
+      // between them by looking for repositories rather than for somewhere
+      // this account may actually work. A worker that had quietly chosen the
+      // personal organization nobody pays for reported a refusal that read
+      // as being about the team's — so its admins promoted the person, twice,
+      // in the workspace the worker was never asking about.
+      const named = await gw.options.store
+        .getOrganization(organizationId)
+        .catch(() => undefined);
+      // "Organization", not "workspace". The web app already uses workspace
+      // for a repository's working area — its files, its changeset, its rail
+      // — and the screen somebody reads this and then goes looking for is
+      // labelled Organization. A message in the product's other vocabulary
+      // sends them to the wrong settings page, which is the failure this
+      // whole sentence exists to prevent.
+      const organization =
+        named?.name === undefined || named.name.trim().length === 0
+          ? "that organization"
+          : `the "${named.name}" organization`;
+      throw new HttpError(
+        403,
+        "forbidden",
+        REGISTRATION_REFUSALS[reason](organization),
+      );
     });
     const adapters = body["adapters"];
     if (
@@ -213,33 +281,23 @@ export async function routeWorkers(
     if (worker === undefined || worker.userId !== principal.user.id) {
       throw new HttpError(404, "not_found", "Worker was not found");
     }
-    const projectId =
-      stringField(body["projectId"], "projectId", { max: 120 }) ?? "";
-    // `repositories` is not decoration. A collaborator invited to one
-    // repository has no organization role, reaches this project through
-    // that grant alone, and `authorizeProject` folds every grant they hold
-    // here into one role to answer "can they reach the project at all".
-    // That answer must not become "and may therefore run anything in it":
-    // the narrowing is passed down to the lease, which is the only place
-    // that decides what a machine is handed.
-    const { project, repositories } = await authorizeProject(
-      gw.options.store,
-      principal,
-      projectId,
-      "run_task",
-    );
-    // Visibility widened to the organization; execution did not follow it
-    // across one. A user who belongs to two organizations could otherwise
-    // point a worker registered in one at work belonging to the other, and
-    // the resulting workspace, bundle, and changeset would carry another
-    // tenant's code on a machine that tenant never admitted to its fleet.
-    if (worker.organizationId !== project.organizationId) {
-      throw new HttpError(
-        403,
-        "worker_organization_mismatch",
-        "This worker is registered to a different organization",
-      );
-    }
+    // Optional, and that is the point.
+    //
+    // A worker used to have to name one, and the desktop app answered from a
+    // guess made at start — before any task existed, from whichever
+    // organization it had picked. So a machine polled one project forever and
+    // was deaf to work filed anywhere else its owner could reach, including
+    // by the person sitting at it. The task already knows its own project;
+    // the worker was simply asking before that was allowed to matter.
+    //
+    // Sent, it is still honoured exactly as before: a deployment that pins a
+    // worker to one project keeps doing so, and every older build keeps
+    // sending it.
+    const requestedProject =
+      stringField(body["projectId"], "projectId", {
+        max: 120,
+        optional: true,
+      }) ?? "";
 
     const nowIso = new Date().toISOString();
     // Reclaim anything a dead worker was holding before handing out new
@@ -247,6 +305,14 @@ export async function routeWorkers(
     // it is the caller that almost always settles the row, and it used to
     // discard it.
     await gw.expireLeasesAndSay(nowIso);
+    // Before any project is resolved, not after one is authorized.
+    //
+    // A machine that reached this route is alive, and whether some project
+    // then hands it work is a different question. Touched on the far side of
+    // that, a worker whose polls were being refused never had its heartbeat
+    // written at all: it aged out after three minutes and its owner's agents
+    // went grey, while its own status line still said "polling". Liveness is
+    // about the machine; work is about the project.
     await gw.options.store.touchWorker(workerId, nowIso);
 
     const repositoryId = stringField(body["repositoryId"], "repositoryId", {
@@ -282,61 +348,131 @@ export async function routeWorkers(
         "This deployment does not support remote workers",
       );
     }
-    const assignment = await leaseOperation({
-      workerId,
-      projectId,
-      actorId: principal.user.id,
-      ...(repositoryId === undefined ? {} : { repositoryId }),
-      ...(repositories === undefined ? {} : { repositories }),
-      ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
-      ...(protocolVersion === undefined ? {} : { protocolVersion }),
-    });
-    if (assignment === undefined) {
-      // 204 rather than an empty 200 so a polling worker can branch on the
-      // status code without parsing a body.
-      response.writeHead(204).end();
+
+    // Every project this account could be handed work in, or the one it
+    // named. Enumerated here rather than guessed on the machine, because
+    // this is the only side that knows what exists.
+    const candidates =
+      requestedProject !== ""
+        ? [requestedProject]
+        : (
+            await Promise.all(
+              (await gw.reachableOrganizations(principal)).map(
+                async (organization) =>
+                  await gw
+                    .reachableProjects(principal, organization.id, false)
+                    .catch((): [] => []),
+              ),
+            )
+          )
+            .flat()
+            .map((project) => project.id);
+
+    for (const projectId of candidates) {
+      // `repositories` is not decoration. A collaborator invited to one
+      // repository has no organization role, reaches this project through
+      // that grant alone, and `authorizeProject` folds every grant they hold
+      // here into one role to answer "can they reach the project at all".
+      // That answer must not become "and may therefore run anything in it":
+      // the narrowing is passed down to the lease, which is the only place
+      // that decides what a machine is handed.
+      //
+      // A project the caller cannot work in is skipped rather than refused,
+      // because with no project named this list is a search and not a claim.
+      // One the caller *did* name still refuses, so nothing that used to be
+      // an error quietly becomes an empty queue.
+      const authorized = await authorizeProject(
+        gw.options.store,
+        principal,
+        projectId,
+        "run_task",
+      ).catch((error: unknown) => {
+        if (requestedProject !== "") {
+          throw error;
+        }
+        return undefined;
+      });
+      if (authorized === undefined) {
+        continue;
+      }
+      const { repositories } = authorized;
+      // Deliberately not compared against `worker.organizationId`.
+      //
+      // It used to be, to keep a machine out of a tenant that had never
+      // admitted it to its fleet. The property was real; the mechanism was
+      // wrong, because the organization on a worker is chosen by the desktop
+      // app at start — before any task exists — from whichever organization
+      // it guessed. A person who belongs to two teams therefore had one of
+      // them silently unreachable from their own laptop, and when a wider
+      // account made the guess wider still, a machine registered into a
+      // stranger's organization and sat there polling: alive, healthy, and
+      // invisible to the team it was bought for.
+      //
+      // `authorizeProject` above is the honest form of the same property. It
+      // has already established that this account may run work in this
+      // project, through membership or through a grant, and under local
+      // execution the machine is that account's own. So the invariant
+      // enforced now is "a machine runs only what its owner is entitled to
+      // run", which is strictly what was meant, and does not depend on a
+      // guess made before the work existed.
+      const assignment = await leaseOperation({
+        workerId,
+        projectId,
+        actorId: principal.user.id,
+        ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(repositories === undefined ? {} : { repositories }),
+        ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
+        ...(protocolVersion === undefined ? {} : { protocolVersion }),
+      });
+      if (assignment === undefined) {
+        continue;
+      }
+      // Checked again on the way out, against the same two bounds this
+      // iteration was authorized on. `leaseWork` is an operation a deployment
+      // supplies, and an authorization that only holds because one
+      // implementation remembered to apply it is not an authorization. The
+      // repository half matters most: it is the only thing standing between a
+      // grant on one repository and an agent run from the repository beside
+      // it, on this person's laptop, with their vendor login.
+      if (
+        assignment.task.projectId !== projectId ||
+        assignment.lease.projectId !== projectId
+      ) {
+        await gw.options.store.finishWorkLease(
+          assignment.lease.id,
+          "released",
+          new Date().toISOString(),
+          "control-plane project mismatch",
+        );
+        throw new HttpError(
+          500,
+          "invalid_assignment",
+          "Worker assignment escaped its authorized project",
+        );
+      }
+      if (
+        repositories !== undefined &&
+        !repositories.has(assignment.task.repositoryId)
+      ) {
+        await gw.options.store.finishWorkLease(
+          assignment.lease.id,
+          "released",
+          new Date().toISOString(),
+          "control-plane repository mismatch",
+        );
+        throw new HttpError(
+          500,
+          "invalid_assignment",
+          "Worker assignment escaped its authorized repositories",
+        );
+      }
+      gw.sendJson(response, 200, assignment);
       return true;
     }
-    // Checked again on the way out, against the same two bounds the
-    // request was authorized on. `leaseWork` is an operation a deployment
-    // supplies, and an authorization that only holds because one
-    // implementation remembered to apply it is not an authorization. The
-    // repository half matters most: it is the only thing standing between a
-    // grant on one repository and an agent run from the repository beside
-    // it, on this person's laptop, with their vendor login.
-    if (
-      assignment.task.projectId !== projectId ||
-      assignment.lease.projectId !== projectId
-    ) {
-      await gw.options.store.finishWorkLease(
-        assignment.lease.id,
-        "released",
-        new Date().toISOString(),
-        "control-plane project mismatch",
-      );
-      throw new HttpError(
-        500,
-        "invalid_assignment",
-        "Worker assignment escaped its authorized project",
-      );
-    }
-    if (
-      repositories !== undefined &&
-      !repositories.has(assignment.task.repositoryId)
-    ) {
-      await gw.options.store.finishWorkLease(
-        assignment.lease.id,
-        "released",
-        new Date().toISOString(),
-        "control-plane repository mismatch",
-      );
-      throw new HttpError(
-        500,
-        "invalid_assignment",
-        "Worker assignment escaped its authorized repositories",
-      );
-    }
-    gw.sendJson(response, 200, assignment);
+
+    // 204 rather than an empty 200 so a polling worker can branch on the
+    // status code without parsing a body.
+    response.writeHead(204).end();
     return true;
   }
 

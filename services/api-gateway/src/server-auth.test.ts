@@ -912,3 +912,512 @@ test("invalid and malformed tokens are refused", async (t) => {
  * The remote worker protocol, exercised the way a worker actually uses it:
  * bearer token only, no cookies, lease -> bundle -> result.
  */
+
+test("a refused worker is told which of the three things is wrong, and where", async (t) => {
+  // One sentence used to answer three unrelated questions. "You do not have
+  // permission to perform this action" is true of a stranger, of a member
+  // whose organization stopped paying, and of a token minted too narrow, and
+  // it is the only thing written anywhere — a log file on the machine that
+  // will not start, with a stack trace under it.
+  //
+  // It cost an afternoon. A co-founder's worker was refused; he was promoted
+  // to developer, then to admin, and neither changed anything, because his
+  // desktop had quietly registered against the personal organization that
+  // signing up had created for him rather than against the team's. The
+  // refusal was about a workspace nobody was looking at. So the workspace is
+  // named, and the cause is distinguished.
+  const previous = process.env["KUMI_PAYMENTS_ENABLED"];
+  process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["KUMI_PAYMENTS_ENABLED"];
+    } else {
+      process.env["KUMI_PAYMENTS_ENABLED"] = previous;
+    }
+  });
+
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const member = await runtime.store.createUser({
+    email: "refused@example.com",
+    displayName: "Refused",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  // An organization of their own, unpaid, exactly as signing up leaves one.
+  const alone = await runtime.store.createOrganization({
+    slug: "refused-workspace",
+    name: "Refused's Workspace",
+  });
+  await runtime.store.saveMembership({
+    organizationId: alone.id,
+    userId: member.id,
+    role: "owner",
+  });
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: member.email, password: PASSWORD },
+  });
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "their machine", scopes: ["view", "run_task"] },
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.data.token as string;
+
+  // Owner of it, and still refused: the role was never what was missing.
+  const lapsed = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: alone.id,
+        name: "their-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(lapsed.status, 403);
+  const said = String(lapsed.data.error?.message ?? "");
+  assert.match(said, /Refused's Workspace/u, "it must name the organization");
+  assert.match(
+    said,
+    /organization/u,
+    "in the product's own word for a tenant — the web app spends " +
+      '"workspace" on a repository\'s working area, and the settings screen ' +
+      "this sends somebody to is labelled Organization",
+  );
+  assert.match(said, /subscription|trial/u, "it must name the cause");
+  assert.match(
+    said,
+    /changing your role will not help/u,
+    "it must say the thing they are about to try twice does not work",
+  );
+  assert.doesNotMatch(
+    said,
+    /invite/u,
+    "an owner must not be told to get themselves invited",
+  );
+
+  // The other cause, same route: somewhere they hold nothing at all.
+  const stranger = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "their-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(stranger.status, 403);
+  const elsewhere = String(stranger.data.error?.message ?? "");
+  assert.match(elsewhere, /invite/u, "a stranger is told how to get standing");
+  assert.doesNotMatch(
+    elsewhere,
+    /subscription|trial/u,
+    "and is told nothing about that organization's billing",
+  );
+});
+
+test("the organization listing says where this account could actually work", async (t) => {
+  // The desktop app has to choose between these, and it chose by counting
+  // repositories — so a machine landed in the personal organization signing
+  // up had made for its owner, which had never been paid for, and was refused
+  // on its first call. Nothing in this listing could have told it otherwise:
+  // a role would not have, because an organization that cannot spend folds
+  // every role to `viewer`, owners included. So the answer here is the same
+  // question registration asks, asked in advance.
+  const previous = process.env["KUMI_PAYMENTS_ENABLED"];
+  process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["KUMI_PAYMENTS_ENABLED"];
+    } else {
+      process.env["KUMI_PAYMENTS_ENABLED"] = previous;
+    }
+  });
+
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+
+  const member = await runtime.store.createUser({
+    email: "twotenants@example.com",
+    displayName: "Two Tenants",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const personal = await runtime.store.createOrganization({
+    slug: "two-tenants-personal",
+    name: "Personal",
+  });
+  // Owner of their own, unpaid — and a developer in the team's, which is not.
+  await runtime.store.saveMembership({
+    organizationId: personal.id,
+    userId: member.id,
+    role: "owner",
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: member.id,
+    role: "developer",
+    comped: true,
+  });
+  assert.ok(bootstrapped.user.id !== member.id);
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: member.email, password: PASSWORD },
+  });
+  const listed = await client.request("/api/v1/organizations");
+  assert.equal(listed.status, 200);
+
+  const rows = listed.data.organizations as Array<{
+    id: string;
+    canRunWork?: boolean;
+  }>;
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  assert.equal(
+    byId.get(personal.id)?.canRunWork,
+    false,
+    "owning an organization that cannot spend is not being able to work in it",
+  );
+  assert.equal(
+    byId.get(DEFAULT_ORGANIZATION_ID)?.canRunWork,
+    true,
+    "and a comped membership in the team's is",
+  );
+});
+
+test("joining an organization does not take away a free invitation", async (t) => {
+  // Two answers about one person, in one organization, in the same minute.
+  //
+  // `authorizeProject` takes the higher of the entitled role and the comped
+  // one, so somebody invited for free could submit work all day even after
+  // the organization's trial ran out. `authorizeOrganizationOrGrant` returned
+  // on the membership branch before it ever looked at grants, so the moment
+  // their machine tried to register it folded them to `viewer` and refused —
+  // "You do not have permission to perform this action", every few minutes,
+  // in a log file. Being a member was strictly worse than being a guest.
+  //
+  // It cost an afternoon and two promotions. A role was never what was
+  // missing: an organization that cannot spend folds every role, admin and
+  // owner alike.
+  const previous = process.env["KUMI_PAYMENTS_ENABLED"];
+  process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["KUMI_PAYMENTS_ENABLED"];
+    } else {
+      process.env["KUMI_PAYMENTS_ENABLED"] = previous;
+    }
+  });
+
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const shared = await invitableRepository(owner, "comped-shared");
+  // The organization stopped paying. Nobody swept anything; the row says so.
+  await runtime.store.saveSubscription({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    status: "canceled",
+  });
+
+  const guest = await runtime.store.createUser({
+    email: "comped@example.com",
+    displayName: "Comped",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  // Invited for free to a repository, and then made a member — the ordinary
+  // shape of a co-founder who was added to the team afterwards.
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: shared,
+    userId: guest.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    comped: true,
+    createdAt: new Date().toISOString(),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: guest.id,
+    role: "admin",
+  });
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: guest.email, password: PASSWORD },
+  });
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "their machine", scopes: ["view", "run_task"] },
+  });
+  assert.equal(minted.status, 201);
+
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    minted.data.token as string,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "their-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(
+    registered.status,
+    201,
+    "a comped grant must carry a member exactly as it carries a guest",
+  );
+
+  // And the comp is still only a comp: somebody holding nothing but a lapsed
+  // membership is refused, which is the behaviour this must not undo.
+  const plain = await runtime.store.createUser({
+    email: "plain@example.com",
+    displayName: "Plain",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: plain.id,
+    role: "admin",
+  });
+  const plainClient = new TestClient(runtime.origin);
+  await plainClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: plain.email, password: PASSWORD },
+  });
+  const plainToken = await plainClient.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "their machine", scopes: ["view", "run_task"] },
+  });
+  const refused = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    plainToken.data.token as string,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "other-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(refused.status, 403, "an unpaid organization is still read-only");
+  assert.match(
+    String(refused.data.error?.message ?? ""),
+    /subscription|trial/u,
+    "and says so, rather than sending an admin to be invited again",
+  );
+});
+
+test("deployment administration can be taken back, not only given", async (t) => {
+  // The grant and the revoke are one menu item that reads
+  // `person.user.systemAdmin` to decide which of the two it is. The roster
+  // projected `{id, displayName}` and dropped the flag, so the answer was
+  // always `undefined`, so the item always said "Make deployment admin" —
+  // and the revoke, whose route, client call and handler all exist, could
+  // not be reached from anywhere in the product.
+  //
+  // That mattered more than a missing button usually does. A system
+  // administrator reaches every organization on the deployment, which widens
+  // what a desktop app can discover and quietly changes which organization
+  // somebody's machine registers into. Granting it to unstick one person
+  // sent their worker to a different tenant, where every lease poll was
+  // refused and their agent went grey — with no way to undo the grant.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "roster-admin");
+
+  const mate = await runtime.store.createUser({
+    email: "mate@example.com",
+    displayName: "Mate",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: mate.id,
+    role: "admin",
+  });
+  assert.equal(bootstrapped.user.systemAdmin, true, "the first user runs the deployment");
+
+  const rosterPath =
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}` +
+    `/repositories/${repositoryId}/channel/agents`;
+
+  const before = await owner.request(rosterPath);
+  assert.equal(before.status, 200);
+  const findMate = (data: { people?: Array<{ userId: string; user?: { systemAdmin?: boolean } }> }) =>
+    (data.people ?? []).find((person) => person.userId === mate.id);
+  assert.equal(
+    findMate(before.data)?.user?.systemAdmin,
+    false,
+    "an ordinary member reads as not an administrator, not as unknown",
+  );
+
+  await owner.request(`/api/v1/admin/users/${mate.id}`, {
+    method: "PATCH",
+    body: { systemAdmin: true },
+  });
+
+  const after = await owner.request(rosterPath);
+  assert.equal(
+    findMate(after.data)?.user?.systemAdmin,
+    true,
+    "and once granted the roster says so, which is what draws the revoke",
+  );
+
+  // Withheld from everybody else. The item is only drawn for an
+  // administrator, so nobody else's roster needs to name who runs this
+  // deployment.
+  const plain = new TestClient(runtime.origin);
+  await plain.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: mate.email, password: PASSWORD },
+  });
+  await owner.request(`/api/v1/admin/users/${mate.id}`, {
+    method: "PATCH",
+    body: { systemAdmin: false },
+  });
+  const asMate = await plain.request(rosterPath);
+  assert.equal(asMate.status, 200);
+  const seenByMate = (asMate.data.people ?? []) as Array<{
+    userId: string;
+    user?: Record<string, unknown>;
+  }>;
+  const seesOwner = seenByMate.find((person) => person.userId === bootstrapped.user.id);
+  assert.ok(seesOwner !== undefined, "the owner is still in the room");
+  assert.equal(
+    "systemAdmin" in (seesOwner.user ?? {}),
+    false,
+    "a non-administrator is told no more than before",
+  );
+});
+
+test("a machine works for its owner's team wherever it happened to register", async (t) => {
+  // The afternoon this cost, in one test.
+  //
+  // A desktop app picks an organization at start, before any task exists,
+  // from whichever one it guessed — and a co-founder's laptop guessed a
+  // stranger's. It registered there, polled there, and reported itself
+  // "polling" the whole time, while the agent it existed to run stayed grey
+  // in the only room anybody was looking at. Two promotions and a billing
+  // flag later, nothing had changed, because none of them were what was
+  // wrong.
+  //
+  // So the guess no longer decides anything. Liveness asks whether this
+  // person's machine is polling; the lease asks whether this person may work
+  // in this project. Neither asks which organization a desktop app named
+  // before the work existed.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const shared = await invitableRepository(owner, "the-real-work");
+
+  // Somebody else's organization, which this account has nothing to do with.
+  const elsewhere = await runtime.store.createOrganization({
+    slug: "a-strangers-team",
+    name: "A Stranger's Team",
+  });
+
+  const mate = await runtime.store.createUser({
+    email: "mate2@example.com",
+    displayName: "Mate",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  // Invited to one repository and nothing else — no membership anywhere,
+  // which is exactly the shape that used to make this unrecoverable.
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: shared,
+    userId: mate.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    comped: false,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Deployment administration, granted to unstick them — which is what made
+  // the stranger's organization visible to their desktop at all, and so what
+  // made the wrong guess possible. Registering there is refused outright
+  // without it, which is the register route working exactly as intended and
+  // is why this was never reproducible until somebody was promoted.
+  await runtime.store.updateUser(mate.id, { systemAdmin: true });
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: mate.email, password: PASSWORD },
+  });
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "their laptop", scopes: ["view", "run_task"] },
+  });
+  const token = minted.data.token as string;
+
+  // The wrong guess, made real: registered into the stranger's organization.
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: elsewhere.id,
+        name: "their-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(registered.status, 201);
+  const workerId = registered.data.id as string;
+
+  // And it still takes work from the team it actually belongs to.
+  const leased = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    {
+      method: "POST",
+      body: { workerId, projectId: DEFAULT_PROJECT_ID },
+    },
+  );
+  assert.notEqual(
+    leased.status,
+    403,
+    "a guess made before the work existed must not decide whether work is " +
+      "handed out — this used to be worker_organization_mismatch",
+  );
+  assert.ok(
+    leased.status === 200 || leased.status === 204,
+    `expected an assignment or an empty queue, got ${String(leased.status)}`,
+  );
+
+  // Polling anywhere is polling. The row the fleet listing files this
+  // machine under is now cosmetic, and liveness stopped reading it.
+  const live = await runtime.gateway.liveWorkerOwners(DEFAULT_ORGANIZATION_ID);
+  assert.deepEqual(
+    [...(live.get(mate.id) ?? new Set<string>())],
+    ["codex"],
+    "their agent is reachable in the room they were invited to",
+  );
+});

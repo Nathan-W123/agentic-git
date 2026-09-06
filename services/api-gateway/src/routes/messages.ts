@@ -1226,7 +1226,28 @@ export async function routeMessages(
             {
               userId: entry.userId,
               role: entry.role,
-              user: { id: user.id, displayName: user.displayName },
+              user: {
+                id: user.id,
+                displayName: user.displayName,
+                // Sent so the control that grants deployment administration
+                // can also take it back. The menu item is one item that reads
+                // this to decide which of the two it is; without it the answer
+                // was `undefined`, so it always drew "Make deployment admin"
+                // and the revoke — route, client call and handler, all of
+                // which exist — could not be reached from anywhere in the
+                // product. Granting it is a large, permanent widening: a
+                // system administrator reaches every organization on the
+                // deployment, which quietly changes which one somebody's
+                // machine picks to work in. Being unable to undo that was the
+                // whole problem.
+                //
+                // Only for an administrator, who is the only viewer the item
+                // is drawn for. Everybody else's roster says no more about who
+                // runs this deployment than it did before.
+                ...(principal.user.systemAdmin
+                  ? { systemAdmin: user.systemAdmin === true }
+                  : {}),
+              },
             },
           ];
     });

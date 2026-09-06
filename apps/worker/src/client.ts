@@ -453,7 +453,14 @@ export class WorkerClient {
   /** Returns undefined when the queue is empty, signalled by a 204. */
   public async lease(
     workerId: string,
-    projectId: string,
+    /**
+     * The one project to poll, or nothing to be handed work from any of them.
+     *
+     * Optional because a worker cannot know where work will be filed. Absent,
+     * the control plane searches every project this account can work in —
+     * which is where the answer actually lives.
+     */
+    projectId: string | undefined,
     repositoryId?: string,
     /**
      * What this worker can execute. Absent means work alone, which is what
@@ -467,7 +474,12 @@ export class WorkerClient {
       method: "POST",
       body: {
         workerId,
-        projectId,
+        // Omitted rather than sent empty: an older control plane requires the
+        // field and refuses without it, and a refusal is a better failure
+        // than a silent poll of the wrong project.
+        ...(projectId === undefined || projectId === ""
+          ? {}
+          : { projectId }),
         // What this build can be handed. A lease can carry things an older
         // worker does not know how to run — MCP servers, most recently — and
         // handing them to one that ignores them is a task that runs without

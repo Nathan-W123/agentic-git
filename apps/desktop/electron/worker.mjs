@@ -91,6 +91,16 @@ let stayAwake = false;
 let failures = 0;
 let restartTimer;
 /**
+ * The control plane's reason for refusing this worker, while it stands.
+ *
+ * Needed because `heard` below reports every line the child writes as
+ * evidence that it is running — which is right for the log it narrates and
+ * exactly wrong for a refusal, the one message that means the opposite. The
+ * refusal arrives as a signal rather than on stderr, and this holds it in
+ * front of the noise until the worker actually registers.
+ */
+let refusal;
+/**
  * The MCP servers this process has already asked about, and whether it is
  * asking right now.
  *
@@ -241,7 +251,8 @@ async function startWorkerOnce(here, session, onEvent) {
     state: "running",
     detail:
       `Joined ${tenancy.projectName ?? tenancy.projectId ?? "the default project"} ` +
-      `(${tenancy.organizationId}).`,
+      `(${process.env.COORD_ORGANIZATION?.trim() || tenancy.organizationId})` +
+      `${process.env.COORD_ORGANIZATION?.trim() ? ", set by COORD_ORGANIZATION" : ""}.`,
   });
 
   const root = workerRoot();
@@ -256,7 +267,15 @@ async function startWorkerOnce(here, session, onEvent) {
       ...process.env,
       COORD_SERVER: session.server,
       COORD_TOKEN: session.token,
-      COORD_ORGANIZATION: tenancy.organizationId,
+      // Discovery, unless somebody has overruled it. Set last it always won,
+      // so the documented way to point a worker at a particular tenant —
+      // `COORD_ORGANIZATION`, which the worker itself reads and
+      // `docs/deployment/desktop-worker.md` describes — did nothing at all
+      // through the app, silently. That is the wrong shape for an escape
+      // hatch: the moment discovery chooses wrong is the moment somebody
+      // needs one, and there was none short of running the bundle by hand.
+      COORD_ORGANIZATION:
+        process.env.COORD_ORGANIZATION?.trim() || tenancy.organizationId,
       COORD_PROJECT_ROOT: root,
       COORD_WORKER_NAME: deviceName(),
       // The installed build, so the fleet can say which machine is on which.
@@ -288,13 +307,23 @@ async function startWorkerOnce(here, session, onEvent) {
   const heard = (line) => {
     const text = String(line);
     log?.write(text);
-    // Kept out of the menu, kept in the log. The status line is the one place
-    // a person is told why their machine is not working, and every worker
-    // prints Node's SQLite warning the moment it starts — so the answer to
-    // "why is nothing happening" was reliably replaced, within milliseconds,
-    // by a sentence about an experimental feature that is not the problem and
-    // never will be. Somebody read that line while the failure that mattered
-    // sat in the log underneath it.
+    // Two ways the one status line gets taken away from the person reading
+    // it, and both are handled here.
+    //
+    // A refusal first, because it outranks everything: a worker being told it
+    // may not register is not running, and every line it prints while waiting
+    // out the retry would say that it is. Held until the worker actually
+    // registers.
+    if (refusal !== undefined) {
+      return;
+    }
+    // Then the noise. The status line is the one place a person is told why
+    // their machine is not working, and every worker prints Node's SQLite
+    // warning the moment it starts — so the answer to "why is nothing
+    // happening" was reliably replaced, within milliseconds, by a sentence
+    // about an experimental feature that is not the problem and never will
+    // be. Somebody read that line while the failure that mattered sat in the
+    // log underneath it.
     const meaningful = text
       .split("\n")
       .map((part) => part.trim())
@@ -318,6 +347,18 @@ async function startWorkerOnce(here, session, onEvent) {
     } else if (message?.type === "idle") {
       busy = false;
       reconsiderAwake();
+    } else if (message?.type === "registration-refused") {
+      // The child is alive and waiting, not dead, so this is deliberately not
+      // a restart: restarting a refused worker only refuses it again sooner.
+      // It heals when somebody with administrative access fixes the thing the
+      // sentence names, and the worker notices by itself.
+      refusal = String(message.detail ?? "").trim();
+      onEvent?.({
+        state: "stopped",
+        detail: refusal.length === 0 ? "Registration was refused." : refusal,
+      });
+    } else if (message?.type === "registered") {
+      refusal = undefined;
     } else if (message?.type === "mcp-offered") {
       // The child ran without these and has said so to the room; the one
       // thing it cannot do is ask the person whose machine this is.
@@ -327,6 +368,7 @@ async function startWorkerOnce(here, session, onEvent) {
 
   child.once("exit", (code) => {
     busy = false;
+    refusal = undefined;
     reconsiderAwake();
     const ranForMs = Date.now() - startedAt;
     child = undefined;

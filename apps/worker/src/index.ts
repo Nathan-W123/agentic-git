@@ -6,6 +6,7 @@ import { CoordinatorProject } from "@coord/cli/project";
 
 import { WorkerClient } from "./client.js";
 import { WorkNudge } from "./nudge.js";
+import { registerWhenAllowed } from "./registration.js";
 import { Worker } from "./worker.js";
 
 function required(name: string): string {
@@ -78,7 +79,7 @@ async function main(): Promise<void> {
     ...(adapters === undefined ? {} : { adapters }),
   });
 
-  const id = await worker.register();
+  const id = await registerWhenAllowed(() => worker.register());
   const advertised = worker.advertisedAdapters;
   console.log(
     `Worker ${id} polling ${serverUrl} for ${

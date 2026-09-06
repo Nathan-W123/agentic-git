@@ -31,13 +31,31 @@ test("a worker registers, leases exclusively, and heartbeats", async (t) => {
   assert.equal(registered.status, 201);
   const workerId = registered.data.id as string;
 
+  // Naming no project is a question, not a mistake.
+  //
+  // It used to be a 400, and the desktop app answered it with a guess made
+  // at start — before any task existed — so a machine polled one project
+  // forever and was deaf to work filed anywhere else its owner could reach.
+  // Now the control plane searches what that account can actually work in,
+  // which is the only side that knows. Nothing is queued here, so the honest
+  // answer is the same empty one a named project gives.
   const unscoped = await bearer(
     runtime.origin,
     "/api/v1/workers/leases",
     token,
     { method: "POST", body: { workerId } },
   );
-  assert.equal(unscoped.status, 400);
+  assert.equal(unscoped.status, 204);
+
+  // A project that *is* named is still authorized, so nothing that used to
+  // be a refusal quietly became an empty queue.
+  const elsewhere = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    { method: "POST", body: { workerId, projectId: "project_not_yours" } },
+  );
+  assert.equal(elsewhere.status, 404);
 
   // Nothing queued yet, so the poll must say so without a body.
   const empty = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
@@ -1315,4 +1333,118 @@ test("an agent colour must be a plain hex triple", async (t) => {
       assert.equal(rejected.status, 400, `${field}: ${value} should be refused`);
     }
   }
+});
+
+test("work is found where it was filed, not where the machine guessed", async (t) => {
+  // The last half of the afternoon.
+  //
+  // A worker had to name one project, and the desktop app answered from a
+  // guess made at start, before any task existed — so a machine polled that
+  // one project forever and was deaf to work filed anywhere else its owner
+  // could reach. Removing the gates that refused it was not enough: it was
+  // still asking the wrong question, five seconds at a time, and being
+  // answered honestly.
+  //
+  // The task has always known its own project. It just was not allowed to
+  // matter, because the worker had already narrowed the question.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  // A second project, which no desktop guess would have landed on.
+  const created = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/projects`,
+    { method: "POST", body: { slug: "elsewhere", name: "Elsewhere" } },
+  );
+  assert.equal(created.status, 201);
+  const elsewhere = created.data.project.id as string;
+
+  const repositoryId = "repo_far_away";
+  await runtime.store.saveRepository({
+    id: repositoryId,
+    path: "/canonical/far-away.git",
+    branch: "main",
+  });
+  await runtime.store.linkRepository(elsewhere, repositoryId);
+
+  const minted = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "a machine", scopes: ["view", "run_task"] },
+  });
+  const token = minted.data.token as string;
+
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "a-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(registered.status, 201);
+  const workerId = registered.data.id as string;
+
+  // Filed in the project nobody's machine was watching.
+  await runtime.store.submitTask({
+    repositoryId,
+    projectId: elsewhere,
+    objective: "fix the login redirect",
+    agentId: "codex",
+    validationCommands: [],
+  });
+
+  // Asked for without naming anywhere, and found.
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId },
+  });
+  assert.equal(
+    leased.status,
+    200,
+    "a worker that names no project must be handed work from any of them",
+  );
+  assert.equal(leased.data.task.projectId, elsewhere);
+  assert.equal(leased.data.task.repositoryId, repositoryId);
+
+  // And the heartbeat is written whether or not anything was found.
+  //
+  // Checked on an *empty* poll specifically, because that is the case that
+  // was broken and the successful one hides it: touched on the far side of
+  // the search, a worker whose polls found nothing never had its heartbeat
+  // written at all. It aged out after three minutes and its owner's agents
+  // went grey, while its own status line still said "polling" — which is
+  // exactly the state a co-founder's laptop sat in for two hours.
+  const seenAt = async (): Promise<string> => {
+    const fleet = await bearer(
+      runtime.origin,
+      `/api/v1/workers?organizationId=${DEFAULT_ORGANIZATION_ID}`,
+      token,
+    );
+    const mine = (
+      fleet.data.workers as Array<{ id: string; lastSeenAt: string }>
+    ).find((worker) => worker.id === workerId);
+    assert.ok(mine !== undefined, "the machine is in the fleet");
+    return mine.lastSeenAt;
+  };
+  const before = await seenAt();
+
+  // The queue is empty now — the only task was handed out above.
+  const nothing = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    { method: "POST", body: { workerId } },
+  );
+  assert.equal(nothing.status, 204, "and there is nothing left to hand out");
+  assert.ok(
+    Date.parse(await seenAt()) > Date.parse(before),
+    "a poll that finds nothing still says the machine is alive, which is " +
+      "the only thing liveness reads",
+  );
 });
