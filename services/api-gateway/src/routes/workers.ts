@@ -295,18 +295,25 @@ export async function routeWorkers(
       projectId,
       "run_task",
     );
-    // Visibility widened to the organization; execution did not follow it
-    // across one. A user who belongs to two organizations could otherwise
-    // point a worker registered in one at work belonging to the other, and
-    // the resulting workspace, bundle, and changeset would carry another
-    // tenant's code on a machine that tenant never admitted to its fleet.
-    if (worker.organizationId !== project.organizationId) {
-      throw new HttpError(
-        403,
-        "worker_organization_mismatch",
-        "This worker is registered to a different organization",
-      );
-    }
+    // Deliberately not compared against `worker.organizationId`.
+    //
+    // It used to be, to keep a machine out of a tenant that had never
+    // admitted it to its fleet. The property was real; the mechanism was
+    // wrong, because the organization on a worker is chosen by the desktop
+    // app at start — before any task exists — from whichever organization it
+    // guessed. A person who belongs to two teams therefore had one of them
+    // silently unreachable from their own laptop, and when a wider account
+    // made the guess wider still, a machine registered into a stranger's
+    // organization and sat there polling: alive, healthy, and invisible to
+    // the team it was bought for.
+    //
+    // `authorizeProject` above is the honest form of the same property. It
+    // has already established that this account may run work in this project,
+    // through membership or through a grant, and under local execution the
+    // machine is that account's own. So the invariant enforced now is "a
+    // machine runs only what its owner is entitled to run", which is
+    // strictly what was meant, and does not depend on a guess made before
+    // the work existed.
 
     const nowIso = new Date().toISOString();
     // Reclaim anything a dead worker was holding before handing out new

@@ -3888,11 +3888,30 @@ export class ApiGateway {
     // made the commonest query in the product scale with how often people had
     // restarted their desktops.
     const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
+    // Every machine that is polling, whoever it belongs to.
+    //
+    // `organizationId` is accepted and deliberately not used to filter. It
+    // used to be, against the organization stamped on the worker row — and
+    // that stamp is chosen by a desktop app at start, before any task exists,
+    // out of whichever organization it guessed. So a person in two teams was
+    // live in one of them and grey in the other, on the same laptop, with
+    // nothing anywhere saying which; and when a wider account made the guess
+    // wider still, a machine registered into a stranger's organization polled
+    // away happily, healthy and invisible to the team that owned it.
+    //
+    // Narrowing it back by membership would not do, either: somebody invited
+    // to a single repository holds a grant and no membership at all, and they
+    // are exactly the people whose agents most need to be reachable.
+    //
+    // Nothing is widened by dropping it. This answers "is this person's
+    // machine polling", and the only people it is ever asked about are the
+    // ones already in the room doing the asking — every caller resolves an
+    // agent from a channel roster first, and an agent's owner is somebody
+    // that roster already lists. Whether they may work *here* is settled by
+    // `authorizeProject` when the lease is taken, which is the place that
+    // decides, rather than by a guess made before the work existed.
     const workers = await this.options.store
-      .listWorkers({
-        ...(organizationId === undefined ? {} : { organizationId }),
-        seenAfter: cutoff,
-      })
+      .listWorkers({ seenAfter: cutoff })
       .catch((): [] => []);
     const polling = new Map<string, Set<string>>();
     for (const worker of workers) {

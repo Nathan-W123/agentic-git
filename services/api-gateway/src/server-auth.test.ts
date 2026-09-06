@@ -1312,3 +1312,112 @@ test("deployment administration can be taken back, not only given", async (t) =>
     "a non-administrator is told no more than before",
   );
 });
+
+test("a machine works for its owner's team wherever it happened to register", async (t) => {
+  // The afternoon this cost, in one test.
+  //
+  // A desktop app picks an organization at start, before any task exists,
+  // from whichever one it guessed — and a co-founder's laptop guessed a
+  // stranger's. It registered there, polled there, and reported itself
+  // "polling" the whole time, while the agent it existed to run stayed grey
+  // in the only room anybody was looking at. Two promotions and a billing
+  // flag later, nothing had changed, because none of them were what was
+  // wrong.
+  //
+  // So the guess no longer decides anything. Liveness asks whether this
+  // person's machine is polling; the lease asks whether this person may work
+  // in this project. Neither asks which organization a desktop app named
+  // before the work existed.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const shared = await invitableRepository(owner, "the-real-work");
+
+  // Somebody else's organization, which this account has nothing to do with.
+  const elsewhere = await runtime.store.createOrganization({
+    slug: "a-strangers-team",
+    name: "A Stranger's Team",
+  });
+
+  const mate = await runtime.store.createUser({
+    email: "mate2@example.com",
+    displayName: "Mate",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  // Invited to one repository and nothing else — no membership anywhere,
+  // which is exactly the shape that used to make this unrecoverable.
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: shared,
+    userId: mate.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    comped: false,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Deployment administration, granted to unstick them — which is what made
+  // the stranger's organization visible to their desktop at all, and so what
+  // made the wrong guess possible. Registering there is refused outright
+  // without it, which is the register route working exactly as intended and
+  // is why this was never reproducible until somebody was promoted.
+  await runtime.store.updateUser(mate.id, { systemAdmin: true });
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: mate.email, password: PASSWORD },
+  });
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "their laptop", scopes: ["view", "run_task"] },
+  });
+  const token = minted.data.token as string;
+
+  // The wrong guess, made real: registered into the stranger's organization.
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: elsewhere.id,
+        name: "their-laptop",
+        adapters: ["codex"],
+        version: "1.0.0",
+      },
+    },
+  );
+  assert.equal(registered.status, 201);
+  const workerId = registered.data.id as string;
+
+  // And it still takes work from the team it actually belongs to.
+  const leased = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    {
+      method: "POST",
+      body: { workerId, projectId: DEFAULT_PROJECT_ID },
+    },
+  );
+  assert.notEqual(
+    leased.status,
+    403,
+    "a guess made before the work existed must not decide whether work is " +
+      "handed out — this used to be worker_organization_mismatch",
+  );
+  assert.ok(
+    leased.status === 200 || leased.status === 204,
+    `expected an assignment or an empty queue, got ${String(leased.status)}`,
+  );
+
+  // Polling anywhere is polling. The row the fleet listing files this
+  // machine under is now cosmetic, and liveness stopped reading it.
+  const live = await runtime.gateway.liveWorkerOwners(DEFAULT_ORGANIZATION_ID);
+  assert.deepEqual(
+    [...(live.get(mate.id) ?? new Set<string>())],
+    ["codex"],
+    "their agent is reachable in the room they were invited to",
+  );
+});
