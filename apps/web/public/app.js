@@ -2531,10 +2531,34 @@ function workspaceSection() {
         },
         {
           term: "People",
-          value: exactCountLabel(
-            (state.members ?? []).length,
-            (state.members ?? []).length === 1 ? "member" : "members",
-          ),
+          // The people who can reach the channel named directly above, not
+          // the organization's membership list.
+          //
+          // This panel names a project and a channel and then reported a
+          // count from a third scope, and the three do not agree: somebody
+          // invited to a repository holds a grant and no membership, so they
+          // are in the channel, in its roster, mentionable, running agents —
+          // and absent from this number. It read "1 member" for a workspace
+          // two people were working in, which is how an afternoon went by
+          // with nobody suspecting the invitation had only ever reached the
+          // innermost of the three things this screen calls a workspace.
+          //
+          // The channel roster is the honest list, and the one this screen is
+          // about: the server builds it from memberships and grants together.
+          // With no channel open there is no roster to count, and the
+          // organization's own membership is the right answer to a question
+          // about the organization.
+          value: (() => {
+            const roster =
+              repository === undefined
+                ? undefined
+                : state.channelPeople?.[repository.id];
+            const people = roster ?? state.members ?? [];
+            return exactCountLabel(
+              people.length,
+              people.length === 1 ? "person" : "people",
+            );
+          })(),
         },
       ])}</div>`,
   })}${invitationsCard()}${settingsSectionBlock({
