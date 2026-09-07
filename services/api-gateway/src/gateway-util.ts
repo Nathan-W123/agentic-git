@@ -276,7 +276,19 @@ export function matchPath(pathname: string, pattern: RegExp): string[] | undefin
     return undefined;
   }
   try {
-    return match.slice(1).map((value) => decodeURIComponent(value));
+    // An optional group that did not participate stays absent. Decoding it
+    // instead produced the *string* `"undefined"`, which is not falsy, is not
+    // `undefined`, and defeats both of the ways a caller can ask whether a
+    // segment was there: the `= ""` destructuring defaults through this file
+    // never fired, and `x === undefined` was false for a path that plainly
+    // did not have that segment.
+    return match
+      .slice(1)
+      .map((value) =>
+        value === undefined
+          ? (undefined as unknown as string)
+          : decodeURIComponent(value),
+      );
   } catch {
     throw new HttpError(
       400,

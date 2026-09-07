@@ -14014,6 +14014,130 @@ dialog.modal[open]::backdrop {
   to { opacity: 0; transform: translateX(10px); }
 }
 
+/* -------------------------------------------------- branch review ---- */
+/*
+ * The pull request a work channel is, in the column beside the transcript.
+ *
+ * Built from the surfaces already here — the file panel's stats row, the
+ * empty state, the unified diff — so reading a branch and reading a file look
+ * like the same kind of thing, because they are.
+ */
+.branch-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+
+.branch-summary {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-counts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.branch-count {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.branch-count.behind {
+  color: var(--orange);
+  font-weight: 600;
+}
+
+.branch-note {
+  padding: 12px 16px;
+  font-size: 12.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.branch-summary .branch-note {
+  padding: 0;
+}
+
+.branch-note.err {
+  color: var(--red);
+}
+
+.branch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-files {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+}
+
+.branch-file-open {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  padding: 5px 0;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+  /* A path is read from its end: the file matters more than the directory it
+     is in, and a truncated head still identifies it. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+}
+
+.branch-file-open:hover {
+  color: var(--text-1);
+  text-decoration: underline;
+}
+
+.branch-file.conflicted .branch-file-open {
+  color: var(--red);
+}
+
+.branch-conflict {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--red);
+}
+
+.branch-diff {
+  min-height: 0;
+  overflow-x: auto;
+}
+
+.branch-panel .fp-stats {
+  display: inline-flex;
+  gap: 6px;
+  font-size: 0.78rem;
+  flex: none;
+}
+
 .secondary-info-body,
 .secondary-profile-body {
   padding: 16px;

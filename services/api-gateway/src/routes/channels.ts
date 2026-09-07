@@ -129,12 +129,16 @@ export async function routeChannels(
           // hand, and a list that disagreed with the write would show a
           // composer that 403s.
           canPost:
-            member ||
-            channel.visibility === "public" ||
-            // Redundant since #general is stored `public`, and kept because
-            // a database restored from before that migration would other-
-            // wise make the room every project has read-only for everybody.
-            channel.slug === GENERAL_SUB_CHANNEL_SLUG,
+            // A merged work channel is finished and its branch is gone; the
+            // write path refuses it, and a list that said otherwise would
+            // draw a composer that 403s.
+            channel.mergedAt === undefined &&
+            (member ||
+              channel.visibility === "public" ||
+              // Redundant since #general is stored `public`, and kept because
+              // a database restored from before that migration would other-
+              // wise make the room every project has read-only for everybody.
+              channel.slug === GENERAL_SUB_CHANNEL_SLUG),
           // How much of this room the caller has not read. Zero rather than
           // absent, so the browser never has to tell "no badge" apart from
           // "the server did not say".
@@ -335,6 +339,243 @@ export async function routeChannels(
       return true;
     }
     throw new HttpError(405, "method_not_allowed", "Unsupported method");
+  }
+
+  // ---- The pull request a work channel is ---------------------------------
+  // A work channel is a branch, so it is already the unit a pull request
+  // describes: the conversation, the tasks, the diff and the merge are one
+  // thing rather than a thread over here and a review over there. These three
+  // routes are the whole of it — what the branch has, bringing the
+  // repository's own branch into it, and landing it.
+  const branchMatch = matchPath(
+    path,
+    new RegExp(
+      `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channels/([^/]+)/branch(?:/(refresh|merge))?$`,
+      "u",
+    ),
+  );
+  if (branchMatch !== undefined) {
+    const [projectId = "", repositoryId = "", channelId = "", verb] =
+      branchMatch;
+    const permission =
+      verb === undefined
+        ? "view"
+        : // Landing on canonical is the most consequential write in the
+          // system, and `review` is the permission that says so by name.
+          // Bringing canonical *into* a channel touches only that channel's
+          // own branch, so it is work, and anybody who can do work here may.
+          verb === "merge"
+          ? "review"
+          : "submit_task";
+    await authorizeRepository(
+      gw.options.store,
+      principal,
+      projectId,
+      repositoryId,
+      permission,
+    );
+    if (
+      !(await gw.options.store.projectHasRepository(projectId, repositoryId))
+    ) {
+      throw new HttpError(404, "not_found", "Repository was not found");
+    }
+    const channel = await gw.authorizeSubChannel({
+      projectId,
+      repositoryId,
+      channelId,
+      principal,
+    });
+    const branch = channel.branch;
+    if (branch === undefined) {
+      throw new HttpError(
+        409,
+        "not_a_branch",
+        `#${channel.slug} is a conversation, not a branch. Work said here ` +
+          "lands on the repository's own branch.",
+      );
+    }
+    const operations = gw.options.operations;
+    if (
+      operations.branchComparison === undefined ||
+      operations.mergeBranch === undefined ||
+      operations.refreshBranch === undefined
+    ) {
+      throw new HttpError(
+        501,
+        "not_supported",
+        "This deployment cannot read or merge branches",
+      );
+    }
+
+    // A merged channel is finished. Its branch is gone, so there is nothing
+    // left to compare, refresh or merge — and answering anything but "this
+    // landed" would describe a branch that no longer exists.
+    if (channel.mergedAt !== undefined) {
+      if (verb !== undefined) {
+        throw new HttpError(
+          409,
+          "already_merged",
+          `#${channel.slug} was already merged. Open a new channel for ` +
+            "follow-up work.",
+        );
+      }
+      gw.sendJson(response, 200, {
+        branch,
+        merged: true,
+        mergedAt: channel.mergedAt,
+        mergedBy: channel.mergedBy,
+      });
+      return true;
+    }
+
+    if (verb === undefined) {
+      if (method !== "GET") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      const comparison = await gw.performOperation(
+        "branch_failed",
+        async () =>
+          await operations.branchComparison!({
+            projectId,
+            repositoryId,
+            branch,
+          }),
+      );
+      gw.sendJson(response, 200, {
+        branch,
+        merged: false,
+        ...comparison,
+        // Whether the person asking could land it themselves, so the browser
+        // knows whether to draw the button. Derived rather than asked for
+        // separately: the answer is already in hand, and a review surface
+        // that offered a merge the server would refuse is worse than one that
+        // never offered it.
+        canMerge: await authorizeRepository(
+          gw.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "review",
+        ).then(
+          () => true,
+          () => false,
+        ),
+      });
+      return true;
+    }
+
+    if (method !== "POST") {
+      throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
+    if (verb === "refresh") {
+      const refreshed = await gw.performOperation(
+        "branch_failed",
+        async () =>
+          await operations.refreshBranch!({
+            projectId,
+            repositoryId,
+            branch,
+          }),
+      );
+      // Said in the room either way. A branch that caught up is worth one
+      // line, and one that could not is the only warning anybody gets before
+      // the merge refuses at the end for the same reason.
+      await gw.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        refreshed.merged
+          ? `Brought the repository's latest into \`${branch}\`. Nothing ` +
+            "conflicted."
+          : `Could not bring the repository's latest into \`${branch}\`: ` +
+            `${refreshed.conflicts.join(", ")} ${
+              refreshed.conflicts.length === 1 ? "conflicts" : "conflict"
+            }. Somebody has to resolve ${
+              refreshed.conflicts.length === 1 ? "it" : "them"
+            } before this can merge.`,
+        channel.id,
+      );
+      await gw.options.store.appendAudit(undefined, {
+        type: "channel_updated",
+        data: {
+          projectId,
+          repositoryId,
+          channelId: channel.id,
+          slug: channel.slug,
+          branch,
+          refreshed: refreshed.merged,
+          actorId: principal.user.id,
+        },
+      });
+      gw.sendJson(response, 200, refreshed);
+      return true;
+    }
+
+    const merged = await gw.performOperation(
+      "branch_failed",
+      async () =>
+        await operations.mergeBranch!({
+          projectId,
+          repositoryId,
+          branch,
+          message:
+            `Merge #${channel.slug}\n\n` +
+            `Work channel #${channel.slug}, merged from ${branch}.`,
+        }),
+    );
+    if (!merged.merged) {
+      await gw.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        `\`${branch}\` cannot merge yet: ${merged.conflicts.join(", ")} ` +
+          `${merged.conflicts.length === 1 ? "conflicts" : "conflict"} with ` +
+          "the repository's own branch. Bring the latest in and resolve " +
+          "them, then try again.",
+        channel.id,
+      );
+      gw.sendJson(response, 409, {
+        error: {
+          code: "merge_conflict",
+          message: `${branch} conflicts with the repository's own branch`,
+          conflicts: merged.conflicts,
+        },
+      });
+      return true;
+    }
+    // Recorded after the merge, not before: a channel marked merged whose
+    // branch never landed is a channel that has closed itself over work
+    // nobody has.
+    const closed = await gw.options.store.mergeSubChannel(
+      repositoryId,
+      channel.id,
+      { mergedAt: new Date().toISOString(), mergedBy: principal.user.id },
+    );
+    await gw.postChannelSystemMessage(
+      projectId,
+      repositoryId,
+      `Merged \`${branch}\` into the repository. This channel is finished — ` +
+        "open a new one for follow-up work.",
+      channel.id,
+    );
+    await gw.options.store.appendAudit(undefined, {
+      type: "channel_updated",
+      data: {
+        projectId,
+        repositoryId,
+        channelId: channel.id,
+        slug: channel.slug,
+        branch,
+        merged: true,
+        revision: merged.revision,
+        actorId: principal.user.id,
+      },
+    });
+    gw.sendJson(response, 200, {
+      merged: true,
+      revision: merged.revision,
+      channel: closed ?? channel,
+    });
+    return true;
   }
 
   const subChannelMatch = matchPath(

@@ -187,6 +187,59 @@ test("a channel can be opened as a branch, and says so everywhere it is shown", 
   assert.match(panel, /channel\.branch\s*\?\s*""\s*:\s*`<button[^`]*sub-channel-rename/u);
 });
 
+test("a work channel's branch is reviewed and merged from the room itself", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const styles = await publicFile("styles.css");
+
+  // The way in sits with the room, not on a separate screen: the diff, the
+  // conversation and the tasks that produced it are one thing.
+  assert.match(chats, /act: "branch-review-open"/u);
+  // And only where there is a branch. A button that opened an empty panel
+  // would be worse than no button.
+  assert.match(
+    chats,
+    /main && openSubChannel\(repositoryId\)\?\.branch\s*\n?\s*\?\s*iconButton\("branch"/u,
+  );
+
+  // It draws in the secondary column, beside the transcript, the way threads
+  // and files already do — so reading the diff and reading what people said
+  // about it happen side by side.
+  assert.match(chats, /case "branch":\s*\n\s*return branchReviewPanel\(repositoryId\)/u);
+  assert.match(app, /openSecondaryContext\("branch"\)/u);
+
+  // The three states the panel has to tell apart, and does.
+  assert.match(chats, /review\.merged === true/u);
+  assert.match(chats, /\(review\.ahead \?\? 0\) === 0/u);
+  assert.match(chats, /conflicts\.length > 0/u);
+  // The merge button is drawn only for somebody the server would let merge,
+  // and disabled while anything conflicts.
+  assert.match(chats, /review\.canMerge === true/u);
+  assert.match(chats, /busy \|\| conflicts\.length > 0 \? "disabled" : ""/u);
+  assert.match(styles, /\.branch-panel \.fp-stats/u);
+
+  // Merging closes the channel, so it is confirmed rather than a single
+  // click, and the transcript is re-read for the line the server posts.
+  const merge = app.slice(app.indexOf('case "branch-review-merge"'));
+  const handler = merge.slice(0, merge.indexOf('case "secondary-context-close"'));
+  assert.match(handler, /showModal\(/u);
+  assert.match(handler, /mergeBranchReview\(repositoryId, value\)/u);
+  assert.match(handler, /ensureChannelMessages\(repositoryId, render\)/u);
+
+  // The review is not patched in from the write's response: a refresh or a
+  // merge moves the branch, so every number in it is about a commit that no
+  // longer exists.
+  for (const name of ["refreshBranchReview", "mergeBranchReview"]) {
+    const fn = data.slice(data.indexOf(`export async function ${name}`));
+    assert.match(
+      fn.slice(0, fn.indexOf("\n}")),
+      /loadBranchReview\(repositoryId, channelId\)/u,
+      name,
+    );
+  }
+});
+
 test("switching rooms clears every cache it names, and cannot half-finish", async () => {
   const data = await publicFile("data.js");
 

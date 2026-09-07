@@ -4193,6 +4193,14 @@ export class ApiGateway {
      */
     admin = false,
   ): Promise<boolean> {
+    // A merged work channel is finished, and its branch is gone with it.
+    // Anything said here now would be dispatched against a branch nothing can
+    // check out, so the room closes rather than accepting work it cannot
+    // route. Read first, and ahead of every other rule including `#general`'s
+    // — which never has a branch, so this can never close it.
+    if (channel.mergedAt !== undefined) {
+      return false;
+    }
     if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
       return true;
     }

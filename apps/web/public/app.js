@@ -67,6 +67,9 @@ import {
   moveChannelFile,
   saveChannelFile,
   createSubChannel,
+  loadBranchReview,
+  mergeBranchReview,
+  refreshBranchReview,
   deleteSubChannel,
   ensureChannelMessages,
   ensureChannelRoster,
@@ -10104,6 +10107,83 @@ document.addEventListener("click", (event) => {
       setChanDrawer(false);
       render();
       return;
+    /* --------------------------------------------- branch review ---- */
+    /**
+     * The pull request a work channel is, opened beside the transcript.
+     *
+     * Read on open rather than kept fresh in the background: it is a handful
+     * of Git commands per branch, and the answer only changes when work lands
+     * or somebody merges — both of which are re-reads this file already asks
+     * for by hand.
+     */
+    case "branch-review-open": {
+      const repositoryId = value || activeChannelId();
+      const channelId = activeSubChannelId(repositoryId);
+      openSecondaryContext("branch");
+      render();
+      if (channelId) {
+        void loadBranchReview(repositoryId, channelId).then(render);
+      }
+      return;
+    }
+    case "branch-review-reload": {
+      const repositoryId = activeChannelId();
+      void loadBranchReview(repositoryId, value).then(render);
+      render();
+      return;
+    }
+    case "branch-review-refresh": {
+      const repositoryId = activeChannelId();
+      render();
+      void refreshBranchReview(repositoryId, value).then((outcome) => {
+        if (outcome?.merged === true) {
+          toast("Brought the repository's latest into this branch", "ok");
+        } else if (outcome !== undefined) {
+          toast(
+            `Still conflicting: ${(outcome.conflicts ?? []).join(", ")}`,
+            "error",
+          );
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      return;
+    }
+    /**
+     * Landing the branch. Confirmed first, because it is the one action here
+     * that changes what everybody else builds on — and it closes the channel,
+     * which nothing undoes.
+     */
+    case "branch-review-merge": {
+      const repositoryId = activeChannelId();
+      const review = state.branchReview[value];
+      void showModal({
+        title: "Merge into the repository",
+        subtitle:
+          `${review?.branch ?? "This branch"} lands on the repository's own ` +
+          "branch, and this channel closes. Follow-up work goes in a new one.",
+        confirm: "Merge",
+        body: "",
+      })
+        .then((values) => {
+          if (values === undefined) {
+            return undefined;
+          }
+          return mergeBranchReview(repositoryId, value).then((outcome) => {
+            if (outcome?.merged === true) {
+              toast("Merged into the repository", "ok");
+            }
+            render();
+            void ensureChannelMessages(repositoryId, render);
+            return outcome;
+          });
+        })
+        .catch((error) =>
+          toast(`Could not merge: ${error.message}`, "error"),
+        );
+      render();
+      return;
+    }
     case "secondary-context-close": {
       const closing = activeSecondaryContext();
       const closingValue =

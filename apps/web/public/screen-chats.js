@@ -2201,6 +2201,14 @@ function primaryDestinationClose(destination) {
  * destination inside it. Status and actions share one bounded group on the
  * right so a preview address cannot spread across, or overlap, the title.
  */
+/** The room this pane is showing, as the channel list knows it. */
+function openSubChannel(repositoryId) {
+  const channelId = activeSubChannelId(repositoryId);
+  return subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+}
+
 function conversationHeader(repositoryId) {
   const destination = primaryDestinationForWorkspace(repositoryId);
   const person =
@@ -2285,6 +2293,20 @@ function conversationHeader(repositoryId) {
                 value: repositoryId ?? "",
                 title: `${label} actions`,
               })
+      }
+      ${
+        // A work channel is a branch, and this is the way into what it has:
+        // the diff, how far ahead it is, and the one button that lands it.
+        // Only where there is a branch — an ordinary room has nothing to
+        // review, and a button that opened an empty panel would be worse than
+        // no button.
+        main && openSubChannel(repositoryId)?.branch
+          ? iconButton("branch", {
+              act: "branch-review-open",
+              value: repositoryId ?? "",
+              title: `Review ${openSubChannel(repositoryId)?.branch}`,
+            })
+          : ""
       }
       ${primaryDestinationClose(destination)}
     </div>
@@ -4917,6 +4939,8 @@ function rightPanel(repositoryId, kind) {
       return conversationInfoPanel(repositoryId);
     case "pins":
       return pinnedMessagesPanel(repositoryId);
+    case "branch":
+      return branchReviewPanel(repositoryId);
     case "dm":
       return dmPanel();
     case "file":
@@ -5058,6 +5082,169 @@ function conversationInfoPanel(repositoryId) {
     </header>
     <div class="thread-body secondary-info-body">${content}</div>
   </aside>`;
+}
+
+/**
+ * The pull request a work channel is.
+ *
+ * A work channel is already the unit a pull request describes — the
+ * conversation, the tasks, the diff and the merge are one thing — so this is
+ * not a second surface beside the room. It is the room's own branch, read: how
+ * far ahead it is, what changed, and the one button that lands it.
+ *
+ * Drawn in the secondary column beside the transcript, the way a thread, a
+ * file and the pins already are, so reading the diff and reading what people
+ * said about it happen side by side rather than in two places.
+ */
+function branchReviewPanel(repositoryId) {
+  const channelId = activeSubChannelId(repositoryId);
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+  const review = state.branchReview[channelId];
+  const busy = state.branchReviewBusy === channelId;
+  const branch = channel?.branch ?? review?.branch;
+  return `<aside class="thread-panel branch-panel" aria-label="Branch review">
+    ${panelGrip()}
+    <header class="thread-head">
+      ${panelKind("Branch")}
+      <span class="thread-title" title="${esc(branch ?? "")}">${
+        branch === undefined ? "This channel" : esc(branch)
+      }</span>
+      <span class="spacer"></span>
+      ${panelClose("secondary-context-close", "Close branch review (Esc)")}
+    </header>
+    <div class="thread-body branch-body"
+      data-scroll-key="branch:${esc(repositoryId)}:${esc(channelId ?? "")}">
+      ${branchReviewBody(repositoryId, channelId, review, busy)}
+    </div>
+  </aside>`;
+}
+
+/** Everything inside the branch panel, so its states read in one place. */
+function branchReviewBody(repositoryId, channelId, review, busy) {
+  if (state.branchReviewError !== undefined) {
+    return `<div class="branch-note err">${esc(state.branchReviewError)}</div>
+      <div class="branch-actions">
+        <button class="btn" type="button" data-act="branch-review-reload"
+          data-value="${esc(channelId ?? "")}">Try again</button>
+      </div>`;
+  }
+  if (review === undefined) {
+    return busy
+      ? `<div class="branch-note">Reading the branch…</div>`
+      : emptyState(
+          "branch",
+          "Nothing read yet",
+          "Open this channel's branch to see what it has.",
+        );
+  }
+  if (review.merged === true) {
+    return emptyState(
+      "check",
+      "Merged",
+      `${review.branch} landed on the repository ${relativeTime(
+        review.mergedAt,
+      )}. This channel is finished — open a new one for follow-up work.`,
+    );
+  }
+  const conflicts = review.conflicts ?? [];
+  const files = review.files ?? [];
+  const stats =
+    typeof review.patch === "string" && review.patch !== ""
+      ? patchStats(review.patch)
+      : { additions: 0, deletions: 0 };
+  // Ahead of nothing is a branch with no work on it. Said plainly rather than
+  // drawn as an empty diff, which reads as a failed read.
+  if ((review.ahead ?? 0) === 0) {
+    return `${branchSummary(review, stats, conflicts)}
+      ${emptyState(
+        "branch",
+        "Nothing to merge yet",
+        "No work has landed on this branch. Ask an agent here and it will.",
+      )}`;
+  }
+  return `${branchSummary(review, stats, conflicts)}
+    <div class="branch-actions">
+      ${
+        (review.behind ?? 0) > 0 || conflicts.length > 0
+          ? `<button class="btn" type="button" data-act="branch-review-refresh"
+               data-value="${esc(channelId ?? "")}" ${busy ? "disabled" : ""}
+               >Bring in the latest</button>`
+          : ""
+      }
+      <span class="spacer"></span>
+      ${
+        review.canMerge === true
+          ? `<button class="btn btn-primary" type="button"
+               data-act="branch-review-merge" data-value="${esc(channelId ?? "")}"
+               ${busy || conflicts.length > 0 ? "disabled" : ""}
+               title="${
+                 conflicts.length > 0
+                   ? "Resolve the conflicts first"
+                   : `Merge ${esc(review.branch ?? "")} into the repository`
+               }">Merge into the repository</button>`
+          : `<span class="branch-note">Somebody with review rights merges this.</span>`
+      }
+    </div>
+    <ul class="branch-files">
+      ${files
+        .map(
+          (file) => `<li class="branch-file${
+            conflicts.includes(file) ? " conflicted" : ""
+          }">
+            <button type="button" class="branch-file-open"
+              data-act="chan-file-open" data-value="${esc(file)}"
+              title="Open ${esc(file)}">${esc(file)}</button>
+            ${
+              conflicts.includes(file)
+                ? `<span class="branch-conflict">conflicts</span>`
+                : ""
+            }
+          </li>`,
+        )
+        .join("")}
+    </ul>
+    <div class="branch-diff">${
+      typeof review.patch === "string" && review.patch !== ""
+        ? renderUnified(parsePatch(review.patch))
+        : `<div class="branch-note">No text diff for these changes.</div>`
+    }${
+      review.truncated === true
+        ? `<div class="branch-note">The diff was too long to show in full. Every changed file is listed above.</div>`
+        : ""
+    }</div>`;
+}
+
+/** The one-line state of a branch: how far ahead, how far behind, what breaks. */
+function branchSummary(review, stats, conflicts) {
+  const ahead = review.ahead ?? 0;
+  const behind = review.behind ?? 0;
+  return `<div class="branch-summary">
+    <div class="branch-counts">
+      <span class="branch-count">${ahead} ${
+        ahead === 1 ? "commit" : "commits"
+      } ahead</span>
+      ${
+        behind > 0
+          ? `<span class="branch-count behind">${behind} behind</span>`
+          : `<span class="branch-count">up to date</span>`
+      }
+      <span class="fp-stats">
+        <span class="delta-add">+${stats.additions}</span>
+        <span class="delta-del">-${stats.deletions}</span>
+      </span>
+    </div>
+    ${
+      conflicts.length > 0
+        ? `<div class="branch-note err">${conflicts.length} ${
+            conflicts.length === 1 ? "file conflicts" : "files conflict"
+          } with the repository. Bring the latest in and resolve ${
+            conflicts.length === 1 ? "it" : "them"
+          } before this can merge.</div>`
+        : ""
+    }
+  </div>`;
 }
 
 /**

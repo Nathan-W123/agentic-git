@@ -743,6 +743,20 @@ export const state = {
   channelPins: {},
   /** Whether the pinned banner is unfolded. A reading preference, session-only. */
   pinsOpen: false,
+  /**
+   * What each work channel's branch has that the repository's does not,
+   * keyed by channel id.
+   *
+   * The pull request, in other words: the files, the patch, how far ahead and
+   * behind, whether it can merge, and whether it already did. Fetched when the
+   * review is opened rather than with the channel list — it is a Git read per
+   * branch, and the sidebar draws dozens of rows.
+   */
+  branchReview: {},
+  /** Which channel's review is being fetched or acted on, if any. */
+  branchReviewBusy: undefined,
+  /** Why the last review read or merge failed, if it did. */
+  branchReviewError: undefined,
   /** A one-shot message id the next channel render should scroll to. */
   scrollToMessage: undefined,
   /**
@@ -4338,6 +4352,99 @@ export async function createSubChannel(repositoryId, name, visibility, branch) {
     selectSubChannel(repositoryId, created.id);
   }
   return created;
+}
+
+/**
+ * What a work channel's branch has that the repository's does not.
+ *
+ * The pull request's whole substance, read in one request: the changed files,
+ * the patch taken from the merge base, how far ahead and behind the branch is,
+ * whatever would conflict, and whether the caller may land it.
+ *
+ * Kept out of the channel list on purpose. This is a handful of Git commands
+ * per branch, and the sidebar draws every room on every render.
+ */
+export async function loadBranchReview(repositoryId, channelId) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const response = await api(
+      channelsPath(repositoryId, `/${encodeURIComponent(channelId)}/branch`),
+    );
+    state.branchReview[channelId] = response;
+    return response;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    // Cleared rather than left stale: a panel showing last read's diff beside
+    // this read's error would be describing two different moments at once.
+    delete state.branchReview[channelId];
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Brings the repository's own branch into this channel's.
+ *
+ * The answer is re-read rather than patched in from the response: a refresh
+ * moves the branch, so every number in the review — ahead, behind, the patch
+ * itself — is about a commit that no longer exists.
+ */
+export async function refreshBranchReview(repositoryId, channelId) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const outcome = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/refresh`,
+      ),
+      { method: "POST", body: {} },
+    );
+    state.branchReviewBusy = undefined;
+    await loadBranchReview(repositoryId, channelId);
+    // The room is told either way by the server, so the transcript is dropped
+    // for `ensureChannelMessages` to fetch the line it just posted.
+    state.channelLoaded.delete(repositoryId);
+    return outcome;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Lands the channel's branch on the repository's own, and closes the room.
+ *
+ * The channel list is reloaded rather than patched: merging changes what the
+ * room *is* — it stops accepting posts and starts reading as finished — and
+ * the server is the only thing that knows the whole of that.
+ */
+export async function mergeBranchReview(repositoryId, channelId) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const outcome = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/merge`,
+      ),
+      { method: "POST", body: {} },
+    );
+    state.branchReviewBusy = undefined;
+    await loadSubChannels(repositoryId);
+    await loadBranchReview(repositoryId, channelId);
+    state.channelLoaded.delete(repositoryId);
+    return outcome;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
 }
 
 /** Renames a room, or changes whether it is listed to the whole project. */
