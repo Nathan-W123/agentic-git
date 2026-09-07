@@ -680,6 +680,18 @@ export interface WorkLease {
   status: WorkLeaseStatus;
   /** Canonical revision the worker must build its workspace from. */
   baseRevision: string;
+  /**
+   * The branch that revision is on, or absent for the repository's own.
+   *
+   * Beside `baseRevision` for the same reason: both say where the change is
+   * being written, and every later step — validating the plan, arbitrating a
+   * mid-run widening, integrating the result — has to answer against the same
+   * place the base came from. Reading the branch back from the task instead
+   * would work and would be one more store read on four hot paths, and would
+   * leave a window where a task edited underneath a running lease moved the
+   * branch its result integrates into.
+   */
+  branch: string | undefined;
   issuedAt: string;
   expiresAt: string;
   heartbeatAt: string;
@@ -852,6 +864,20 @@ export interface SubmitTaskInput {
   answerTo?: string;
   repositoryId: string;
   projectId?: ProjectId;
+  /**
+   * The branch this work lands on, or absent for the repository's own.
+   *
+   * Set from the channel the task was dispatched in, at submission, and
+   * carried on the row rather than looked up later: the channel could be
+   * renamed, merged or archived while the task is still queued, and the
+   * branch a change was written against is not a thing that may change
+   * underneath it.
+   *
+   * Absent is what every task written before this meant and still means —
+   * canonical — so a deployment that never makes a work channel behaves
+   * exactly as it did.
+   */
+  branch?: string;
   objective: string;
   agentId: string;
   validationCommands: ValidationCommand[];
@@ -922,6 +948,8 @@ export interface SubmittedTask {
   answerTo: string | undefined;
   repositoryId: string;
   projectId: ProjectId | undefined;
+  /** See {@link SubmitTaskInput.branch}. Absent means the repository's own. */
+  branch: string | undefined;
   objective: string;
   agentId: string;
   validationCommands: ValidationCommand[];
@@ -1739,6 +1767,33 @@ export interface SubChannel {
   /** What an admin typed. Defaults to the slug. */
   name: string;
   visibility: SubChannelVisibility;
+  /**
+   * The branch this channel's work lands on, or absent for a channel that is
+   * only a conversation.
+   *
+   * Absent is the default and what every channel written before this had, so
+   * nothing changes for a deployment that never uses it: work lands on the
+   * repository's own branch exactly as it did. `#general` is always absent,
+   * because it *is* that branch — the thing everything else merges into.
+   *
+   * Set, the channel is a unit of shippable work. Its agents are arbitrated
+   * against each other as they always were, and their changes land here
+   * rather than on canonical, so the channel can be reviewed and merged as
+   * one thing. See `docs/CHANNELS-AS-BRANCHES.md`, and in particular why a
+   * claim on anything at an interface still contends across every branch —
+   * without that, branches are isolation and this is a step backwards.
+   */
+  branch?: string;
+  /**
+   * When this channel's work was merged, and by whom.
+   *
+   * Set once the pull request opened from it is merged. A merged channel is
+   * read-only for work: its branch is behind canonical from that moment on,
+   * and admitting new tasks onto it would produce a second review of work
+   * that has already shipped.
+   */
+  mergedAt?: string;
+  mergedBy?: string;
   createdAt: string;
   createdBy?: string;
 }
@@ -1756,7 +1811,29 @@ export interface CreateSubChannelInput {
   slug: string;
   name?: string;
   visibility?: SubChannelVisibility;
+  /**
+   * Make this a unit of shippable work rather than a place to talk.
+   *
+   * The caller supplies the branch name; the store only records it. Creating
+   * the branch in git is the gateway's job, because only it holds the
+   * repository service — and it must do that *before* asking for the channel,
+   * so a channel can never name a branch that does not exist.
+   */
+  branch?: string;
   createdBy?: string;
+}
+
+/**
+ * Recording that a channel's work has been merged.
+ *
+ * Separate from {@link UpdateSubChannelInput} because that one is a rename:
+ * it is reached from a settings form and every field on it is something an
+ * admin retypes. This is a fact about the work, written once by the merge
+ * itself, and no form should be able to assert it.
+ */
+export interface MergeSubChannelInput {
+  mergedAt: string;
+  mergedBy: string;
 }
 
 export interface UpdateSubChannelInput {
@@ -2515,6 +2592,20 @@ export interface CoordinationStore {
     projectId: ProjectId,
   ): Promise<SubChannel>;
   createSubChannel(input: CreateSubChannelInput): Promise<SubChannel>;
+  /**
+   * Marks a work channel merged, once and never again.
+   *
+   * Idempotent by refusal rather than by overwrite: a second merge of the
+   * same channel is a bug somewhere upstream — two people pressing the button
+   * at once, or a retry after a response was lost — and quietly rewriting who
+   * merged it would hide that. Returns undefined when the channel is already
+   * merged, so the caller can say so rather than claim it did the work.
+   */
+  mergeSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: MergeSubChannelInput,
+  ): Promise<SubChannel | undefined>;
   updateSubChannel(
     repositoryId: string,
     channelId: string,

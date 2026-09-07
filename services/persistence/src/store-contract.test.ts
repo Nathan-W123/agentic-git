@@ -6792,4 +6792,136 @@ for (const backend of backends) {
       await cleanup();
     }
   });
+
+  test(`${backend.name}: a channel can be a branch, and is merged once`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_branching",
+        path: "/canonical/branching.git",
+        branch: "main",
+      });
+      const general = await store.ensureGeneralSubChannel(
+        "repo_branching",
+        DEFAULT_PROJECT_ID,
+      );
+      // `#general` is the repository's own branch — the thing everything else
+      // merges into — so it never carries one of its own.
+      assert.equal(general.branch, undefined);
+
+      // A channel that is only a conversation: unchanged, and every channel
+      // written before this existed reads back exactly this way.
+      const design = await store.createSubChannel({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "design",
+      });
+      assert.equal(design.branch, undefined);
+      assert.equal(design.mergedAt, undefined);
+
+      const work = await store.createSubChannel({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "login-redirect",
+        branch: "kumi/login-redirect",
+        createdBy: "user_who",
+      });
+      assert.equal(work.branch, "kumi/login-redirect");
+      assert.equal(work.mergedAt, undefined);
+      // Read back, not merely returned: the write and the read have to agree,
+      // and a column that only the insert knows about is the classic way
+      // three implementations quietly stop matching.
+      assert.equal(
+        (await store.getSubChannel("repo_branching", work.id))?.branch,
+        "kumi/login-redirect",
+      );
+      assert.equal(
+        (await store.listSubChannels("repo_branching")).find(
+          (channel) => channel.id === work.id,
+        )?.branch,
+        "kumi/login-redirect",
+      );
+
+      // Two channels on one branch would each think they owned it, and the
+      // second to merge would ship the first one's work under its own review.
+      await assert.rejects(
+        store.createSubChannel({
+          repositoryId: "repo_branching",
+          projectId: DEFAULT_PROJECT_ID,
+          slug: "login-redirect-again",
+          branch: "kumi/login-redirect",
+        }),
+        /already working that branch/u,
+      );
+      // But a conversation channel is not competing for anything, so any
+      // number of them coexist. Nulls must not collide in that index.
+      await store.createSubChannel({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "standup",
+      });
+      await store.createSubChannel({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "watercooler",
+      });
+
+      // The same branch name in a different repository is a different branch.
+      await store.saveRepository({
+        id: "repo_elsewhere",
+        path: "/canonical/elsewhere.git",
+        branch: "main",
+      });
+      const elsewhere = await store.createSubChannel({
+        repositoryId: "repo_elsewhere",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "login-redirect",
+        branch: "kumi/login-redirect",
+      });
+      assert.equal(elsewhere.branch, "kumi/login-redirect");
+
+      const merged = await store.mergeSubChannel("repo_branching", work.id, {
+        mergedAt: "2026-01-02T03:04:05.000Z",
+        mergedBy: "user_who",
+      });
+      assert.equal(merged?.mergedAt, "2026-01-02T03:04:05.000Z");
+      assert.equal(merged?.mergedBy, "user_who");
+      assert.equal(merged?.branch, "kumi/login-redirect");
+
+      // Twice is not a second merge. Two people pressing the button at once,
+      // or a retry after a lost response, must produce one merge and one
+      // honest refusal — never a rewritten record of who shipped it.
+      assert.equal(
+        await store.mergeSubChannel("repo_branching", work.id, {
+          mergedAt: "2026-02-02T03:04:05.000Z",
+          mergedBy: "user_someone_else",
+        }),
+        undefined,
+      );
+      assert.equal(
+        (await store.getSubChannel("repo_branching", work.id))?.mergedBy,
+        "user_who",
+      );
+
+      // A conversation channel has no work to merge.
+      assert.equal(
+        await store.mergeSubChannel("repo_branching", design.id, {
+          mergedAt: "2026-01-02T03:04:05.000Z",
+          mergedBy: "user_who",
+        }),
+        undefined,
+      );
+      // Nor does a channel in another repository, named by the wrong one.
+      assert.equal(
+        await store.mergeSubChannel("repo_branching", elsewhere.id, {
+          mergedAt: "2026-01-02T03:04:05.000Z",
+          mergedBy: "user_who",
+        }),
+        undefined,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
 }

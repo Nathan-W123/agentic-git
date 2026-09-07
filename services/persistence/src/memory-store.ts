@@ -69,6 +69,7 @@ import type {
   ChannelReaction,
   ChannelReply,
   CreateSubChannelInput,
+  MergeSubChannelInput,
   SubChannel,
   SubChannelMember,
   UpdateSubChannelInput,
@@ -835,6 +836,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       projectId: candidate.projectId,
       status: "active",
       baseRevision: input.baseRevision,
+      // From the task, not from the caller — see the other two stores.
+      branch: candidate.branch,
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
       heartbeatAt: now.toISOString(),
@@ -1751,6 +1754,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       answerTo: input.answerTo,
       repositoryId: input.repositoryId,
       projectId: input.projectId ?? DEFAULT_PROJECT_ID,
+      branch: input.branch,
       objective: input.objective,
       agentId: input.agentId,
       validationCommands: copy(input.validationCommands),
@@ -3494,11 +3498,49 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       slug,
       name: input.name?.trim() === "" ? slug : (input.name?.trim() ?? slug),
       visibility: input.visibility ?? "read_only",
+      ...(input.branch === undefined || input.branch === ""
+        ? {}
+        : { branch: input.branch }),
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
+    // Said here as well as by the two backed stores' unique index, so all
+    // three refuse the same thing with the same sentence.
+    if (channel.branch !== undefined) {
+      for (const other of this.subChannels.values()) {
+        if (
+          other.repositoryId === input.repositoryId &&
+          other.branch === channel.branch
+        ) {
+          throw new Error("Another channel is already working that branch");
+        }
+      }
+    }
     this.subChannels.set(channel.id, channel);
     return { ...channel };
+  }
+
+  public async mergeSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: MergeSubChannelInput,
+  ): Promise<SubChannel | undefined> {
+    const channel = this.subChannels.get(channelId);
+    if (
+      channel === undefined ||
+      channel.repositoryId !== repositoryId ||
+      channel.branch === undefined ||
+      channel.mergedAt !== undefined
+    ) {
+      return undefined;
+    }
+    const merged: SubChannel = {
+      ...channel,
+      mergedAt: input.mergedAt,
+      mergedBy: input.mergedBy,
+    };
+    this.subChannels.set(channelId, merged);
+    return { ...merged };
   }
 
   public async updateSubChannel(

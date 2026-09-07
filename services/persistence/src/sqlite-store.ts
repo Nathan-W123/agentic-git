@@ -73,6 +73,7 @@ import type {
   ChannelReaction,
   ChannelReply,
   CreateSubChannelInput,
+  MergeSubChannelInput,
   McpServerRecord,
   McpServerScope,
   McpServerSecrets,
@@ -1027,6 +1028,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
         projectId: task.projectId,
         status: "active",
         baseRevision: input.baseRevision,
+        // From the task, not from the caller. The caller passes a revision it
+        // resolved against some branch; taking the branch from the same row
+        // the revision was resolved for is what keeps the two describing one
+        // place rather than two.
+        branch: task.branch,
         issuedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
         heartbeatAt: now.toISOString(),
@@ -1045,8 +1051,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .prepare(
           `INSERT INTO work_leases
              (id, task_id, worker_id, repository_id, project_id, status,
-              base_revision, issued_at, expires_at, heartbeat_at)
-           VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+              base_revision, branch, issued_at, expires_at, heartbeat_at)
+           VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
         )
         .run(
           lease.id,
@@ -1055,6 +1061,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
           lease.repositoryId,
           lease.projectId ?? null,
           lease.baseRevision,
+          lease.branch ?? null,
           lease.issuedAt,
           lease.expiresAt,
           lease.heartbeatAt,
@@ -1294,6 +1301,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       projectId: optionalText(row, "project_id"),
       status: text(row, "status") as WorkLeaseStatus,
       baseRevision: text(row, "base_revision"),
+      branch: optionalText(row, "branch"),
       issuedAt: text(row, "issued_at"),
       expiresAt: text(row, "expires_at"),
       heartbeatAt: text(row, "heartbeat_at"),
@@ -2487,6 +2495,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       answerTo: input.answerTo,
       repositoryId: input.repositoryId,
       projectId,
+      branch: input.branch,
       objective: input.objective,
       agentId: input.agentId,
       validationCommands: input.validationCommands,
@@ -2540,16 +2549,17 @@ export class SqliteCoordinationStore implements CoordinationStore {
       this.db
         .prepare(
           `INSERT INTO submitted_tasks
-             (id, repository_id, project_id, objective, agent_id,
+             (id, repository_id, project_id, branch, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
               context, conversation_id, model, effort, after_task_id,
               kind, answer_to)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           task.id,
           task.repositoryId,
           task.projectId ?? DEFAULT_PROJECT_ID,
+          task.branch ?? null,
           task.objective,
           task.agentId,
           JSON.stringify(task.validationCommands),
@@ -2863,6 +2873,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       answerTo: optionalText(row, "answer_to"),
       repositoryId: text(row, "repository_id"),
       projectId: optionalText(row, "project_id"),
+      branch: optionalText(row, "branch"),
       objective: text(row, "objective"),
       agentId: text(row, "agent_id"),
       validationCommands: parseJson<ValidationCommand[]>(
@@ -4997,6 +5008,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   private toSubChannel(row: Row): SubChannel {
     const createdBy = optionalText(row, "created_by");
+    const branch = optionalText(row, "branch");
+    const mergedAt = optionalText(row, "merged_at");
+    const mergedBy = optionalText(row, "merged_by");
     return {
       id: text(row, "id"),
       repositoryId: text(row, "repository_id"),
@@ -5004,6 +5018,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
       slug: text(row, "slug"),
       name: text(row, "name"),
       visibility: text(row, "visibility") as SubChannelVisibility,
+      // Absent, not empty. A channel with no branch is a conversation, and
+      // `""` would be a channel claiming a branch nobody can check out.
+      ...(branch === undefined || branch === "" ? {} : { branch }),
+      ...(mergedAt === undefined ? {} : { mergedAt }),
+      ...(mergedBy === undefined ? {} : { mergedBy }),
       createdAt: text(row, "created_at"),
       ...(createdBy === undefined ? {} : { createdBy }),
     };
@@ -5071,6 +5090,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       slug,
       name: name === undefined || name === "" ? slug : name,
       visibility: input.visibility ?? "read_only",
+      ...(input.branch === undefined || input.branch === ""
+        ? {}
+        : { branch: input.branch }),
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
@@ -5080,11 +5102,24 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (existing !== undefined) {
       throw new Error("A sub-channel with that name already exists");
     }
+    // Said here as well as by the unique index, because the index's own
+    // message names a constraint rather than the thing that went wrong.
+    if (channel.branch !== undefined) {
+      const taken = this.db
+        .prepare(
+          "SELECT id FROM sub_channels WHERE repository_id = ? AND branch = ?",
+        )
+        .get(input.repositoryId, channel.branch) as Row | undefined;
+      if (taken !== undefined) {
+        throw new Error("Another channel is already working that branch");
+      }
+    }
     this.db
       .prepare(
         `INSERT INTO sub_channels
-           (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, repository_id, project_id, slug, name, visibility, branch,
+            created_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         channel.id,
@@ -5093,10 +5128,35 @@ export class SqliteCoordinationStore implements CoordinationStore {
         channel.slug,
         channel.name,
         channel.visibility,
+        channel.branch ?? null,
         channel.createdAt,
         input.createdBy ?? null,
       );
     return channel;
+  }
+
+  public async mergeSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: MergeSubChannelInput,
+  ): Promise<SubChannel | undefined> {
+    // Conditional on still being open, so two callers racing produce one
+    // merge and one honest "already merged" rather than two claims on the
+    // same work.
+    const changed = this.db
+      .prepare(
+        `UPDATE sub_channels SET merged_at = ?, merged_by = ?
+          WHERE id = ? AND repository_id = ? AND branch IS NOT NULL
+            AND merged_at IS NULL`,
+      )
+      .run(input.mergedAt, input.mergedBy, channelId, repositoryId);
+    if (changed.changes === 0) {
+      return undefined;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM sub_channels WHERE id = ? AND repository_id = ?")
+      .get(channelId, repositoryId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubChannel(row);
   }
 
   public async updateSubChannel(

@@ -1314,6 +1314,102 @@ export class RepositoryService {
     this.validatedBranches.add(reference);
   }
 
+  /**
+   * Creates a branch at another branch's head, or leaves an existing one be.
+   *
+   * Written with `update-ref` and an explicit old value of the zero object,
+   * which is git's way of saying "only if this ref does not exist". That is
+   * the whole of the concurrency story: two people creating the same work
+   * channel at the same moment produce one branch and one refusal, rather
+   * than a second creation quietly moving somebody else's branch back to the
+   * base and losing every commit on it.
+   *
+   * Returns whether it created one. A caller that needs the branch to be new
+   * — creating a channel around it — must check; a caller that only needs it
+   * to exist can ignore the answer.
+   */
+  public async ensureBranch(
+    repository: CanonicalRepository,
+    branch: string,
+    options: { from?: string } = {},
+  ): Promise<boolean> {
+    await this.assertBranchName(branch);
+    const from = options.from ?? repository.branch;
+    await this.assertBranchName(from);
+    if (branch === from) {
+      throw new Error(`Cannot branch ${branch} from itself`);
+    }
+    const base = await this.git.run([
+      `--git-dir=${repository.path}`,
+      "rev-parse",
+      "--verify",
+      `refs/heads/${from}`,
+    ]);
+    const revision = base.stdout.trim();
+    if (revision.length === 0) {
+      throw new Error(`Branch ${from} does not exist in ${repository.path}`);
+    }
+    const created = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "update-ref",
+        "--end-of-options",
+        `refs/heads/${branch}`,
+        revision,
+        // The zero object id: "create only, and fail if something is here".
+        "0000000000000000000000000000000000000000",
+      ],
+      { allowFailure: true },
+    );
+    return created.exitCode === 0;
+  }
+
+  /** Whether a branch exists, without asserting anything about its contents. */
+  public async branchExists(
+    repository: CanonicalRepository,
+    branch: string,
+  ): Promise<boolean> {
+    await this.assertBranchName(branch);
+    const found = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "for-each-ref",
+        "--format=%(objectname)",
+        `refs/heads/${branch}`,
+      ],
+      { allowFailure: true },
+    );
+    return found.stdout.trim().length > 0;
+  }
+
+  /**
+   * Deletes a branch, and says nothing if it was already gone.
+   *
+   * For a channel whose work has merged. Deliberately unconditional on the
+   * branch being merged anywhere: this is called by the merge itself, which
+   * has just established that, and re-deriving it here would be a second
+   * answer to a question already settled.
+   */
+  public async deleteBranch(
+    repository: CanonicalRepository,
+    branch: string,
+  ): Promise<void> {
+    await this.assertBranchName(branch);
+    if (branch === repository.branch) {
+      throw new Error(`Refusing to delete the canonical branch ${branch}`);
+    }
+    await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "update-ref",
+        "-d",
+        "--end-of-options",
+        `refs/heads/${branch}`,
+      ],
+      { allowFailure: true },
+    );
+  }
+
   public async getCanonicalVersion(
     repository: CanonicalRepository,
   ): Promise<CanonicalVersion> {

@@ -1679,6 +1679,50 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE api_tokens ADD COLUMN editor_vendor TEXT`,
     ],
   },
+  {
+    /**
+     * A channel can be a branch.
+     *
+     * Null for every channel that exists today and for every one created
+     * afterwards that is only a conversation — `#general` included, because
+     * `#general` *is* the repository's branch, the thing everything else
+     * merges into. Set, the channel is a unit of shippable work: its agents
+     * are arbitrated against each other exactly as before, and what they
+     * produce lands here rather than on canonical, so the whole channel can
+     * be reviewed and merged as one thing.
+     *
+     * Three columns rather than one because a merged channel is a different
+     * state from an open one and the difference has to survive a restart: its
+     * branch is behind canonical from the moment it merges, and admitting new
+     * work onto it would produce a second review of something already
+     * shipped.
+     *
+     * Unique per repository. Two channels naming one branch would each think
+     * they owned it, and the second to merge would ship the first one's work
+     * under its own review. Nullable columns do not collide in a UNIQUE index
+     * on either backend, so every conversation channel remains free.
+     */
+    version: 58,
+    name: "channels-can-be-branches",
+    statements: [
+      `ALTER TABLE sub_channels ADD COLUMN branch TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN merged_at TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN merged_by TEXT`,
+      `CREATE UNIQUE INDEX sub_channels_by_branch
+         ON sub_channels(repository_id, branch)`,
+      // And on the work itself, because the channel is not the authority
+      // once a task exists. A channel can be renamed, merged or archived
+      // while a task it dispatched is still queued, and the branch a change
+      // was written against is not a thing that may move underneath it.
+      // Null on every existing row, which reads as the repository's own.
+      `ALTER TABLE submitted_tasks ADD COLUMN branch TEXT`,
+      // And on the lease, beside the base revision it pins. Both say where a
+      // change is being written, and every later step — validating the plan,
+      // arbitrating a widening mid-run, integrating the result — has to
+      // answer against the same place the base came from.
+      `ALTER TABLE work_leases ADD COLUMN branch TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

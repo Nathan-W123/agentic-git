@@ -64,6 +64,7 @@ import type {
   ChannelEntryKind,
   CreateMcpServerInput,
   CreateSubChannelInput,
+  MergeSubChannelInput,
   McpServerRecord,
   McpServerScope,
   McpServerSecrets,
@@ -1124,6 +1125,11 @@ export class PostgresCoordinationStore implements CoordinationStore {
           projectId: task.projectId,
           status: "active",
           baseRevision: input.baseRevision,
+          // From the task, not from the caller. The caller passes a revision
+          // it resolved against some branch; taking the branch from the same
+          // row the revision was resolved for is what keeps the two
+          // describing one place rather than two.
+          branch: task.branch,
           issuedAt: now.toISOString(),
           expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
           heartbeatAt: now.toISOString(),
@@ -1141,8 +1147,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
         await client.query(
           `INSERT INTO work_leases
              (id, task_id, worker_id, repository_id, project_id, status,
-              base_revision, issued_at, expires_at, heartbeat_at)
-           VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9)`,
+              base_revision, branch, issued_at, expires_at, heartbeat_at)
+           VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10)`,
           [
             lease.id,
             lease.taskId,
@@ -1150,6 +1156,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
             lease.repositoryId,
             lease.projectId ?? null,
             lease.baseRevision,
+            lease.branch ?? null,
             lease.issuedAt,
             lease.expiresAt,
             lease.heartbeatAt,
@@ -1372,6 +1379,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       projectId: optionalText(row, "project_id"),
       status: text(row, "status") as WorkLeaseStatus,
       baseRevision: text(row, "base_revision"),
+      branch: optionalText(row, "branch"),
       issuedAt: text(row, "issued_at"),
       expiresAt: text(row, "expires_at"),
       heartbeatAt: text(row, "heartbeat_at"),
@@ -2531,6 +2539,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       answerTo: input.answerTo,
       repositoryId: input.repositoryId,
       projectId,
+      branch: input.branch,
       objective: input.objective,
       agentId: input.agentId,
       validationCommands: input.validationCommands,
@@ -2583,16 +2592,17 @@ export class PostgresCoordinationStore implements CoordinationStore {
         }
         await client.query(
           `INSERT INTO submitted_tasks
-             (id, repository_id, project_id, objective, agent_id,
+             (id, repository_id, project_id, branch, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
               context, conversation_id, model, effort, after_task_id,
               kind, answer_to)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                   $15, $16)`,
+                   $15, $16, $17)`,
           [
             task.id,
             task.repositoryId,
             task.projectId ?? DEFAULT_PROJECT_ID,
+            task.branch ?? null,
             task.objective,
             task.agentId,
             JSON.stringify(task.validationCommands),
@@ -2895,6 +2905,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       answerTo: optionalText(row, "answer_to"),
       repositoryId: text(row, "repository_id"),
       projectId: optionalText(row, "project_id"),
+      branch: optionalText(row, "branch"),
       objective: text(row, "objective"),
       agentId: text(row, "agent_id"),
       validationCommands: parseJson<ValidationCommand[]>(
@@ -4799,6 +4810,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
   private toSubChannel(row: Row): SubChannel {
     const createdBy = optionalText(row, "created_by");
+    const branch = optionalText(row, "branch");
+    const mergedAt = optionalText(row, "merged_at");
+    const mergedBy = optionalText(row, "merged_by");
     return {
       id: text(row, "id"),
       repositoryId: text(row, "repository_id"),
@@ -4806,6 +4820,11 @@ export class PostgresCoordinationStore implements CoordinationStore {
       slug: text(row, "slug"),
       name: text(row, "name"),
       visibility: text(row, "visibility") as SubChannelVisibility,
+      // Absent, not empty. A channel with no branch is a conversation, and
+      // `""` would be a channel claiming a branch nobody can check out.
+      ...(branch === undefined || branch === "" ? {} : { branch }),
+      ...(mergedAt === undefined ? {} : { mergedAt }),
+      ...(mergedBy === undefined ? {} : { mergedBy }),
       createdAt: text(row, "created_at"),
       ...(createdBy === undefined ? {} : { createdBy }),
     };
@@ -4873,6 +4892,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
       slug,
       name: trimmed === undefined || trimmed === "" ? slug : trimmed,
       visibility: input.visibility ?? "read_only",
+      ...(input.branch === undefined || input.branch === ""
+        ? {}
+        : { branch: input.branch }),
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
@@ -4883,10 +4905,22 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if (existing !== undefined) {
       throw new Error("A sub-channel with that name already exists");
     }
+    // Said here as well as by the unique index, because the index's own
+    // message names a constraint rather than the thing that went wrong.
+    if (channel.branch !== undefined) {
+      const taken = await this.row(
+        "SELECT id FROM sub_channels WHERE repository_id = $1 AND branch = $2",
+        [input.repositoryId, channel.branch],
+      );
+      if (taken !== undefined) {
+        throw new Error("Another channel is already working that branch");
+      }
+    }
     await this.query(
       `INSERT INTO sub_channels
-         (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+         (id, repository_id, project_id, slug, name, visibility, branch,
+          created_at, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         channel.id,
         channel.repositoryId,
@@ -4894,11 +4928,32 @@ export class PostgresCoordinationStore implements CoordinationStore {
         channel.slug,
         channel.name,
         channel.visibility,
+        channel.branch ?? null,
         channel.createdAt,
         input.createdBy ?? null,
       ],
     );
     return channel;
+  }
+
+  public async mergeSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: MergeSubChannelInput,
+  ): Promise<SubChannel | undefined> {
+    // Conditional on still being open, so two callers racing produce one
+    // merge and one honest "already merged" rather than two claims on the
+    // same work. `RETURNING` rather than a second read: the row this
+    // statement changed is the row to describe, and re-reading it opens a
+    // window where somebody else's write is reported as this one's result.
+    const row = await this.row(
+      `UPDATE sub_channels SET merged_at = $1, merged_by = $2
+        WHERE id = $3 AND repository_id = $4 AND branch IS NOT NULL
+          AND merged_at IS NULL
+        RETURNING *`,
+      [input.mergedAt, input.mergedBy, channelId, repositoryId],
+    );
+    return row === undefined ? undefined : this.toSubChannel(row);
   }
 
   public async updateSubChannel(

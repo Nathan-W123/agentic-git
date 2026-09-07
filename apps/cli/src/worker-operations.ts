@@ -390,6 +390,29 @@ function canonical(repository: {
   };
 }
 
+/**
+ * The repository as this piece of work sees it: its own branch, or the
+ * repository's when it has none.
+ *
+ * Everything downstream of a lease reads `repository.branch` — the canonical
+ * version its base was resolved at, the worktree the agent is handed, the
+ * mid-run scope arbitration, and the compare-and-swap that decides whether
+ * the result may land. They have to agree, and the only way they can is by
+ * every one of them asking this.
+ *
+ * `on` is the task's branch at lease time and the lease's thereafter. Absent
+ * is the repository's own, which is what everything written before work
+ * channels existed meant and still means.
+ */
+function canonicalOn(
+  repository: { id: string; path: string; branch: string },
+  on: string | undefined,
+): CanonicalRepository {
+  return canonical(
+    on === undefined || on === "" ? repository : { ...repository, branch: on },
+  );
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -794,7 +817,19 @@ export async function leaseWork(
     if (stored === undefined) {
       throw new Error(`Unknown repository: ${next.repositoryId}`);
     }
-    const repository = canonical(stored);
+    // The task's branch, not the repository's, when it has one.
+    //
+    // This one substitution is the whole of "work happens on the channel's
+    // branch". Everything downstream reads `repository.branch`: the canonical
+    // version the lease pins its base to, the worktree the agent is given,
+    // and the compare-and-swap that decides whether the change may land. Set
+    // it here and all three follow; set it anywhere else and they disagree,
+    // which is a change written against one branch and integrated into
+    // another.
+    //
+    // Absent is the repository's own branch, which is what every task written
+    // before work channels existed meant and still means.
+    const repository = canonicalOn(stored, next.branch);
     const version = await repositories.getCanonicalVersion(repository);
     const leased = await store.leaseNextTask({
       workerId: input.workerId,
@@ -844,7 +879,11 @@ export async function leaseWork(
       task: leased.task,
       repository: {
         id: stored.id,
-        branch: stored.branch,
+        // What the lease was actually taken against, which is the channel's
+        // branch when the task named one. The worker checks this out, so a
+        // stored branch here would hand it a worktree from one branch and a
+        // base revision from another.
+        branch: repository.branch,
       },
       canonicalVersion: version,
       bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
@@ -882,7 +921,10 @@ export async function leaseBundle(
     return undefined;
   }
   return await repositories.createBundle(
-    canonical(repository),
+    // The lease's branch: this bundle is what the worker clones, and packing
+    // it from the repository's own branch would hand a worker on a channel
+    // branch a workspace built from somewhere its base revision is not.
+    canonicalOn(repository, lease.branch),
     lease.baseRevision,
     bundleRefFor(lease.id),
     have,
@@ -966,7 +1008,11 @@ async function requeueForCanonicalChange(
     repository === undefined
       ? []
       : await repositories.listChangedFiles(
-          canonical(repository),
+          // The branch this lease is on: "what moved under me" is a question
+          // about the place this work is being written, and answering it from
+          // the repository's own branch would tell a worker on a channel
+          // branch about commits that never touched it.
+          canonicalOn(repository, lease.branch),
           previousVersion.revision,
           canonicalVersion.revision,
         );
@@ -1503,7 +1549,7 @@ export async function claimWorkRepository(
   const intelligence =
     services.intelligence ?? new CodeIntelligenceService(repositories);
   const admissions = services.admissions ?? new PlanAdmissionController();
-  const repository = canonical(storedRepository);
+  const repository = canonicalOn(storedRepository, lease.branch);
   let baseVersion: CanonicalVersion;
   try {
     baseVersion = await repositories.getVersionAtRevision(
@@ -1908,7 +1954,7 @@ export async function admitWorkPlan(
     await failLease(store, lease, reason, "remote_plan_validation");
     return { outcome: "rejected", reason };
   }
-  const repository = canonical(storedRepository);
+  const repository = canonicalOn(storedRepository, lease.branch);
   let baseVersion: CanonicalVersion;
   let current: CanonicalVersion;
   try {
@@ -2615,7 +2661,7 @@ export async function arbitrateScopeChange(
     await failLease(store, lease, reason, "remote_scope_validation");
     return { outcome: "rejected", reason };
   }
-  const repository = canonical(storedRepository);
+  const repository = canonicalOn(storedRepository, lease.branch);
   let baseVersion: CanonicalVersion;
   try {
     baseVersion = await repositories.getVersionAtRevision(
@@ -3156,7 +3202,10 @@ export async function acceptWorkResult(
       `Unknown repository: ${task.repositoryId}`,
     );
   }
-  const repository = canonical(storedRepository);
+  // From the lease as it was taken, not from the task: the task could have
+  // been edited since, and a result is integrated into the branch its base
+  // came from or into nothing at all.
+  const repository = canonicalOn(storedRepository, leaseAtStart.branch);
   let baseVersion: CanonicalVersion;
   // The enriched plan the coordinator admitted, not the one the worker chose
   // to report: ownership was granted against the former, so that is what the

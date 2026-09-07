@@ -177,6 +177,9 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         seq BIGSERIAL,
         repository_id TEXT NOT NULL REFERENCES repositories(id),
         project_id TEXT NOT NULL DEFAULT 'project_local',
+        -- Null means the repository's own branch, which is what every task
+        -- written before work channels existed meant. See migration 58.
+        branch TEXT,
         objective TEXT NOT NULL,
         agent_id TEXT NOT NULL,
         validation_commands_json TEXT NOT NULL,
@@ -318,6 +321,8 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         project_id TEXT,
         status TEXT NOT NULL,
         base_revision TEXT NOT NULL,
+        -- Null means the repository's own branch. See migration 58.
+        branch TEXT,
         issued_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         heartbeat_at TEXT NOT NULL,
@@ -1065,6 +1070,12 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         slug TEXT NOT NULL,
         name TEXT NOT NULL,
         visibility TEXT NOT NULL,
+        -- Null for a channel that is only a conversation, which is every
+        -- channel unless somebody made it a unit of shippable work. See
+        -- migration 58, "channels-can-be-branches".
+        branch TEXT,
+        merged_at TEXT,
+        merged_by TEXT,
         created_at TEXT NOT NULL,
         created_by TEXT,
         UNIQUE (repository_id, slug)
@@ -1077,6 +1088,11 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       )`,
       `CREATE INDEX sub_channels_by_repository
          ON sub_channels(repository_id, slug)`,
+      // Two channels naming one branch would each think they owned it, and
+      // the second to merge would ship the first one's work under its own
+      // review. Nulls do not collide here, so conversation channels are free.
+      `CREATE UNIQUE INDEX sub_channels_by_branch
+         ON sub_channels(repository_id, branch)`,
       // A repository's project comes from `project_repositories`, which is
       // where the link lives; a repository linked to nothing at all — a
       // fixture, or a row from before projects existed — falls back to the
