@@ -12,6 +12,10 @@ import {
   assertProjectPolicy,
   claimCoversPath,
   claimOccupiesPath,
+  crossesBranches,
+  interfaceScopeOf,
+  isInterfaceFile,
+  symbolVisibility,
   claimedDirectories,
   deferredFilePaths,
   isBlanketClaim,
@@ -908,6 +912,142 @@ test("a grant summary cannot itself become the unbounded field", () => {
   );
   assert.equal(summary.count, 400, "the true number survives the cap");
   assert.equal(summary.files.length, 50);
+});
+
+test("a claim crosses branches only where its meaning is shared", () => {
+  const symbols = symbolVisibility({
+    exported: ["SessionToken", "renderPage"],
+    known: ["SessionToken", "renderPage", "clampWidth", "readCookie"],
+  });
+
+  // Routes, schemas and configuration keys are interfaces by what they are —
+  // the plan has separate fields for them because they are the things other
+  // code consumes.
+  for (const resourceType of ["api", "schema", "configuration"] as const) {
+    assert.equal(
+      crossesBranches({ resourceType, resourceId: "anything" }, symbols),
+      true,
+      resourceType,
+    );
+  }
+
+  // A test belongs to whichever branch wrote it, and "service" is a naming
+  // convention (anything ending in Service, Client, Repository, Gateway or
+  // Worker) rather than a shared resource — an exported one is already caught
+  // as a symbol.
+  for (const resourceType of ["test", "service"] as const) {
+    assert.equal(
+      crossesBranches({ resourceType, resourceId: "PricingService" }, symbols),
+      false,
+      resourceType,
+    );
+  }
+
+  assert.equal(
+    crossesBranches({ resourceType: "symbol", resourceId: "SessionToken" }, symbols),
+    true,
+  );
+  assert.equal(
+    crossesBranches({ resourceType: "symbol", resourceId: "clampWidth" }, symbols),
+    false,
+  );
+  // Case follows `planResourceKey`, so a plan that wrote one spelling and an
+  // index that recorded another are talking about one symbol.
+  assert.equal(
+    crossesBranches({ resourceType: "symbol", resourceId: " sessiontoken " }, symbols),
+    true,
+  );
+  // The one place this leans, and it leans safe: a symbol the index has never
+  // heard of is not thereby private. A language the indexer cannot parse must
+  // not hand its symbols cross-branch freedom on the strength of that.
+  assert.equal(
+    crossesBranches({ resourceType: "symbol", resourceId: "neverSeen" }, symbols),
+    true,
+  );
+
+  // Manifests and migrations are a statement about the whole repository: two
+  // branches changing one merge cleanly and produce a tree that installs
+  // neither version, or runs two migrations in an order neither expected.
+  for (const shared of [
+    "package.json",
+    "apps/web/package.json",
+    "Cargo.lock",
+    "go.mod",
+    "services/api/db/migrate/003_add_column.sql",
+    "src/migrations/20240101_init.ts",
+    "src/App.csproj",
+  ]) {
+    assert.equal(isInterfaceFile(shared), true, shared);
+  }
+  // And an ordinary file is not. Two branches editing one is a question Git
+  // is competent to answer.
+  for (const local of [
+    "src/server.ts",
+    "tsconfig.json",
+    "README.md",
+    "src/packages.json",
+    "docs/migration-guide.md",
+  ]) {
+    assert.equal(isInterfaceFile(local), false, local);
+  }
+});
+
+test("another branch's plan is reduced to what it shares, or drops out", () => {
+  const symbols = symbolVisibility({
+    exported: ["SessionToken"],
+    known: ["SessionToken", "clampWidth"],
+  });
+
+  const shared: AgentPlan = {
+    taskId: "task_billing",
+    objective: "Widen the session token",
+    expectedFiles: ["src/session.ts", "package.json"],
+    expectedSymbols: ["SessionToken", "clampWidth"],
+    expectedApis: ["POST /v1/sessions"],
+    expectedTests: ["test/session.test.ts"],
+    declared: {
+      symbols: ["SessionToken", "clampWidth"],
+      apis: ["POST /v1/sessions"],
+      tests: ["test/session.test.ts"],
+    },
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  };
+
+  const reduced = interfaceScopeOf(shared, symbols);
+  assert.notEqual(reduced, undefined);
+  // The exported type and the manifest survive; the private helper, the
+  // ordinary source file and the test do not.
+  assert.deepEqual(reduced?.expectedSymbols, ["SessionToken"]);
+  assert.deepEqual(reduced?.expectedFiles, ["package.json"]);
+  assert.deepEqual(reduced?.expectedApis, ["POST /v1/sessions"]);
+  assert.deepEqual(reduced?.expectedTests, []);
+  // The agent's own words narrow with it. A record left whole would hand the
+  // decision a plan that still claims what the reduction just removed —
+  // arbitration scores `declared`, not the widened lists.
+  assert.deepEqual(reduced?.declared?.symbols, ["SessionToken"]);
+  assert.deepEqual(reduced?.declared?.tests, []);
+
+  // A plan that touches only its own branch's business has nothing to say to
+  // another branch, and dropping it is the whole benefit of branching: the
+  // other branch is not queued behind work that cannot affect it.
+  const private_: AgentPlan = {
+    ...shared,
+    taskId: "task_login",
+    expectedFiles: ["src/login.ts"],
+    expectedSymbols: ["clampWidth"],
+    expectedApis: [],
+    declared: { symbols: ["clampWidth"], apis: [] },
+  };
+  assert.equal(interfaceScopeOf(private_, symbols), undefined);
+
+  // Nothing is mutated. The active plan this reduces is the one on the
+  // holder's lease, and narrowing it in place would narrow the contract the
+  // holder is actually running under.
+  assert.deepEqual(shared.expectedSymbols, ["SessionToken", "clampWidth"]);
+  assert.deepEqual(shared.expectedFiles, ["src/session.ts", "package.json"]);
 });
 
 test("bounded output keeps the end, which is where a failure says why", () => {

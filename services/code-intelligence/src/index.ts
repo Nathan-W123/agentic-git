@@ -7,10 +7,12 @@ import {
   type CanonicalRepository,
 } from "@coord/repository-service";
 import {
+  symbolVisibility,
   uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
   type PlanResourceRef,
+  type SymbolVisibility,
 } from "@coord/shared-types";
 import ts from "typescript";
 
@@ -92,6 +94,23 @@ export interface IndexedFile {
   language: SupportedLanguage;
   bytes: number;
   symbols: string[];
+  /**
+   * The subset of {@link symbols} this file hands to other files.
+   *
+   * An `export` modifier, an `export { … }` clause, an `export default`, or
+   * anything at all in a `.d.ts`, where every declaration is ambient and
+   * therefore public. Empty for a language the indexer does not parse into an
+   * AST, which is the same statement {@link symbols} makes for that file:
+   * nothing is known, not nothing exists.
+   *
+   * This is what separates the two tiers of claim once channels are branches.
+   * A symbol nobody outside its file can name is local: two branches editing
+   * it produce a Git conflict or two independent edits, and Git is the right
+   * arbiter of that. An exported one is an interface: two branches can change
+   * its shape differently, merge without a conflict, and break the build — or
+   * not break it, which is worse. See `interfaceScopeOf` in `@coord/shared-types`.
+   */
+  exportedSymbols: string[];
   /**
    * Empty for a file whose language the indexer does not parse into an AST.
    * Callers must not read that as "this file has no symbols" — use
@@ -253,6 +272,28 @@ function scriptKind(filePath: string): ts.ScriptKind {
     : ts.ScriptKind.TS;
 }
 
+/**
+ * Whether a declaration is visible outside the file it is written in.
+ *
+ * `getCombinedModifierFlags` is what reads an `export` through the layers TypeScript
+ * puts between a declarator and the statement carrying its keyword, and it is
+ * the same answer for `export default`, which sets both flags.
+ *
+ * `ambient` is a declaration file: everything in a `.d.ts` describes a shape
+ * somebody else consumes, whether or not the keyword is written, so treating
+ * one as local would call an entire package's public types private.
+ */
+function isExported(node: ts.Node, ambient: boolean): boolean {
+  if (ambient) {
+    return true;
+  }
+  return (
+    (ts.getCombinedModifierFlags(node as ts.Declaration) &
+      ts.ModifierFlags.Export) !==
+    0
+  );
+}
+
 function analyzeScript(
   filePath: string,
   source: string,
@@ -266,6 +307,7 @@ function analyzeScript(
     scriptKind(filePath),
   );
   const symbols = new Set<string>();
+  const exported = new Set<string>();
   const imports = new Set<string>();
   const dependencies = new Set<string>();
   const referencedSymbols = new Set<string>();
@@ -276,6 +318,7 @@ function analyzeScript(
   const services = new Set<string>();
   const ranges = new Map<string, SymbolRange>();
   const calls = new Map<string, Set<string>>();
+  const ambient = /\.d\.[cm]?ts$/u.test(filePath);
 
   /**
    * The declared symbols currently being descended through, innermost last.
@@ -335,6 +378,9 @@ function analyzeScript(
     const declaration = namedDeclaration(node);
     if (declaration !== undefined) {
       symbols.add(declaration);
+      if (isExported(node, ambient)) {
+        exported.add(declaration);
+      }
       record(declaration, node);
       if (/(?:Service|Client|Repository|Gateway|Worker)$/u.test(declaration)) {
         services.add(declaration);
@@ -386,13 +432,40 @@ function analyzeScript(
       symbols.add(node.name.text);
       // The whole statement, not just the declarator: `export const value = 1`
       // is one thing to an agent editing it, and the modifiers are part of it.
-      record(
-        node.name.text,
+      const statement =
         ts.isVariableDeclarationList(node.parent) &&
-          ts.isVariableStatement(node.parent.parent)
+        ts.isVariableStatement(node.parent.parent)
           ? node.parent.parent
-          : node,
-      );
+          : node;
+      // The statement, which is where the `export` keyword actually sits —
+      // `getCombinedModifierFlags` would walk up to it from the declarator
+      // too, and asking the node this is already holding says so plainly.
+      if (isExported(statement, ambient)) {
+        exported.add(node.name.text);
+      }
+      record(node.name.text, statement);
+    }
+
+    // `export { one, two }` and `export { one as two } from "./x"`. Neither
+    // carries a modifier on the declaration it names — the declaration may be
+    // in another file entirely — so this is the only place they are visible.
+    if (
+      ts.isExportDeclaration(node) &&
+      node.exportClause !== undefined &&
+      ts.isNamedExports(node.exportClause)
+    ) {
+      for (const element of node.exportClause.elements) {
+        exported.add(element.name.text);
+        // `export { internalName as publicName }` publishes the internal one
+        // too: it is the declaration somebody editing this interface changes.
+        if (element.propertyName !== undefined) {
+          exported.add(element.propertyName.text);
+        }
+      }
+    }
+
+    if (ts.isExportAssignment(node) && ts.isIdentifier(node.expression)) {
+      exported.add(node.expression.text);
     }
 
     if (
@@ -492,6 +565,7 @@ function analyzeScript(
       ),
     imports: uniqueStrings([...imports]),
     dependencies: uniqueStrings([...dependencies]),
+    exportedSymbols: uniqueStrings([...exported]),
     referencedSymbols: uniqueStrings([...referencedSymbols]),
     apis: uniqueStrings([...apis]),
     schemas: uniqueStrings([...schemas]),
@@ -580,6 +654,7 @@ function analyzeScannedFile(
     symbolCalls: [],
     imports: [],
     dependencies: [],
+    exportedSymbols: [],
     referencedSymbols: [],
     apis: [],
     schemas: [],
@@ -643,6 +718,7 @@ function analyzeDataFile(
     symbolCalls: [],
     imports: [],
     dependencies: [],
+    exportedSymbols: [],
     referencedSymbols: [],
     apis: [],
     schemas: uniqueStrings([...schemas]),
@@ -1227,6 +1303,30 @@ export class CodeIntelligenceService {
       file.symbolRangesUnknown !== true
       ? file.symbolRanges
       : undefined;
+  }
+
+  /**
+   * Which of this repository's symbols other files can name.
+   *
+   * The input to the interface tier of a claim: a symbol nobody outside its
+   * own file can reach is local to whichever branch is editing it, and an
+   * exported one belongs to every branch at once. Built from the whole index
+   * rather than from the files a plan declares, because the question is
+   * "does anything publish this name", not "does the file I am editing".
+   *
+   * A language the indexer does not parse contributes nothing to either set,
+   * which leaves its symbols unknown rather than private — and
+   * `crossesBranches` reads unknown as contended, which is the safe way for
+   * that ignorance to land.
+   */
+  public symbolVisibility(index: RepositoryIndex): SymbolVisibility {
+    const exported: string[] = [];
+    const known: string[] = [];
+    for (const file of index.files) {
+      known.push(...file.symbols);
+      exported.push(...file.exportedSymbols);
+    }
+    return symbolVisibility({ exported, known });
   }
 
   public resourcesInFile(

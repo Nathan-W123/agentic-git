@@ -2,6 +2,7 @@ import {
   CodeIntelligenceService,
   groundedIntentAssessor,
   groundPlan,
+  type RepositoryIndex,
 } from "@coord/code-intelligence";
 import {
   BLOCKED_ADMISSION_LIFETIME_CAP,
@@ -43,6 +44,7 @@ import {
 } from "@coord/workspace-manager";
 import {
   claimOccupiesPath,
+  interfaceScopeOf,
   isBlanketClaim,
   normalizeRepositoryPath,
   planAdmissionApproved,
@@ -416,6 +418,15 @@ export class LeasePlanAuthority implements PlanAuthority {
       request.repository,
       request.baseVersion.revision,
     );
+    // Applied here rather than in `executingPlans` because it needs the index
+    // to know which symbols are exported, and the index is deliberately not
+    // built until something else really is running.
+    active = this.narrowToBranch(active, executing.branchOf, lease, index);
+    if (active.length === 0) {
+      // Everything still running is on another branch and claims nothing this
+      // one shares. Recorded and admitted, exactly as an empty set is above.
+      return await this.publish(request, lease, request.plan, approvedLeaseIds);
+    }
     const enriched = this.intelligence.enrichPlan(
       groundPlan(request.plan, index),
       index,
@@ -1742,7 +1753,12 @@ export class LeasePlanAuthority implements PlanAuthority {
 
   private async executingPlans(
     lease: WorkLease,
-  ): Promise<{ active: ActivePlan[]; approvedLeaseIds: string[] }> {
+  ): Promise<{
+    active: ActivePlan[];
+    approvedLeaseIds: string[];
+    /** The branch each active plan is being written on, by task. */
+    branchOf: Map<TaskId, string | undefined>;
+  }> {
     const leases = await this.store.listWorkLeases({
       status: "active",
       repositoryId: lease.repositoryId,
@@ -1767,7 +1783,57 @@ export class LeasePlanAuthority implements PlanAuthority {
         }),
       ),
       approvedLeaseIds: admitted.map((candidate) => candidate.id).sort(),
+      // Read from the lease rather than from the task, because the lease is
+      // what the work is actually happening on: the task's branch is what it
+      // was commissioned against, and the lease copies it once at claim time
+      // and is the thing that outlives a channel being merged underneath it.
+      branchOf: new Map(
+        admitted.map((candidate) => [candidate.taskId, candidate.branch]),
+      ),
     };
+  }
+
+  /**
+   * The active set as this lease's branch sees it.
+   *
+   * Same branch, whole plan: two agents on one branch contend on everything,
+   * which is what they have always done and what makes a channel coherent.
+   *
+   * Another branch, interface only. Two channels are two branches, and if
+   * that were the end of it agents in different channels would simply stop
+   * contending — isolation, which is Conductor with a nicer chat on it and
+   * strictly worse than having no branches at all. `#billing-v2` changes
+   * `SessionToken.userId`, `#login-redirect` changes `SessionToken.expiresAt`,
+   * neither conflicts in Git, both merge, and the build breaks. So a plan on
+   * another branch is reduced to what crosses between them — exported
+   * symbols, routes, schemas, config keys, manifests, migrations — and the
+   * ordinary ladder decides against that. A plan with nothing shared to say
+   * drops out, which is the whole benefit of branching.
+   *
+   * See `interfaceScopeOf` in `@coord/shared-types` for where the line is
+   * drawn and why it leans the way it does.
+   */
+  private narrowToBranch(
+    active: readonly ActivePlan[],
+    branchOf: ReadonlyMap<TaskId, string | undefined>,
+    lease: WorkLease,
+    index: RepositoryIndex,
+  ): ActivePlan[] {
+    // `undefined` and the repository's own branch are the same place; a task
+    // submitted before work channels existed carries no branch and means
+    // canonical, which is where a task submitted in #general still goes.
+    const here = lease.branch ?? "";
+    if (active.every((entry) => (branchOf.get(entry.taskId) ?? "") === here)) {
+      return [...active];
+    }
+    const symbols = this.intelligence.symbolVisibility(index);
+    return active.flatMap((entry) => {
+      if ((branchOf.get(entry.taskId) ?? "") === here) {
+        return [entry];
+      }
+      const shared = interfaceScopeOf(entry.plan, symbols);
+      return shared === undefined ? [] : [{ ...entry, plan: shared }];
+    });
   }
 
   /** Milliseconds this task has been waiting, starting the clock if new. */

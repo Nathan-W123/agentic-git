@@ -35,6 +35,7 @@ import type {
 } from "@coord/persistence";
 import { DEFAULT_ORGANIZATION_ID, DEFAULT_PROJECT_ID } from "@coord/persistence";
 import {
+  canonicalOn,
   normalizeGitHubRepository,
   RepositoryService,
   sanitizeChildEnv,
@@ -279,6 +280,21 @@ export async function leaseQueuedWork(
     repositoryId: string;
     projectId: string;
     baseRevision: string;
+    /**
+     * Take only work commissioned against this branch.
+     *
+     * A wave runs one canonical revision, so it can only run one branch: the
+     * base every plan is written against, the worktrees every agent is handed
+     * and the compare-and-swap every result lands through are all that
+     * branch's. Leasing a work channel's task into a wave running the
+     * repository's own branch would plan it against the wrong base and land
+     * it on the wrong branch.
+     *
+     * `""` is the repository's own branch, which is where a task with no
+     * branch of its own goes. Absent takes whatever is queued, which is what
+     * every caller written before work channels existed meant.
+     */
+    branch?: string;
   },
 ): Promise<Array<{ task: SubmittedTask; lease: WorkLease }>> {
   const leased: Array<{ task: SubmittedTask; lease: WorkLease }> = [];
@@ -307,13 +323,23 @@ export async function leaseQueuedWork(
     excludeSubmittedBy: reserved,
   };
 
-  const pending = legacyAdmissionLoop()
-    ? []
-    : await store.listSubmittedTasks({
-        projectId: input.projectId,
-        repositoryId: input.repositoryId,
-        status: "submitted",
-      });
+  // Listed even under the legacy flag when a branch was named: the unnamed
+  // drain below cannot express "this branch only", so naming every candidate
+  // is the only way to honour it.
+  const pending =
+    legacyAdmissionLoop() && input.branch === undefined
+      ? []
+      : (
+          await store.listSubmittedTasks({
+            projectId: input.projectId,
+            repositoryId: input.repositoryId,
+            status: "submitted",
+          })
+        ).filter(
+          (task) =>
+            input.branch === undefined ||
+            (task.branch ?? "") === input.branch,
+        );
   const waiting =
     pending.length === 0
       ? new Set<string>()
@@ -338,6 +364,15 @@ export async function leaseQueuedWork(
       continue;
     }
     leased.push({ task: next.task, lease: next.lease });
+  }
+
+  // A branched wave stops here. The drain below takes the oldest queued row
+  // in the repository whatever branch it is on, which is precisely what a
+  // wave running one branch must not do; the rows it would have caught are
+  // taken by the next pass, and `runRepository` keeps passing until one finds
+  // nothing.
+  if (input.branch !== undefined) {
+    return leased;
   }
 
   // Then whatever the pass above could not name: rows that arrived while it
@@ -1504,6 +1539,13 @@ export interface RunOptions {
   repositoryId?: string;
   projectId?: string;
   /**
+   * Run this branch's queue rather than whichever is oldest.
+   *
+   * A wave is one canonical revision, so it is one branch; without this the
+   * oldest queued task picks it. `""` is the repository's own branch.
+   */
+  branch?: string;
+  /**
    * Where an agent's question goes, and where its answer comes back from.
    *
    * Absent on the CLI, which has nobody watching to ask — a question there
@@ -1657,7 +1699,28 @@ export async function runPendingTasks(
     store,
     options.repositoryId,
   );
-  const canonical = toCanonical(repository);
+  // Which branch this wave is for.
+  //
+  // A wave runs one canonical revision — one base for every plan, one
+  // worktree source for every agent, one ref for every compare-and-swap — so
+  // it can only be about one branch. The oldest queued task picks it, so
+  // work channels and the repository's own branch drain in the order they
+  // were asked for rather than one starving the other, and `runRepository`
+  // keeps calling until a pass finds nothing, which is what drains the rest.
+  //
+  // `""` is the repository's own branch: a task with no branch of its own is
+  // a task submitted from #general, or from anywhere that predates work
+  // channels, and both mean canonical.
+  const waveBranch =
+    options.branch ??
+    (
+      await store.listSubmittedTasks({
+        repositoryId: repository.id,
+        status: "submitted",
+      })
+    )[0]?.branch ??
+    "";
+  const canonical = canonicalOn(toCanonical(repository), waveBranch);
   const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
 
   // Conversations whose silence has outlasted the deadline end before new
@@ -1728,7 +1791,18 @@ export async function runPendingTasks(
         "cannot hold work leases. Tasks will execute without cross-run plan " +
         "admission; overlapping work is caught only at integration time.",
     );
-    claimed = await store.claimSubmittedTasks(repository.id, projectId);
+    const everything = await store.claimSubmittedTasks(repository.id, projectId);
+    claimed = everything.filter(
+      (task) => (task.branch ?? "") === waveBranch,
+    );
+    // `claimSubmittedTasks` takes the repository's whole queue, so anything on
+    // another branch is handed straight back rather than left claimed by a
+    // wave that is never going to run it.
+    for (const other of everything) {
+      if ((other.branch ?? "") !== waveBranch) {
+        await store.retrySubmittedTask(other.id).catch(() => undefined);
+      }
+    }
   } else {
     const baseVersion =
       await repositoriesForLease.getCanonicalVersion(canonical);
@@ -1737,6 +1811,7 @@ export async function runPendingTasks(
       repositoryId: repository.id,
       projectId,
       baseRevision: baseVersion.revision,
+      branch: waveBranch,
     });
     claimed = leasedWork.map((entry) => entry.task);
     for (const entry of leasedWork) {

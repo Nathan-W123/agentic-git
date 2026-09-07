@@ -35,6 +35,7 @@ function file(
     language: "typescript",
     bytes: 100,
     symbols: [],
+    exportedSymbols: [],
     symbolRanges: [],
     symbolCalls: [],
     imports: [],
