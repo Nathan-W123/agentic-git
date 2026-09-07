@@ -132,12 +132,59 @@ test("a private room is drawn as private, and a typing ping stays in its room", 
   const chats = await publicFile("screen-chats.js");
   const data = await publicFile("data.js");
 
-  assert.match(chats, /channel\.visibility === "private" \? icon\("lock"\)/u);
+  // A work channel's sigil is its branch, and a private one's is a lock. Both
+  // in one expression, in that order, because a work channel that is also
+  // private has to pick one and "this ships somewhere else" is the fact a
+  // reader cannot get from the name — the lock's meaning is still spelled out
+  // in words on the row and in the settings panel.
+  assert.match(
+    chats,
+    /channel\.branch\s*\?\s*icon\("branch"\)\s*:\s*channel\.visibility === "private"\s*\?\s*icon\("lock"\)/u,
+  );
   const noteTyping = data.slice(data.indexOf("export function noteTyping"));
   assert.match(
     noteTyping.slice(0, noteTyping.indexOf("\n}")),
     /frame\.channelId !== open/u,
   );
+});
+
+test("a channel can be opened as a branch, and says so everywhere it is shown", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const styles = await publicFile("styles.css");
+
+  // Asked once, when the room is created. A branch cannot move afterwards
+  // without orphaning every commit on it, so this is what the room is rather
+  // than a setting it carries.
+  assert.match(app, /function branchChoiceHtml\(\)/u);
+  const newChannel = app.slice(app.indexOf('case "sub-channel-new"'));
+  const dialog = newChannel.slice(0, newChannel.indexOf('case "sub-channel-menu"'));
+  assert.match(dialog, /\$\{branchChoiceHtml\(\)\}/u);
+  // The checkbox's `checked` boolean, not its `value` string — `showModal`
+  // resolves the two differently and comparing against "on" would send
+  // `false` for every ticked box.
+  assert.match(dialog, /values\.branch === true/u);
+  assert.match(styles, /\.chan-branch-choice \{/u);
+
+  // Only sent when it was asked for, so an ordinary channel's request is
+  // byte-for-byte what it was before work channels existed.
+  const create = data.slice(data.indexOf("export async function createSubChannel"));
+  assert.match(
+    create.slice(0, create.indexOf("\n}")),
+    /branch === true \? \{ branch: true \} : \{\}/u,
+  );
+
+  // And it is visible without opening anything: the row's own title says
+  // which branch, so the sigil is not the only place the fact lives.
+  assert.match(chats, /works on \$\{esc\(channel\.branch\)\}/u);
+  // The settings panel says it in a sentence, and withholds Rename — the
+  // server refuses that for a work channel, and an affordance whose only
+  // outcome is an error toast is worse than no affordance.
+  const manage = chats.slice(chats.indexOf("export function subChannelManagePopoverHtml"));
+  const panel = manage.slice(0, manage.indexOf("\nexport function", 1));
+  assert.match(panel, /Work in this\s+channel lands on/u);
+  assert.match(panel, /channel\.branch\s*\?\s*""\s*:\s*`<button[^`]*sub-channel-rename/u);
 });
 
 test("switching rooms clears every cache it names, and cannot half-finish", async () => {

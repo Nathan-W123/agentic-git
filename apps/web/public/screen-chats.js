@@ -1799,13 +1799,27 @@ function subChannelRow(repositoryId, channel, active) {
     <button type="button" class="chan-channel"
       data-act="sub-channel-open" data-value="${esc(channel.id)}"
       aria-current="${active ? "page" : "false"}"
-      title="Open ${esc(label)}">
+      title="${
+        channel.branch
+          ? `Open ${esc(label)} — works on ${esc(channel.branch)}`
+          : `Open ${esc(label)}`
+      }">
       <span class="chan-channel-sigil" aria-hidden="true">${
-        channel.visibility === "private" ? icon("lock") : "#"
+        // A work channel is a branch, and that is the single most useful thing
+        // to know about a room before opening it: what is said here lands
+        // somewhere other than the repository's own branch. It outranks the
+        // lock, which the private label below still says in words.
+        channel.branch
+          ? icon("branch")
+          : channel.visibility === "private"
+            ? icon("lock")
+            : "#"
       }</span>${
-        channel.visibility === "public"
-          ? `<span class="sr-only">Open to everyone in the project</span>`
-          : ""
+        channel.branch
+          ? `<span class="sr-only">Works on branch ${esc(channel.branch)}</span>`
+          : channel.visibility === "public"
+            ? `<span class="sr-only">Open to everyone in the project</span>`
+            : ""
       }
       <span class="chan-channel-name">${esc(channel.slug)}</span>
       ${
@@ -8248,11 +8262,30 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
       )}</span>
     </div>
     ${
+      // Where work in this room lands. Said here rather than only on the row,
+      // because this is the panel somebody opens when they want to know what
+      // a channel actually is, and "on a branch" is the difference between a
+      // room that talks and one that ships.
+      channel.branch
+        ? `<div class="channel-info-summary">${icon("branch")} Work in this
+             channel lands on <code>${esc(channel.branch)}</code>, not on the
+             repository's own branch.</div>`
+        : ""
+    }
+    ${
       general
         ? `<div class="channel-info-summary">Everyone in this workspace can read and post in #general.</div>`
         : `<div class="pop-row">
-             <button type="button" class="btn-quiet" data-act="sub-channel-rename"
-               data-value="${esc(channelId)}">Rename</button>
+             ${
+               // A branch cannot move without orphaning every commit on it,
+               // so a work channel's handle is fixed. The server refuses the
+               // rename either way; offering the button anyway would be an
+               // affordance whose only outcome is an error toast.
+               channel.branch
+                 ? ""
+                 : `<button type="button" class="btn-quiet" data-act="sub-channel-rename"
+               data-value="${esc(channelId)}">Rename</button>`
+             }
              <!-- One entry into a picker rather than a toggle: with three
                   states a flip cannot reach the one it is not between. -->
              <button type="button" class="btn-quiet" data-act="sub-channel-visibility"

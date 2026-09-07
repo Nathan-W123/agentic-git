@@ -355,6 +355,20 @@ async function serve(
   }, 60_000);
   conversationSweep.unref?.();
 
+  // A stored repository as `RepositoryService` wants it. The gateway asks by
+  // id because it holds no paths; every git-touching operation below starts
+  // here, and doing the lookup once means one place decides what an unknown
+  // id does.
+  const canonicalRepository = async (
+    repositoryId: string,
+  ): Promise<{ id: string; path: string; branch: string }> => {
+    const stored = await store.getRepository(repositoryId);
+    if (stored === undefined) {
+      throw new Error(`Unknown repository: ${repositoryId}`);
+    }
+    return { id: stored.id, path: stored.path, branch: stored.branch };
+  };
+
   // Bound after construction: the gateway is built from these operations, and
   // one of them (a question put to a person) needs the gateway back. Only
   // read from inside a call, which cannot happen before it is serving.
@@ -566,6 +580,7 @@ async function serve(
         // place the absent case is decided.
         ...(input.kind === undefined ? {} : { kind: input.kind }),
         ...(input.answerTo === undefined ? {} : { answerTo: input.answerTo }),
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
       });
     },
     async cancelTasks(input) {
@@ -725,15 +740,7 @@ async function serve(
       });
     },
     async canonicalDiff(input) {
-      const stored = await store.getRepository(input.repositoryId);
-      if (stored === undefined) {
-        throw new Error(`Unknown repository: ${input.repositoryId}`);
-      }
-      const repository = {
-        id: stored.id,
-        path: stored.path,
-        branch: stored.branch,
-      };
+      const repository = await canonicalRepository(input.repositoryId);
       const [files, diff] = await Promise.all([
         repositories.listChangedFiles(
           repository,
@@ -754,15 +761,84 @@ async function serve(
       return { files, patch: diff.patch, truncated: diff.truncated };
     },
     async canonicalHead(input) {
-      const stored = await store.getRepository(input.repositoryId);
-      if (stored === undefined) {
-        throw new Error(`Unknown repository: ${input.repositoryId}`);
-      }
       const [newest] = await repositories.listCanonicalHistory(
-        { id: stored.id, path: stored.path, branch: stored.branch },
+        await canonicalRepository(input.repositoryId),
         1,
       );
       return newest?.revision;
+    },
+    async createBranch(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      return {
+        created: await repositories.ensureBranch(repository, input.branch),
+      };
+    },
+    async deleteBranch(input) {
+      await repositories.deleteBranch(
+        await canonicalRepository(input.repositoryId),
+        input.branch,
+      );
+    },
+    async branchComparison(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      const comparison = await repositories.compareBranches(
+        repository,
+        input.branch,
+      );
+      // The patch is a second call rather than something `compareBranches`
+      // returns, because it is the one part of a comparison that can be
+      // enormous and the only one with a truncation story. Taken from the
+      // merge base for the reason the comparison itself is: against the tip
+      // of canonical, every commit landed elsewhere since would read as
+      // something this branch deleted.
+      const diff = await repositories.diffBetween(
+        repository,
+        comparison.mergeBase,
+        comparison.head,
+      );
+      return {
+        ...comparison,
+        patch: diff.patch,
+        truncated: diff.truncated,
+      };
+    },
+    async mergeBranch(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      const merged = await repositories.mergeBranchInto(
+        repository,
+        input.branch,
+        { message: input.message },
+      );
+      if (!merged.merged) {
+        return merged;
+      }
+      // Deleted only once the merge is on canonical. Doing it the other way
+      // round loses the work if the ref moves under the compare-and-swap.
+      await repositories.deleteBranch(repository, input.branch);
+      return merged;
+    },
+    async refreshBranch(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      const merged = await repositories.mergeBranchInto(
+        repository,
+        repository.branch,
+        {
+          message: `Merge ${repository.branch} into ${input.branch}`,
+          into: input.branch,
+        },
+      );
+      if (!merged.merged) {
+        return merged;
+      }
+      // Asked after the merge, not before: what the channel wants to know is
+      // how far behind it still is, and after a clean merge that is zero.
+      // Reporting the pre-merge number would say "8 behind" about a branch
+      // that has just caught up.
+      const comparison = await repositories.compareBranches(
+        repository,
+        input.branch,
+      );
+      return { ...merged, behind: comparison.behind };
     },
     async previewStart(input) {
       return await previews.start({ repositoryId: input.repositoryId });

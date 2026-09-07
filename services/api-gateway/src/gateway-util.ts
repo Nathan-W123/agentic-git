@@ -204,6 +204,30 @@ export function subChannelSlug(raw: string): string {
     .slice(0, 60);
 }
 
+/**
+ * The prefix every channel branch carries.
+ *
+ * So a branch that belongs to a channel is recognisable as one at a glance,
+ * in `git branch` and on GitHub alike, and so a channel can never be given a
+ * name that collides with a branch somebody was already using. `kumi/` rather
+ * than `coord/`, which is taken: that one names the branches a push produces
+ * from canonical, and the two are different things with different lifetimes.
+ */
+export const CHANNEL_BRANCH_PREFIX = "kumi/";
+
+/**
+ * The branch a work channel's slug asks for.
+ *
+ * Derived rather than stored separately so the two can never disagree. A
+ * channel's slug is already restricted to what `subChannelSlug` allows —
+ * lowercase, digits and single hyphens, never leading or trailing — which is
+ * a strict subset of what `git check-ref-format` accepts, so this cannot
+ * produce a name git will refuse.
+ */
+export function channelBranchName(slug: string): string {
+  return `${CHANNEL_BRANCH_PREFIX}${slug}`;
+}
+
 /** `private` only when it says so; anything else is an open room. */
 export function subChannelVisibility(raw: unknown): SubChannelVisibility {
   // `read_only` is the default for anything unrecognised, which is what an

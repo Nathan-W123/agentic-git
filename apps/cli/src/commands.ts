@@ -882,6 +882,12 @@ export interface TaskSubmitOptions {
    */
   model?: string;
   effort?: string;
+  /**
+   * The branch this task's work lands on. See `SubmitTaskInput.branch` in the
+   * persistence store; absent means the repository's own branch, which is
+   * every task submitted from anywhere but a work channel.
+   */
+  branch?: string;
 }
 
 export async function taskSubmit(
@@ -930,6 +936,9 @@ export async function taskSubmit(
       : { effort: options.effort.trim() }),
     ...(options.kind === undefined ? {} : { kind: options.kind }),
     ...(options.answerTo === undefined ? {} : { answerTo: options.answerTo }),
+    ...(options.branch === undefined || options.branch.trim() === ""
+      ? {}
+      : { branch: options.branch.trim() }),
   });
 }
 

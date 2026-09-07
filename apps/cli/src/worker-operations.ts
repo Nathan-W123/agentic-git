@@ -63,6 +63,7 @@ import type {
 } from "@coord/persistence";
 import {
   agentCommitIdentity,
+  canonicalOn,
   LEASE_REF_PREFIX,
   RepositoryService,
   type CanonicalRepository,
@@ -383,34 +384,7 @@ function canonical(repository: {
   path: string;
   branch: string;
 }): CanonicalRepository {
-  return {
-    id: repository.id,
-    path: repository.path,
-    branch: repository.branch,
-  };
-}
-
-/**
- * The repository as this piece of work sees it: its own branch, or the
- * repository's when it has none.
- *
- * Everything downstream of a lease reads `repository.branch` — the canonical
- * version its base was resolved at, the worktree the agent is handed, the
- * mid-run scope arbitration, and the compare-and-swap that decides whether
- * the result may land. They have to agree, and the only way they can is by
- * every one of them asking this.
- *
- * `on` is the task's branch at lease time and the lease's thereafter. Absent
- * is the repository's own, which is what everything written before work
- * channels existed meant and still means.
- */
-function canonicalOn(
-  repository: { id: string; path: string; branch: string },
-  on: string | undefined,
-): CanonicalRepository {
-  return canonical(
-    on === undefined || on === "" ? repository : { ...repository, branch: on },
-  );
+  return canonicalOn(repository, undefined);
 }
 
 function errorMessage(error: unknown): string {

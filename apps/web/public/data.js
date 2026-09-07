@@ -4310,8 +4310,15 @@ export function selectSubChannel(repositoryId, channelId) {
   state.channelRosterLoaded.delete(repositoryId);
 }
 
-/** Creates a room. `name` is squeezed into a `#handle` by the server. */
-export async function createSubChannel(repositoryId, name, visibility) {
+/**
+ * Creates a room. `name` is squeezed into a `#handle` by the server.
+ *
+ * `branch` asks for a work channel: the server cuts a branch named after the
+ * handle and every task dispatched in the room lands on it. It sends the
+ * request rather than the name — the branch is derived from the slug the
+ * server itself produced, and a name computed here could disagree with it.
+ */
+export async function createSubChannel(repositoryId, name, visibility, branch) {
   // The dialog's three choices, all three of them. This collapsed everything
   // that was not `private` into the read-only state, so picking "Open — anyone
   // in the project can find it, read it, and post" built a room only its
@@ -4323,7 +4330,7 @@ export async function createSubChannel(repositoryId, name, visibility) {
   // the right default and the only place it should be decided.
   const response = await api(channelsPath(repositoryId), {
     method: "POST",
-    body: { name, visibility },
+    body: { name, visibility, ...(branch === true ? { branch: true } : {}) },
   });
   await loadSubChannels(repositoryId);
   const created = response?.channel;

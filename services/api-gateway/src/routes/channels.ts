@@ -24,6 +24,7 @@ import {
   stringField,
 } from "../field-validation.js";
 import {
+  channelBranchName,
   matchPath,
   subChannelSlug,
   subChannelVisibility,
@@ -170,14 +171,71 @@ export async function routeChannels(
           "A channel with that name already exists",
         );
       }
-      const channel = await gw.options.store.createSubChannel({
-        repositoryId,
-        projectId,
-        slug,
-        ...(name === undefined ? {} : { name }),
-        visibility,
-        createdBy: principal.user.id,
-      });
+      // A work channel: its own branch, cut from the repository's, and every
+      // task dispatched in it lands there instead of on canonical. Opt-in per
+      // channel, because most rooms are conversations and a branch for one
+      // would be a branch nothing ever commits to.
+      const wantsBranch = body["branch"] === true;
+      const operations = gw.options.operations;
+      if (wantsBranch && operations.createBranch === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot create branches",
+        );
+      }
+      const branch = wantsBranch ? channelBranchName(slug) : undefined;
+      if (branch !== undefined) {
+        // Created before the channel is stored, because git's own
+        // compare-and-swap is the only thing here that can settle two people
+        // creating the same work channel at once: `ensureBranch` writes with
+        // an explicit old value of the zero object, so exactly one of them
+        // creates it and the other is told.
+        const { created } = await gw.performOperation(
+          "branch_failed",
+          async () =>
+            await operations.createBranch!({
+              projectId,
+              repositoryId,
+              branch,
+            }),
+        );
+        if (!created) {
+          // Never adopted. A branch that is already there has commits on it
+          // that nobody in this channel reviewed, and adopting it would put
+          // them inside this channel's pull request as though they were its
+          // work.
+          throw new HttpError(
+            409,
+            "branch_exists",
+            `The branch ${branch} already exists. Pick another name.`,
+          );
+        }
+      }
+      let channel: SubChannel;
+      try {
+        channel = await gw.options.store.createSubChannel({
+          repositoryId,
+          projectId,
+          slug,
+          ...(name === undefined ? {} : { name }),
+          visibility,
+          createdBy: principal.user.id,
+          ...(branch === undefined ? {} : { branch }),
+        });
+      } catch (error) {
+        // The branch was created a moment ago and nothing has been told about
+        // it, so dropping it loses nothing. Leaving it would leave a branch
+        // no channel owns and a name the next attempt could not reuse.
+        if (branch !== undefined) {
+          await operations.deleteBranch?.({
+            projectId,
+            repositoryId,
+            branch,
+          }).catch(() => undefined);
+        }
+        throw error;
+      }
       // Whoever made the room is in it, so a private channel is never
       // created into a state where nobody — including its author — can
       // read or post in it.
@@ -319,6 +377,19 @@ export async function routeChannels(
         );
       }
       await gw.options.store.deleteSubChannel(repositoryId, channel.id);
+      // The branch goes with the room. A work channel that is deleted rather
+      // than merged is work somebody abandoned, and leaving the branch behind
+      // would leave a name nothing owns that the next channel of that name
+      // could not take.
+      if (channel.branch !== undefined) {
+        await gw.options.operations
+          .deleteBranch?.({
+            projectId,
+            repositoryId,
+            branch: channel.branch,
+          })
+          .catch(() => undefined);
+      }
       await gw.options.store.appendAudit(undefined, {
         type: "channel_deleted",
         data: {
@@ -347,6 +418,17 @@ export async function routeChannels(
       visibility?: SubChannelVisibility;
     } = {};
     if (rawName !== undefined) {
+      // A work channel is addressed by the same word as its branch, and the
+      // branch cannot move without orphaning every commit on it. Renaming one
+      // would leave #new-name working `kumi/old-name`, which reads as a bug
+      // in every place either name is shown.
+      if (channel.branch !== undefined) {
+        throw new HttpError(
+          409,
+          "branch_channel",
+          `#${channel.slug} is a branch (${channel.branch}) and cannot be renamed`,
+        );
+      }
       const slug = subChannelSlug(rawName);
       if (slug.length === 0) {
         throw new HttpError(

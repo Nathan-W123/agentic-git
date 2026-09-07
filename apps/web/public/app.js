@@ -3582,6 +3582,30 @@ const SUB_CHANNEL_VISIBILITIES = [
   },
 ];
 
+/**
+ * The one extra question a new channel can be asked: is it work, or talk?
+ *
+ * A channel with a branch is where agents commit; every task dispatched in it
+ * lands there instead of on the repository's own branch, and it ends by being
+ * merged rather than by going quiet. Off by default, because most rooms are
+ * conversations and a branch nothing ever commits to is a branch somebody
+ * later has to wonder about.
+ *
+ * Offered only when a channel is created. A branch cannot move afterwards
+ * without orphaning every commit on it, so this is not a setting — it is what
+ * the room is.
+ */
+function branchChoiceHtml() {
+  return `<label class="chan-branch-choice">
+    <input type="checkbox" name="branch" value="on">
+    <span class="chan-visibility-copy">
+      <strong>Work on a branch</strong>
+      <small>Agents commit here instead of to the repository, and the work is
+        reviewed and merged when the channel is done.</small>
+    </span>
+  </label>`;
+}
+
 /** The radio cards both channel dialogs offer, with one pre-selected. */
 function visibilityChoicesHtml(selected) {
   return `<div class="chan-visibility-choices" role="radiogroup"
@@ -11004,7 +11028,8 @@ document.addEventListener("click", (event) => {
             <input class="input" name="name" maxlength="60" required autofocus
               placeholder="frontend">
           </label>
-          ${visibilityChoicesHtml("read_only")}`,
+          ${visibilityChoicesHtml("read_only")}
+          ${branchChoiceHtml()}`,
       }).then((values) => {
         const name = String(values?.name ?? "").trim();
         if (values === undefined || name === "") {
@@ -11014,6 +11039,10 @@ document.addEventListener("click", (event) => {
           repositoryId,
           name,
           String(values.visibility ?? "read_only"),
+          // `showModal` resolves a checkbox to its `checked` boolean, not to
+          // its `value` string, so this is the box itself rather than a
+          // comparison against "on".
+          values.branch === true,
         ).then(() => {
           render();
           void ensureChannelMessages(repositoryId, render);

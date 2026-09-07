@@ -10973,6 +10973,50 @@ dialog.modal[open]::backdrop {
   line-height: 1.45;
 }
 
+/*
+ * The work-channel toggle, in the new-channel dialog.
+ *
+ * The visibility cards' shape so the dialog reads as one set of choices, with
+ * a visible box rather than a hidden input: those are a radio group where the
+ * selected card is the affordance, and this is one independent question whose
+ * off state has nothing highlighted to say it was answered.
+ */
+.chan-branch-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  cursor: pointer;
+  transition:
+    background var(--motion-pop) ease,
+    border-color var(--motion-pop) ease;
+}
+
+.chan-branch-choice:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.chan-branch-choice:has(input:checked) {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+
+.chan-branch-choice:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chan-branch-choice input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
 .agent-provider-choice {
   position: relative;
   min-width: 0;

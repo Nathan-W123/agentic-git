@@ -5690,6 +5690,48 @@ export class ApiGateway {
     return best === undefined ? undefined : { id: best.id, title: best.title };
   }
 
+  /**
+   * The branch work dispatched under this channel message lands on.
+   *
+   * Derived from the message rather than threaded through every dispatch
+   * call site. There are thirteen of them, each with its own reason for
+   * existing, and a branch passed by twelve of them would have sent the
+   * thirteenth's work to canonical with nothing anywhere saying so — the
+   * quietest possible way for a work channel to leak into main.
+   *
+   * The message is the one thing every one of those callers has: they all
+   * name either the channel root that asked for the work or the thread it
+   * belongs in, and both are channel messages in this repository that know
+   * which room they are in.
+   *
+   * Undefined for an ordinary conversation channel, which is what most rooms
+   * are, and undefined when the message cannot be read — a branch guessed
+   * wrong is worse than a branch not used, because it puts the work somewhere
+   * nobody is looking for it.
+   */
+  private async branchForChannelMessage(
+    repositoryId: string,
+    messageId: string | undefined,
+  ): Promise<string | undefined> {
+    if (messageId === undefined) {
+      return undefined;
+    }
+    // The viewer only decides whose reactions are marked `mine`; it is not a
+    // membership filter, so this reads the same row for anybody, and the
+    // reactions are discarded here anyway. `coordinator` is the author id the
+    // system's own messages carry and never a real user's.
+    const message = await this.options.store
+      .getChannelMessage(repositoryId, messageId, "coordinator")
+      .catch(() => undefined);
+    if (message === undefined) {
+      return undefined;
+    }
+    const channel = await this.options.store
+      .getSubChannel(repositoryId, message.channelId)
+      .catch(() => undefined);
+    return channel?.branch;
+  }
+
   private async dispatchOneMention(input: {
     projectId: string;
     repositoryId: string;
@@ -6092,6 +6134,13 @@ export class ApiGateway {
         .bumpChannelMessage(repositoryId, continuing, new Date().toISOString())
         .catch(() => undefined);
     }
+    // Read from whichever message this dispatch names: the thread it belongs
+    // in when there is one, otherwise the channel root that asked for it.
+    // Both are messages in this repository, and both know their room.
+    const dispatchBranch = await this.branchForChannelMessage(
+      repositoryId,
+      input.threadMessageId ?? input.referencedMessageId,
+    );
     try {
       const task = await this.options.operations.submitTask({
         projectId,
@@ -6151,6 +6200,14 @@ export class ApiGateway {
         // than stopping at the roster row it was typed into.
         ...(candidate.model === undefined ? {} : { model: candidate.model }),
         ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
+        // Where the work lands. A work channel's own branch, and canonical
+        // for every other room — resolved from the message this dispatch
+        // came from rather than passed in, so a caller cannot forget it.
+        // Stamped on the task now rather than looked up at lease time,
+        // because the channel can be merged or deleted while its task is
+        // still queued and the branch is what that task was commissioned
+        // against.
+        ...(dispatchBranch === undefined ? {} : { branch: dispatchBranch }),
         // Held from the moment it exists, not held after the fact. The
         // branch below that stops and waits for a person is downstream of
         // this; between the insert and that branch the row would otherwise

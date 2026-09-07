@@ -270,6 +270,17 @@ export interface ApiOperations {
      */
     model?: string;
     effort?: string;
+    /**
+     * The branch this task's work lands on — the dispatching channel's, for a
+     * work channel, and absent for every other room, which means the
+     * repository's own.
+     *
+     * Carried on the task rather than looked up from the channel at lease
+     * time because the two can diverge: a channel deleted or merged while a
+     * task of its own is still queued would otherwise send that task to
+     * canonical, which is the one place its author never asked for.
+     */
+    branch?: string;
   }): Promise<SubmittedTask>;
   runRepository(input: {
     projectId: string;
@@ -373,6 +384,105 @@ export interface ApiOperations {
     projectId: string;
     repositoryId: string;
   }): Promise<string | undefined>;
+
+  /**
+   * Creates a work channel's branch, at the repository's own head.
+   *
+   * An operation rather than a direct `RepositoryService` call for the same
+   * reason as everything above it: the gateway holds no repository paths and
+   * has no business acquiring any.
+   *
+   * `created` is false when the branch was already there. The caller must
+   * refuse the channel in that case rather than adopt it — an existing branch
+   * has commits on it that nobody in this channel reviewed, and adopting it
+   * would put them inside somebody else's pull request.
+   *
+   * Absent on a deployment without repository access, where a work channel
+   * cannot be created at all and the route says so rather than storing a
+   * channel that names a branch nothing can check out.
+   */
+  createBranch?(input: {
+    projectId: string;
+    repositoryId: string;
+    branch: string;
+  }): Promise<{ created: boolean }>;
+
+  /**
+   * Drops a channel's branch, and says nothing if it was already gone.
+   *
+   * Two callers: a work channel being deleted, and the rollback when a
+   * channel's branch was created but the channel itself could not be stored.
+   * A merge deletes its own branch, so this is not that path.
+   */
+  deleteBranch?(input: {
+    projectId: string;
+    repositoryId: string;
+    branch: string;
+  }): Promise<void>;
+
+  /**
+   * What a channel's branch has that the repository's does not.
+   *
+   * The pull request's whole substance: the files, the patch, how far ahead
+   * it is, and whether it can be merged without a person resolving anything.
+   * `mergeBase` is the point the two last agreed, which is what the diff is
+   * taken from — diffing against the tip of canonical instead would show
+   * every commit made elsewhere since as though this channel had removed it.
+   */
+  branchComparison?(input: {
+    projectId: string;
+    repositoryId: string;
+    branch: string;
+  }): Promise<{
+    mergeBase: string;
+    head: string;
+    baseHead: string;
+    ahead: number;
+    behind: number;
+    files: string[];
+    patch: string;
+    truncated: boolean;
+    conflicts: string[];
+  }>;
+
+  /**
+   * Merges a channel's branch into the repository's own.
+   *
+   * Refuses rather than resolves. A merge that needs a person is a merge a
+   * person should do — inventing a resolution here would put code nobody
+   * reviewed into canonical under a review that never saw it. `conflicts`
+   * names the files, so the channel can be told what to fix.
+   *
+   * Deletes the branch on success, because the channel that owned it is
+   * finished and a branch nothing points at is a branch somebody will later
+   * wonder about.
+   */
+  mergeBranch?(input: {
+    projectId: string;
+    repositoryId: string;
+    branch: string;
+    message: string;
+  }): Promise<
+    | { merged: true; revision: string }
+    | { merged: false; conflicts: string[] }
+  >;
+
+  /**
+   * Brings the repository's branch into a channel's, so it stops drifting.
+   *
+   * The same refusal on conflict, for the same reason. Reported back into the
+   * channel either way: a branch that merged cleanly is worth one line, and
+   * one that did not is the only warning anybody gets before the pull request
+   * refuses for the same reason at the end.
+   */
+  refreshBranch?(input: {
+    projectId: string;
+    repositoryId: string;
+    branch: string;
+  }): Promise<
+    | { merged: true; revision: string; behind: number }
+    | { merged: false; conflicts: string[] }
+  >;
   /**
    * Runs the repository's own app so somebody can look at it.
    *

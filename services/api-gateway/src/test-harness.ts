@@ -155,6 +155,8 @@ export interface TestRuntime {
     /** What the channel picked for this agent, if it picked anything. */
     model?: string;
     effort?: string;
+    /** The branch this task lands on — a work channel's, or none. */
+    branch?: string;
   }>;
   /** Every direct canonical push requested through the channel command. */
   pushCalls: Array<{
@@ -197,6 +199,17 @@ export interface TestRuntime {
   }>;
   /** What `canonicalDiff` answers; mutated in place by tests. */
   canonicalDiff: { files: string[]; patch: string; truncated: boolean };
+  /**
+   * The branches the fixture believes exist, keyed `repositoryId\0branch`.
+   *
+   * A test that wants a merge to conflict sets `conflicts` on the entry the
+   * route created; everything else reads it.
+   */
+  branches: Map<string, { conflicts: string[]; merged: boolean }>;
+  /** Every branch a merge actually landed, in order. */
+  mergedBranches: string[];
+  /** What `branchComparison` says changed; mutated in place by tests. */
+  branchFiles: string[];
   /** Where `canonicalHead` says canonical stands; mutated in place. */
   canonicalState: { head: string | undefined };
   /** Set `reason` to make `runRepository` reject, as a run that cannot start does. */
@@ -458,6 +471,12 @@ export async function startRuntime(
     /** Drops direct push support, as an older or limited deployment may. */
     withoutPushRepository?: boolean;
     /**
+     * Drops every branch operation, as a deployment with no repository
+     * access has — the case where a work channel cannot be created at all
+     * and the route must say so rather than store one.
+     */
+    withoutBranches?: boolean;
+    /**
      * Writes the catch-up's prose, standing in for the local model.
      *
      * Defaults to one that answers nothing, which is both what a machine
@@ -558,6 +577,9 @@ export async function startRuntime(
     patch: "@@ -1 +1 @@\n-const ok = a && b;\n+const ok = a || b;",
     truncated: false,
   };
+  const branches: TestRuntime["branches"] = new Map();
+  const mergedBranches: TestRuntime["mergedBranches"] = [];
+  const branchFiles: TestRuntime["branchFiles"] = ["src/login.ts"];
   const performChat = async (
     input: any,
     onEvent?: (event: Record<string, unknown>) => void,
@@ -877,6 +899,7 @@ export async function startRuntime(
           : { queueAfterCurrent: input.queueAfterCurrent }),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { effort: input.effort }),
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
       });
       return await store.submitTask({
         projectId: input.projectId,
@@ -892,6 +915,10 @@ export async function startRuntime(
         ...(input.planOnly === true ? { planOnly: true } : {}),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { effort: input.effort }),
+        // Where the work lands. Stored for the same reason: a fixture that
+        // dropped it would file every work channel's task against canonical
+        // and every branch test would pass while proving nothing.
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
@@ -1041,6 +1068,69 @@ export async function startRuntime(
       canonicalDiffs.push(input);
       return canonicalDiff;
     },
+    // Branches, modelled rather than stubbed. What the routes above depend on
+    // is not git — it is create-only semantics (two channels asking for one
+    // branch produce one branch and one refusal), that a merged branch stops
+    // existing, and that a conflicting merge refuses rather than lands. A
+    // stub that answered `{created:true}` unconditionally would let every one
+    // of those tests pass against a route that had lost the check.
+    async createBranch(input) {
+      const key = `${input.repositoryId}\u0000${input.branch}`;
+      if (branches.has(key)) {
+        return { created: false };
+      }
+      branches.set(key, { conflicts: [], merged: false });
+      return { created: true };
+    },
+    async deleteBranch(input) {
+      branches.delete(`${input.repositoryId}\u0000${input.branch}`);
+    },
+    async branchComparison(input) {
+      const key = `${input.repositoryId}\u0000${input.branch}`;
+      const state = branches.get(key);
+      if (state === undefined) {
+        throw new Error(`No such branch: ${input.branch}`);
+      }
+      return {
+        mergeBase: "b".repeat(40),
+        head: "c".repeat(40),
+        baseHead: "b".repeat(40),
+        ahead: state.conflicts.length > 0 ? 2 : 1,
+        behind: 0,
+        files: branchFiles,
+        patch: canonicalDiff.patch,
+        truncated: false,
+        conflicts: state.conflicts,
+      };
+    },
+    async mergeBranch(input) {
+      const key = `${input.repositoryId}\u0000${input.branch}`;
+      const state = branches.get(key);
+      if (state === undefined) {
+        throw new Error(`No such branch: ${input.branch}`);
+      }
+      if (state.conflicts.length > 0) {
+        return { merged: false, conflicts: state.conflicts };
+      }
+      // Gone once merged, exactly as the real one is: a route that merged
+      // twice would otherwise pass here and put two merge commits on
+      // canonical in production.
+      branches.delete(key);
+      mergedBranches.push(input.branch);
+      return { merged: true, revision: "d".repeat(40) };
+    },
+    async refreshBranch(input) {
+      const key = `${input.repositoryId}\u0000${input.branch}`;
+      const state = branches.get(key);
+      if (state === undefined) {
+        throw new Error(`No such branch: ${input.branch}`);
+      }
+      if (state.conflicts.length > 0) {
+        return { merged: false, conflicts: state.conflicts };
+      }
+      return { merged: true, revision: "e".repeat(40), behind: 0 };
+    },
+
     async canonicalHead() {
       return canonicalState.head;
     },
@@ -1269,6 +1359,17 @@ export async function startRuntime(
   if (options.withoutPushRepository === true) {
     delete operations.pushRepository;
   }
+  if (options.withoutBranches === true) {
+    // All five together, because that is how a deployment without repository
+    // access loses them: dropping only `createBranch` would model a
+    // deployment that cannot make a branch but can merge one, which is not a
+    // thing that exists.
+    delete operations.createBranch;
+    delete operations.deleteBranch;
+    delete operations.branchComparison;
+    delete operations.mergeBranch;
+    delete operations.refreshBranch;
+  }
   const gateway = new ApiGateway({
     store,
     operations,
@@ -1417,6 +1518,9 @@ export async function startRuntime(
     pauseCalls,
     resumeCalls,
     canonicalDiff,
+    branches,
+    mergedBranches,
+    branchFiles,
     canonicalState,
     runFailure,
   };
