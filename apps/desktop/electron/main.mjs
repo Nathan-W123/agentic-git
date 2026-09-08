@@ -55,7 +55,9 @@ import {
 import { detectAgents, findAgentCommand } from "./agents.mjs";
 import { CONNECTABLE, connectEditor } from "./editor-mcp.mjs";
 import {
+  allowTerminals,
   forgetMcpServers,
+  readTerminalsAllowed,
   setStayAwake,
   startWorker,
   stopWorker,
@@ -111,6 +113,16 @@ let session;
 let running = false;
 /** Mirrors the stored `keepAwake` choice so the menu can show it. */
 let awakeForWork = false;
+/**
+ * Whether this machine opens terminals, as the menu last read it.
+ *
+ * True before anything has been read, because that is what the worker writes
+ * on its first start — see `terminal-consent.mjs`. Starting at false would
+ * draw an unticked box for the second between the menu being built and the
+ * worker writing the yes, which reads as a setting somebody has to go and
+ * turn on.
+ */
+let terminalsAllowed = true;
 /** What the menu says about the worker. Replaced as soon as one reports. */
 let workerStatus = "Starting agents on this machine…";
 
@@ -331,6 +343,18 @@ function buildMenu() {
     },
     { type: "separator" },
     {
+      // On unless somebody says otherwise, and here rather than behind a
+      // prompt on first use. Nothing here can open a shell on another
+      // person's machine, so the only party to this consent is whoever
+      // installed the app and signed it in — asking them again would be
+      // asking them to agree to what they already did.
+      label: "Allow Terminals on This Machine",
+      type: "checkbox",
+      checked: terminalsAllowed,
+      click: (item) => void toggleTerminals(item.checked),
+    },
+    { type: "separator" },
+    {
       // Named for what it actually does. The platform call underneath is
       // `SetThreadExecutionState`, and Microsoft is explicit that it "cannot
       // be used to prevent the user from putting the computer to sleep" — a
@@ -407,6 +431,43 @@ async function forgetAllowedMcp() {
       buttons: ["Close"],
     });
   }
+}
+
+/**
+ * Reads the consent back and redraws the menu around it.
+ *
+ * Asynchronous because the file is on disk and the menu is not: the box is
+ * drawn from the cached answer, and this is what makes the cache true. Called
+ * once the worker has started — which is when the file exists — and after
+ * every toggle, so a write that failed shows as the state it actually left.
+ */
+async function refreshTerminalConsent() {
+  const allowed = await readTerminalsAllowed();
+  // Undefined is a worker that has not written it yet, which is the state the
+  // default already describes. Overwriting it with `false` would be the menu
+  // inventing a refusal nobody made.
+  if (allowed !== undefined) {
+    terminalsAllowed = allowed;
+  }
+  Menu.setApplicationMenu(buildMenu());
+}
+
+/** The switch itself. Takes effect where the worker reads it, without a restart. */
+async function toggleTerminals(wanted) {
+  try {
+    await allowTerminals(wanted === true);
+  } catch (error) {
+    await tellDialog({
+      kind: "error",
+      title: "Kumi",
+      heading: "Could not change the terminal setting.",
+      body: describe(error),
+      buttons: ["Close"],
+    });
+  }
+  // Read back rather than assumed: if the write failed, the box goes back to
+  // what is actually on disk instead of showing what was asked for.
+  await refreshTerminalConsent();
 }
 
 async function toggleKeepAwake(wanted) {
@@ -820,6 +881,10 @@ async function start() {
   // Unconditional. The app is the machine that runs the agents; there is no
   // arrangement in which it has signed in and should be sitting idle.
   void startWorker(here, session, noteWorkerState);
+  // After the worker, because the worker is what writes the consent on a
+  // first run. Not awaited: the dashboard should open whether or not a file
+  // read on a cold disk is quick.
+  void refreshTerminalConsent();
   await openDashboard();
 }
 

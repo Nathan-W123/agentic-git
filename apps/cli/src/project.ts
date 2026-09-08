@@ -778,6 +778,45 @@ function assertMcp(value: unknown): McpAllowlist {
 }
 
 /**
+ * The machine owner's answer about terminals, kept through a save.
+ *
+ * Rebuilt here for the reason `assertMcp` is, and it was missed once: this
+ * object is what `save` writes back, so a field this function forgets is a
+ * field the next save silently drops. Dropping this one turns a machine whose
+ * owner allowed terminals into one that refuses them, with nothing changed
+ * that anybody did on purpose — and the desktop app writes this file at every
+ * start, so it would have happened on the next launch, every time.
+ *
+ * A list of ids narrows what the machine will open a shell for; an empty one
+ * is a decision — "none" — and not the same as the key being absent, which is
+ * "never asked". The desktop app's switch depends on telling those apart.
+ */
+function assertTerminal(value: unknown): TerminalConsent {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(`"terminal" must be an object`);
+  }
+  const consent = value as Partial<TerminalConsent>;
+  const allow = consent.allow;
+  const cwd = consent.cwd;
+  if (cwd !== undefined && (typeof cwd !== "string" || cwd.trim().length === 0)) {
+    fail(`"terminal.cwd" must be a path`);
+  }
+  const where = cwd === undefined ? {} : { cwd };
+  if (allow === "all") {
+    return { allow: "all", ...where };
+  }
+  if (!Array.isArray(allow)) {
+    fail(`"terminal.allow" must be "all" or an array of repository ids`);
+  }
+  for (const entry of allow) {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      fail(`"terminal.allow" must be "all" or an array of repository ids`);
+    }
+  }
+  return { allow: [...(allow as string[])], ...where };
+}
+
+/**
  * What a machine owner is agreeing to when they allow a server.
  *
  * Everything that decides what runs and where it reaches: the name, how it
@@ -1002,6 +1041,9 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     // dropping this one turns a machine that ran its tools into one that
     // withholds them, with nothing changed that anybody did on purpose.
     ...(config.mcp === undefined ? {} : { mcp: assertMcp(config.mcp) }),
+    ...(config.terminal === undefined
+      ? {}
+      : { terminal: assertTerminal(config.terminal) }),
   };
 }
 
