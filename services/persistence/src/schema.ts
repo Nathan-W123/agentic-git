@@ -1801,6 +1801,18 @@ export const MIGRATIONS: readonly Migration[] = [
          ON branch_claims(repository_id, branch)`,
     ],
   },
+  {
+    version: 62,
+    name: "what-shape-a-branch-left-the-contract-in",
+    statements: [
+      // The name of an exported symbol says a branch touched it; the shape
+      // says what it now is. Without this, a branch that changed a return
+      // type and a branch that goes on calling it hold nothing in common —
+      // the name is the same on both sides, which is exactly why git merges
+      // them without a word.
+      `ALTER TABLE branch_claims ADD COLUMN shapes TEXT NOT NULL DEFAULT '[]'`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

@@ -4866,9 +4866,32 @@ export class Coordinator {
       // Best effort: an index that cannot be built falls back to the plan,
       // which is what this did before and is still better than nothing.
       const changedFiles = result.changeSet.patches.map((patch) => patch.path);
-      const resources = await this.intelligence
+      const observed = await this.intelligence
         .index(input.repository, integration.canonicalVersion.revision)
-        .then((index) => this.intelligence.changedResources(changedFiles, index))
+        .then((index) => {
+          // Names, and then shapes. The names say which contracts this branch
+          // touched; the shapes say what state it left them in, which is the
+          // half a clean merge destroys — `sign` is `sign` on both sides of a
+          // parameter that changed from `string` to `number`.
+          return {
+            resources: this.intelligence.changedResources(changedFiles, index),
+            contracts: {
+              // Each contract with what is built on it. Asked here because
+              // this is the only moment the index for this revision is in
+              // hand, and kept per contract because the warning has to name
+              // both — "login.ts consumes `sign`, which moved on #payments".
+              shapes: this.intelligence
+                .shapesIn(changedFiles, index)
+                .map((shape) => ({
+                  ...shape,
+                  consumers: this.intelligence.consumersOf(index, {
+                    file: shape.file,
+                    symbol: shape.symbol,
+                  }),
+                })),
+            },
+          };
+        })
         .catch(() => undefined);
       await store.recordBranchClaim(
         claimFromChangeSet({
@@ -4877,7 +4900,8 @@ export class Coordinator {
           revision: integration.canonicalVersion.revision,
           changeSet: result.changeSet,
           ...(result.plan === undefined ? {} : { plan: result.plan }),
-          ...(resources === undefined ? {} : { resources }),
+          ...(observed === undefined ? {} : { resources: observed.resources }),
+          ...(observed === undefined ? {} : { contracts: observed.contracts }),
         }),
       );
     } catch {

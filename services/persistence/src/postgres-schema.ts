@@ -1384,4 +1384,14 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON branch_claims(repository_id, branch)`,
     ],
   },
+  {
+    version: 62,
+    name: "what-shape-a-branch-left-the-contract-in",
+    statements: [
+      // See the SQLite copy for why. `IF NOT EXISTS` because this dialect
+      // has it and a migration that cannot be re-run is a migration that
+      // turns a half-applied deploy into a manual repair.
+      `ALTER TABLE branch_claims ADD COLUMN IF NOT EXISTS shapes TEXT NOT NULL DEFAULT '[]'`,
+    ],
+  },
 ];

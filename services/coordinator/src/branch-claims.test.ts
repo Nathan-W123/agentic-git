@@ -13,13 +13,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { BranchClaim } from "@coord/persistence";
+import type { BranchClaim, ClaimedShape } from "@coord/persistence";
 import { interfaceScopeOf } from "@coord/shared-types";
 import type { AgentPlan, ChangeSet, FilePatch } from "@coord/shared-types";
 
 import {
   branchClaimsAsActivePlans,
   claimFromChangeSet,
+  contractKey,
+  contractWarnings,
+  describeContractWarnings,
   describeRangeWarnings,
   rangeWarnings,
   rangesFromPatches,
@@ -42,9 +45,15 @@ function claim(overrides: Partial<BranchClaim> = {}): BranchClaim {
     configKeys: [],
     services: [],
     ranges: [],
+    shapes: [],
     createdAt: "2026-09-08T10:00:00.000Z",
     ...overrides,
   };
+}
+
+/** The plan under arbitration, with only what a test is about spelled out. */
+function plan(overrides: Partial<AgentPlan> = {}): AgentPlan {
+  return { ...PLAN, ...overrides };
 }
 
 const PLAN: AgentPlan = {
@@ -339,4 +348,223 @@ test("a plan touching nothing anybody holds is told nothing", () => {
   );
   assert.deepEqual(quiet, []);
   assert.deepEqual(describeRangeWarnings(quiet), []);
+});
+
+/** A contract as a branch left it, with what is built on it. */
+function shape(
+  overrides: Partial<ClaimedShape> & Pick<ClaimedShape, "symbol">,
+): ClaimedShape {
+  return {
+    file: "src/auth.ts",
+    shape: "(password: string): string",
+    digest: "aaaa",
+    consumers: [],
+    ...overrides,
+  };
+}
+
+/** What the repository's own branch says these contracts are now. */
+function canonical(...shapes: ClaimedShape[]): Map<string, ClaimedShape> {
+  return new Map(
+    shapes.map((entry) => [contractKey(entry.file, entry.symbol), entry]),
+  );
+}
+
+test("a plan that consumes a contract another branch moved is told", () => {
+  // The case the whole layer exists for. `#payments-v2` changed `sign` from
+  // taking a string to taking a number; this plan is not editing `auth.ts`
+  // and never names `sign` — it is editing `login.ts`, which calls it. No
+  // file overlaps, no symbol name overlaps, and git merges both without a
+  // word.
+  const warnings = contractWarnings({
+    plan: plan({ expectedFiles: ["src/login.ts"] }),
+    claims: [
+      claim({
+        shapes: [
+          shape({
+            symbol: "sign",
+            shape: "(password: number): string",
+            digest: "bbbb",
+            consumers: ["src/login.ts", "src/report.ts"],
+          }),
+        ],
+      }),
+    ],
+    canonical: canonical(shape({ symbol: "sign", digest: "aaaa" })),
+  });
+
+  assert.deepEqual(
+    warnings.map((warning) => [warning.via, warning.symbol, warning.through]),
+    [["consumer", "sign", "src/login.ts"]],
+  );
+  const said = describeContractWarnings(warnings)[0] ?? "";
+  // The sentence has to carry all four: which file of mine, which contract,
+  // where it moved to, and that it has not landed. Anything less is a
+  // warning somebody has to go and research.
+  assert.match(said, /src\/login\.ts is built on `sign`/u);
+  assert.match(said, /src\/auth\.ts/u);
+  assert.match(said, /\(password: string\): string/u);
+  assert.match(said, /\(password: number\): string/u);
+  assert.match(said, /#payments-v2/u);
+  assert.match(said, /stop compiling/u);
+});
+
+test("a contract a branch left exactly as canonical has it is not a warning", () => {
+  // A claim records every exported shape in the files its branch touched,
+  // changed or not — deliberately, because the digest is what decides. Two
+  // branches that both edited `auth.ts` without touching `sign` agree with
+  // canonical and produce nothing between them.
+  const untouched = shape({
+    symbol: "sign",
+    digest: "aaaa",
+    consumers: ["src/login.ts"],
+  });
+  assert.deepEqual(
+    contractWarnings({
+      plan: plan({ expectedFiles: ["src/login.ts", "src/auth.ts"] }),
+      claims: [claim({ shapes: [untouched] })],
+      canonical: canonical(untouched),
+    }),
+    [],
+  );
+});
+
+test("editing the contract itself is said with the shapes, not just the name", () => {
+  const warnings = contractWarnings({
+    plan: plan({ expectedFiles: ["src/auth.ts"] }),
+    claims: [
+      claim({
+        shapes: [
+          shape({ symbol: "sign", shape: "(p: number): string", digest: "bbbb" }),
+        ],
+      }),
+    ],
+    canonical: canonical(shape({ symbol: "sign", digest: "aaaa" })),
+  });
+  assert.equal(warnings[0]?.via, "contract");
+  const said = describeContractWarnings(warnings)[0] ?? "";
+  assert.match(said, /src\/auth\.ts: `sign`/u);
+  assert.match(
+    said,
+    /from `\(password: string\): string` to `\(p: number\): string`/u,
+  );
+
+  // And the same plan reached through its symbols rather than its files.
+  assert.equal(
+    contractWarnings({
+      plan: plan({
+        expectedFiles: ["src/elsewhere.ts"],
+        expectedSymbols: ["sign"],
+      }),
+      claims: [claim({ shapes: [shape({ symbol: "sign", digest: "bbbb" })] })],
+      canonical: canonical(shape({ symbol: "sign", digest: "aaaa" })),
+    })[0]?.via,
+    "contract",
+  );
+});
+
+test("a contract canonical has never had is an arrival, and still worth saying", () => {
+  // A branch that added an export. Nothing on canonical can be depending on
+  // it — but a plan editing a file this branch listed as a consumer is
+  // writing against a name that only exists somewhere else, which is exactly
+  // the state that reads as "works here, fails on main".
+  const warnings = contractWarnings({
+    plan: plan({ expectedFiles: ["src/login.ts"] }),
+    claims: [
+      claim({
+        shapes: [
+          shape({
+            symbol: "verify",
+            shape: "(token: string): boolean",
+            digest: "cccc",
+            consumers: ["src/login.ts"],
+          }),
+        ],
+      }),
+    ],
+    canonical: canonical(),
+  });
+  assert.equal(warnings[0]?.canonical, undefined);
+  assert.match(
+    describeContractWarnings(warnings)[0] ?? "",
+    /has added it as `\(token: string\): boolean`/u,
+  );
+});
+
+test("a plan that meets nothing of another branch's is told nothing", () => {
+  assert.deepEqual(
+    contractWarnings({
+      plan: plan({ expectedFiles: ["src/unrelated.ts"] }),
+      claims: [
+        claim({
+          shapes: [
+            shape({
+              symbol: "sign",
+              digest: "bbbb",
+              consumers: ["src/login.ts"],
+            }),
+          ],
+        }),
+      ],
+      canonical: canonical(shape({ symbol: "sign", digest: "aaaa" })),
+    }),
+    [],
+  );
+});
+
+test("a contract that is partly inferred says so rather than implying coverage", () => {
+  // The honest half of a syntax-only reading: an unannotated return type is
+  // not being watched, and a warning silent about that would be claiming a
+  // coverage it does not have.
+  const warnings = contractWarnings({
+    plan: plan({ expectedFiles: ["src/login.ts"] }),
+    claims: [
+      claim({
+        shapes: [
+          shape({
+            symbol: "sign",
+            digest: "bbbb",
+            inferred: true,
+            consumers: ["src/login.ts"],
+          }),
+        ],
+      }),
+    ],
+    canonical: canonical(shape({ symbol: "sign", digest: "aaaa" })),
+  });
+  assert.equal(warnings[0]?.inferred, true);
+  assert.match(
+    describeContractWarnings(warnings)[0] ?? "",
+    /inferred rather than written/u,
+  );
+});
+
+test("what this plan edits is read before what it merely consumes", () => {
+  // Different problems: one is a collision to resolve now, the other is a
+  // thing to know before writing against a shape on its way out.
+  const warnings = contractWarnings({
+    plan: plan({ expectedFiles: ["src/auth.ts", "src/login.ts"] }),
+    claims: [
+      claim({
+        branch: "kumi/one",
+        shapes: [
+          shape({
+            file: "src/session.ts",
+            symbol: "renew",
+            digest: "bbbb",
+            consumers: ["src/login.ts"],
+          }),
+          shape({ file: "src/auth.ts", symbol: "sign", digest: "bbbb" }),
+        ],
+      }),
+    ],
+    canonical: canonical(
+      shape({ file: "src/session.ts", symbol: "renew", digest: "aaaa" }),
+      shape({ file: "src/auth.ts", symbol: "sign", digest: "aaaa" }),
+    ),
+  });
+  assert.deepEqual(
+    describeContractWarnings(warnings).map((line) => line.split(" ")[0]),
+    ["src/auth.ts:", "src/login.ts"],
+  );
 });

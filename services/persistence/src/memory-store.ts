@@ -3577,6 +3577,10 @@ public async recordBranchClaim(
       configKeys: [...(input.configKeys ?? [])],
       services: [...(input.services ?? [])],
       ranges: (input.ranges ?? []).map((range) => ({ ...range })),
+      shapes: (input.shapes ?? []).map((shape) => ({
+        ...shape,
+        consumers: [...shape.consumers],
+      })),
       createdAt: new Date().toISOString(),
     };
     this.branchClaims.set(claim.id, claim);

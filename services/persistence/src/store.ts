@@ -1898,6 +1898,35 @@ export interface ClaimedRange {
 }
 
 /**
+ * One exported contract as a branch left it.
+ *
+ * The tier above {@link BranchClaim.symbols}. A name says a branch touched
+ * `sign`; this says `sign` is now `(password: number): string`, which is what
+ * lets a consumer of the old shape be told, and is invisible to git — the
+ * name on both sides is the same, which is precisely why it merges.
+ */
+export interface ClaimedShape {
+  file: string;
+  symbol: string;
+  /** The readable form, for the sentence somebody is shown. */
+  shape: string;
+  /** What decides whether it moved; see `contract-shape.ts`. */
+  digest: string;
+  /** Part of this contract is inferred, so this claim cannot see all of it. */
+  inferred?: boolean;
+  /**
+   * The files that were built on this contract when the branch left it.
+   *
+   * Held per contract rather than as one list for the claim, because the
+   * sentence this exists to produce names both: "login.ts consumes `sign`,
+   * which #payments-v2 has already changed". A flat list could only manage
+   * "consumes something that moved", which is the kind of warning people
+   * learn to close.
+   */
+  consumers: string[];
+}
+
+/**
  * What one task left behind on a branch, and therefore what that branch holds
  * for as long as it is open.
  *
@@ -1941,6 +1970,15 @@ export interface BranchClaim {
    * anybody decides whether it should ever be more than a warning.
    */
   ranges: ClaimedRange[];
+  /**
+   * What the exported contracts this branch touched now look like.
+   *
+   * Enforced like the semantic surface above rather than advisory like the
+   * ranges, and for the same reason: a shape change is one of the cases where
+   * a clean merge produces broken software, and contracts move rarely enough
+   * that holding one for a branch's life costs almost nothing.
+   */
+  shapes: ClaimedShape[];
   createdAt: string;
 }
 
@@ -1955,6 +1993,7 @@ export interface RecordBranchClaimInput {
   configKeys?: readonly string[];
   services?: readonly string[];
   ranges?: readonly ClaimedRange[];
+  shapes?: readonly ClaimedShape[];
 }
 
 /** One person's membership of one sub-channel. */
