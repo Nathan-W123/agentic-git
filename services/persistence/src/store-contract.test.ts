@@ -6792,4 +6792,341 @@ for (const backend of backends) {
       await cleanup();
     }
   });
+
+  test(`${backend.name}: a channel can be a branch, and is merged once`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_branching",
+        path: "/canonical/branching.git",
+        branch: "main",
+      });
+      const general = await store.ensureGeneralSubChannel(
+        "repo_branching",
+        DEFAULT_PROJECT_ID,
+      );
+      // `#general` is the repository's own branch — the thing everything else
+      // merges into — so it never carries one of its own.
+      assert.equal(general.branch, undefined);
+
+      // A channel that is only a conversation: unchanged, and every channel
+      // written before this existed reads back exactly this way.
+      const design = await store.createSubChannel({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "design",
+      });
+      assert.equal(design.branch, undefined);
+      assert.equal(design.mergedAt, undefined);
+
+      const work = await store.createSubChannel({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "login-redirect",
+        branch: "kumi/login-redirect",
+        createdBy: "user_who",
+      });
+      assert.equal(work.branch, "kumi/login-redirect");
+      assert.equal(work.mergedAt, undefined);
+      // Read back, not merely returned: the write and the read have to agree,
+      // and a column that only the insert knows about is the classic way
+      // three implementations quietly stop matching.
+      assert.equal(
+        (await store.getSubChannel("repo_branching", work.id))?.branch,
+        "kumi/login-redirect",
+      );
+      assert.equal(
+        (await store.listSubChannels("repo_branching")).find(
+          (channel) => channel.id === work.id,
+        )?.branch,
+        "kumi/login-redirect",
+      );
+
+      // Two channels on one branch would each think they owned it, and the
+      // second to merge would ship the first one's work under its own review.
+      await assert.rejects(
+        store.createSubChannel({
+          repositoryId: "repo_branching",
+          projectId: DEFAULT_PROJECT_ID,
+          slug: "login-redirect-again",
+          branch: "kumi/login-redirect",
+        }),
+        /already working that branch/u,
+      );
+      // But a conversation channel is not competing for anything, so any
+      // number of them coexist. Nulls must not collide in that index.
+      await store.createSubChannel({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "standup",
+      });
+      await store.createSubChannel({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "watercooler",
+      });
+
+      // The same branch name in a different repository is a different branch.
+      await store.saveRepository({
+        id: "repo_elsewhere",
+        path: "/canonical/elsewhere.git",
+        branch: "main",
+      });
+      const elsewhere = await store.createSubChannel({
+        repositoryId: "repo_elsewhere",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "login-redirect",
+        branch: "kumi/login-redirect",
+      });
+      assert.equal(elsewhere.branch, "kumi/login-redirect");
+
+      const merged = await store.mergeSubChannel("repo_branching", work.id, {
+        mergedAt: "2026-01-02T03:04:05.000Z",
+        mergedBy: "user_who",
+      });
+      assert.equal(merged?.mergedAt, "2026-01-02T03:04:05.000Z");
+      assert.equal(merged?.mergedBy, "user_who");
+      assert.equal(merged?.branch, "kumi/login-redirect");
+
+      // Twice is not a second merge. Two people pressing the button at once,
+      // or a retry after a lost response, must produce one merge and one
+      // honest refusal — never a rewritten record of who shipped it.
+      assert.equal(
+        await store.mergeSubChannel("repo_branching", work.id, {
+          mergedAt: "2026-02-02T03:04:05.000Z",
+          mergedBy: "user_someone_else",
+        }),
+        undefined,
+      );
+      assert.equal(
+        (await store.getSubChannel("repo_branching", work.id))?.mergedBy,
+        "user_who",
+      );
+
+      // A conversation channel has no work to merge.
+      assert.equal(
+        await store.mergeSubChannel("repo_branching", design.id, {
+          mergedAt: "2026-01-02T03:04:05.000Z",
+          mergedBy: "user_who",
+        }),
+        undefined,
+      );
+      // Nor does a channel in another repository, named by the wrong one.
+      assert.equal(
+        await store.mergeSubChannel("repo_branching", elsewhere.id, {
+          mergedAt: "2026-01-02T03:04:05.000Z",
+          mergedBy: "user_who",
+        }),
+        undefined,
+      );
+
+      // Shipping is the second gate, and a separate fact. A channel that has
+      // merged has not necessarily gone to GitHub — a deployment with no
+      // remote never does — so the two are recorded apart.
+      assert.equal(
+        (await store.getSubChannel("repo_branching", work.id))?.pullRequestUrl,
+        undefined,
+      );
+      const shipped = await store.shipSubChannel("repo_branching", work.id, {
+        pullRequestUrl: "https://github.com/acme/app/pull/7",
+        shippedAt: "2026-01-02T04:00:00.000Z",
+      });
+      assert.equal(
+        shipped?.pullRequestUrl,
+        "https://github.com/acme/app/pull/7",
+      );
+      assert.equal(shipped?.shippedAt, "2026-01-02T04:00:00.000Z");
+      // And it survives the round trip, which is the whole reason it is a
+      // column rather than something the browser remembers.
+      const reread = await store.getSubChannel("repo_branching", work.id);
+      assert.equal(reread?.pullRequestUrl, "https://github.com/acme/app/pull/7");
+      assert.equal(
+        (await store.listSubChannels("repo_branching")).find(
+          (channel) => channel.id === work.id,
+        )?.pullRequestUrl,
+        "https://github.com/acme/app/pull/7",
+      );
+
+      // Unlike merging, shipping twice is not a conflict: GitHub answers the
+      // pull request that already exists rather than opening a second, so the
+      // second write restates a fact rather than claiming somebody's work.
+      const again = await store.shipSubChannel("repo_branching", work.id, {
+        pullRequestUrl: "https://github.com/acme/app/pull/7",
+        shippedAt: "2026-01-03T04:00:00.000Z",
+      });
+      assert.equal(again?.shippedAt, "2026-01-03T04:00:00.000Z");
+
+      // A channel this repository does not have is not shipped by naming it.
+      assert.equal(
+        await store.shipSubChannel("repo_branching", elsewhere.id, {
+          pullRequestUrl: "https://github.com/acme/app/pull/8",
+          shippedAt: "2026-01-03T04:00:00.000Z",
+        }),
+        undefined,
+      );
+      assert.equal(
+        (await store.getSubChannel("repo_elsewhere", elsewhere.id))
+          ?.pullRequestUrl,
+        undefined,
+      );
+
+      // ---- reviewing the branch in its own room ----------------------
+      //
+      // A review comment is a channel message with an anchor, not a parallel
+      // comment system: the room is already the pull request's conversation,
+      // so a second store beside it would be two places to look and one of
+      // them would go stale.
+      const plain = await store.appendChannelMessage({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        channelId: work.id,
+        authorId: "user_who",
+        content: "Taking a look now.",
+      });
+      assert.equal(plain.anchor, undefined);
+
+      const anchored = await store.appendChannelMessage({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        channelId: work.id,
+        authorId: "user_who",
+        content: "This should clamp from below too.",
+        anchor: { path: "src/login.ts", line: 42, revision: "c".repeat(40) },
+      });
+      assert.deepEqual(anchored.anchor, {
+        path: "src/login.ts",
+        line: 42,
+        revision: "c".repeat(40),
+      });
+      // And it survives the round trip, which is the whole reason it is a
+      // column: the panel draws these against a diff on every later read.
+      const readBack = await store.getChannelMessage(
+        "repo_branching",
+        anchored.id,
+        "user_who",
+      );
+      assert.deepEqual(readBack?.anchor, {
+        path: "src/login.ts",
+        line: 42,
+        revision: "c".repeat(40),
+      });
+      const listed = await store.listChannelMessages(
+        "repo_branching",
+        "user_who",
+        { channelId: work.id },
+      );
+      assert.equal(
+        listed.find((message) => message.id === anchored.id)?.anchor?.line,
+        42,
+      );
+      assert.equal(
+        listed.find((message) => message.id === plain.id)?.anchor,
+        undefined,
+      );
+
+      // One review per person, replaced rather than accumulated: changing
+      // your mind is the ordinary case, and a history of somebody approving
+      // and un-approving is noise nobody asked for.
+      assert.deepEqual(
+        await store.listSubChannelReviews("repo_branching", work.id),
+        [],
+      );
+      await store.saveSubChannelReview({
+        repositoryId: "repo_branching",
+        channelId: work.id,
+        userId: "user_who",
+        state: "changes_requested",
+        note: "The clamp is still one-sided.",
+        revision: "c".repeat(40),
+        reviewedAt: "2026-01-02T05:00:00.000Z",
+      });
+      await store.saveSubChannelReview({
+        repositoryId: "repo_branching",
+        channelId: work.id,
+        userId: "user_other",
+        state: "approved",
+        reviewedAt: "2026-01-02T05:01:00.000Z",
+      });
+      const reviews = await store.listSubChannelReviews(
+        "repo_branching",
+        work.id,
+      );
+      assert.equal(reviews.length, 2);
+      assert.deepEqual(
+        reviews.map((review) => review.userId),
+        ["user_who", "user_other"],
+        "oldest first, so who looked reads in the order they looked",
+      );
+      assert.equal(reviews[0]?.state, "changes_requested");
+      assert.equal(reviews[0]?.note, "The clamp is still one-sided.");
+      assert.equal(reviews[0]?.revision, "c".repeat(40));
+      // Absent rather than empty for the one who said nothing: "no note" and
+      // "an empty note" are different statements.
+      assert.equal(reviews[1]?.note, undefined);
+      assert.equal(reviews[1]?.revision, undefined);
+
+      await store.saveSubChannelReview({
+        repositoryId: "repo_branching",
+        channelId: work.id,
+        userId: "user_who",
+        state: "approved",
+        reviewedAt: "2026-01-02T06:00:00.000Z",
+      });
+      const afterChangingMind = await store.listSubChannelReviews(
+        "repo_branching",
+        work.id,
+      );
+      assert.equal(afterChangingMind.length, 2, "a second review replaces");
+      assert.equal(
+        afterChangingMind.find((review) => review.userId === "user_who")?.state,
+        "approved",
+      );
+      // The old note goes with the old answer rather than outliving it.
+      assert.equal(
+        afterChangingMind.find((review) => review.userId === "user_who")?.note,
+        undefined,
+      );
+
+      assert.equal(
+        await store.clearSubChannelReview(
+          "repo_branching",
+          work.id,
+          "user_who",
+        ),
+        true,
+      );
+      assert.deepEqual(
+        (await store.listSubChannelReviews("repo_branching", work.id)).map(
+          (review) => review.userId,
+        ),
+        ["user_other"],
+      );
+      // Withdrawing one nobody left, and one named by the wrong repository,
+      // both answer false rather than throwing.
+      assert.equal(
+        await store.clearSubChannelReview(
+          "repo_branching",
+          work.id,
+          "user_who",
+        ),
+        false,
+      );
+      assert.equal(
+        await store.clearSubChannelReview(
+          "repo_elsewhere",
+          work.id,
+          "user_other",
+        ),
+        false,
+      );
+      assert.equal(
+        (await store.listSubChannelReviews("repo_branching", work.id)).length,
+        1,
+        "a wrong-repository withdrawal must not remove a real review",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
 }

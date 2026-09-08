@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 
 import { RepositoryService } from "@coord/repository-service";
-import type { AgentPlan } from "@coord/shared-types";
+import { crossesBranches, type AgentPlan } from "@coord/shared-types";
 
 import { CodeIntelligenceService, type RepositoryIndex } from "./index.js";
 
@@ -71,6 +71,84 @@ test("indexes symbols, imports, APIs, schemas, configuration, tests, and service
     const enriched = service.enrichPlan(plan, index);
     assert.ok(enriched.expectedSymbols.includes("UserService"));
     assert.ok(enriched.dependencies.includes("file:src/util.ts"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("records which declarations leave their file, and which do not", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "session.ts"),
+      [
+        // Every shape the `export` keyword takes, because they reach
+        // `getCombinedModifierFlags` through different amounts of TypeScript.
+        "export interface SessionToken { id: string }",
+        "export class SessionStore {}",
+        "export function issue() { return 1; }",
+        "export const TTL_MS = 60;",
+        "export default function boot() { return 2; }",
+        // And the ones that do not leave the file.
+        "interface Clock { now(): number }",
+        "function clampWidth(n: number) { return n; }",
+        "const scratch = 3;",
+        // Published without a modifier, from somewhere else in the file.
+        "function readCookie() { return \"\"; }",
+        "export { readCookie as cookie };",
+      ].join("\n"),
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "exports",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+    const file = index.files.find((entry) => entry.path === "src/session.ts");
+    assert.ok(file);
+
+    for (const published of [
+      "SessionToken",
+      "SessionStore",
+      "issue",
+      "TTL_MS",
+      "boot",
+      "readCookie",
+      "cookie",
+    ]) {
+      assert.ok(
+        file.exportedSymbols.includes(published),
+        `${published} should be exported`,
+      );
+    }
+    for (const kept of ["Clock", "clampWidth", "scratch"]) {
+      assert.ok(file.symbols.includes(kept), `${kept} should be indexed`);
+      assert.ok(
+        !file.exportedSymbols.includes(kept),
+        `${kept} should not be exported`,
+      );
+    }
+
+    // The whole point of recording it: a symbol nobody outside its file can
+    // name is local to the branch editing it, and an exported one belongs to
+    // every branch at once.
+    const symbols = service.symbolVisibility(index);
+    assert.equal(
+      crossesBranches({ resourceType: "symbol", resourceId: "SessionToken" }, symbols),
+      true,
+    );
+    assert.equal(
+      crossesBranches({ resourceType: "symbol", resourceId: "clampWidth" }, symbols),
+      false,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

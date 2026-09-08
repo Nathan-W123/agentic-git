@@ -10,147 +10,160 @@
  */
 
 import {
+  activeChannelId,
+  activeSubChannelId,
+  addChannelAgent,
   api,
+  approveWaitlistEntry,
+  canDeleteRepository,
+  canLeaveRepository,
+  canManageOrganization,
+  canManageRepository,
+  CHANNEL_MESSAGE_MAX_CHARS,
+  channelAgentsFor,
+  channelAuthor,
+  channelMessagesFor,
+  closeChannelFile,
   closeSocket,
+  closeTerminal,
+  commentOnBranchLine,
   connectSocket,
-  ensureSocketAlive,
-  TYPING_SWEEP_MS,
-  noteAgentBusy,
-  noteDirectMessage,
-  noteDirectMessageEdited,
-  noteDirectMessageDeleted,
-  ensureDirectMessages,
-  loadChannelStats,
-  noteEventSequence,
-  loadDmThread,
-  sendDirectMessage,
-  noteTyping,
-  sendTyping,
+  createSubChannel,
   currentRepository,
   currentUserId,
   currentUserName,
+  decideApproval,
   DEFAULT_ACCENT,
   DEFAULT_ACCENT_SECONDARY,
   DEFAULT_AGENT_COLOR,
-  disconnectGitHub,
-  loadContext,
-  loadDeferredContext,
-  loadGitHub,
-  loadHealth,
-  loadProviders,
-  phoneLayout,
-  markRead,
-  myAccent,
-  myAccentSecondary,
-  myAgentColor,
-  myAvatar,
-  setMyAvatar,
-  setChannelPicture,
-  ensureChannelPictureShared,
-  myTheme,
-  myThemePreference,
-  setMyTheme,
-  myAgents,
-  notifications,
-  PROVIDER_VENDOR,
-  persist,
-  isFavourite,
-  flushChannelDrafts,
-  channelAgentsFor,
-  activeChannelId,
-  refreshChannelLiveness,
-  canLeaveRepository,
-  canManageRepository,
-  canDeleteRepository,
-  closeChannelFile,
-  loadChannelFile,
-  moveChannelFile,
-  saveChannelFile,
-  createSubChannel,
-  deleteSubChannel,
-  ensureChannelMessages,
-  ensureChannelRoster,
-  ensureSubChannels,
-  loadSubChannelMembers,
-  loadSubChannels,
-  activeSubChannelId,
-  selectSubChannel,
-  setSubChannelMember,
-  subChannelsFor,
-  updateSubChannel,
-  ensureProviderUsage,
-  ensureRepositoryGrants,
-  markChannelRead,
-  isChannelMuted,
-  loadChannelMutes,
-  setChannelMuted,
-  refreshChannelMessages,
-  refreshProviderUsage,
-  takePromptedThread,
-  takeReadyPlan,
-  addChannelAgent,
-  removeChannelAgent,
-  renameAgent,
-  renameChannelAgent,
-  setChannelAgentSetting,
-  deleteRepository,
-  renameRepository,
-  repositoryLabel,
-  leaveRepository,
-  channelAuthor,
-  channelMessagesFor,
   deleteAllChannelThreads,
   deleteChannelMessageEntry,
   deleteChannelReplyEntry,
   deleteChannelThread,
   deleteDirectMessageEntry,
+  deleteRepository,
+  deleteSubChannel,
+  deleteWaitlistEntry,
+  DIRECT_MESSAGE_MAX_CHARS,
+  disconnectGitHub,
+  dmUnreadTotal,
   editChannelMessageEntry,
   editChannelReplyEntry,
   editDirectMessageEntry,
-  loadPreview,
-  rollbackTask,
-  setAuditorPaused,
-  setPreviewCommand,
-  simplifySummary,
-  startPreview,
-  uploadAttachment,
-  stopPreview,
-  setRepositoryGrant,
-  revokeRepositoryGrant,
-  updateMemberRole,
-  iAmSystemAdmin,
-  canManageOrganization,
-  resolveAttachmentImages,
-  openBillingPortal,
-  startCheckout,
   ensureBilling,
-  resetBilling,
-  joinWaitlist,
-  loadWaitlist,
-  approveWaitlistEntry,
-  deleteWaitlistEntry,
-  decideApproval,
+  ensureChangeSetForTask,
+  ensureChannelMessages,
+  ensureChannelPictureShared,
+  ensureChannelRoster,
   ensureDeployment,
+  ensureDirectMessages,
+  ensureProviderUsage,
+  ensureRepositoryGrants,
+  ensureSocketAlive,
+  ensureSubChannels,
+  flushChannelDrafts,
+  iAmSystemAdmin,
+  isChannelMuted,
+  isDirectMessagePerson,
+  isFavourite,
+  joinWaitlist,
+  leaveRepository,
   loadBilling,
-  setSystemAdmin,
+  loadBranchReview,
+  loadChannelFile,
+  loadChannelMessage,
+  loadChannelMutes,
+  loadChannelStats,
+  loadContext,
+  loadDeferredContext,
+  loadDmThread,
+  loadEarlierChannelMessages,
+  loadGitHub,
+  loadHealth,
+  loadPreview,
+  loadProviders,
+  loadSubChannelMembers,
+  loadSubChannels,
+  loadTerminalMachines,
+  loadWaitlist,
+  markChannelRead,
+  markRead,
+  memberName,
+  memberRole,
+  mergeBranchReview,
+  messageFoldOpen,
+  messageTooLong,
+  moveChannelFile,
+  myAccent,
+  myAccentSecondary,
+  myAgentColor,
+  myAgents,
+  myAvatar,
+  myTheme,
+  myThemePreference,
+  noteAgentBusy,
+  noteDirectMessage,
+  noteDirectMessageDeleted,
+  noteDirectMessageEdited,
+  noteEventSequence,
+  noteTyping,
+  notifications,
+  openBillingPortal,
+  openTerminalSession,
+  persist,
+  personOnline,
+  phoneLayout,
+  previewKey,
+  PROVIDER_VENDOR,
+  readTerminal,
+  refreshBranchReview,
+  refreshChannelLiveness,
+  refreshChannelMessages,
+  refreshProviderUsage,
+  removeChannelAgent,
   removeMember,
+  renameAgent,
+  renameChannelAgent,
+  renameRepository,
+  repositoryLabel,
+  resendChannelMessage,
+  resetBilling,
+  resizeTerminal,
+  resolveAttachmentImages,
+  reviewBranch,
+  revokeRepositoryGrant,
+  rollbackTask,
+  saveChannelFile,
+  selectSubChannel,
+  sendDirectMessage,
+  sendTerminalInput,
+  sendTyping,
+  setAuditorPaused,
+  setChannelAgentSetting,
+  setChannelMuted,
+  setChannelPicture,
+  setMyAvatar,
+  setMyTheme,
+  setPreviewCommand,
+  setRepositoryGrant,
+  setSubChannelMember,
+  setSystemAdmin,
+  shipBranchReview,
+  simplifySummary,
+  startCheckout,
+  startPreview,
   state,
+  stopPreview,
+  subChannelsFor,
+  takePromptedThread,
+  takeReadyPlan,
   toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
-  dmUnreadTotal,
-  isDirectMessagePerson,
-  memberName,
-  memberRole,
-  messageFoldOpen,
-  personOnline,
-  loadEarlierChannelMessages,
-  loadChannelMessage,
-  resendChannelMessage,
-  ensureChangeSetForTask,
-  CHANNEL_MESSAGE_MAX_CHARS,
-  DIRECT_MESSAGE_MAX_CHARS,
-  messageTooLong,
+  TYPING_SWEEP_MS,
+  updateMemberRole,
+  updateSubChannel,
+  uploadAttachment,
 } from "./data.js";
 import {
   $,
@@ -3582,6 +3595,30 @@ const SUB_CHANNEL_VISIBILITIES = [
   },
 ];
 
+/**
+ * The one extra question a new channel can be asked: is it work, or talk?
+ *
+ * A channel with a branch is where agents commit; every task dispatched in it
+ * lands there instead of on the repository's own branch, and it ends by being
+ * merged rather than by going quiet. Off by default, because most rooms are
+ * conversations and a branch nothing ever commits to is a branch somebody
+ * later has to wonder about.
+ *
+ * Offered only when a channel is created. A branch cannot move afterwards
+ * without orphaning every commit on it, so this is not a setting — it is what
+ * the room is.
+ */
+function branchChoiceHtml() {
+  return `<label class="chan-branch-choice">
+    <input type="checkbox" name="branch" value="on">
+    <span class="chan-visibility-copy">
+      <strong>Work on a branch</strong>
+      <small>Agents commit here instead of to the repository, and the work is
+        reviewed and merged when the channel is done.</small>
+    </span>
+  </label>`;
+}
+
 /** The radio cards both channel dialogs offer, with one pre-selected. */
 function visibilityChoicesHtml(selected) {
   return `<div class="chan-visibility-choices" role="radiogroup"
@@ -3895,17 +3932,167 @@ state.providerConnecting = providerConnecting;
  * binds its port is a broken app, and a page that asks about it forever is a
  * second broken thing.
  */
-async function watchPreviewReady(repositoryId) {
-  if (previewsWatched.has(repositoryId)) {
+/* --------------------------------------------------------- terminal ---- */
+
+/**
+ * The live terminal, kept across renders.
+ *
+ * The page re-renders by replacing HTML, and a terminal cannot be redrawn
+ * from state: it *is* state — a scrollback, a cursor, a program mid-draw. So
+ * one emulator is made per session and re-attached to whatever container the
+ * latest render produced, rather than rebuilt with it.
+ */
+let liveTerminal;
+
+/** Loads the vendored emulator once, on the first terminal anybody opens. */
+async function loadXterm() {
+  if (window.Terminal !== undefined) {
+    return window.Terminal;
+  }
+  await new Promise((resolve, reject) => {
+    const style = document.createElement("link");
+    style.rel = "stylesheet";
+    style.href = "/vendor/xterm/xterm.css";
+    document.head.append(style);
+    const script = document.createElement("script");
+    script.src = "/vendor/xterm/xterm.js";
+    script.onload = resolve;
+    script.onerror = () =>
+      reject(new Error("The terminal emulator could not be loaded."));
+    document.head.append(script);
+  });
+  return window.Terminal;
+}
+
+/**
+ * Attaches the emulator to the container the last render drew, if any.
+ *
+ * Called after every render rather than once, because the container is a new
+ * element each time and xterm holds a reference to the old one.
+ */
+function syncTerminal() {
+  const host = document.querySelector(".terminal-screen");
+  if (host === null || liveTerminal === undefined) {
     return;
   }
-  previewsWatched.add(repositoryId);
+  if (host.dataset.terminal !== liveTerminal.sessionId) {
+    return;
+  }
+  if (host.childElementCount === 0) {
+    liveTerminal.term.open(host);
+    liveTerminal.term.focus();
+  }
+}
+
+/** Reads output until the shell ends or the reader closes the pane. */
+async function pumpTerminal(repositoryId, channelId, session) {
+  let after = 0;
+  while (liveTerminal !== undefined && liveTerminal.sessionId === session.id) {
+    let read;
+    try {
+      read = await readTerminal(repositoryId, channelId, session.id, after);
+    } catch {
+      // The session is gone — closed here, or its machine went away. Said in
+      // the terminal itself, which is where somebody is looking.
+      liveTerminal?.term.write(
+        "\r\n\u001b[2mThis terminal is no longer open.\u001b[0m\r\n",
+      );
+      break;
+    }
+    if (read?.truncated === true) {
+      liveTerminal?.term.write(
+        "\r\n\u001b[2m…earlier output was dropped\u001b[0m\r\n",
+      );
+    }
+    if (typeof read?.data === "string" && read.data !== "") {
+      liveTerminal?.term.write(read.data);
+    }
+    after = typeof read?.seq === "number" ? read.seq : after;
+    if (read?.exitCode !== undefined) {
+      liveTerminal?.term.write(
+        `\r\n\u001b[2mThe shell exited (${String(read.exitCode)}).\u001b[0m\r\n`,
+      );
+      const held = state.terminals[previewKey(repositoryId, channelId)];
+      if (held !== undefined) {
+        held.exitCode = read.exitCode;
+      }
+      scheduleRender();
+      break;
+    }
+    // A short wait between reads. The server answers at once, so this is what
+    // keeps a quiet terminal from being a request every millisecond.
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+  }
+}
+
+async function openTerminalAction(repositoryId, workerId, shell) {
+  const Terminal = await loadXterm().catch((error) => {
+    toast(error.message, "error");
+    return undefined;
+  });
+  if (Terminal === undefined) {
+    return;
+  }
+  const channelId = activeSubChannelId(repositoryId);
+  const term = new Terminal({
+    convertEol: false,
+    cursorBlink: true,
+    fontSize: 12,
+    fontFamily:
+      'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+    theme: { background: "#0f1115", foreground: "#d5d9e0" },
+  });
+  const session = await openTerminalSession(
+    repositoryId,
+    { workerId, shell, cols: term.cols, rows: term.rows },
+    channelId,
+  );
+  if (session === undefined) {
+    term.dispose();
+    render();
+    return;
+  }
+  liveTerminal = { term, sessionId: session.id, repositoryId, channelId };
+  term.onData((data) => {
+    void sendTerminalInput(repositoryId, session.id, data);
+  });
+  term.onResize(({ cols, rows }) => {
+    void resizeTerminal(repositoryId, session.id, cols, rows);
+  });
+  render();
+  syncTerminal();
+  void pumpTerminal(repositoryId, channelId, session);
+}
+
+async function closeTerminalAction(repositoryId, sessionId) {
+  const channelId = liveTerminal?.channelId ?? activeSubChannelId(repositoryId);
+  liveTerminal?.term.dispose();
+  liveTerminal = undefined;
+  await closeTerminal(repositoryId, channelId, sessionId);
+  render();
+}
+
+async function watchPreviewReady(
+  repositoryId,
+  channelId = activeSubChannelId(repositoryId),
+) {
+  // The room is captured, not re-read each pass. A cold start takes minutes
+  // and the reader does not sit still for them: without this the watcher
+  // follows whichever channel they wandered into, polls that one's app, and
+  // writes the answer over that one's cache entry — so the branch they were
+  // waiting on stays on "starting…" forever while an unrelated room's Run
+  // button flickers.
+  const key = previewKey(repositoryId, channelId);
+  if (previewsWatched.has(key)) {
+    return;
+  }
+  previewsWatched.add(key);
   try {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       await new Promise((resolve) => {
         window.setTimeout(resolve, 3000);
       });
-      const preview = await loadPreview(repositoryId);
+      const preview = await loadPreview(repositoryId, channelId);
       if (
         preview === null ||
         preview.ready !== false ||
@@ -3915,7 +4102,7 @@ async function watchPreviewReady(repositoryId) {
       }
     }
   } finally {
-    previewsWatched.delete(repositoryId);
+    previewsWatched.delete(key);
     render();
   }
 }
@@ -3958,7 +4145,11 @@ async function askPreviewCommand(repositoryId, why) {
 }
 
 async function startPreviewAction(repositoryId, asked = false) {
-  if (previewsStarting.has(repositoryId)) {
+  // Keyed by room, not by repository: two work channels are two apps on two
+  // ports, and a guard shared between them would report starting the second
+  // as a second press on the first.
+  const key = previewKey(repositoryId);
+  if (previewsStarting.has(key)) {
     toast(
       "Already starting — installing, building and, where a repository ships " +
         "one, building its image can take a few minutes.",
@@ -3966,7 +4157,7 @@ async function startPreviewAction(repositoryId, asked = false) {
     );
     return;
   }
-  previewsStarting.add(repositoryId);
+  previewsStarting.add(key);
   render();
   toast("Starting…", "ok");
   let preview;
@@ -3978,7 +4169,7 @@ async function startPreviewAction(repositoryId, asked = false) {
   }
   // Cleared before anything below, so the question this may ask can start the
   // answer it is given rather than refusing itself as a second press.
-  previewsStarting.delete(repositoryId);
+  previewsStarting.delete(key);
   render();
   if (failure === undefined) {
     // What it took to get here, when it took more than one attempt: the
@@ -4016,7 +4207,7 @@ async function startPreviewAction(repositoryId, asked = false) {
     // Up, but still building. The header says so, and this is what eventually
     // takes the word back.
     if (preview !== null && preview.ready === false) {
-      void watchPreviewReady(repositoryId);
+      void watchPreviewReady(repositoryId, activeSubChannelId(repositoryId));
     }
     return;
   }
@@ -7430,6 +7621,12 @@ export function render() {
     if (renderAgain) {
       renderAgain = false;
       render();
+    } else {
+      // The terminal is the one thing on the page that cannot be redrawn
+      // from state — it *is* state, a scrollback and a cursor and a program
+      // mid-draw — so it is re-attached to the container this render made
+      // rather than rebuilt with it.
+      syncTerminal();
     }
   }
 }
@@ -7725,21 +7922,25 @@ function renderNow() {
     // to start a second. `undefined` is "not asked yet"; `null` is "asked,
     // there is none", which is why this tests for the former.
     // A workspace has to exist before it can have an app running in it.
+    // Asked per *room*, not per repository: a work channel runs its own
+    // branch's app on its own port, so two rooms of one repository are two
+    // questions with two answers.
     if (
       activeChannelId() !== "" &&
-      state.previews[activeChannelId()] === undefined
+      state.previews[previewKey(activeChannelId())] === undefined
     ) {
       const channel = activeChannelId();
+      const room = activeSubChannelId(channel);
       // Claimed before the request so a second render in the same tick does
       // not fire it again.
-      state.previews[channel] = null;
-      void loadPreview(channel).then((preview) => {
+      state.previews[previewKey(channel, room)] = null;
+      void loadPreview(channel, room).then((preview) => {
         // Found mid-build, which a reload during a slow first start is the
         // ordinary way to arrive at. The same follow-up a fresh start gets,
         // because the header is otherwise stuck on "starting…" for a channel
         // nobody is about to leave and come back to.
         if (preview !== null && preview.ready === false) {
-          void watchPreviewReady(channel);
+          void watchPreviewReady(channel, room);
         }
         if (state.route === "chats") {
           scheduleRender();
@@ -10080,6 +10281,195 @@ document.addEventListener("click", (event) => {
       setChanDrawer(false);
       render();
       return;
+    /* --------------------------------------------- branch review ---- */
+    /**
+     * The pull request a work channel is, opened beside the transcript.
+     *
+     * Read on open rather than kept fresh in the background: it is a handful
+     * of Git commands per branch, and the answer only changes when work lands
+     * or somebody merges — both of which are re-reads this file already asks
+     * for by hand.
+     */
+    case "branch-review-open": {
+      const repositoryId = value || activeChannelId();
+      const channelId = activeSubChannelId(repositoryId);
+      // Cleared before the first paint, not inside the fetch: the panel draws
+      // once before `loadBranchReview` has run, and the error left over from
+      // a different channel's read would be what it drew.
+      state.branchReviewError = undefined;
+      openSecondaryContext("branch");
+      render();
+      if (channelId) {
+        void loadBranchReview(repositoryId, channelId).then(render);
+      }
+      return;
+    }
+    case "branch-review-reload": {
+      const repositoryId = activeChannelId();
+      void loadBranchReview(repositoryId, value).then(render);
+      render();
+      return;
+    }
+    case "branch-review-refresh": {
+      const repositoryId = activeChannelId();
+      render();
+      void refreshBranchReview(repositoryId, value).then((outcome) => {
+        if (outcome?.merged === true) {
+          toast("Brought the repository's latest into this branch", "ok");
+        } else if (outcome !== undefined) {
+          toast(
+            `Still conflicting: ${(outcome.conflicts ?? []).join(", ")}`,
+            "error",
+          );
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      return;
+    }
+    /**
+     * Landing the branch. Confirmed first, because it is the one action here
+     * that changes what everybody else builds on — and it closes the channel,
+     * which nothing undoes.
+     */
+    case "branch-review-merge": {
+      const repositoryId = activeChannelId();
+      const review = state.branchReview[value];
+      void showModal({
+        title: "Merge into the repository",
+        subtitle:
+          `${review?.branch ?? "This branch"} lands on the repository's own ` +
+          "branch, and this channel closes. Follow-up work goes in a new one.",
+        confirm: "Merge",
+        body: "",
+      })
+        .then((values) => {
+          if (values === undefined) {
+            return undefined;
+          }
+          return mergeBranchReview(repositoryId, value).then((outcome) => {
+            if (outcome?.merged === true) {
+              toast("Merged into the repository", "ok");
+            }
+            render();
+            void ensureChannelMessages(repositoryId, render);
+            return outcome;
+          });
+        })
+        .catch((error) =>
+          toast(`Could not merge: ${error.message}`, "error"),
+        );
+      render();
+      return;
+    }
+    /**
+     * The second gate, on GitHub. Not confirmed the way the merge is: this
+     * opens a pull request for people to look at, which is reversible by
+     * closing it, and pressing it twice reaches the same one.
+     */
+    case "branch-review-ship": {
+      const repositoryId = activeChannelId();
+      render();
+      void shipBranchReview(repositoryId, value).then((outcome) => {
+        if (outcome?.outcome === "done") {
+          toast(outcome.explanation ?? "Opened a pull request", "ok");
+        } else if (outcome !== undefined) {
+          // A refusal is a real answer with a real reason — no remote, no
+          // connected account, a token without write access — and every one
+          // of them is something the person reading it can fix.
+          toast(outcome.explanation ?? "Could not ship this", "error");
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      return;
+    }
+    /**
+     * Comment on a line. One box at a time, drawn inside the diff at the line
+     * it is about — two of them would be two boxes in one scroll each
+     * claiming to be the comment you are writing.
+     */
+    case "branch-comment-open": {
+      const line = Number(node?.dataset?.line ?? "");
+      if (!Number.isSafeInteger(line)) {
+        return;
+      }
+      state.branchComment = {
+        channelId: value,
+        path: node?.dataset?.path ?? "",
+        line,
+      };
+      render();
+      // Focus after the render that draws it, not before: the textarea does
+      // not exist yet on this tick.
+      requestAnimationFrame(() => {
+        document.querySelector(".branch-comment-form textarea")?.focus();
+      });
+      return;
+    }
+    case "branch-comment-cancel":
+      state.branchComment = undefined;
+      render();
+      return;
+    case "branch-comment-submit": {
+      const repositoryId = activeChannelId();
+      // Read from the box this button belongs to, not from the document: two
+      // reviews can be open in the column at once and `querySelector` would
+      // find whichever came first in the DOM.
+      const box = node?.closest?.(".branch-comment-form");
+      const content = String(box?.querySelector("textarea")?.value ?? "").trim();
+      if (content === "") {
+        return;
+      }
+      const line = Number(node?.dataset?.line ?? "");
+      void commentOnBranchLine(repositoryId, value, {
+        path: node?.dataset?.path ?? "",
+        line,
+        revision: node?.dataset?.revision ?? "",
+        content,
+      }).then((posted) => {
+        if (posted === undefined) {
+          toast(state.branchReviewError ?? "Could not leave that comment", "error");
+        } else if ((posted.taskIds ?? []).length > 0) {
+          // The thing a pull request on GitHub cannot do: the comment
+          // mentioned an agent, so the fix is already running on this branch.
+          toast("Comment posted — an agent is on it", "ok");
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      render();
+      return;
+    }
+    /**
+     * Approve, or ask for changes. Pressing the one already pressed withdraws
+     * it, which is how a toggle behaves and saves a third button for the one
+     * answer nobody looks for.
+     */
+    case "branch-review-state": {
+      const repositoryId = activeChannelId();
+      const wanted = node?.dataset?.state ?? "";
+      const current = state.branchReview[value]?.myReview;
+      const next = current === wanted ? "withdrawn" : wanted;
+      void reviewBranch(repositoryId, value, next).then((saved) => {
+        if (saved === undefined) {
+          toast(state.branchReviewError ?? "Could not record that", "error");
+        } else {
+          toast(
+            next === "withdrawn"
+              ? "Review withdrawn"
+              : next === "approved"
+                ? "Approved"
+                : "Changes requested",
+            "ok",
+          );
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      render();
+      return;
+    }
     case "secondary-context-close": {
       const closing = activeSecondaryContext();
       const closingValue =
@@ -10187,6 +10577,20 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
+    case "terminal-toggle":
+      selectPrimaryDestination({ kind: "terminal" }, activeChannelId());
+      void loadTerminalMachines(activeChannelId()).then(scheduleRender);
+      break;
+    case "terminal-open":
+      void openTerminalAction(
+        activeChannelId(),
+        value,
+        node.dataset.shell ?? "",
+      );
+      break;
+    case "terminal-close":
+      void closeTerminalAction(activeChannelId(), value);
+      break;
     case "preview-start":
       void startPreviewAction(value);
       return;
@@ -11004,7 +11408,8 @@ document.addEventListener("click", (event) => {
             <input class="input" name="name" maxlength="60" required autofocus
               placeholder="frontend">
           </label>
-          ${visibilityChoicesHtml("read_only")}`,
+          ${visibilityChoicesHtml("read_only")}
+          ${branchChoiceHtml()}`,
       }).then((values) => {
         const name = String(values?.name ?? "").trim();
         if (values === undefined || name === "") {
@@ -11014,6 +11419,10 @@ document.addEventListener("click", (event) => {
           repositoryId,
           name,
           String(values.visibility ?? "read_only"),
+          // `showModal` resolves a checkbox to its `checked` boolean, not to
+          // its `value` string, so this is the box itself rather than a
+          // comparison against "on".
+          values.branch === true,
         ).then(() => {
           render();
           void ensureChannelMessages(repositoryId, render);

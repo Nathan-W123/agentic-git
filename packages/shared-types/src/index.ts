@@ -2820,6 +2820,203 @@ export function scopeReleaseResources(
   return resources;
 }
 
+/**
+ * Paths that are an interface whatever is written inside them.
+ *
+ * A dependency manifest or lockfile is a statement about what the whole
+ * repository builds against, and two branches changing one merge cleanly and
+ * produce a tree that installs neither version. A migration is worse: two
+ * branches each add one, Git puts both in, and they run in an order neither
+ * branch was written for.
+ *
+ * Deliberately a small, named list rather than a guess. Everything not on it
+ * is local, and a local file two branches edit is a question Git is
+ * competent to answer — it conflicts, or the two edits were independent.
+ */
+export function isInterfaceFile(filePath: string): boolean {
+  const normalised = filePath.trim().toLowerCase().replaceAll("\\", "/");
+  const base = normalised.slice(normalised.lastIndexOf("/") + 1);
+  if (INTERFACE_MANIFESTS.has(base)) {
+    return true;
+  }
+  // A migration anywhere under a directory that says so, which is where every
+  // framework this deployment is likely to meet puts them.
+  if (/(?:^|\/)(?:migrations?|migrate|db\/migrate)\//u.test(normalised)) {
+    return true;
+  }
+  return /\.(?:csproj|vbproj|fsproj)$/u.test(base);
+}
+
+/**
+ * Manifests and lockfiles, by exact filename.
+ *
+ * By name rather than by pattern because these are proper nouns: `package.json`
+ * is an interface and `tsconfig.json` is not, and no regular expression over
+ * `.json` tells those apart.
+ */
+const INTERFACE_MANIFESTS = new Set([
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "yarn.lock",
+  "npm-shrinkwrap.json",
+  "cargo.toml",
+  "cargo.lock",
+  "go.mod",
+  "go.sum",
+  "requirements.txt",
+  "pyproject.toml",
+  "poetry.lock",
+  "pipfile",
+  "pipfile.lock",
+  "gemfile",
+  "gemfile.lock",
+  "composer.json",
+  "composer.lock",
+  "build.gradle",
+  "build.gradle.kts",
+  "pom.xml",
+  "mix.exs",
+  "pubspec.yaml",
+  "pubspec.lock",
+]);
+
+/**
+ * What this repository's exported names are, as far as anything knows.
+ *
+ * `exported` is what the index found declared with an `export`; `known` is
+ * every symbol it found at all. The difference matters: a symbol in neither
+ * set is one the index has never heard of, and that is not the same statement
+ * as "it is private" — see {@link interfaceScopeOf}, which contends on it.
+ *
+ * Both sets hold {@link symbolVisibilityKey} of each name, so a lookup agrees
+ * with {@link planResourceKey}: a plan that wrote `SessionToken` and an index
+ * that recorded `sessiontoken` are talking about one symbol, and everything
+ * else in this file already decided that.
+ */
+export interface SymbolVisibility {
+  exported: ReadonlySet<string>;
+  known: ReadonlySet<string>;
+}
+
+/** How a symbol name is spelled inside a {@link SymbolVisibility}. */
+export function symbolVisibilityKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** Both sets of a {@link SymbolVisibility}, spelled the way lookups expect. */
+export function symbolVisibility(input: {
+  exported: Iterable<string>;
+  known: Iterable<string>;
+}): SymbolVisibility {
+  return {
+    exported: new Set([...input.exported].map(symbolVisibilityKey)),
+    known: new Set([...input.known].map(symbolVisibilityKey)),
+  };
+}
+
+/**
+ * Whether one claimed resource crosses branches.
+ *
+ * The two tiers, in one predicate. An API, a schema and a configuration key
+ * are interfaces by what they are — the plan has separate fields for them
+ * precisely because they are the things other code consumes. A file is an
+ * interface only if it is one of the few whose contents are a statement about
+ * the whole repository. A symbol is an interface if it is exported.
+ *
+ * A symbol the index has never heard of is treated as an interface. That is
+ * the one place this leans, and it leans the safe way: "I could not find it"
+ * must not read as "it is private", or a plan naming a symbol in a language
+ * the indexer cannot parse would be handed cross-branch freedom on the
+ * strength of the indexer's ignorance.
+ */
+export function crossesBranches(
+  resource: PlanResourceRef,
+  symbols: SymbolVisibility,
+): boolean {
+  switch (resource.resourceType) {
+    case "api":
+    case "schema":
+    case "configuration":
+      return true;
+    case "file":
+      return isInterfaceFile(resource.resourceId);
+    case "symbol": {
+      const key = symbolVisibilityKey(resource.resourceId);
+      return symbols.exported.has(key) || !symbols.known.has(key);
+    }
+    // A test belongs to the branch that wrote it. A "service" is a naming
+    // convention — anything ending in Service, Client, Repository, Gateway or
+    // Worker — and an exported one is already caught as a symbol, so treating
+    // the convention itself as an interface would contend two branches on a
+    // suffix they happen to share.
+    case "test":
+    case "service":
+      return false;
+  }
+}
+
+/**
+ * One plan as another branch sees it: only what crosses between them.
+ *
+ * Two channels are two branches, and agents in different channels stop
+ * contending — which is isolation, and on its own strictly worse than not
+ * having branches at all. `#billing-v2` changes `SessionToken.userId`,
+ * `#login-redirect` changes `SessionToken.expiresAt`, both merge without a
+ * Git conflict, and the build breaks. Or it does not, and the bug ships.
+ *
+ * So a plan on another branch is not ignored and it is not taken whole: it is
+ * reduced to the resources whose meaning is shared, and the ordinary
+ * admission ladder decides against that. Same machinery, narrower scope on
+ * one tier.
+ *
+ * Returns `undefined` when nothing survives — a plan that claims only local
+ * work has nothing to say to another branch, and dropping it is what stops a
+ * branch from queueing behind work that cannot affect it.
+ */
+export function interfaceScopeOf(
+  plan: AgentPlan,
+  symbols: SymbolVisibility,
+): AgentPlan | undefined {
+  const local: PlanResourceRef[] = [];
+  const add = (
+    resourceType: ResourceType,
+    ids: readonly string[] | undefined,
+  ): void => {
+    for (const resourceId of ids ?? []) {
+      const resource = { resourceType, resourceId };
+      if (!crossesBranches(resource, symbols)) {
+        local.push(resource);
+      }
+    }
+  };
+  // The agent's own words as well as the widened lists, because a resource
+  // dropped from one and left in the other is a claim that survives its own
+  // reduction — the same trap `reducePlanScope` documents at length.
+  add("file", plan.expectedFiles);
+  add("symbol", plan.expectedSymbols);
+  add("api", plan.expectedApis);
+  add("schema", plan.expectedSchemas);
+  add("configuration", plan.expectedConfigKeys);
+  add("test", plan.expectedTests);
+  add("service", plan.expectedServices);
+  add("symbol", plan.declared?.symbols);
+  add("api", plan.declared?.apis);
+  add("schema", plan.declared?.schemas);
+  add("configuration", plan.declared?.configKeys);
+  add("test", plan.declared?.tests);
+  add("service", plan.declared?.services);
+  const reduced = reducePlanScope(plan, local);
+  const claims =
+    reduced.expectedFiles.length +
+    reduced.expectedSymbols.length +
+    (reduced.expectedApis?.length ?? 0) +
+    (reduced.expectedSchemas?.length ?? 0) +
+    (reduced.expectedConfigKeys?.length ?? 0);
+  return claims === 0 ? undefined : reduced;
+}
+
 /** Case-insensitive identity for a planned resource. */
 export function planResourceKey(type: ResourceType, id: string): string {
   return `${type}\0${id.trim().toLowerCase()}`;

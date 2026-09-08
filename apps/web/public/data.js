@@ -743,6 +743,28 @@ export const state = {
   channelPins: {},
   /** Whether the pinned banner is unfolded. A reading preference, session-only. */
   pinsOpen: false,
+  /**
+   * What each work channel's branch has that the repository's does not,
+   * keyed by channel id.
+   *
+   * The pull request, in other words: the files, the patch, how far ahead and
+   * behind, whether it can merge, and whether it already did. Fetched when the
+   * review is opened rather than with the channel list — it is a Git read per
+   * branch, and the sidebar draws dozens of rows.
+   */
+  branchReview: {},
+  /** Which channel's review is being fetched or acted on, if any. */
+  branchReviewBusy: undefined,
+  /** Why the last review read or merge failed, if it did. */
+  branchReviewError: undefined,
+  /**
+   * The line a comment is being written about, if one is.
+   *
+   * `{ channelId, path, line }`. One at a time, because the box is drawn
+   * inside the diff at the line it is about and two of them would be two
+   * boxes in one scroll claiming to be the comment you are writing.
+   */
+  branchComment: undefined,
   /** A one-shot message id the next channel render should scroll to. */
   scrollToMessage: undefined,
   /**
@@ -763,6 +785,17 @@ export const state = {
    * between states on every render.
    */
   previews: {},
+  /**
+   * The terminal, per room.
+   *
+   * Keyed the same way a preview is, because it is the same question: a work
+   * channel's terminal and the repository's are two shells and one key would
+   * have the second overwrite the first.
+   */
+  terminals: {},
+  /** Machines that could offer one, and what each says it can do. */
+  terminalMachines: undefined,
+  terminalError: undefined,
   /** Images being uploaded from the composer right now, for the note beside it. */
   attaching: 0,
   /** The same, counted separately for the thread panel's own reply composer. */
@@ -4310,8 +4343,15 @@ export function selectSubChannel(repositoryId, channelId) {
   state.channelRosterLoaded.delete(repositoryId);
 }
 
-/** Creates a room. `name` is squeezed into a `#handle` by the server. */
-export async function createSubChannel(repositoryId, name, visibility) {
+/**
+ * Creates a room. `name` is squeezed into a `#handle` by the server.
+ *
+ * `branch` asks for a work channel: the server cuts a branch named after the
+ * handle and every task dispatched in the room lands on it. It sends the
+ * request rather than the name — the branch is derived from the slug the
+ * server itself produced, and a name computed here could disagree with it.
+ */
+export async function createSubChannel(repositoryId, name, visibility, branch) {
   // The dialog's three choices, all three of them. This collapsed everything
   // that was not `private` into the read-only state, so picking "Open — anyone
   // in the project can find it, read it, and post" built a room only its
@@ -4323,7 +4363,7 @@ export async function createSubChannel(repositoryId, name, visibility) {
   // the right default and the only place it should be decided.
   const response = await api(channelsPath(repositoryId), {
     method: "POST",
-    body: { name, visibility },
+    body: { name, visibility, ...(branch === true ? { branch: true } : {}) },
   });
   await loadSubChannels(repositoryId);
   const created = response?.channel;
@@ -4331,6 +4371,211 @@ export async function createSubChannel(repositoryId, name, visibility) {
     selectSubChannel(repositoryId, created.id);
   }
   return created;
+}
+
+/**
+ * What a work channel's branch has that the repository's does not.
+ *
+ * The pull request's whole substance, read in one request: the changed files,
+ * the patch taken from the merge base, how far ahead and behind the branch is,
+ * whatever would conflict, and whether the caller may land it.
+ *
+ * Kept out of the channel list on purpose. This is a handful of Git commands
+ * per branch, and the sidebar draws every room on every render.
+ */
+export async function loadBranchReview(repositoryId, channelId) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const response = await api(
+      channelsPath(repositoryId, `/${encodeURIComponent(channelId)}/branch`),
+    );
+    state.branchReview[channelId] = response;
+    return response;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    // Cleared rather than left stale: a panel showing last read's diff beside
+    // this read's error would be describing two different moments at once.
+    delete state.branchReview[channelId];
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Brings the repository's own branch into this channel's.
+ *
+ * The answer is re-read rather than patched in from the response: a refresh
+ * moves the branch, so every number in the review — ahead, behind, the patch
+ * itself — is about a commit that no longer exists.
+ */
+export async function refreshBranchReview(repositoryId, channelId) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const outcome = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/refresh`,
+      ),
+      { method: "POST", body: {} },
+    );
+    state.branchReviewBusy = undefined;
+    await loadBranchReview(repositoryId, channelId);
+    // The room is told either way by the server, so the transcript is dropped
+    // for `ensureChannelMessages` to fetch the line it just posted.
+    state.channelLoaded.delete(repositoryId);
+    return outcome;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Lands the channel's branch on the repository's own, and closes the room.
+ *
+ * The channel list is reloaded rather than patched: merging changes what the
+ * room *is* — it stops accepting posts and starts reading as finished — and
+ * the server is the only thing that knows the whole of that.
+ */
+export async function mergeBranchReview(repositoryId, channelId) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const outcome = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/merge`,
+      ),
+      { method: "POST", body: {} },
+    );
+    state.branchReviewBusy = undefined;
+    await loadSubChannels(repositoryId);
+    await loadBranchReview(repositoryId, channelId);
+    state.channelLoaded.delete(repositoryId);
+    return outcome;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Puts a merged channel's work on GitHub as a pull request.
+ *
+ * The second gate, and the only one that reaches outside this deployment: it
+ * pushes canonical to a branch named for the channel, under the caller's own
+ * GitHub account, and asks for it to go into whatever the remote calls main.
+ *
+ * A refusal is an answer, not a failure — no remote, no connected GitHub
+ * account, a token without write access — so this reads `outcome` rather than
+ * treating everything but success as an error. The merge already landed
+ * either way, which is what the explanation says.
+ */
+export async function shipBranchReview(repositoryId, channelId) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const outcome = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/ship`,
+      ),
+      { method: "POST", body: {} },
+    );
+    state.branchReviewBusy = undefined;
+    // Re-read rather than patched in: the pull request's link lives on the
+    // channel now, and the server is what knows whether it was recorded.
+    await loadSubChannels(repositoryId);
+    await loadBranchReview(repositoryId, channelId);
+    state.channelLoaded.delete(repositoryId);
+    return outcome;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Says something about a line, in the room the branch belongs to.
+ *
+ * It posts a channel message with an anchor, through the same route any other
+ * message goes through — so `@`-mentioning an agent in one dispatches a task
+ * on this branch. The whole review is re-read afterwards rather than the
+ * comment being spliced in: the dispatch may have started work, and the panel
+ * shows what the server believes rather than what this browser hoped.
+ */
+export async function commentOnBranchLine(
+  repositoryId,
+  channelId,
+  { path, line, revision, content },
+) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const posted = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/comments`,
+      ),
+      { method: "POST", body: { path, line, revision, content } },
+    );
+    state.branchReviewBusy = undefined;
+    state.branchComment = undefined;
+    await loadBranchReview(repositoryId, channelId);
+    // The comment is a message, so the transcript is a revision behind.
+    state.channelLoaded.delete(repositoryId);
+    return posted;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Approves the branch, asks for changes, or withdraws what you said before.
+ *
+ * `withdrawn` is a state rather than a DELETE because it is the same decision
+ * as the other two — what do I think of this — and a second verb for one of
+ * three answers would put it somewhere else in a surface that offers all
+ * three together.
+ */
+export async function reviewBranch(repositoryId, channelId, state_, note) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const saved = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/review`,
+      ),
+      {
+        method: "POST",
+        body: { state: state_, ...(note ? { note } : {}) },
+      },
+    );
+    state.branchReviewBusy = undefined;
+    await loadBranchReview(repositoryId, channelId);
+    // The server says every review out loud in the room, so the transcript
+    // has a line this browser has not read yet.
+    state.channelLoaded.delete(repositoryId);
+    return saved;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
 }
 
 /** Renames a room, or changes whether it is listed to the whole project. */
@@ -6538,7 +6783,24 @@ export async function setAuditorPaused(repositoryId, paused) {
  * reload, or a second tab, must find the one that is already up instead of
  * offering to start a second.
  */
-export async function loadPreview(repositoryId) {
+/**
+ * Which preview is being spoken about: a repository, in a room.
+ *
+ * The browser caches previews by this rather than by repository, because two
+ * work channels are two apps on two ports and a single key would have the
+ * second one overwrite the first — leaving whichever channel you opened last
+ * showing its address under every other channel's Run button.
+ */
+export function previewKey(repositoryId, channelId = activeSubChannelId(repositoryId)) {
+  return channelId ? `${repositoryId}\u0000${channelId}` : repositoryId;
+}
+
+/** The query the server needs to resolve a room's branch, or nothing. */
+function channelQuery(repositoryId, channelId = activeSubChannelId(repositoryId)) {
+  return channelId ? `?channelId=${encodeURIComponent(channelId)}` : "";
+}
+
+export async function loadPreview(repositoryId, channelId = activeSubChannelId(repositoryId)) {
   // No repository named, nothing to ask about. Without this the empty-
   // workspace screen — where `activeChannelId()` is "" — asked the server
   // about `/repositories//preview`, a path with a hole in it that can only
@@ -6547,16 +6809,19 @@ export async function loadPreview(repositoryId) {
   if (!repositoryId) {
     return null;
   }
+  const key = previewKey(repositoryId, channelId);
   try {
-    const response = await api(repositoryPath(repositoryId, "/preview"));
-    state.previews[repositoryId] = response?.preview ?? null;
+    const response = await api(
+      repositoryPath(repositoryId, `/preview${channelQuery(repositoryId, channelId)}`),
+    );
+    state.previews[key] = response?.preview ?? null;
   } catch {
     // A deployment that cannot run previews answers 501, and a reader who
     // never asked for one should not see an error about it. Absent is the
     // same as "no button", which is the right outcome either way.
-    state.previews[repositoryId] = null;
+    state.previews[key] = null;
   }
-  return state.previews[repositoryId];
+  return state.previews[key];
 }
 
 /**
@@ -6590,12 +6855,103 @@ export async function uploadAttachment(repositoryId, file) {
  * message saying what it looked for, which is what the caller turns into the
  * one question worth asking.
  */
-export async function startPreview(repositoryId) {
-  const response = await api(repositoryPath(repositoryId, "/preview"), {
-    method: "POST",
-  });
-  state.previews[repositoryId] = response?.preview ?? null;
-  return state.previews[repositoryId];
+export async function startPreview(
+  repositoryId,
+  channelId = activeSubChannelId(repositoryId),
+) {
+  const response = await api(
+    repositoryPath(repositoryId, `/preview${channelQuery(repositoryId, channelId)}`),
+    { method: "POST" },
+  );
+  const key = previewKey(repositoryId, channelId);
+  state.previews[key] = response?.preview ?? null;
+  return state.previews[key];
+}
+
+/* --------------------------------------------------------- terminal ---- */
+
+/**
+ * The machines that could open a terminal, and what each of them offers.
+ *
+ * Only the reader's own: a terminal runs with its owner's login and files, so
+ * the server never lists anybody else's, and this never asks it to.
+ */
+export async function loadTerminalMachines(repositoryId) {
+  if (!repositoryId) {
+    return [];
+  }
+  try {
+    const response = await api(repositoryPath(repositoryId, "/terminal/machines"));
+    state.terminalMachines = response?.machines ?? [];
+  } catch {
+    // A deployment without the route, or a reader without `run_task`. Absent
+    // rather than an error: the tab says there is nothing to open one on.
+    state.terminalMachines = [];
+  }
+  return state.terminalMachines;
+}
+
+/** Opens a shell on one of them, in the room the reader is looking at. */
+export async function openTerminalSession(
+  repositoryId,
+  { workerId, shell, cols, rows },
+  channelId = activeSubChannelId(repositoryId),
+) {
+  state.terminalError = undefined;
+  try {
+    const response = await api(
+      repositoryPath(
+        repositoryId,
+        `/terminal${channelQuery(repositoryId, channelId)}`,
+      ),
+      { method: "POST", body: { workerId, shell, cols, rows } },
+    );
+    const key = previewKey(repositoryId, channelId);
+    state.terminals[key] = { ...response?.session, seq: 0, output: "" };
+    return state.terminals[key];
+  } catch (error) {
+    state.terminalError = error.message;
+    return undefined;
+  }
+}
+
+/**
+ * Everything the shell has said since last time.
+ *
+ * By sequence number rather than "since I last asked", because a poll that
+ * retried after a dropped connection would otherwise lose whatever arrived
+ * in between — and a terminal that silently drops a line is worse than one
+ * that stops.
+ */
+export async function readTerminal(repositoryId, channelId, sessionId, after) {
+  return await api(
+    repositoryPath(
+      repositoryId,
+      `/terminal/${encodeURIComponent(sessionId)}?after=${String(after)}`,
+    ),
+  );
+}
+
+export async function sendTerminalInput(repositoryId, sessionId, data) {
+  await api(
+    repositoryPath(repositoryId, `/terminal/${encodeURIComponent(sessionId)}/input`),
+    { method: "POST", body: { data } },
+  );
+}
+
+export async function resizeTerminal(repositoryId, sessionId, cols, rows) {
+  await api(
+    repositoryPath(repositoryId, `/terminal/${encodeURIComponent(sessionId)}/resize`),
+    { method: "POST", body: { cols, rows } },
+  ).catch(() => undefined);
+}
+
+export async function closeTerminal(repositoryId, channelId, sessionId) {
+  await api(
+    repositoryPath(repositoryId, `/terminal/${encodeURIComponent(sessionId)}`),
+    { method: "DELETE" },
+  ).catch(() => undefined);
+  delete state.terminals[previewKey(repositoryId, channelId)];
 }
 
 /** Remembers how this repository starts, so it is asked once and not again. */
@@ -6606,9 +6962,15 @@ export async function setPreviewCommand(repositoryId, command) {
   });
 }
 
-export async function stopPreview(repositoryId) {
-  await api(repositoryPath(repositoryId, "/preview"), { method: "DELETE" });
-  state.previews[repositoryId] = null;
+export async function stopPreview(
+  repositoryId,
+  channelId = activeSubChannelId(repositoryId),
+) {
+  await api(
+    repositoryPath(repositoryId, `/preview${channelQuery(repositoryId, channelId)}`),
+    { method: "DELETE" },
+  );
+  state.previews[previewKey(repositoryId, channelId)] = null;
 }
 
 /**
@@ -7652,7 +8014,14 @@ function normalPrimaryDestination(destination) {
     const id = String(destination?.id ?? "");
     return id === "" ? { kind: "main" } : { kind, id };
   }
-  return ["threads", "files"].includes(kind) ? { kind } : { kind: "main" };
+  // An allow-list, and silently: anything not named here becomes the main
+  // chat. That is right for a stale value out of `localStorage`, and it is
+  // how a new destination gets a rail entry that highlights while the pane
+  // stays on the conversation — the click is accepted, normalized away, and
+  // nothing anywhere says so.
+  return ["threads", "files", "terminal"].includes(kind)
+    ? { kind }
+    : { kind: "main" };
 }
 
 /** The selected primary destination for one workspace. */

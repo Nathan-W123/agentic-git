@@ -18,6 +18,23 @@ import {
 import { GitBatchReader } from "./batch-reader.js";
 import { GitClient, GitCommandError } from "./git-client.js";
 
+/**
+ * One commit a branch has that the branch it is measured against does not.
+ *
+ * Deliberately not {@link CanonicalHistoryEntry}: that one carries a
+ * `sequence`, which is a commit's depth in canonical's history and is
+ * meaningless for a commit that is not on canonical yet. Naming the same
+ * field for both would invite somebody to compare the two.
+ */
+export interface BranchCommit {
+  revision: string;
+  /** The first line of the message, which is what a reviewer scans. */
+  subject: string;
+  author: string;
+  /** When it was committed, ISO-8601. */
+  createdAt: string;
+}
+
 /** One promotion in the canonical branch's history. */
 export interface CanonicalHistoryEntry {
   revision: string;
@@ -33,6 +50,30 @@ export interface CanonicalRepository {
   id: string;
   path: string;
   branch: string;
+}
+
+/**
+ * The repository as one piece of work sees it: its own branch, or the
+ * repository's when it has none.
+ *
+ * Everything downstream of a lease reads `repository.branch` — the canonical
+ * version its base was resolved at, the worktree the agent is handed, the
+ * mid-run scope arbitration, and the compare-and-swap that decides whether
+ * the result may land. They have to agree, and the only way they can is by
+ * every one of them asking this.
+ *
+ * `on` is the task's branch at lease time and the lease's thereafter. Absent
+ * — and the empty string, which is how a column that was never set reads
+ * back from one of the stores — is the repository's own branch, which is
+ * what everything written before work channels existed meant and still means.
+ */
+export function canonicalOn(
+  repository: { id: string; path: string; branch: string },
+  on: string | undefined,
+): CanonicalRepository {
+  const source =
+    on === undefined || on === "" ? repository : { ...repository, branch: on };
+  return { id: source.id, path: source.path, branch: source.branch };
 }
 
 export interface CommitIdentity {
@@ -1312,6 +1353,375 @@ export class RepositoryService {
     }
     await this.git.run(["check-ref-format", reference]);
     this.validatedBranches.add(reference);
+  }
+
+  /**
+   * Creates a branch at another branch's head, or leaves an existing one be.
+   *
+   * Written with `update-ref` and an explicit old value of the zero object,
+   * which is git's way of saying "only if this ref does not exist". That is
+   * the whole of the concurrency story: two people creating the same work
+   * channel at the same moment produce one branch and one refusal, rather
+   * than a second creation quietly moving somebody else's branch back to the
+   * base and losing every commit on it.
+   *
+   * Returns whether it created one. A caller that needs the branch to be new
+   * — creating a channel around it — must check; a caller that only needs it
+   * to exist can ignore the answer.
+   */
+  public async ensureBranch(
+    repository: CanonicalRepository,
+    branch: string,
+    options: { from?: string } = {},
+  ): Promise<boolean> {
+    await this.assertBranchName(branch);
+    const from = options.from ?? repository.branch;
+    await this.assertBranchName(from);
+    if (branch === from) {
+      throw new Error(`Cannot branch ${branch} from itself`);
+    }
+    const base = await this.git.run([
+      `--git-dir=${repository.path}`,
+      "rev-parse",
+      "--verify",
+      `refs/heads/${from}`,
+    ]);
+    const revision = base.stdout.trim();
+    if (revision.length === 0) {
+      throw new Error(`Branch ${from} does not exist in ${repository.path}`);
+    }
+    const created = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "update-ref",
+        "--end-of-options",
+        `refs/heads/${branch}`,
+        revision,
+        // The zero object id: "create only, and fail if something is here".
+        "0000000000000000000000000000000000000000",
+      ],
+      { allowFailure: true },
+    );
+    return created.exitCode === 0;
+  }
+
+  /**
+   * The conflicted paths in `git merge-tree --write-tree --name-only` output.
+   *
+   * The format is three sections, and only the middle one is paths:
+   *
+   *     <oid of the merged tree>
+   *     <conflicted path>...
+   *     <blank line>
+   *     <informational messages>
+   *
+   * The blank line is the whole of the separator, so dropping empty lines
+   * before splitting — which is the obvious thing to do with git output —
+   * silently glues the two halves together. Measured against a real
+   * conflicting merge, that reported `Auto-merging src/login.ts` and
+   * `CONFLICT (content): Merge conflict in src/login.ts` as two conflicted
+   * *files*, both of which the channel would then have named to somebody and
+   * asked them to go and fix.
+   *
+   * On a clean merge there is one line and nothing after it, which is the
+   * empty list this returns.
+   */
+  private conflictedPaths(stdout: string): string[] {
+    const paths: string[] = [];
+    // `split("\n")` and not a trim-then-filter: the blank line is data.
+    for (const line of stdout.split("\n").slice(1)) {
+      if (line.trim().length === 0) {
+        break;
+      }
+      paths.push(line);
+    }
+    return paths;
+  }
+
+  /**
+   * What one branch has that another does not, and whether it can be merged.
+   *
+   * Everything a pull request is made of, in one pass. The diff is taken from
+   * the merge base rather than from the tip of the base branch — against the
+   * tip, every commit made elsewhere since this branch started would appear
+   * as though this branch had removed it, which is a review of the wrong
+   * change.
+   *
+   * `git merge-tree --write-tree` is what answers the conflict question. It
+   * merges in memory, touches no working tree and needs none, which is the
+   * only way to ask this of a bare repository without checking anything out.
+   * It exits non-zero on conflict and prints the conflicted paths, so the
+   * answer and the reason arrive together.
+   */
+  public async compareBranches(
+    repository: CanonicalRepository,
+    branch: string,
+    /**
+     * How many of the branch's own commits to describe.
+     *
+     * A cap rather than everything, because the panel that shows these is a
+     * column beside a conversation and a branch somebody left open for a
+     * month is not a list anybody reads to the end of. `ahead` is the honest
+     * total either way, so a reader can always tell there is more.
+     */
+    commitLimit = 50,
+  ): Promise<{
+    mergeBase: string;
+    head: string;
+    baseHead: string;
+    ahead: number;
+    behind: number;
+    files: string[];
+    conflicts: string[];
+    /**
+     * The work this branch is made of, newest first, capped at
+     * `commitLimit`. Empty for a branch that has nothing on it yet.
+     */
+    commits: BranchCommit[];
+  }> {
+    await this.assertBranchName(branch);
+    const base = `refs/heads/${repository.branch}`;
+    const side = `refs/heads/${branch}`;
+    const [baseHead, head] = await Promise.all([
+      this.git.run([`--git-dir=${repository.path}`, "rev-parse", "--verify", base]),
+      this.git.run([`--git-dir=${repository.path}`, "rev-parse", "--verify", side]),
+    ]);
+    const baseRevision = baseHead.stdout.trim();
+    const headRevision = head.stdout.trim();
+    const mergeBaseResult = await this.git.run([
+      `--git-dir=${repository.path}`,
+      "merge-base",
+      "--end-of-options",
+      baseRevision,
+      headRevision,
+    ]);
+    const mergeBase = mergeBaseResult.stdout.trim();
+    const [counts, files, merged, log] = await Promise.all([
+      // One walk for both directions: "ahead" is what this branch added,
+      // "behind" is what canonical added while it was away, and asking twice
+      // would walk the same history twice.
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "rev-list",
+        "--left-right",
+        "--count",
+        "--end-of-options",
+        `${baseRevision}...${headRevision}`,
+      ]),
+      this.listChangedFiles(repository, mergeBase, headRevision),
+      this.git.run(
+        [
+          `--git-dir=${repository.path}`,
+          "merge-tree",
+          "--write-tree",
+          "--name-only",
+          "--end-of-options",
+          baseRevision,
+          headRevision,
+        ],
+        { allowFailure: true },
+      ),
+      // What this branch added, and only that: `mergeBase..head` excludes
+      // everything the two already agreed on. The same record separators
+      // `listCanonicalHistory` uses, for the same reason — a commit subject
+      // containing a tab or a newline must not split a record.
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "log",
+        `--max-count=${commitLimit}`,
+        "--format=%H%x1f%cI%x1f%an%x1f%s%x00",
+        "--end-of-options",
+        `${mergeBase}..${headRevision}`,
+      ]),
+    ]);
+    const [behindText = "0", aheadText = "0"] = counts.stdout.trim().split(/\s+/u);
+    return {
+      mergeBase,
+      head: headRevision,
+      baseHead: baseRevision,
+      ahead: Number.parseInt(aheadText, 10) || 0,
+      behind: Number.parseInt(behindText, 10) || 0,
+      files,
+      // The first line is the merged tree's id; the conflicted paths follow,
+      // and git's own commentary follows those after a blank line. See
+      // `conflictedPaths`.
+      conflicts:
+        merged.exitCode === 0 ? [] : this.conflictedPaths(merged.stdout),
+      commits: log.stdout
+        .split("\0")
+        .map((record) => record.trim())
+        .filter((record) => record.length > 0)
+        .map((record): BranchCommit => {
+          const [revision, createdAt, author, subject] = record.split("\x1f");
+          return {
+            revision: revision ?? "",
+            createdAt: createdAt ?? "",
+            author: author ?? "",
+            subject: subject ?? "",
+          };
+        }),
+    };
+  }
+
+  /**
+   * Merges one branch into another, or refuses and says what conflicts.
+   *
+   * A real merge commit with two parents, written without a working tree:
+   * `merge-tree` produces the tree, `commit-tree` gives it both parents, and
+   * `update-ref` moves the branch only if it is still where this started —
+   * so a promotion that lands between the two is refused rather than
+   * overwritten.
+   *
+   * Never resolves a conflict. A merge that needs a person is a merge a
+   * person should do; inventing a resolution here would put code nobody
+   * reviewed into canonical under a review that never saw it.
+   */
+  public async mergeBranchInto(
+    repository: CanonicalRepository,
+    branch: string,
+    options: { message: string; into?: string },
+  ): Promise<
+    | { merged: true; revision: string }
+    | { merged: false; conflicts: string[] }
+  > {
+    await this.assertBranchName(branch);
+    const intoBranch = options.into ?? repository.branch;
+    await this.assertBranchName(intoBranch);
+    if (branch === intoBranch) {
+      throw new Error(`Cannot merge ${branch} into itself`);
+    }
+    const intoRef = `refs/heads/${intoBranch}`;
+    const [intoHead, sideHead] = await Promise.all([
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "rev-parse",
+        "--verify",
+        intoRef,
+      ]),
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "rev-parse",
+        "--verify",
+        `refs/heads/${branch}`,
+      ]),
+    ]);
+    const intoRevision = intoHead.stdout.trim();
+    const sideRevision = sideHead.stdout.trim();
+
+    // Already contained: nothing to merge, and writing an empty merge commit
+    // would put a commit on canonical that changes nothing.
+    if (await this.isAncestor(repository, sideRevision, intoRevision)) {
+      return { merged: true, revision: intoRevision };
+    }
+
+    const merged = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--end-of-options",
+        intoRevision,
+        sideRevision,
+      ],
+      { allowFailure: true },
+    );
+    if (merged.exitCode !== 0) {
+      return { merged: false, conflicts: this.conflictedPaths(merged.stdout) };
+    }
+    const tree = merged.stdout.split("\n")[0]?.trim();
+    if (tree === undefined || tree.length === 0) {
+      throw new Error(`git merge-tree produced no tree for ${branch}`);
+    }
+    const commit = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "commit-tree",
+        tree,
+        "-p",
+        intoRevision,
+        "-p",
+        sideRevision,
+        "-m",
+        options.message,
+      ],
+      {
+        env: {
+          GIT_AUTHOR_NAME: this.identity.name,
+          GIT_AUTHOR_EMAIL: this.identity.email,
+          GIT_COMMITTER_NAME: this.identity.name,
+          GIT_COMMITTER_EMAIL: this.identity.email,
+        },
+      },
+    );
+    const revision = commit.stdout.trim();
+    // Compare-and-swap on the old value, exactly as an integration does. A
+    // promotion that landed while this merge was being computed moves the ref
+    // out from under it, and the right answer is to refuse rather than to
+    // discard whatever arrived.
+    const moved = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "update-ref",
+        "--end-of-options",
+        intoRef,
+        revision,
+        intoRevision,
+      ],
+      { allowFailure: true },
+    );
+    if (moved.exitCode !== 0) {
+      throw new Error(
+        `${intoBranch} moved while ${branch} was being merged; try again`,
+      );
+    }
+    return { merged: true, revision };
+  }
+
+  /** Whether a branch exists, without asserting anything about its contents. */
+  public async branchExists(
+    repository: CanonicalRepository,
+    branch: string,
+  ): Promise<boolean> {
+    await this.assertBranchName(branch);
+    const found = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "for-each-ref",
+        "--format=%(objectname)",
+        `refs/heads/${branch}`,
+      ],
+      { allowFailure: true },
+    );
+    return found.stdout.trim().length > 0;
+  }
+
+  /**
+   * Deletes a branch, and says nothing if it was already gone.
+   *
+   * For a channel whose work has merged. Deliberately unconditional on the
+   * branch being merged anywhere: this is called by the merge itself, which
+   * has just established that, and re-deriving it here would be a second
+   * answer to a question already settled.
+   */
+  public async deleteBranch(
+    repository: CanonicalRepository,
+    branch: string,
+  ): Promise<void> {
+    await this.assertBranchName(branch);
+    if (branch === repository.branch) {
+      throw new Error(`Refusing to delete the canonical branch ${branch}`);
+    }
+    await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "update-ref",
+        "-d",
+        "--end-of-options",
+        `refs/heads/${branch}`,
+      ],
+      { allowFailure: true },
+    );
   }
 
   public async getCanonicalVersion(

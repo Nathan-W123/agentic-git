@@ -69,7 +69,11 @@ import type {
   ChannelReaction,
   ChannelReply,
   CreateSubChannelInput,
+  MergeSubChannelInput,
+  ChannelAnchor,
   SubChannel,
+  SubChannelReview,
+  SaveSubChannelReviewInput,
   SubChannelMember,
   UpdateSubChannelInput,
   AuditArchiveResult,
@@ -188,6 +192,8 @@ interface StoredChannelMessage {
   bumpedAt?: string;
   /** The task this thread is the story of, when it is one. */
   taskId?: TaskId;
+  /** Where in a branch's diff it was said, for a review comment. */
+  anchor?: ChannelAnchor;
   /** What that task changed, kept with the thread. */
   changedFiles?: ChannelChangedFile[];
   /** When somebody pinned it to the channel's banner, and who. */
@@ -286,6 +292,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly channelAgentMembers = new Map<string, ChannelAgentMember>();
   /** Every sub-channel, keyed by its id. */
   private readonly subChannels = new Map<string, SubChannel>();
+  /** Keyed `channelId\0userId`, which is the table's primary key. */
+  private readonly subChannelReviews = new Map<string, SubChannelReview>();
   /** Keyed by `channelId\0userId`. */
   private readonly subChannelMembers = new Map<string, SubChannelMember>();
   /** Keyed by `userId\0provider` — the name an agent answers to everywhere. */
@@ -835,6 +843,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       projectId: candidate.projectId,
       status: "active",
       baseRevision: input.baseRevision,
+      // From the task, not from the caller — see the other two stores.
+      branch: candidate.branch,
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
       heartbeatAt: now.toISOString(),
@@ -1751,6 +1761,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       answerTo: input.answerTo,
       repositoryId: input.repositoryId,
       projectId: input.projectId ?? DEFAULT_PROJECT_ID,
+      branch: input.branch,
       objective: input.objective,
       agentId: input.agentId,
       validationCommands: copy(input.validationCommands),
@@ -2734,6 +2745,9 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       replies: copy(message.replies),
       reactions,
       taskId: message.taskId,
+      // Copied out as well as in: a reader mutating what it was handed must
+      // not reach into the store's own row.
+      ...(message.anchor === undefined ? {} : { anchor: { ...message.anchor } }),
       changedFiles: message.changedFiles,
       pinnedAt: message.pinnedAt,
       pinnedBy: message.pinnedBy,
@@ -3043,6 +3057,9 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       ...(input.referencedMessageId === undefined
         ? {}
         : { referencedMessageId: input.referencedMessageId }),
+      // Copied rather than referenced, so a caller mutating the object it
+      // passed cannot change what the store believes it was told.
+      ...(input.anchor === undefined ? {} : { anchor: { ...input.anchor } }),
     };
     this.channelMessages.set(message.id, message);
     return this.toPublicChannelMessage(message, input.authorId);
@@ -3494,11 +3511,120 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       slug,
       name: input.name?.trim() === "" ? slug : (input.name?.trim() ?? slug),
       visibility: input.visibility ?? "read_only",
+      ...(input.branch === undefined || input.branch === ""
+        ? {}
+        : { branch: input.branch }),
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
+    // Said here as well as by the two backed stores' unique index, so all
+    // three refuse the same thing with the same sentence.
+    if (channel.branch !== undefined) {
+      for (const other of this.subChannels.values()) {
+        if (
+          other.repositoryId === input.repositoryId &&
+          other.branch === channel.branch
+        ) {
+          throw new Error("Another channel is already working that branch");
+        }
+      }
+    }
     this.subChannels.set(channel.id, channel);
     return { ...channel };
+  }
+
+  public async mergeSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: MergeSubChannelInput,
+  ): Promise<SubChannel | undefined> {
+    const channel = this.subChannels.get(channelId);
+    if (
+      channel === undefined ||
+      channel.repositoryId !== repositoryId ||
+      channel.branch === undefined ||
+      channel.mergedAt !== undefined
+    ) {
+      return undefined;
+    }
+    const merged: SubChannel = {
+      ...channel,
+      mergedAt: input.mergedAt,
+      mergedBy: input.mergedBy,
+    };
+    this.subChannels.set(channelId, merged);
+    return { ...merged };
+  }
+
+  public async listSubChannelReviews(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<SubChannelReview[]> {
+    return [...this.subChannelReviews.values()]
+      .filter(
+        (review) =>
+          review.repositoryId === repositoryId &&
+          review.channelId === channelId,
+      )
+      .sort(
+        (a, b) =>
+          a.reviewedAt.localeCompare(b.reviewedAt) ||
+          a.userId.localeCompare(b.userId),
+      )
+      .map((review) => ({ ...review }));
+  }
+
+  public async saveSubChannelReview(
+    input: SaveSubChannelReviewInput,
+  ): Promise<SubChannelReview> {
+    const review: SubChannelReview = {
+      channelId: input.channelId,
+      repositoryId: input.repositoryId,
+      userId: input.userId,
+      state: input.state,
+      ...(input.note === undefined ? {} : { note: input.note }),
+      ...(input.revision === undefined ? {} : { revision: input.revision }),
+      reviewedAt: input.reviewedAt,
+    };
+    // Keyed by the pair the table's primary key is, so a second review from
+    // the same person replaces the first rather than joining it.
+    this.subChannelReviews.set(`${input.channelId}\u0000${input.userId}`, review);
+    return { ...review };
+  }
+
+  public async clearSubChannelReview(
+    repositoryId: string,
+    channelId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const key = `${channelId}\u0000${userId}`;
+    const existing = this.subChannelReviews.get(key);
+    if (existing === undefined || existing.repositoryId !== repositoryId) {
+      return false;
+    }
+    this.subChannelReviews.delete(key);
+    return true;
+  }
+
+  public async shipSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: { pullRequestUrl: string; shippedAt: string },
+  ): Promise<SubChannel | undefined> {
+    const channel = this.subChannels.get(channelId);
+    if (channel === undefined || channel.repositoryId !== repositoryId) {
+      return undefined;
+    }
+    // Unconditional, unlike the merge above: shipping twice reaches the same
+    // pull request, so the second write restates a fact rather than claiming
+    // work somebody else's write already claimed.
+    const shipped: SubChannel = {
+      ...channel,
+      pullRequestUrl: input.pullRequestUrl,
+      shippedAt: input.shippedAt,
+    };
+    this.subChannels.set(channelId, shipped);
+    return { ...shipped };
   }
 
   public async updateSubChannel(

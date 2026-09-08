@@ -123,7 +123,17 @@ function numberField(
     : undefined;
 }
 
+/** One string field of a JSON body, or nothing if it is not one. */
+function readString(body: unknown, key: string): string | undefined {
+  if (typeof body !== "object" || body === null) {
+    return undefined;
+  }
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 const GITHUB_API_USER = "https://api.github.com/user";
+const GITHUB_API_REPOS = "https://api.github.com/repos";
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
 const GITHUB_DEVICE_TOKEN_URL = "https://github.com/login/oauth/access_token";
 /**
@@ -468,6 +478,146 @@ export class GitHubConnectionService {
   }
 
   /** Asks GitHub who the token is, and refuses tokens GitHub refuses. */
+  /**
+   * Opens a pull request on GitHub, or finds the one that is already open.
+   *
+   * The second of the two gates a work channel passes: Kumi reviews the
+   * channel's branch into canonical, GitHub reviews canonical into whatever
+   * the remote calls main. Run on the caller's own stored token, the same
+   * rule the push follows — a shared deployment token would open pull
+   * requests under one person's name from everybody's work.
+   *
+   * An existing pull request for the same head is answered rather than
+   * refused. GitHub returns 422 for the second one, and "you already shipped
+   * this, here it is" is the true and useful reading of that: pressing the
+   * button twice should land on the same page, not on an error.
+   */
+  public async openPullRequest(input: {
+    token: string;
+    /** `owner/name`, as `normalizeGitHubRepository` produces it. */
+    repository: string;
+    /** The branch the work is on. */
+    head: string;
+    /** The branch it is asking to go into. */
+    base: string;
+    title: string;
+    body: string;
+  }): Promise<{ url: string; existing: boolean }> {
+    const created = await this.apiRequest(
+      `${GITHUB_API_REPOS}/${input.repository}/pulls`,
+      input.token,
+      {
+        method: "POST",
+        body: {
+          title: input.title,
+          body: input.body,
+          head: input.head,
+          base: input.base,
+        },
+      },
+    );
+    if (created.status === 201) {
+      const url = readString(created.body, "html_url");
+      if (url === undefined) {
+        throw new GitHubConnectionError(
+          502,
+          "github_unreadable",
+          "GitHub opened the pull request but did not say where it is.",
+        );
+      }
+      return { url, existing: false };
+    }
+    // 422 is GitHub's answer to both "a pull request for this head already
+    // exists" and "there is nothing between these two branches". They read
+    // very differently to a person, so they are told apart rather than
+    // collapsed into one refusal.
+    if (created.status === 422) {
+      const open = await this.apiRequest(
+        `${GITHUB_API_REPOS}/${input.repository}/pulls` +
+          `?state=open&head=${encodeURIComponent(
+            `${input.repository.split("/")[0]}:${input.head}`,
+          )}`,
+        input.token,
+      );
+      const first = Array.isArray(open.body) ? open.body[0] : undefined;
+      const url = readString(first, "html_url");
+      if (url !== undefined) {
+        return { url, existing: true };
+      }
+      throw new GitHubConnectionError(
+        422,
+        "github_nothing_to_merge",
+        `GitHub refused a pull request from ${input.head} into ${input.base}: ` +
+          (readString(created.body, "message") ??
+            "there may be nothing between them."),
+      );
+    }
+    if (created.status === 401 || created.status === 403) {
+      throw new GitHubConnectionError(
+        created.status,
+        "github_forbidden",
+        "Your GitHub token cannot open a pull request on that repository. " +
+          "Reconnect GitHub in Settings, or ask for write access.",
+      );
+    }
+    throw new GitHubConnectionError(
+      502,
+      "github_failed",
+      `GitHub refused the pull request (${created.status}): ` +
+        (readString(created.body, "message") ?? "no reason given"),
+    );
+  }
+
+  /**
+   * One request to the GitHub API, returning the status beside the body.
+   *
+   * Status rather than `ok`, because the callers above act on 201, 422, 401
+   * and 403 differently — and a helper that threw on anything but success
+   * would take that distinction away from them.
+   */
+  private async apiRequest(
+    url: string,
+    token: string,
+    options: { method?: string; body?: unknown } = {},
+  ): Promise<{ status: number; body: unknown }> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: options.method ?? "GET",
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          // GitHub's API refuses anonymous user agents outright.
+          "user-agent": "coord-dashboard",
+          "x-github-api-version": "2022-11-28",
+          ...(options.body === undefined
+            ? {}
+            : { "content-type": "application/json" }),
+        },
+        ...(options.body === undefined
+          ? {}
+          : { body: JSON.stringify(options.body) }),
+      });
+    } catch (error) {
+      throw new GitHubConnectionError(
+        502,
+        "github_unreachable",
+        `GitHub could not be reached: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      // A body that is not JSON is not a reason to lose the status, which is
+      // what every caller above actually decides on.
+      body = undefined;
+    }
+    return { status: response.status, body };
+  }
+
   private async verify(token: string): Promise<string> {
     let response: Response;
     try {

@@ -23,6 +23,7 @@ import {
 import type {
   AuditEventFilter,
   AuditorCursor,
+  ChannelAnchor,
   ChannelChangedFile,
   ChannelMessage,
   ChannelReply,
@@ -163,6 +164,7 @@ import {
   type ProxyTarget,
 } from "./mcp-proxy.js";
 import { dialMcp } from "./mcp-dialer.js";
+import { TerminalSessions } from "./terminal-sessions.js";
 import { BundleTickets, EditorPresence } from "./editor-sessions.js";
 import {
   buildCatchUpDigest,
@@ -252,6 +254,7 @@ import { routeProjects } from "./routes/projects.js";
 import { routeRepositories } from "./routes/repositories.js";
 import { routeTasks } from "./routes/tasks.js";
 import { routeChannels } from "./routes/channels.js";
+import { routeTerminal } from "./routes/terminal.js";
 import { routeMessages } from "./routes/messages.js";
 import { routeChat } from "./routes/chat.js";
 import { routeSettings } from "./routes/settings.js";
@@ -278,6 +281,7 @@ const AUTHENTICATED_ROUTES: ReadonlyArray<
   routeRepositories,
   routeTasks,
   routeChannels,
+  routeTerminal,
   routeMessages,
   routeChat,
   routeSettings,
@@ -1654,6 +1658,15 @@ export class ApiGateway {
   /** One-shot permission to fetch one lease's bundle. Same file, same reason. */
   readonly bundleTickets = new BundleTickets();
   /**
+   * Live terminal sessions, held in memory because that is what they are.
+   *
+   * See `terminal-sessions.ts`: a session is a process on somebody's laptop,
+   * so it cannot outlive the worker holding it and a restart here ends every
+   * one of them — which readers are told rather than left to infer from a
+   * shell that has stopped answering.
+   */
+  readonly terminals = new TerminalSessions();
+  /**
    * What each approved MCP server offers, so a handshake does not dial them.
    *
    * `tools/list` runs at the start of every editor session. Without this,
@@ -1935,11 +1948,16 @@ export class ApiGateway {
     // `submittedAt`, so like the hold sweep it does not care which process
     // was running when the task was filed.
     void this.reportStalledTasks().catch(() => undefined);
+    // And the fifth: work channels drifting behind the branch they will have
+    // to merge into. See `refreshDriftingBranches` — most conflicts are drift,
+    // and drift is the one kind that gets worse the longer nobody looks.
+    void this.refreshDriftingBranches().catch(() => undefined);
     this.threadReconcileTimer = setInterval(() => {
       void this.reconcileFinishedThreads().catch(() => undefined);
       void this.reconcileArbitrationNotices().catch(() => undefined);
       void this.lapseStalePlanHolds().catch(() => undefined);
       void this.reportStalledTasks().catch(() => undefined);
+      void this.refreshDriftingBranches().catch(() => undefined);
     }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
   }
@@ -4193,6 +4211,14 @@ export class ApiGateway {
      */
     admin = false,
   ): Promise<boolean> {
+    // A merged work channel is finished, and its branch is gone with it.
+    // Anything said here now would be dispatched against a branch nothing can
+    // check out, so the room closes rather than accepting work it cannot
+    // route. Read first, and ahead of every other rule including `#general`'s
+    // — which never has a branch, so this can never close it.
+    if (channel.mergedAt !== undefined) {
+      return false;
+    }
     if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
       return true;
     }
@@ -4615,6 +4641,28 @@ export class ApiGateway {
       return { handled: true };
     }
     if (input.command.name === "push") {
+      // `/push` publishes canonical, and a work channel's work is not on
+      // canonical until it has been merged. Typing it here would push
+      // somebody else's work under this channel's name and leave this
+      // channel's own work exactly where it was — so it is refused, with the
+      // gate it actually has to pass named.
+      const room =
+        input.channelId === undefined
+          ? undefined
+          : await this.options.store
+              .getSubChannel(repositoryId, input.channelId)
+              .catch(() => undefined);
+      if (room?.branch !== undefined && room.mergedAt === undefined) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          `#${room.slug} works on \`${room.branch}\`, and \`/push\` publishes ` +
+            "the repository's own branch. Review and merge this channel " +
+            "first — then it can go to GitHub as its own pull request.",
+          room.id,
+        );
+        return { handled: true };
+      }
       const operation = this.options.operations.pushRepository;
       if (operation === undefined) {
         await this.postChannelSystemMessage(
@@ -5006,6 +5054,16 @@ export class ApiGateway {
      * threw on its way to being started is the one answer it must never give.
      */
     rethrowDispatchErrors?: boolean;
+    /**
+     * Where in a branch's diff this was said, for a review comment.
+     *
+     * A review comment goes through this method and not a path of its own,
+     * which is the whole design: mentioning an agent in one dispatches a task
+     * on that branch, the thread hangs off it, and the unread count moves —
+     * none of which had to be rebuilt for reviews. The anchor is the only
+     * thing a comment needs that an ordinary message does not.
+     */
+    anchor?: ChannelAnchor;
   }): Promise<{
     channel: SubChannel;
     message: ChannelMessage;
@@ -5040,6 +5098,7 @@ export class ApiGateway {
       kind: "user",
       authorId: principal.user.id,
       content,
+      ...(input.anchor === undefined ? {} : { anchor: input.anchor }),
     });
     await this.options.store.appendAudit(undefined, {
       type: "channel_message_posted",
@@ -5690,6 +5749,48 @@ export class ApiGateway {
     return best === undefined ? undefined : { id: best.id, title: best.title };
   }
 
+  /**
+   * The branch work dispatched under this channel message lands on.
+   *
+   * Derived from the message rather than threaded through every dispatch
+   * call site. There are thirteen of them, each with its own reason for
+   * existing, and a branch passed by twelve of them would have sent the
+   * thirteenth's work to canonical with nothing anywhere saying so — the
+   * quietest possible way for a work channel to leak into main.
+   *
+   * The message is the one thing every one of those callers has: they all
+   * name either the channel root that asked for the work or the thread it
+   * belongs in, and both are channel messages in this repository that know
+   * which room they are in.
+   *
+   * Undefined for an ordinary conversation channel, which is what most rooms
+   * are, and undefined when the message cannot be read — a branch guessed
+   * wrong is worse than a branch not used, because it puts the work somewhere
+   * nobody is looking for it.
+   */
+  private async branchForChannelMessage(
+    repositoryId: string,
+    messageId: string | undefined,
+  ): Promise<string | undefined> {
+    if (messageId === undefined) {
+      return undefined;
+    }
+    // The viewer only decides whose reactions are marked `mine`; it is not a
+    // membership filter, so this reads the same row for anybody, and the
+    // reactions are discarded here anyway. `coordinator` is the author id the
+    // system's own messages carry and never a real user's.
+    const message = await this.options.store
+      .getChannelMessage(repositoryId, messageId, "coordinator")
+      .catch(() => undefined);
+    if (message === undefined) {
+      return undefined;
+    }
+    const channel = await this.options.store
+      .getSubChannel(repositoryId, message.channelId)
+      .catch(() => undefined);
+    return channel?.branch;
+  }
+
   private async dispatchOneMention(input: {
     projectId: string;
     repositoryId: string;
@@ -6092,6 +6193,13 @@ export class ApiGateway {
         .bumpChannelMessage(repositoryId, continuing, new Date().toISOString())
         .catch(() => undefined);
     }
+    // Read from whichever message this dispatch names: the thread it belongs
+    // in when there is one, otherwise the channel root that asked for it.
+    // Both are messages in this repository, and both know their room.
+    const dispatchBranch = await this.branchForChannelMessage(
+      repositoryId,
+      input.threadMessageId ?? input.referencedMessageId,
+    );
     try {
       const task = await this.options.operations.submitTask({
         projectId,
@@ -6151,6 +6259,14 @@ export class ApiGateway {
         // than stopping at the roster row it was typed into.
         ...(candidate.model === undefined ? {} : { model: candidate.model }),
         ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
+        // Where the work lands. A work channel's own branch, and canonical
+        // for every other room — resolved from the message this dispatch
+        // came from rather than passed in, so a caller cannot forget it.
+        // Stamped on the task now rather than looked up at lease time,
+        // because the channel can be merged or deleted while its task is
+        // still queued and the branch is what that task was commissioned
+        // against.
+        ...(dispatchBranch === undefined ? {} : { branch: dispatchBranch }),
         // Held from the moment it exists, not held after the fact. The
         // branch below that stops and waits for a person is downstream of
         // this; between the insert and that branch the row would otherwise
@@ -10273,6 +10389,169 @@ export class ApiGateway {
    * word came from the agent rather than the narration — `canonical_promoted`
    * prefers the agent's own summary, which will not match the fixed sentences.
    */
+  /**
+   * Brings the repository's own branch into every open work channel's.
+   *
+   * The coordinator arbitrates claims *between concurrently executing tasks*.
+   * Two branches editing the same lines at different times never contend —
+   * the first task's claim was released before the second one asked — so the
+   * collision surfaces at merge time as a Git conflict, and by then it is
+   * days old and whoever wrote either half has moved on.
+   *
+   * Most of those are not real disagreements. They are drift: canonical moved
+   * and the branch did not. Merging canonical in as it moves keeps the two
+   * edits minutes apart instead of days, which is the difference between a
+   * conflict somebody can resolve from memory and an archaeology exercise —
+   * and where it merges cleanly, which is most of the time, there is never a
+   * conflict to resolve at all.
+   *
+   * This is the "on a cadence" half of `docs/CHANNELS-AS-BRANCHES.md`. The
+   * on-demand half is the panel's "Bring in the latest".
+   *
+   * Silent when nothing changes. A branch that was already up to date says
+   * nothing, and a clean catch-up says one line — but a *conflict* is said
+   * out loud, because that is the only warning anybody gets before the merge
+   * refuses for the same reason at the end.
+   */
+  /**
+   * The drift sweep, run now, because canonical just moved.
+   *
+   * Every open work channel in this repository is one merge further behind
+   * than it was a second ago, and this is the moment somebody is looking. The
+   * sweep would get there on its own; arriving while the person who caused
+   * the drift is still on the screen is what makes the notice useful.
+   */
+  async refreshBranchesAfterMerge(repositoryId: string): Promise<void> {
+    await this.refreshDriftingBranches(repositoryId);
+  }
+
+  private async refreshDriftingBranches(
+    /** One repository, or every repository when the sweep is on its timer. */
+    onlyRepositoryId?: string,
+  ): Promise<void> {
+    const operations = this.options.operations;
+    if (
+      operations.refreshBranch === undefined ||
+      operations.branchComparison === undefined
+    ) {
+      return;
+    }
+    const repositories = (
+      await this.options.store.listRepositories().catch((): [] => [])
+    ).filter(
+      (repository) =>
+        onlyRepositoryId === undefined || repository.id === onlyRepositoryId,
+    );
+    for (const repository of repositories) {
+      const channels = await this.options.store
+        .listSubChannels(repository.id)
+        .catch((): [] => []);
+      for (const channel of channels) {
+        // Open work channels only. A conversation has no branch, and a merged
+        // one's branch is gone — refreshing either would be a git call that
+        // could only fail.
+        if (channel.branch === undefined || channel.mergedAt !== undefined) {
+          continue;
+        }
+        const before = await operations
+          .branchComparison({
+            projectId: channel.projectId,
+            repositoryId: repository.id,
+            branch: channel.branch,
+          })
+          .catch(() => undefined);
+        // Nothing to bring in, or nothing on the branch to bring it into: a
+        // branch nobody has committed to is not drifting, it is empty, and
+        // merging canonical into it would put a merge commit on a branch
+        // whose whole history is canonical's.
+        if (
+          before === undefined ||
+          before.behind === 0 ||
+          before.ahead === 0
+        ) {
+          continue;
+        }
+        const refreshed = await operations
+          .refreshBranch({
+            projectId: channel.projectId,
+            repositoryId: repository.id,
+            branch: channel.branch,
+          })
+          .catch(() => undefined);
+        if (refreshed === undefined) {
+          continue;
+        }
+        if (refreshed.merged) {
+          await this.postChannelSystemMessage(
+            channel.projectId,
+            repository.id,
+            `Brought the repository's latest into \`${channel.branch}\` — ` +
+              `${before.behind} ${
+                before.behind === 1 ? "commit" : "commits"
+              } this branch was behind by. Nothing conflicted.`,
+            channel.id,
+          ).catch(() => undefined);
+          continue;
+        }
+        // Said once, not once per sweep. A conflict that stands is still
+        // there on the next pass and every pass after it, and a room that
+        // repeated the same warning every minute would be a room nobody
+        // reads. `alreadyWarnedAboutConflict` looks for the notice this
+        // posted, against these same files.
+        if (
+          await this.alreadyWarnedAboutConflict(
+            repository.id,
+            channel.id,
+            refreshed.conflicts,
+          )
+        ) {
+          continue;
+        }
+        await this.postChannelSystemMessage(
+          channel.projectId,
+          repository.id,
+          `\`${channel.branch}\` has fallen ${before.behind} ${
+            before.behind === 1 ? "commit" : "commits"
+          } behind and cannot catch up on its own: ` +
+            `${refreshed.conflicts.join(", ")} ${
+              refreshed.conflicts.length === 1 ? "conflicts" : "conflict"
+            } with the repository. Somebody has to resolve ${
+              refreshed.conflicts.length === 1 ? "it" : "them"
+            } here — the merge will refuse for the same reason.`,
+          channel.id,
+        ).catch(() => undefined);
+      }
+    }
+  }
+
+  /**
+   * Whether this room has already been told about exactly these conflicts.
+   *
+   * The sweep runs on a timer and a conflict does not go away on its own, so
+   * without this the same paragraph would arrive every minute until somebody
+   * fixed it. Matched on the files rather than on the text: the sentence
+   * around them changes with the count, and the files are what the notice is
+   * actually about.
+   */
+  private async alreadyWarnedAboutConflict(
+    repositoryId: string,
+    channelId: string,
+    conflicts: readonly string[],
+  ): Promise<boolean> {
+    const recent = await this.options.store
+      .listChannelMessages(repositoryId, "coordinator", {
+        channelId,
+        limit: 40,
+      })
+      .catch((): [] => []);
+    return recent.some(
+      (message) =>
+        message.kind === "system" &&
+        message.content.includes("cannot catch up on its own") &&
+        conflicts.every((file) => message.content.includes(file)),
+    );
+  }
+
   private async reconcileFinishedThreads(): Promise<void> {
     const repositories = await this.options.store.listRepositories();
     for (const repository of repositories) {

@@ -18,30 +18,27 @@
 
 import {
   activeChannelId,
+  activeSecondaryContext,
   activeSubChannelId,
-  canManageSubChannels,
-  canPostInActiveSubChannel,
-  subChannelLabel,
-  subChannelsFor,
   activeTasks,
   agentForTask,
+  agentOwnerOffline,
   agentStatus,
-  agentWorkingProgress,
   agentsThinkingIn,
+  agentWorkingProgress,
 api,
   API_ROOT,
-  canEditChannelEntry,
   canDeleteChannelEntry,
+  canEditChannelEntry,
   canManageOrganization,
-  imagesNeedFetching,
   canManageRepository,
-  subChannelUnread,
-  iAmSystemAdmin,
+  canManageSubChannels,
+  canPostInActiveSubChannel,
   channelAgentsFor,
   channelAuthor,
   channelAwaitsGoAhead,
-  channelMessagesFor,
   channelDraft,
+  channelMessagesFor,
   channelNewSince,
   channelParticipants,
   channelPicture,
@@ -53,9 +50,10 @@ api,
   dmUnreadFrom,
   dmUnreadTotal,
   flushChannelDrafts,
+  iAmSystemAdmin,
+  imagesNeedFetching,
   isChannelMuted,
   keptRightPanels,
-  activeSecondaryContext,
   markChannelRead,
   memberName,
   memberRole,
@@ -64,6 +62,8 @@ api,
   messageFoldOpen,
   myAgents,
   myAvatar,
+  offlineAgentsMentionedIn,
+  onlineAgentsIn,
   outstandingQuestionsFor,
   pendingQuestionFor,
   persist,
@@ -71,19 +71,22 @@ api,
   phoneLayout,
   planReplyOf,
   postChannelReply,
+  previewKey,
+  primaryDestinationForWorkspace,
+  providerAllowsCustomModel,
   providerEffortOptions,
   providerModelOptions,
-  providerAllowsCustomModel,
-  usageKey,
   providerOptionsNote,
-  primaryDestinationForWorkspace,
   repositoryLabel,
-  selectPrimaryDestination,
   saveChannelDraft,
+  selectPrimaryDestination,
   sendChannelMessage,
   snapshotChannelRead,
   STAGE_PROGRESS,
   state,
+  subChannelLabel,
+  subChannelsFor,
+  subChannelUnread,
   taskBelongsToAgent,
   taskProgress,
   threadAwaitsGoAhead,
@@ -93,10 +96,8 @@ api,
   threadTitle,
   threadTitleReply,
   typingOn,
+  usageKey,
   waitingTasks,
-  agentOwnerOffline,
-  offlineAgentsMentionedIn,
-  onlineAgentsIn,
 } from "./data.js";
 import {
   chatComposer,
@@ -110,6 +111,8 @@ import {
   FLAG_FOR_STATUS,
   buildTree,
   parsePatch,
+  splitPatchByFile,
+  highlight,
   patchStats,
   renderUnified,
 } from "./code-view.js";
@@ -1799,19 +1802,41 @@ function subChannelRow(repositoryId, channel, active) {
     <button type="button" class="chan-channel"
       data-act="sub-channel-open" data-value="${esc(channel.id)}"
       aria-current="${active ? "page" : "false"}"
-      title="Open ${esc(label)}">
+      title="${
+        channel.branch
+          ? `Open ${esc(label)} — works on ${esc(channel.branch)}`
+          : `Open ${esc(label)}`
+      }">
       <span class="chan-channel-sigil" aria-hidden="true">${
-        channel.visibility === "private" ? icon("lock") : "#"
+        // A work channel is a branch, and that is the single most useful thing
+        // to know about a room before opening it: what is said here lands
+        // somewhere other than the repository's own branch. It outranks the
+        // lock, which the private label below still says in words.
+        channel.branch
+          ? icon("branch")
+          : channel.visibility === "private"
+            ? icon("lock")
+            : "#"
       }</span>${
-        channel.visibility === "public"
-          ? `<span class="sr-only">Open to everyone in the project</span>`
-          : ""
+        channel.branch
+          ? `<span class="sr-only">Works on branch ${esc(channel.branch)}</span>`
+          : channel.visibility === "public"
+            ? `<span class="sr-only">Open to everyone in the project</span>`
+            : ""
       }
       <span class="chan-channel-name">${esc(channel.slug)}</span>
       ${
-        channel.canPost === false
-          ? `<span class="chan-channel-note" title="You can read this channel but not post in it">read&nbsp;only</span>`
-          : ""
+        // A merged work channel is finished, and that outranks read-only:
+        // both mean "you cannot post here", and only one of them says why.
+        channel.mergedAt
+          ? `<span class="chan-channel-note" title="${
+              channel.pullRequestUrl
+                ? `Merged, and on GitHub at ${esc(channel.pullRequestUrl)}`
+                : "Merged into the repository — this channel is finished"
+            }">merged</span>`
+          : channel.canPost === false
+            ? `<span class="chan-channel-note" title="You can read this channel but not post in it">read&nbsp;only</span>`
+            : ""
       }
       ${
         // What is waiting in a room the reader is not in. Suppressed on the
@@ -1905,6 +1930,13 @@ function chanSidebar(activeRepositoryId) {
            they say what they are: rows with names, the width of the column,
            beside the two destinations they were always siblings of. The
            running app's address follows the control that started it. -->
+      <button type="button" class="chan-quick-link${
+        destination.kind === "terminal" ? " on" : ""
+      }" data-act="terminal-toggle" aria-current="${
+        destination.kind === "terminal" ? "page" : "false"
+      }" title="Open a terminal on one of your machines">
+        ${icon("terminal")}<span>Terminal</span>
+      </button>
       ${pinsQuickLink()}
       ${previewControl(activeRepositoryId)}
       ${previewLink(activeRepositoryId)}
@@ -2011,7 +2043,7 @@ function chanSidebar(activeRepositoryId) {
  * answer.
  */
 function previewRunning(repositoryId) {
-  const preview = state.previews[repositoryId];
+  const preview = state.previews[previewKey(repositoryId)];
   return preview !== null && preview !== undefined && preview.exited === undefined
     ? preview
     : undefined;
@@ -2026,7 +2058,7 @@ function previewRunning(repositoryId) {
  * is also what it looks like before anything was ever started.
  */
 function previewStopped(repositoryId) {
-  const preview = state.previews[repositoryId];
+  const preview = state.previews[previewKey(repositoryId)];
   return preview !== null && preview !== undefined && preview.exited !== undefined
     ? preview
     : undefined;
@@ -2058,7 +2090,7 @@ function previewControl(repositoryId) {
   // nothing — so it was pressed again, and the second press killed the first.
   // Disabled rather than merely marked: the refusal is in `app.js`, and a
   // control that still looks pressable is an invitation to find that out.
-  if (state.previewsStarting?.has(repositoryId) === true) {
+  if (state.previewsStarting?.has(previewKey(repositoryId)) === true) {
     const busy = "Starting — installing and building can take a minute";
     return `<button type="button" class="chan-quick-link ch-preview-toggle starting"
         data-act="preview-start" data-value="${esc(repositoryId)}" disabled
@@ -2187,6 +2219,14 @@ function primaryDestinationClose(destination) {
  * destination inside it. Status and actions share one bounded group on the
  * right so a preview address cannot spread across, or overlap, the title.
  */
+/** The room this pane is showing, as the channel list knows it. */
+function openSubChannel(repositoryId) {
+  const channelId = activeSubChannelId(repositoryId);
+  return subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+}
+
 function conversationHeader(repositoryId) {
   const destination = primaryDestinationForWorkspace(repositoryId);
   const person =
@@ -2271,6 +2311,20 @@ function conversationHeader(repositoryId) {
                 value: repositoryId ?? "",
                 title: `${label} actions`,
               })
+      }
+      ${
+        // A work channel is a branch, and this is the way into what it has:
+        // the diff, how far ahead it is, and the one button that lands it.
+        // Only where there is a branch — an ordinary room has nothing to
+        // review, and a button that opened an empty panel would be worse than
+        // no button.
+        main && openSubChannel(repositoryId)?.branch
+          ? iconButton("branch", {
+              act: "branch-review-open",
+              value: repositoryId ?? "",
+              title: `Review ${openSubChannel(repositoryId)?.branch}`,
+            })
+          : ""
       }
       ${primaryDestinationClose(destination)}
     </div>
@@ -4757,10 +4811,21 @@ function composer(repositoryId) {
   // right now" and this is "not you" — with the thing to do about it.
   if (!canPostInActiveSubChannel(repositoryId)) {
     const label = subChannelLabel(repositoryId, activeSubChannelId(repositoryId));
+    // Two reasons a room refuses the composer, and they want opposite things
+    // of the reader. "Not you" is answered by asking to be added; a merged
+    // work channel is answered by nobody, because it is finished — its branch
+    // is gone, and anything said here would be dispatched against a branch
+    // nothing can check out. Telling somebody to ask an admin to add them to a
+    // room that has shipped sends them to ask for something nobody can give.
+    const merged = openSubChannel(repositoryId)?.mergedAt;
     return `<div class="chan-composer-wrap">
       <div class="chan-composer-locked">
-        ${icon("lock")}
-        <span>You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.</span>
+        ${icon(merged ? "check" : "lock")}
+        <span>${
+          merged
+            ? `${esc(label)} merged and is finished. Open a new channel for follow-up work.`
+            : `You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.`
+        }</span>
       </div>
     </div>`;
   }
@@ -4903,6 +4968,8 @@ function rightPanel(repositoryId, kind) {
       return conversationInfoPanel(repositoryId);
     case "pins":
       return pinnedMessagesPanel(repositoryId);
+    case "branch":
+      return branchReviewPanel(repositoryId);
     case "dm":
       return dmPanel();
     case "file":
@@ -5044,6 +5111,467 @@ function conversationInfoPanel(repositoryId) {
     </header>
     <div class="thread-body secondary-info-body">${content}</div>
   </aside>`;
+}
+
+/**
+ * How many files a review opens without being asked.
+ *
+ * Small enough that a typical change is readable in one scroll, and past it
+ * everything starts folded so a twenty-file branch is a list of files rather
+ * than the wall of diff the per-file split exists to replace.
+ */
+const BRANCH_FILES_OPEN_BY_DEFAULT = 4;
+
+/**
+ * The pull request a work channel is.
+ *
+ * A work channel is already the unit a pull request describes — the
+ * conversation, the tasks, the diff and the merge are one thing — so this is
+ * not a second surface beside the room. It is the room's own branch, read: how
+ * far ahead it is, what changed, and the one button that lands it.
+ *
+ * Drawn in the secondary column beside the transcript, the way a thread, a
+ * file and the pins already are, so reading the diff and reading what people
+ * said about it happen side by side rather than in two places.
+ */
+function branchReviewPanel(repositoryId) {
+  const channelId = activeSubChannelId(repositoryId);
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+  const review = state.branchReview[channelId];
+  const busy = state.branchReviewBusy === channelId;
+  const branch = channel?.branch ?? review?.branch;
+  return `<aside class="thread-panel branch-panel" aria-label="Branch review">
+    ${panelGrip()}
+    <header class="thread-head">
+      ${panelKind("Branch")}
+      <span class="thread-title" title="${esc(branch ?? "")}">${
+        branch === undefined ? "This channel" : esc(branch)
+      }</span>
+      <span class="spacer"></span>
+      ${panelClose("secondary-context-close", "Close branch review (Esc)")}
+    </header>
+    <div class="thread-body branch-body"
+      data-scroll-key="branch:${esc(repositoryId)}:${esc(channelId ?? "")}">
+      ${branchReviewBody(repositoryId, channelId, review, busy)}
+    </div>
+  </aside>`;
+}
+
+/** Everything inside the branch panel, so its states read in one place. */
+function branchReviewBody(repositoryId, channelId, review, busy) {
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+  // The panel stays open across a room switch, so it can find itself looking
+  // at a conversation. Said plainly rather than drawn as a branch that has
+  // not been read, which reads as something waiting to load.
+  if (channel !== undefined && channel.branch === undefined) {
+    return emptyState(
+      "branch",
+      "Not a branch",
+      `#${channel.slug} is a conversation. Work said here lands on the ` +
+        "repository's own branch, so there is nothing to review or merge.",
+    );
+  }
+  if (state.branchReviewError !== undefined) {
+    return `<div class="branch-note err">${esc(state.branchReviewError)}</div>
+      <div class="branch-actions">
+        <button class="btn" type="button" data-act="branch-review-reload"
+          data-value="${esc(channelId ?? "")}">Try again</button>
+      </div>`;
+  }
+  if (review === undefined) {
+    return busy
+      ? `<div class="branch-note">Reading the branch…</div>`
+      : emptyState(
+          "branch",
+          "Nothing read yet",
+          "This channel's branch has not been read in this session.",
+          // With the way to read it. The panel survives a room switch, so it
+          // routinely lands on a channel nothing has fetched, and an empty
+          // state with no way out of it is a dead end.
+          `<button class="btn" type="button" data-act="branch-review-reload"
+             data-value="${esc(channelId ?? "")}">Read the branch</button>`,
+        );
+  }
+  if (review.merged === true) {
+    // The second gate. Kumi reviewed this into the repository; GitHub reviews
+    // the repository into whatever it calls main, and until somebody presses
+    // this the work has landed in Kumi and nowhere else.
+    return `${emptyState(
+      "check",
+      "Merged",
+      `${review.branch} landed on the repository ${relativeTime(
+        review.mergedAt,
+      )}. This channel is finished — open a new one for follow-up work.`,
+    )}
+    ${
+      review.pullRequestUrl
+        ? `<div class="branch-note">On GitHub as
+             <a href="${esc(review.pullRequestUrl)}" target="_blank"
+               rel="noreferrer noopener">${esc(review.pullRequestUrl)}</a>,
+             opened ${esc(relativeTime(review.shippedAt))}.</div>
+           <div class="branch-actions">
+             ${
+               review.canShip === true
+                 ? `<button class="btn" type="button" data-act="branch-review-ship"
+                      data-value="${esc(channelId ?? "")}" ${busy ? "disabled" : ""}
+                      >Update the pull request</button>`
+                 : ""
+             }
+           </div>`
+        : review.canShip === true
+          ? `<div class="branch-actions">
+               <button class="btn btn-primary" type="button"
+                 data-act="branch-review-ship" data-value="${esc(channelId ?? "")}"
+                 ${busy ? "disabled" : ""}
+                 title="Push this to GitHub and open a pull request"
+                 >Open a pull request on GitHub</button>
+             </div>`
+          : `<div class="branch-note">Somebody with review rights ships this to GitHub.</div>`
+    }`;
+  }
+  const conflicts = review.conflicts ?? [];
+  const files = review.files ?? [];
+  const stats =
+    typeof review.patch === "string" && review.patch !== ""
+      ? patchStats(review.patch)
+      : { additions: 0, deletions: 0 };
+  // Ahead of nothing is a branch with no work on it. Said plainly rather than
+  // drawn as an empty diff, which reads as a failed read.
+  if ((review.ahead ?? 0) === 0) {
+    return `${branchSummary(review, stats, conflicts)}
+      ${emptyState(
+        "branch",
+        "Nothing to merge yet",
+        "No work has landed on this branch. Ask an agent here and it will.",
+      )}`;
+  }
+  return `${branchSummary(review, stats, conflicts)}
+    <div class="branch-actions">
+      ${
+        (review.behind ?? 0) > 0 || conflicts.length > 0
+          ? `<button class="btn branch-secondary" type="button"
+               data-act="branch-review-refresh"
+               data-value="${esc(channelId ?? "")}" ${busy ? "disabled" : ""}
+               >Bring in the latest</button>`
+          : ""
+      }
+      ${
+        review.canMerge === true
+          ? `<button class="btn btn-primary" type="button"
+               data-act="branch-review-merge" data-value="${esc(channelId ?? "")}"
+               ${busy || conflicts.length > 0 ? "disabled" : ""}
+               title="${
+                 conflicts.length > 0
+                   ? "Resolve the conflicts first"
+                   : `Merge ${esc(review.branch ?? "")} into the repository`
+               }">Merge into the repository</button>`
+          : `<span class="branch-note">Somebody with review rights merges this.</span>`
+      }
+    </div>
+    ${branchReviewStates(review, channelId, busy)}
+    ${branchCommitList(review)}
+    ${branchFileReview(review, channelId, conflicts, files)}
+    ${
+      review.truncated === true
+        ? `<div class="branch-note">The diff was too long to show in full. Every changed file is listed above.</div>`
+        : ""
+    }`;
+}
+
+/**
+ * Who has looked at this, and the two buttons for saying so.
+ *
+ * Approve and ask-for-changes rather than a third "commented" state: a
+ * comment is a message in the room, which is where comments live, and a
+ * review state that says nothing about the decision would be a row whose only
+ * purpose is to appear in a list.
+ *
+ * A review is stamped with the revision it was left against, so an approval
+ * of a branch that has moved four commits since reads as stale rather than as
+ * an approval of what is on the screen.
+ */
+function branchReviewStates(review, channelId, busy) {
+  const reviews = review.reviews ?? [];
+  const mine = review.myReview;
+  const pressed = (state) => (mine === state ? " on" : "");
+  return `<div class="branch-reviews">
+    ${
+      reviews.length === 0
+        ? `<div class="branch-note">Nobody has reviewed this yet.</div>`
+        : `<ul class="branch-review-list">${reviews
+            .map(
+              (entry) => `<li class="branch-review ${esc(entry.state)}${
+                entry.current === false ? " stale" : ""
+              }">
+                ${icon(entry.state === "approved" ? "check" : "alert")}
+                <span class="branch-review-who">${esc(
+                  memberName(entry.userId) ?? entry.userId,
+                )}</span>
+                <span class="branch-review-what">${
+                  entry.state === "approved" ? "approved" : "asked for changes"
+                }${
+                  entry.current === false
+                    ? " — on an earlier version of this branch"
+                    : ""
+                }</span>
+                ${
+                  entry.note
+                    ? `<span class="branch-review-note">${esc(entry.note)}</span>`
+                    : ""
+                }
+              </li>`,
+            )
+            .join("")}</ul>`
+    }
+    <div class="branch-actions branch-review-actions">
+      <button type="button" class="btn branch-secondary${pressed(
+        "changes_requested",
+      )}" data-act="branch-review-state" data-value="${esc(channelId ?? "")}"
+        data-state="changes_requested" ${busy ? "disabled" : ""}
+        >Request changes</button>
+      <button type="button" class="btn${pressed("approved")}"
+        data-act="branch-review-state" data-value="${esc(channelId ?? "")}"
+        data-state="approved" ${busy ? "disabled" : ""}>Approve</button>
+    </div>
+  </div>`;
+}
+
+/**
+ * What the branch is made of, newest first.
+ *
+ * A diff says what changed; the commits say what was *done*, and in what
+ * order. Without them a reviewer reads one merged blob of every agent's work
+ * at once and has to guess where one piece of work ended and the next began.
+ *
+ * `ahead` is the honest total, so a list the server capped says so rather
+ * than quietly being the whole story.
+ */
+function branchCommitList(review) {
+  const commits = review.commits ?? [];
+  if (commits.length === 0) {
+    return "";
+  }
+  const ahead = review.ahead ?? commits.length;
+  return `<details class="branch-commits" open>
+    <summary>${commits.length} of ${ahead} ${
+      ahead === 1 ? "commit" : "commits"
+    }</summary>
+    <ul class="branch-commit-list">
+      ${commits
+        .map(
+          (commit) => `<li class="branch-commit">
+            <code class="branch-commit-sha">${esc(
+              String(commit.revision ?? "").slice(0, 8),
+            )}</code>
+            <span class="branch-commit-subject">${esc(commit.subject ?? "")}</span>
+            <span class="branch-commit-who">${esc(commit.author ?? "")} · ${esc(
+              relativeTime(commit.createdAt),
+            )}</span>
+          </li>`,
+        )
+        .join("")}
+    </ul>
+  </details>`;
+}
+
+/**
+ * The diff, one file at a time, with the comments left on it.
+ *
+ * One flat patch is what a diff *viewer* shows. A review is read file by
+ * file — you open the one you care about, say something about a line in it,
+ * and collapse it again — so each file is its own section with its own stats
+ * and its own fold.
+ *
+ * Open by default while the change is small enough to take in at once.
+ * Past that, everything starts folded and the reader chooses, because a
+ * twenty-file branch that expands all of them is the wall of diff this
+ * replaced.
+ */
+function branchFileReview(review, channelId, conflicts, files) {
+  const perFile = splitPatchByFile(review.patch ?? "");
+  const byPath = new Map(perFile.map((file) => [file.path, file.patch]));
+  const openByDefault = perFile.length <= BRANCH_FILES_OPEN_BY_DEFAULT;
+  // Every file the comparison named, whether or not the patch covered it: a
+  // binary file changes without producing a text diff, and leaving it out of
+  // the list would be the review quietly not mentioning it.
+  const paths = files.length > 0 ? files : perFile.map((file) => file.path);
+  const comments = review.comments ?? [];
+  return paths
+    .map((path) => {
+      const patch = byPath.get(path);
+      const stats = patch === undefined
+        ? { additions: 0, deletions: 0 }
+        : patchStats(patch);
+      const onThisFile = comments.filter(
+        (comment) => comment.anchor?.path === path,
+      );
+      return `<details class="branch-file-review${
+        conflicts.includes(path) ? " conflicted" : ""
+      }"${openByDefault ? " open" : ""}>
+        <summary>
+          <span class="branch-file-path">${esc(path)}</span>
+          ${
+            onThisFile.length > 0
+              ? `<span class="branch-file-comments">${onThisFile.length}</span>`
+              : ""
+          }
+          ${
+            conflicts.includes(path)
+              ? `<span class="branch-conflict">conflicts</span>`
+              : ""
+          }
+          <span class="fp-stats">
+            <span class="delta-add">+${stats.additions}</span>
+            <span class="delta-del">-${stats.deletions}</span>
+          </span>
+        </summary>
+        <div class="branch-diff">${
+          patch === undefined
+            ? `<div class="branch-note">No text diff for this file.</div>`
+            : reviewableDiff(patch, path, channelId, review, onThisFile)
+        }</div>
+      </details>`;
+    })
+    .join("");
+}
+
+/**
+ * One file's diff, with a way to say something about a line.
+ *
+ * `renderUnified` draws rows and nothing else, which is what the file panel
+ * wants. A review wants two more things per row: somewhere to press to leave
+ * a comment, and the comments already left there, under the line they are
+ * about. So the rows are drawn here rather than there — same `parsePatch`,
+ * same `highlight`, same classes, so a diff in the review and a diff in the
+ * file panel are the same object with one affordance added.
+ *
+ * Only added and context rows can be commented on. A deleted line is not in
+ * the branch any more, so a comment anchored to it points at nothing an agent
+ * could go and change.
+ */
+function reviewableDiff(patch, path, channelId, review, comments) {
+  const rows = parsePatch(patch);
+  const byLine = new Map();
+  for (const comment of comments) {
+    const line = comment.anchor?.line;
+    if (typeof line === "number") {
+      byLine.set(line, [...(byLine.get(line) ?? []), comment]);
+    }
+  }
+  const composing = state.branchComment;
+  return rows
+    .map((row) => {
+      const oldNo = row.oldNo === undefined ? "" : row.oldNo;
+      const newNo = row.newNo === undefined ? "" : row.newNo;
+      const commentable = row.kind === "add" || row.kind === "ctx";
+      const line = typeof row.newNo === "number" ? row.newNo : undefined;
+      const here = line === undefined ? [] : (byLine.get(line) ?? []);
+      const open =
+        composing !== undefined &&
+        composing.channelId === channelId &&
+        composing.path === path &&
+        composing.line === line;
+      return `<div class="dline ${row.kind}${
+        commentable ? " commentable" : ""
+      }"><span class="ln">${oldNo}</span><span class="ln">${newNo}</span><span class="src">${highlight(
+        row.text,
+      )}</span>${
+        commentable && line !== undefined
+          ? `<button type="button" class="dline-comment"
+               data-act="branch-comment-open"
+               data-value="${esc(channelId ?? "")}"
+               data-path="${esc(path)}" data-line="${String(line)}"
+               title="Comment on line ${String(line)}">${icon("plus")}</button>`
+          : ""
+      }</div>${here.map((comment) => branchCommentHtml(comment)).join("")}${
+        open ? branchCommentComposer(channelId, path, line, review) : ""
+      }`;
+    })
+    .join("");
+}
+
+/** One comment, under the line it points at. */
+function branchCommentHtml(comment) {
+  return `<div class="branch-comment${
+    comment.current === false ? " stale" : ""
+  }">
+    <span class="branch-comment-who">${esc(
+      memberName(comment.authorId) ?? comment.authorId,
+    )}</span>
+    <span class="branch-comment-body">${esc(comment.content)}</span>
+    ${
+      comment.current === false
+        ? `<span class="branch-comment-note">left on an earlier version of this line</span>`
+        : ""
+    }
+    ${
+      comment.replies > 0
+        ? `<span class="branch-comment-note">${String(comment.replies)} ${
+            comment.replies === 1 ? "reply" : "replies"
+          } in the thread</span>`
+        : ""
+    }
+  </div>`;
+}
+
+/**
+ * The box for saying something about a line.
+ *
+ * It posts a channel message, so `@`-mentioning an agent in it dispatches a
+ * task on this branch — which is the thing a pull request on GitHub
+ * structurally cannot do, and the reason the placeholder says so.
+ */
+function branchCommentComposer(channelId, path, line, review) {
+  // A div and a button, not a `<form>`. The click dispatcher walks up to the
+  // nearest `[data-act]`, so a form carrying the act *and* a submit button
+  // inside it would fire the click path and the submit path for one press,
+  // and post the comment twice.
+  return `<div class="branch-comment-form">
+    <textarea class="input" name="content" rows="2" autofocus
+      placeholder="Comment on line ${String(line)} — @mention an agent and it fixes it here"></textarea>
+    <div class="branch-comment-actions">
+      <button type="button" class="btn-quiet" data-act="branch-comment-cancel">Cancel</button>
+      <button type="button" class="btn btn-primary"
+        data-act="branch-comment-submit" data-value="${esc(channelId ?? "")}"
+        data-path="${esc(path)}" data-line="${String(line)}"
+        data-revision="${esc(review.head ?? "")}">Comment</button>
+    </div>
+  </div>`;
+}
+
+/** The one-line state of a branch: how far ahead, how far behind, what breaks. */
+function branchSummary(review, stats, conflicts) {
+  const ahead = review.ahead ?? 0;
+  const behind = review.behind ?? 0;
+  return `<div class="branch-summary">
+    <div class="branch-counts">
+      <span class="branch-count">${ahead} ${
+        ahead === 1 ? "commit" : "commits"
+      } ahead</span>
+      ${
+        behind > 0
+          ? `<span class="branch-count behind">${behind} behind</span>`
+          : `<span class="branch-count">up to date</span>`
+      }
+      <span class="fp-stats">
+        <span class="delta-add">+${stats.additions}</span>
+        <span class="delta-del">-${stats.deletions}</span>
+      </span>
+    </div>
+    ${
+      conflicts.length > 0
+        ? `<div class="branch-note err">${conflicts.length} ${
+            conflicts.length === 1 ? "file conflicts" : "files conflict"
+          } with the repository. Bring the latest in and resolve ${
+            conflicts.length === 1 ? "it" : "them"
+          } before this can merge.</div>`
+        : ""
+    }
+  </div>`;
 }
 
 /**
@@ -7101,6 +7629,116 @@ function filesConversation(repositoryId) {
     .replace(/<\/aside>$/u, "</section>");
 }
 
+/**
+ * A shell on one of the reader's own machines.
+ *
+ * Three states, and the distinction between the last two is the whole of the
+ * usefulness: no machine connected at all, a machine connected whose owner
+ * has not allowed a terminal on it, and a machine ready to open one. The
+ * middle case used to be the one every remote-shell feature reports as
+ * "unavailable", leaving somebody to guess whether to open their laptop or
+ * change a setting.
+ */
+function terminalConversation(repositoryId) {
+  const session = state.terminals[previewKey(repositoryId)];
+  const machines = state.terminalMachines;
+  const room = subChannelLabel(activeSubChannelId(repositoryId), repositoryId);
+  return `<section class="primary-private-conversation terminal-conversation"
+      aria-label="Terminal">
+    <div class="primary-file-toolbar terminal-head">
+      ${panelKind("Terminal")}
+      <span class="terminal-where">${esc(room)}</span>
+      <span class="spacer"></span>
+      ${
+        session === undefined
+          ? ""
+          : `<button type="button" class="btn-quiet" data-act="terminal-close"
+               data-value="${esc(session.id ?? "")}">Close</button>`
+      }
+    </div>
+    ${
+      state.terminalError === undefined
+        ? ""
+        : `<div class="terminal-error">${esc(state.terminalError)}</div>`
+    }
+    ${
+      session !== undefined
+        ? terminalLive(session)
+        : machines === undefined
+          ? `<div class="terminal-empty">Looking for your machines…</div>`
+          : terminalPicker(machines)
+    }
+  </section>`;
+}
+
+/** The running shell. xterm draws into this; the renderer leaves it alone. */
+function terminalLive(session) {
+  return `<div class="terminal-body">
+    <div class="terminal-meta">
+      ${esc(session.shell ?? "shell")} on ${esc(session.workerName ?? "your machine")}${
+        session.backend === "pipes"
+          ? ' — <span class="terminal-degraded">no pseudo-terminal on this machine, ' +
+            "so full-screen programs and Ctrl-C will not work</span>"
+          : ""
+      }
+      ${
+        session.exitCode === undefined
+          ? ""
+          : `<span class="terminal-ended">· exited ${String(session.exitCode)}</span>`
+      }
+    </div>
+    <div class="terminal-screen" data-terminal="${esc(session.id ?? "")}"></div>
+  </div>`;
+}
+
+/** Which machine, and which of the shells it actually has. */
+function terminalPicker(machines) {
+  if (machines.length === 0) {
+    return `<div class="terminal-empty">
+      <p>No machine of yours is connected.</p>
+      <p class="modal-hint">Open the desktop app on the computer you want the
+      shell to run on. A terminal runs there, not on the control plane — which
+      is why it has your files, your tools and your keys.</p>
+    </div>`;
+  }
+  const offering = machines.filter((machine) => machine.terminal !== undefined);
+  if (offering.length === 0) {
+    return `<div class="terminal-empty">
+      <p>${esc(machines.map((machine) => machine.name).join(", "))}
+      ${machines.length === 1 ? "is" : "are"} connected, but
+      ${machines.length === 1 ? "has" : "have"} not allowed a terminal.</p>
+      <p class="modal-hint">Allow it in the desktop app, on that computer.
+      Nobody here can turn it on for you: a shell there runs as you, so the
+      machine gets the say.</p>
+    </div>`;
+  }
+  return `<div class="terminal-picker">
+    ${offering
+      .map(
+        (machine) => `<div class="terminal-machine">
+          <div class="terminal-machine-name">${esc(machine.name)}</div>
+          <div class="terminal-shells">
+            ${(machine.terminal.shells ?? [])
+              .map(
+                (shell) => `<button type="button" class="btn"
+                  data-act="terminal-open" data-value="${esc(machine.id)}"
+                  data-shell="${esc(shell.id)}">${esc(shell.label)}</button>`,
+              )
+              .join("")}
+          </div>
+          ${
+            machine.terminal.backend === "pipes"
+              ? `<div class="terminal-degraded">This machine has no
+                 pseudo-terminal, so full-screen programs like vim, and Ctrl-C
+                 as an interrupt, will not work here.</div>`
+              : ""
+          }
+        </div>`,
+      )
+      .join("")}
+  </div>`;
+}
+
 /** A selected file replaces the primary destination while keeping its tools. */
 function fileConversation() {
   return filePanel()
@@ -7120,6 +7758,9 @@ function primaryConversation(repositoryId) {
   }
   if (destination.kind === "agent") {
     return agentConversation(repositoryId);
+  }
+  if (destination.kind === "terminal") {
+    return terminalConversation(repositoryId);
   }
   if (destination.kind === "files") {
     return filesConversation(repositoryId);
@@ -8248,11 +8889,30 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
       )}</span>
     </div>
     ${
+      // Where work in this room lands. Said here rather than only on the row,
+      // because this is the panel somebody opens when they want to know what
+      // a channel actually is, and "on a branch" is the difference between a
+      // room that talks and one that ships.
+      channel.branch
+        ? `<div class="channel-info-summary">${icon("branch")} Work in this
+             channel lands on <code>${esc(channel.branch)}</code>, not on the
+             repository's own branch.</div>`
+        : ""
+    }
+    ${
       general
         ? `<div class="channel-info-summary">Everyone in this workspace can read and post in #general.</div>`
         : `<div class="pop-row">
-             <button type="button" class="btn-quiet" data-act="sub-channel-rename"
-               data-value="${esc(channelId)}">Rename</button>
+             ${
+               // A branch cannot move without orphaning every commit on it,
+               // so a work channel's handle is fixed. The server refuses the
+               // rename either way; offering the button anyway would be an
+               // affordance whose only outcome is an error toast.
+               channel.branch
+                 ? ""
+                 : `<button type="button" class="btn-quiet" data-act="sub-channel-rename"
+               data-value="${esc(channelId)}">Rename</button>`
+             }
              <!-- One entry into a picker rather than a toggle: with three
                   states a flip cannot reach the one it is not between. -->
              <button type="button" class="btn-quiet" data-act="sub-channel-visibility"

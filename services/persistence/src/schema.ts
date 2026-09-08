@@ -1679,6 +1679,107 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE api_tokens ADD COLUMN editor_vendor TEXT`,
     ],
   },
+  {
+    /**
+     * A channel can be a branch.
+     *
+     * Null for every channel that exists today and for every one created
+     * afterwards that is only a conversation — `#general` included, because
+     * `#general` *is* the repository's branch, the thing everything else
+     * merges into. Set, the channel is a unit of shippable work: its agents
+     * are arbitrated against each other exactly as before, and what they
+     * produce lands here rather than on canonical, so the whole channel can
+     * be reviewed and merged as one thing.
+     *
+     * Three columns rather than one because a merged channel is a different
+     * state from an open one and the difference has to survive a restart: its
+     * branch is behind canonical from the moment it merges, and admitting new
+     * work onto it would produce a second review of something already
+     * shipped.
+     *
+     * Unique per repository. Two channels naming one branch would each think
+     * they owned it, and the second to merge would ship the first one's work
+     * under its own review. Nullable columns do not collide in a UNIQUE index
+     * on either backend, so every conversation channel remains free.
+     */
+    version: 58,
+    name: "channels-can-be-branches",
+    statements: [
+      `ALTER TABLE sub_channels ADD COLUMN branch TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN merged_at TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN merged_by TEXT`,
+      `CREATE UNIQUE INDEX sub_channels_by_branch
+         ON sub_channels(repository_id, branch)`,
+      // And on the work itself, because the channel is not the authority
+      // once a task exists. A channel can be renamed, merged or archived
+      // while a task it dispatched is still queued, and the branch a change
+      // was written against is not a thing that may move underneath it.
+      // Null on every existing row, which reads as the repository's own.
+      `ALTER TABLE submitted_tasks ADD COLUMN branch TEXT`,
+      // And on the lease, beside the base revision it pins. Both say where a
+      // change is being written, and every later step — validating the plan,
+      // arbitrating a widening mid-run, integrating the result — has to
+      // answer against the same place the base came from.
+      `ALTER TABLE work_leases ADD COLUMN branch TEXT`,
+    ],
+  },
+  {
+    version: 59,
+    name: "channels-ship-to-github",
+    statements: [
+      // Where a merged channel's work went on GitHub.
+      //
+      // The second of the two gates: a channel's branch merges into canonical
+      // under Kumi's own review, and canonical goes to GitHub as a pull
+      // request somebody there reviews. Kept on the channel because that is
+      // what the pull request is *about* — a link stored anywhere else would
+      // have to be joined back to the room every time it was shown.
+      //
+      // Null for every channel that has not shipped, which is every channel
+      // that has not merged and most that have.
+      `ALTER TABLE sub_channels ADD COLUMN pull_request_url TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN shipped_at TEXT`,
+    ],
+  },
+  {
+    version: 60,
+    name: "review-a-branch-in-its-own-room",
+    statements: [
+      // Where in the diff a message was said.
+      //
+      // A review comment is a channel message, not a parallel comment
+      // system. The channel already *is* the pull request's conversation —
+      // the tasks that produced the work are threads in it — so a second
+      // store of comments beside it would be two places to look and one of
+      // them would go stale. What a comment needs on top of a message is
+      // where it was pointed, which is these three columns.
+      //
+      // The revision as well as the path and line, because a line number is
+      // only meaningful against a particular commit: the branch moves, and a
+      // comment left on line 42 of one revision is not about line 42 of the
+      // next. Anything reading these has to check the revision still matches
+      // before drawing the comment against a line.
+      `ALTER TABLE channel_messages ADD COLUMN anchor_path TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN anchor_line INTEGER`,
+      `ALTER TABLE channel_messages ADD COLUMN anchor_revision TEXT`,
+      // One review per person per channel, replaced rather than accumulated:
+      // changing your mind is the ordinary case, and a history of somebody
+      // approving and un-approving is noise nobody asked for. The room keeps
+      // the narrative; this keeps the standing answer.
+      `CREATE TABLE sub_channel_reviews (
+         channel_id TEXT NOT NULL,
+         repository_id TEXT NOT NULL,
+         user_id TEXT NOT NULL,
+         state TEXT NOT NULL,
+         note TEXT,
+         revision TEXT,
+         reviewed_at TEXT NOT NULL,
+         PRIMARY KEY (channel_id, user_id)
+       )`,
+      `CREATE INDEX sub_channel_reviews_by_repository
+         ON sub_channel_reviews(repository_id)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

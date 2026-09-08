@@ -74,6 +74,18 @@ export interface OverlayScope {
   userId: string;
   projectId: string;
   repositoryId: string;
+  /**
+   * The work channel's branch, when the overlay belongs to one.
+   *
+   * Absent means the repository's own canonical branch, which is what every
+   * overlay meant before work channels existed. It is carried here rather
+   * than resolved deeper down because it changes the *identity* of the
+   * overlay — two branches are two checkouts, not one checkout that switches
+   * under somebody's unsaved edits — and identity has to be decided at the
+   * top or the lock, the directory and the metadata disagree about which
+   * workspace is being spoken about.
+   */
+  branch?: string;
 }
 
 export interface OverlayMeta {
@@ -81,6 +93,14 @@ export interface OverlayMeta {
   userId: string;
   projectId: string;
   repositoryId: string;
+  /**
+   * Recorded so a directory cannot be reinterpreted as another branch's.
+   *
+   * The directory name already hashes the branch, so a mismatch here means
+   * either a hand-edited record or a hash collision; both are refused rather
+   * than reconciled.
+   */
+  branch?: string;
   baseVersion: CanonicalVersion;
   createdAt: string;
 }
@@ -252,10 +272,17 @@ export class OverlayWorkspaceService {
 
   /** Deterministic, collision-free, and short enough for Windows paths. */
   public overlayDirectory(scope: OverlayScope): string {
-    const digest = createHash("sha256")
-      .update(`${scope.userId}\0${scope.projectId}\0${scope.repositoryId}`)
-      .digest("hex")
-      .slice(0, 20);
+    // The branch is appended rather than always included, so an overlay with
+    // no branch hashes to exactly what it hashed to before branches existed.
+    // Including it unconditionally — even as an empty string — would rename
+    // every overlay on disk at once and orphan every open workspace in the
+    // deployment, silently, at the moment of deploy.
+    const key =
+      scope.branch === undefined || scope.branch === ""
+        ? `${scope.userId}\0${scope.projectId}\0${scope.repositoryId}`
+        : `${scope.userId}\0${scope.projectId}\0${scope.repositoryId}` +
+          `\0${scope.branch}`;
+    const digest = createHash("sha256").update(key).digest("hex").slice(0, 20);
     return path.join(this.overlaysRoot, digest);
   }
 
@@ -299,7 +326,20 @@ export class OverlayWorkspaceService {
     if (stored === undefined) {
       throw new OverlayError(404, "not_found", "Repository was not found");
     }
-    return { id: stored.id, path: stored.path, branch: stored.branch };
+    // The branch travels inside the repository descriptor, which is the same
+    // shape a branch *task* is leased with (`assignment.repository.branch`).
+    // That is what makes this small: `getCanonicalVersion`, the worktree cut,
+    // the stale-base check and the compare-and-swap promotion all read
+    // `repository.branch` already, so naming the branch here puts the whole
+    // pipeline on it without a second code path to keep in step.
+    return {
+      id: stored.id,
+      path: stored.path,
+      branch:
+        scope.branch === undefined || scope.branch === ""
+          ? stored.branch
+          : scope.branch,
+    };
   }
 
   private async readMeta(scope: OverlayScope): Promise<OverlayMeta | undefined> {
@@ -338,6 +378,7 @@ export class OverlayWorkspaceService {
       value.userId !== scope.userId ||
       value.projectId !== scope.projectId ||
       value.repositoryId !== scope.repositoryId ||
+      (value.branch ?? undefined) !== (scope.branch === "" ? undefined : scope.branch) ||
       base === undefined ||
       !Number.isSafeInteger(base.sequence) ||
       base.sequence < 1 ||
@@ -596,6 +637,9 @@ export class OverlayWorkspaceService {
         userId: scope.userId,
         projectId: scope.projectId,
         repositoryId: scope.repositoryId,
+        ...(scope.branch === undefined || scope.branch === ""
+          ? {}
+          : { branch: scope.branch }),
         baseVersion: canonical,
         createdAt: new Date().toISOString(),
       };

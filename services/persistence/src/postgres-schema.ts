@@ -177,6 +177,9 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         seq BIGSERIAL,
         repository_id TEXT NOT NULL REFERENCES repositories(id),
         project_id TEXT NOT NULL DEFAULT 'project_local',
+        -- Null means the repository's own branch, which is what every task
+        -- written before work channels existed meant. See migration 58.
+        branch TEXT,
         objective TEXT NOT NULL,
         agent_id TEXT NOT NULL,
         validation_commands_json TEXT NOT NULL,
@@ -318,6 +321,8 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         project_id TEXT,
         status TEXT NOT NULL,
         base_revision TEXT NOT NULL,
+        -- Null means the repository's own branch. See migration 58.
+        branch TEXT,
         issued_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         heartbeat_at TEXT NOT NULL,
@@ -1077,6 +1082,11 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       )`,
       `CREATE INDEX sub_channels_by_repository
          ON sub_channels(repository_id, slug)`,
+      // Two channels naming one branch would each think they owned it, and
+      // the second to merge would ship the first one's work under its own
+      // review. Nulls do not collide here, so conversation channels are free.
+      `CREATE UNIQUE INDEX sub_channels_by_branch
+         ON sub_channels(repository_id, branch)`,
       // A repository's project comes from `project_repositories`, which is
       // where the link lives; a repository linked to nothing at all — a
       // fixture, or a row from before projects existed — falls back to the
@@ -1291,6 +1301,66 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     name: "editor-tokens-name-their-editor",
     statements: [
       `ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS editor_vendor TEXT`,
+    ],
+  },
+  {
+    /**
+     * A channel can be a branch. See the SQLite migration of the same name
+     * for what each column is and why the unique index is not optional.
+     *
+     * `IF NOT EXISTS` throughout, which is the convention here and is what
+     * makes these safe on a database created before the column existed and
+     * on one created after — a fresh deployment runs every migration in this
+     * list from the top, and a live one runs only what it has not seen.
+     */
+    version: 58,
+    name: "channels-can-be-branches",
+    statements: [
+      `ALTER TABLE sub_channels ADD COLUMN IF NOT EXISTS branch TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN IF NOT EXISTS merged_at TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN IF NOT EXISTS merged_by TEXT`,
+      // Two channels naming one branch would each think they owned it, and
+      // the second to merge would ship the first one's work under its own
+      // review. Nulls do not collide in a unique index on either backend, so
+      // every conversation channel remains free.
+      `CREATE UNIQUE INDEX IF NOT EXISTS sub_channels_by_branch
+         ON sub_channels(repository_id, branch)`,
+      `ALTER TABLE submitted_tasks ADD COLUMN IF NOT EXISTS branch TEXT`,
+      `ALTER TABLE work_leases ADD COLUMN IF NOT EXISTS branch TEXT`,
+    ],
+  },
+  {
+    /** Where a merged channel's work went on GitHub. */
+    version: 59,
+    name: "channels-ship-to-github",
+    statements: [
+      `ALTER TABLE sub_channels ADD COLUMN IF NOT EXISTS pull_request_url TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN IF NOT EXISTS shipped_at TEXT`,
+    ],
+  },
+  {
+    /**
+     * Reviewing a branch in the room it belongs to: where in the diff a
+     * message was said, and each person's standing answer to it.
+     */
+    version: 60,
+    name: "review-a-branch-in-its-own-room",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN IF NOT EXISTS anchor_path TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN IF NOT EXISTS anchor_line INTEGER`,
+      `ALTER TABLE channel_messages ADD COLUMN IF NOT EXISTS anchor_revision TEXT`,
+      `CREATE TABLE IF NOT EXISTS sub_channel_reviews (
+         channel_id TEXT NOT NULL,
+         repository_id TEXT NOT NULL,
+         user_id TEXT NOT NULL,
+         state TEXT NOT NULL,
+         note TEXT,
+         revision TEXT,
+         reviewed_at TEXT NOT NULL,
+         PRIMARY KEY (channel_id, user_id)
+       )`,
+      `CREATE INDEX IF NOT EXISTS sub_channel_reviews_by_repository
+         ON sub_channel_reviews(repository_id)`,
     ],
   },
 ];
