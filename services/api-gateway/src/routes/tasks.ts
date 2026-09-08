@@ -905,10 +905,32 @@ export async function routeTasks(
       repositoryId,
       action === "exec" ? "run_task" : "submit_task",
     );
+    // Which room the workspace belongs to. Resolved from the channel rather
+    // than taken as a branch name from the caller: `authorizeSubChannel` is
+    // the one place that decides whether this person may see this room at
+    // all, and a branch string on the query would let anybody with
+    // `submit_task` cut a checkout of a private channel's work by guessing
+    // its name. A merged channel's branch is gone, so its workspace falls
+    // back to canonical rather than pointing at a ref that no longer exists.
+    const channelId = url.searchParams.get("channelId") ?? undefined;
+    const channel =
+      channelId === undefined || channelId === ""
+        ? undefined
+        : await gw.authorizeSubChannel({
+            projectId,
+            repositoryId,
+            channelId,
+            principal,
+          });
+    const branch =
+      channel?.branch !== undefined && channel.mergedAt === undefined
+        ? channel.branch
+        : undefined;
     const scope = {
       projectId,
       repositoryId,
       userId: principal.user.id,
+      ...(branch === undefined ? {} : { branch }),
     };
     // Overlay implementations throw errors carrying an HTTP status and
     // code; anything else stays an internal error.

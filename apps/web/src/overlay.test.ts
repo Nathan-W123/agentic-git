@@ -470,3 +470,127 @@ test("a move cannot escape the overlay", async () => {
     );
   }
 });
+
+/* ------------------------------------------------ a branch of one's own ---- */
+
+test("a branch gets its own workspace, and one without a branch keeps its own", async () => {
+  const harness = await createHarness();
+  const plain = scopeFor(harness);
+  const onBranch = { ...plain, branch: "kumi/payments-v2" };
+  const onAnother = { ...plain, branch: "kumi/retry-backoff" };
+
+  // The directory is the identity. Two branches are two checkouts — not one
+  // that switches under somebody's unsaved edits — and a workspace with no
+  // branch is a third thing again.
+  const directories = [plain, onBranch, onAnother].map((scope) =>
+    harness.service.overlayDirectory(scope),
+  );
+  assert.equal(new Set(directories).size, 3, directories.join(" "));
+
+  // And the one with no branch hashes to exactly what it hashed to *before*
+  // branches existed. This is the migration, and it is the whole reason the
+  // branch is appended rather than always included: an overlay directory is
+  // found by recomputing its name, so a scheme that hashes the branch
+  // unconditionally — even as an empty string — renames every overlay on disk
+  // at the moment of deploy and orphans every workspace anybody had open,
+  // silently, with the old directories left behind as garbage.
+  //
+  // Pinned against a literal digest rather than against this function's own
+  // output for another scope. Comparing the scheme to itself is vacuous here:
+  // a scheme that appended `\0` to every key would keep absent and empty
+  // agreeing with each other while agreeing with nothing already on disk.
+  // The constant is sha256("user_alpha\0project_local\0repo_overlay") — the
+  // key the released code builds — truncated the way the directory name is.
+  const beforeBranchesExisted = "9be920ed3d7bf3478207";
+  assert.equal(
+    path.basename(harness.service.overlayDirectory(plain)),
+    beforeBranchesExisted,
+  );
+  assert.equal(
+    path.basename(harness.service.overlayDirectory({ ...plain, branch: "" })),
+    beforeBranchesExisted,
+    "an empty branch has to name the same directory as no branch at all",
+  );
+});
+
+test("a branch workspace is cut from that branch, not from canonical", async () => {
+  const harness = await createHarness();
+  const stored = await harness.store.getRepository(harness.repositoryId);
+  const git = harness.repositories.getGitClient();
+  const work = path.join(harness.root, "wt-branch");
+  await git.run([
+    `--git-dir=${stored?.path ?? ""}`,
+    "worktree",
+    "add",
+    "-b",
+    "kumi/payments-v2",
+    work,
+    "HEAD",
+  ]);
+  await writeFile(
+    path.join(work, "src", "value.js"),
+    "export const value = 99;\n",
+    "utf8",
+  );
+  await harness.repositories.commitAll(work, "raise the value on the branch");
+
+  // Canonical still says 1; the branch says 99. A workspace opened for the
+  // branch has to show 99, or the Files list in a work channel is the
+  // repository's code with the channel's name on it — which is worse than
+  // showing nothing, because it looks right.
+  const onBranch = { ...scopeFor(harness), branch: "kumi/payments-v2" };
+  await harness.service.open(onBranch);
+  const fromBranch = await harness.service.readOverlayFile(onBranch, "src/value.js");
+  assert.match(unixLines(fromBranch.content), /value = 99/u);
+
+  const plain = scopeFor(harness);
+  await harness.service.open(plain);
+  const fromCanonical = await harness.service.readOverlayFile(plain, "src/value.js");
+  assert.match(unixLines(fromCanonical.content), /value = 1/u);
+
+  // Both exist at once, in their own directories, with their own edits. Two
+  // channels being worked on side by side is the ordinary case, not a
+  // conflict to resolve.
+  await harness.service.writeOverlayFile(onBranch, "src/value.js", "export const value = 100;\n");
+  const untouched = await harness.service.readOverlayFile(plain, "src/value.js");
+  assert.match(unixLines(untouched.content), /value = 1/u);
+});
+
+test("a workspace record cannot be reinterpreted as another branch's", async () => {
+  const harness = await createHarness();
+  const stored = await harness.store.getRepository(harness.repositoryId);
+  const git = harness.repositories.getGitClient();
+  const work = path.join(harness.root, "wt-claim");
+  await git.run([
+    `--git-dir=${stored?.path ?? ""}`,
+    "worktree",
+    "add",
+    "-b",
+    "kumi/claimed",
+    work,
+    "HEAD",
+  ]);
+  await harness.repositories.commitAll(work, "a commit on the branch");
+
+  const onBranch = { ...scopeFor(harness), branch: "kumi/claimed" };
+  await harness.service.open(onBranch);
+
+  // The directory already hashes the branch, so a record whose branch does
+  // not match the scope reading it means either a hand-edited file or a hash
+  // collision. Refused, not reconciled — the same posture the owner check
+  // takes, and for the same reason: the alternative is quietly handing
+  // somebody a checkout of work that is not what they asked for.
+  const metaPath = `${harness.service.overlayDirectory(onBranch)}.json`;
+  const meta = JSON.parse(await readFile(metaPath, "utf8"));
+  assert.equal(meta.branch, "kumi/claimed");
+  await writeFile(
+    metaPath,
+    JSON.stringify({ ...meta, branch: "kumi/somebody-elses" }, undefined, 2),
+    "utf8",
+  );
+  await assert.rejects(
+    async () => await harness.service.status(onBranch),
+    (error: unknown) =>
+      error instanceof OverlayError && error.code === "overlay_corrupt",
+  );
+});
