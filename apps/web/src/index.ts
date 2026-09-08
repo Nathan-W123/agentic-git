@@ -49,6 +49,7 @@ import { OverlayWorkspaceService } from "./overlay.js";
 import { PreviewService } from "./preview.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
 import { pullCanonical } from "./pull-canonical.js";
+import { watchUpstreams } from "./upstream-watch.js";
 import {
   pushCanonical,
   pushCanonicalForActor,
@@ -1215,6 +1216,44 @@ async function serve(
         });
     }
   };
+  /**
+   * Somebody pushing straight to the origin, noticed rather than discovered.
+   *
+   * The last unmodelled door. Every other way code reaches this system is
+   * arbitrated on the way in; a push to GitHub is not, and until this ran
+   * nothing here knew a push had happened until a sync, a refused push, or a
+   * merge that failed for a reason nobody could trace. This only reads — the
+   * one thing it must never do is move canonical underneath running agents —
+   * and what it finds is recorded as a branch claim, after which every
+   * warning path that already exists for two branches covers this too.
+   *
+   * The token is a real person's, never a deployment-wide one: whoever most
+   * recently submitted work here and has GitHub connected. A public origin
+   * needs none, and a private one with nobody to borrow from is simply not
+   * watched — which is a smaller failure than either alternative.
+   */
+  watchUpstreams({
+    store,
+    repositories,
+    intelligence,
+    credentialsFor: async (repositoryId) => {
+      const submitted = await store
+        .listSubmittedTasks({ repositoryId })
+        .catch((): [] => []);
+      for (const task of [...submitted].reverse()) {
+        const actorId = task.submittedBy;
+        if (actorId === undefined || actorId === "") {
+          continue;
+        }
+        const connection = await github.tokenFor(actorId).catch(() => undefined);
+        if (connection !== undefined) {
+          return { token: connection.token, actorId };
+        }
+      }
+      return undefined;
+    },
+  });
+
   const queueSweep = setInterval(() => {
     void resumeQueuedWork().catch((error: unknown) => {
       console.error(
