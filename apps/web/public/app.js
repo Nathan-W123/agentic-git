@@ -7754,11 +7754,16 @@ function showDirectMessageMenu(node) {
     ...(conversations.length > 0 && others.length > 0
       ? [{ separator: true }]
       : []),
+    // The same glyph as the half above, deliberately. Every row here does one
+    // thing — open a private conversation with a person — so a second icon on
+    // the lower half read as a second kind of row rather than as the same door
+    // to somebody not written to yet. The half-separator and the per-row meta
+    // (what is unread, or that they are online) are what tell the two apart.
     ...others.slice(0, 12).map((person) => ({
       act: "dm-open",
       value: person.id,
       label: person.name ?? memberName(person.id) ?? person.id,
-      iconName: "users",
+      iconName: "chatBubble",
       ...(personOnline(person.id) ? { meta: "online" } : {}),
     })),
   ];
