@@ -679,18 +679,40 @@ export async function routeTasks(
         "This deployment cannot run previews",
       );
     }
+    // Which app. Resolved from the channel through `authorizeSubChannel` for
+    // the same reason the workspace is: that is where "may this person see
+    // this room" is decided, and a branch name on the query would let anybody
+    // with `run_task` start a private channel's app by guessing its name. A
+    // merged channel has no branch left, so it runs canonical.
+    const previewChannelId = url.searchParams.get("channelId") ?? undefined;
+    const previewChannel =
+      previewChannelId === undefined || previewChannelId === ""
+        ? undefined
+        : await gw.authorizeSubChannel({
+            projectId,
+            repositoryId,
+            channelId: previewChannelId,
+            principal,
+          });
+    const previewBranch =
+      previewChannel?.branch !== undefined &&
+      previewChannel.mergedAt === undefined
+        ? previewChannel.branch
+        : undefined;
+    const previewTarget = {
+      projectId,
+      repositoryId,
+      ...(previewBranch === undefined ? {} : { branch: previewBranch }),
+    };
     if (method === "POST") {
       const preview = await gw.performOperation("preview_failed", async () =>
-        await operations.previewStart!({ projectId, repositoryId }),
+        await operations.previewStart!(previewTarget),
       );
       gw.sendJson(response, 200, { preview });
       return true;
     }
     if (method === "GET") {
-      const preview = await operations.previewStatus({
-        projectId,
-        repositoryId,
-      });
+      const preview = await operations.previewStatus(previewTarget);
       // `null` rather than a 404: "no preview is running" is an answer about
       // this repository, not a missing route, and the caller renders a
       // start button either way.
@@ -698,7 +720,7 @@ export async function routeTasks(
       return true;
     }
     if (method === "DELETE") {
-      await operations.previewStop({ projectId, repositoryId });
+      await operations.previewStop(previewTarget);
       gw.sendJson(response, 200, { stopped: true });
       return true;
     }

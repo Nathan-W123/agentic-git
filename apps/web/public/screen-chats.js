@@ -18,30 +18,27 @@
 
 import {
   activeChannelId,
+  activeSecondaryContext,
   activeSubChannelId,
-  canManageSubChannels,
-  canPostInActiveSubChannel,
-  subChannelLabel,
-  subChannelsFor,
   activeTasks,
   agentForTask,
+  agentOwnerOffline,
   agentStatus,
-  agentWorkingProgress,
   agentsThinkingIn,
+  agentWorkingProgress,
 api,
   API_ROOT,
-  canEditChannelEntry,
   canDeleteChannelEntry,
+  canEditChannelEntry,
   canManageOrganization,
-  imagesNeedFetching,
   canManageRepository,
-  subChannelUnread,
-  iAmSystemAdmin,
+  canManageSubChannels,
+  canPostInActiveSubChannel,
   channelAgentsFor,
   channelAuthor,
   channelAwaitsGoAhead,
-  channelMessagesFor,
   channelDraft,
+  channelMessagesFor,
   channelNewSince,
   channelParticipants,
   channelPicture,
@@ -53,9 +50,10 @@ api,
   dmUnreadFrom,
   dmUnreadTotal,
   flushChannelDrafts,
+  iAmSystemAdmin,
+  imagesNeedFetching,
   isChannelMuted,
   keptRightPanels,
-  activeSecondaryContext,
   markChannelRead,
   memberName,
   memberRole,
@@ -64,6 +62,8 @@ api,
   messageFoldOpen,
   myAgents,
   myAvatar,
+  offlineAgentsMentionedIn,
+  onlineAgentsIn,
   outstandingQuestionsFor,
   pendingQuestionFor,
   persist,
@@ -71,19 +71,22 @@ api,
   phoneLayout,
   planReplyOf,
   postChannelReply,
+  previewKey,
+  primaryDestinationForWorkspace,
+  providerAllowsCustomModel,
   providerEffortOptions,
   providerModelOptions,
-  providerAllowsCustomModel,
-  usageKey,
   providerOptionsNote,
-  primaryDestinationForWorkspace,
   repositoryLabel,
-  selectPrimaryDestination,
   saveChannelDraft,
+  selectPrimaryDestination,
   sendChannelMessage,
   snapshotChannelRead,
   STAGE_PROGRESS,
   state,
+  subChannelLabel,
+  subChannelsFor,
+  subChannelUnread,
   taskBelongsToAgent,
   taskProgress,
   threadAwaitsGoAhead,
@@ -93,10 +96,8 @@ api,
   threadTitle,
   threadTitleReply,
   typingOn,
+  usageKey,
   waitingTasks,
-  agentOwnerOffline,
-  offlineAgentsMentionedIn,
-  onlineAgentsIn,
 } from "./data.js";
 import {
   chatComposer,
@@ -2035,7 +2036,7 @@ function chanSidebar(activeRepositoryId) {
  * answer.
  */
 function previewRunning(repositoryId) {
-  const preview = state.previews[repositoryId];
+  const preview = state.previews[previewKey(repositoryId)];
   return preview !== null && preview !== undefined && preview.exited === undefined
     ? preview
     : undefined;
@@ -2050,7 +2051,7 @@ function previewRunning(repositoryId) {
  * is also what it looks like before anything was ever started.
  */
 function previewStopped(repositoryId) {
-  const preview = state.previews[repositoryId];
+  const preview = state.previews[previewKey(repositoryId)];
   return preview !== null && preview !== undefined && preview.exited !== undefined
     ? preview
     : undefined;
@@ -2082,7 +2083,7 @@ function previewControl(repositoryId) {
   // nothing — so it was pressed again, and the second press killed the first.
   // Disabled rather than merely marked: the refusal is in `app.js`, and a
   // control that still looks pressable is an invitation to find that out.
-  if (state.previewsStarting?.has(repositoryId) === true) {
+  if (state.previewsStarting?.has(previewKey(repositoryId)) === true) {
     const busy = "Starting — installing and building can take a minute";
     return `<button type="button" class="chan-quick-link ch-preview-toggle starting"
         data-act="preview-start" data-value="${esc(repositoryId)}" disabled

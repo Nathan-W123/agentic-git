@@ -851,13 +851,22 @@ async function serve(
       return { ...merged, behind: comparison.behind };
     },
     async previewStart(input) {
-      return await previews.start({ repositoryId: input.repositoryId });
+      return await previews.start({
+        repositoryId: input.repositoryId,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      });
     },
     async previewStatus(input) {
-      return await previews.status(input.repositoryId);
+      return await previews.status({
+        repositoryId: input.repositoryId,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      });
     },
     async previewStop(input) {
-      await previews.stop(input.repositoryId);
+      await previews.stop({
+        repositoryId: input.repositoryId,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      });
     },
     async previewConfigure(input) {
       // One string rather than an executable and an argument list, because the

@@ -538,14 +538,24 @@ export interface ApiOperations {
   previewStart?(input: {
     projectId: string;
     repositoryId: string;
+    /**
+     * The work channel's branch, when the app being run is a channel's.
+     *
+     * Absent means the repository's canonical branch. Two branches are two
+     * apps on two ports, so this is part of *which* preview is meant rather
+     * than a detail of one.
+     */
+    branch?: string;
   }): Promise<unknown>;
   previewStatus?(input: {
     projectId: string;
     repositoryId: string;
+    branch?: string;
   }): Promise<unknown>;
   previewStop?(input: {
     projectId: string;
     repositoryId: string;
+    branch?: string;
   }): Promise<void>;
   /**
    * Remembers how one repository is started, when nothing could be detected.

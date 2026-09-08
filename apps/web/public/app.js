@@ -10,153 +10,154 @@
  */
 
 import {
+  activeChannelId,
+  activeSubChannelId,
+  addChannelAgent,
   api,
+  approveWaitlistEntry,
+  canDeleteRepository,
+  canLeaveRepository,
+  canManageOrganization,
+  canManageRepository,
+  CHANNEL_MESSAGE_MAX_CHARS,
+  channelAgentsFor,
+  channelAuthor,
+  channelMessagesFor,
+  closeChannelFile,
   closeSocket,
+  commentOnBranchLine,
   connectSocket,
-  ensureSocketAlive,
-  TYPING_SWEEP_MS,
-  noteAgentBusy,
-  noteDirectMessage,
-  noteDirectMessageEdited,
-  noteDirectMessageDeleted,
-  ensureDirectMessages,
-  loadChannelStats,
-  noteEventSequence,
-  loadDmThread,
-  sendDirectMessage,
-  noteTyping,
-  sendTyping,
+  createSubChannel,
   currentRepository,
   currentUserId,
   currentUserName,
+  decideApproval,
   DEFAULT_ACCENT,
   DEFAULT_ACCENT_SECONDARY,
   DEFAULT_AGENT_COLOR,
-  disconnectGitHub,
-  loadContext,
-  loadDeferredContext,
-  loadGitHub,
-  loadHealth,
-  loadProviders,
-  phoneLayout,
-  markRead,
-  myAccent,
-  myAccentSecondary,
-  myAgentColor,
-  myAvatar,
-  setMyAvatar,
-  setChannelPicture,
-  ensureChannelPictureShared,
-  myTheme,
-  myThemePreference,
-  setMyTheme,
-  myAgents,
-  notifications,
-  PROVIDER_VENDOR,
-  persist,
-  isFavourite,
-  flushChannelDrafts,
-  channelAgentsFor,
-  activeChannelId,
-  refreshChannelLiveness,
-  canLeaveRepository,
-  canManageRepository,
-  canDeleteRepository,
-  closeChannelFile,
-  loadChannelFile,
-  moveChannelFile,
-  saveChannelFile,
-  createSubChannel,
-  commentOnBranchLine,
-  loadBranchReview,
-  reviewBranch,
-  mergeBranchReview,
-  refreshBranchReview,
-  shipBranchReview,
-  deleteSubChannel,
-  ensureChannelMessages,
-  ensureChannelRoster,
-  ensureSubChannels,
-  loadSubChannelMembers,
-  loadSubChannels,
-  activeSubChannelId,
-  selectSubChannel,
-  setSubChannelMember,
-  subChannelsFor,
-  updateSubChannel,
-  ensureProviderUsage,
-  ensureRepositoryGrants,
-  markChannelRead,
-  isChannelMuted,
-  loadChannelMutes,
-  setChannelMuted,
-  refreshChannelMessages,
-  refreshProviderUsage,
-  takePromptedThread,
-  takeReadyPlan,
-  addChannelAgent,
-  removeChannelAgent,
-  renameAgent,
-  renameChannelAgent,
-  setChannelAgentSetting,
-  deleteRepository,
-  renameRepository,
-  repositoryLabel,
-  leaveRepository,
-  channelAuthor,
-  channelMessagesFor,
   deleteAllChannelThreads,
   deleteChannelMessageEntry,
   deleteChannelReplyEntry,
   deleteChannelThread,
   deleteDirectMessageEntry,
+  deleteRepository,
+  deleteSubChannel,
+  deleteWaitlistEntry,
+  DIRECT_MESSAGE_MAX_CHARS,
+  disconnectGitHub,
+  dmUnreadTotal,
   editChannelMessageEntry,
   editChannelReplyEntry,
   editDirectMessageEntry,
-  loadPreview,
-  rollbackTask,
-  setAuditorPaused,
-  setPreviewCommand,
-  simplifySummary,
-  startPreview,
-  uploadAttachment,
-  stopPreview,
-  setRepositoryGrant,
-  revokeRepositoryGrant,
-  updateMemberRole,
-  iAmSystemAdmin,
-  canManageOrganization,
-  resolveAttachmentImages,
-  openBillingPortal,
-  startCheckout,
   ensureBilling,
-  resetBilling,
-  joinWaitlist,
-  loadWaitlist,
-  approveWaitlistEntry,
-  deleteWaitlistEntry,
-  decideApproval,
+  ensureChangeSetForTask,
+  ensureChannelMessages,
+  ensureChannelPictureShared,
+  ensureChannelRoster,
   ensureDeployment,
+  ensureDirectMessages,
+  ensureProviderUsage,
+  ensureRepositoryGrants,
+  ensureSocketAlive,
+  ensureSubChannels,
+  flushChannelDrafts,
+  iAmSystemAdmin,
+  isChannelMuted,
+  isDirectMessagePerson,
+  isFavourite,
+  joinWaitlist,
+  leaveRepository,
   loadBilling,
-  setSystemAdmin,
+  loadBranchReview,
+  loadChannelFile,
+  loadChannelMessage,
+  loadChannelMutes,
+  loadChannelStats,
+  loadContext,
+  loadDeferredContext,
+  loadDmThread,
+  loadEarlierChannelMessages,
+  loadGitHub,
+  loadHealth,
+  loadPreview,
+  loadProviders,
+  loadSubChannelMembers,
+  loadSubChannels,
+  loadWaitlist,
+  markChannelRead,
+  markRead,
+  memberName,
+  memberRole,
+  mergeBranchReview,
+  messageFoldOpen,
+  messageTooLong,
+  moveChannelFile,
+  myAccent,
+  myAccentSecondary,
+  myAgentColor,
+  myAgents,
+  myAvatar,
+  myTheme,
+  myThemePreference,
+  noteAgentBusy,
+  noteDirectMessage,
+  noteDirectMessageDeleted,
+  noteDirectMessageEdited,
+  noteEventSequence,
+  noteTyping,
+  notifications,
+  openBillingPortal,
+  persist,
+  personOnline,
+  phoneLayout,
+  previewKey,
+  PROVIDER_VENDOR,
+  refreshBranchReview,
+  refreshChannelLiveness,
+  refreshChannelMessages,
+  refreshProviderUsage,
+  removeChannelAgent,
   removeMember,
+  renameAgent,
+  renameChannelAgent,
+  renameRepository,
+  repositoryLabel,
+  resendChannelMessage,
+  resetBilling,
+  resolveAttachmentImages,
+  reviewBranch,
+  revokeRepositoryGrant,
+  rollbackTask,
+  saveChannelFile,
+  selectSubChannel,
+  sendDirectMessage,
+  sendTyping,
+  setAuditorPaused,
+  setChannelAgentSetting,
+  setChannelMuted,
+  setChannelPicture,
+  setMyAvatar,
+  setMyTheme,
+  setPreviewCommand,
+  setRepositoryGrant,
+  setSubChannelMember,
+  setSystemAdmin,
+  shipBranchReview,
+  simplifySummary,
+  startCheckout,
+  startPreview,
   state,
+  stopPreview,
+  subChannelsFor,
+  takePromptedThread,
+  takeReadyPlan,
   toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
-  dmUnreadTotal,
-  isDirectMessagePerson,
-  memberName,
-  memberRole,
-  messageFoldOpen,
-  personOnline,
-  loadEarlierChannelMessages,
-  loadChannelMessage,
-  resendChannelMessage,
-  ensureChangeSetForTask,
-  CHANNEL_MESSAGE_MAX_CHARS,
-  DIRECT_MESSAGE_MAX_CHARS,
-  messageTooLong,
+  TYPING_SWEEP_MS,
+  updateMemberRole,
+  updateSubChannel,
+  uploadAttachment,
 } from "./data.js";
 import {
   $,
@@ -3925,17 +3926,27 @@ state.providerConnecting = providerConnecting;
  * binds its port is a broken app, and a page that asks about it forever is a
  * second broken thing.
  */
-async function watchPreviewReady(repositoryId) {
-  if (previewsWatched.has(repositoryId)) {
+async function watchPreviewReady(
+  repositoryId,
+  channelId = activeSubChannelId(repositoryId),
+) {
+  // The room is captured, not re-read each pass. A cold start takes minutes
+  // and the reader does not sit still for them: without this the watcher
+  // follows whichever channel they wandered into, polls that one's app, and
+  // writes the answer over that one's cache entry — so the branch they were
+  // waiting on stays on "starting…" forever while an unrelated room's Run
+  // button flickers.
+  const key = previewKey(repositoryId, channelId);
+  if (previewsWatched.has(key)) {
     return;
   }
-  previewsWatched.add(repositoryId);
+  previewsWatched.add(key);
   try {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       await new Promise((resolve) => {
         window.setTimeout(resolve, 3000);
       });
-      const preview = await loadPreview(repositoryId);
+      const preview = await loadPreview(repositoryId, channelId);
       if (
         preview === null ||
         preview.ready !== false ||
@@ -3945,7 +3956,7 @@ async function watchPreviewReady(repositoryId) {
       }
     }
   } finally {
-    previewsWatched.delete(repositoryId);
+    previewsWatched.delete(key);
     render();
   }
 }
@@ -3988,7 +3999,11 @@ async function askPreviewCommand(repositoryId, why) {
 }
 
 async function startPreviewAction(repositoryId, asked = false) {
-  if (previewsStarting.has(repositoryId)) {
+  // Keyed by room, not by repository: two work channels are two apps on two
+  // ports, and a guard shared between them would report starting the second
+  // as a second press on the first.
+  const key = previewKey(repositoryId);
+  if (previewsStarting.has(key)) {
     toast(
       "Already starting — installing, building and, where a repository ships " +
         "one, building its image can take a few minutes.",
@@ -3996,7 +4011,7 @@ async function startPreviewAction(repositoryId, asked = false) {
     );
     return;
   }
-  previewsStarting.add(repositoryId);
+  previewsStarting.add(key);
   render();
   toast("Starting…", "ok");
   let preview;
@@ -4008,7 +4023,7 @@ async function startPreviewAction(repositoryId, asked = false) {
   }
   // Cleared before anything below, so the question this may ask can start the
   // answer it is given rather than refusing itself as a second press.
-  previewsStarting.delete(repositoryId);
+  previewsStarting.delete(key);
   render();
   if (failure === undefined) {
     // What it took to get here, when it took more than one attempt: the
@@ -4046,7 +4061,7 @@ async function startPreviewAction(repositoryId, asked = false) {
     // Up, but still building. The header says so, and this is what eventually
     // takes the word back.
     if (preview !== null && preview.ready === false) {
-      void watchPreviewReady(repositoryId);
+      void watchPreviewReady(repositoryId, activeSubChannelId(repositoryId));
     }
     return;
   }
@@ -7755,21 +7770,25 @@ function renderNow() {
     // to start a second. `undefined` is "not asked yet"; `null` is "asked,
     // there is none", which is why this tests for the former.
     // A workspace has to exist before it can have an app running in it.
+    // Asked per *room*, not per repository: a work channel runs its own
+    // branch's app on its own port, so two rooms of one repository are two
+    // questions with two answers.
     if (
       activeChannelId() !== "" &&
-      state.previews[activeChannelId()] === undefined
+      state.previews[previewKey(activeChannelId())] === undefined
     ) {
       const channel = activeChannelId();
+      const room = activeSubChannelId(channel);
       // Claimed before the request so a second render in the same tick does
       // not fire it again.
-      state.previews[channel] = null;
-      void loadPreview(channel).then((preview) => {
+      state.previews[previewKey(channel, room)] = null;
+      void loadPreview(channel, room).then((preview) => {
         // Found mid-build, which a reload during a slow first start is the
         // ordinary way to arrive at. The same follow-up a fresh start gets,
         // because the header is otherwise stuck on "starting…" for a channel
         // nobody is about to leave and come back to.
         if (preview !== null && preview.ready === false) {
-          void watchPreviewReady(channel);
+          void watchPreviewReady(channel, room);
         }
         if (state.route === "chats") {
           scheduleRender();

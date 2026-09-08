@@ -6772,7 +6772,24 @@ export async function setAuditorPaused(repositoryId, paused) {
  * reload, or a second tab, must find the one that is already up instead of
  * offering to start a second.
  */
-export async function loadPreview(repositoryId) {
+/**
+ * Which preview is being spoken about: a repository, in a room.
+ *
+ * The browser caches previews by this rather than by repository, because two
+ * work channels are two apps on two ports and a single key would have the
+ * second one overwrite the first — leaving whichever channel you opened last
+ * showing its address under every other channel's Run button.
+ */
+export function previewKey(repositoryId, channelId = activeSubChannelId(repositoryId)) {
+  return channelId ? `${repositoryId}\u0000${channelId}` : repositoryId;
+}
+
+/** The query the server needs to resolve a room's branch, or nothing. */
+function channelQuery(repositoryId, channelId = activeSubChannelId(repositoryId)) {
+  return channelId ? `?channelId=${encodeURIComponent(channelId)}` : "";
+}
+
+export async function loadPreview(repositoryId, channelId = activeSubChannelId(repositoryId)) {
   // No repository named, nothing to ask about. Without this the empty-
   // workspace screen — where `activeChannelId()` is "" — asked the server
   // about `/repositories//preview`, a path with a hole in it that can only
@@ -6781,16 +6798,19 @@ export async function loadPreview(repositoryId) {
   if (!repositoryId) {
     return null;
   }
+  const key = previewKey(repositoryId, channelId);
   try {
-    const response = await api(repositoryPath(repositoryId, "/preview"));
-    state.previews[repositoryId] = response?.preview ?? null;
+    const response = await api(
+      repositoryPath(repositoryId, `/preview${channelQuery(repositoryId, channelId)}`),
+    );
+    state.previews[key] = response?.preview ?? null;
   } catch {
     // A deployment that cannot run previews answers 501, and a reader who
     // never asked for one should not see an error about it. Absent is the
     // same as "no button", which is the right outcome either way.
-    state.previews[repositoryId] = null;
+    state.previews[key] = null;
   }
-  return state.previews[repositoryId];
+  return state.previews[key];
 }
 
 /**
@@ -6824,12 +6844,17 @@ export async function uploadAttachment(repositoryId, file) {
  * message saying what it looked for, which is what the caller turns into the
  * one question worth asking.
  */
-export async function startPreview(repositoryId) {
-  const response = await api(repositoryPath(repositoryId, "/preview"), {
-    method: "POST",
-  });
-  state.previews[repositoryId] = response?.preview ?? null;
-  return state.previews[repositoryId];
+export async function startPreview(
+  repositoryId,
+  channelId = activeSubChannelId(repositoryId),
+) {
+  const response = await api(
+    repositoryPath(repositoryId, `/preview${channelQuery(repositoryId, channelId)}`),
+    { method: "POST" },
+  );
+  const key = previewKey(repositoryId, channelId);
+  state.previews[key] = response?.preview ?? null;
+  return state.previews[key];
 }
 
 /** Remembers how this repository starts, so it is asked once and not again. */
@@ -6840,9 +6865,15 @@ export async function setPreviewCommand(repositoryId, command) {
   });
 }
 
-export async function stopPreview(repositoryId) {
-  await api(repositoryPath(repositoryId, "/preview"), { method: "DELETE" });
-  state.previews[repositoryId] = null;
+export async function stopPreview(
+  repositoryId,
+  channelId = activeSubChannelId(repositoryId),
+) {
+  await api(
+    repositoryPath(repositoryId, `/preview${channelQuery(repositoryId, channelId)}`),
+    { method: "DELETE" },
+  );
+  state.previews[previewKey(repositoryId, channelId)] = null;
 }
 
 /**
