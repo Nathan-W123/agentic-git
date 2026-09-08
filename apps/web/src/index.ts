@@ -808,6 +808,12 @@ async function serve(
       );
       return {
         ...comparison,
+        // What it would land on, by name. The comparison knows the base as a
+        // revision, which is the right thing to compare against and the wrong
+        // thing to say out loud: "5 commits ahead of b3f1a90" is not a
+        // sentence anybody reads, and every message about a conflict wants to
+        // name the branch the conflict is with.
+        base: repository.branch,
         patch: diff.patch,
         truncated: diff.truncated,
       };

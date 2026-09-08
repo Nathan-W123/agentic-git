@@ -10310,6 +10310,52 @@ document.addEventListener("click", (event) => {
       render();
       return;
     }
+    /**
+     * Switching between the decision, the commits and the diff.
+     *
+     * Nothing is fetched: all three views are drawn from the review already
+     * in hand, which is what makes them tabs rather than pages.
+     */
+    case "branch-tab": {
+      state.branchTab = value;
+      render();
+      return;
+    }
+    /**
+     * Hand a conflict to an agent in the room.
+     *
+     * Writes the request — which branch, which base, which files — and leaves
+     * it in the composer with the picker open and the caret after the `@`.
+     * Addressed by a person on purpose: dispatching this at somebody would be
+     * the panel deciding whose afternoon this is, and the message is a task
+     * the moment it is sent.
+     */
+    case "branch-resolve-ask": {
+      const review = state.branchReview[value];
+      const conflicts = review?.conflicts ?? [];
+      if (conflicts.length === 0) {
+        return;
+      }
+      // The address on its own line, and the request under it. Not "@please
+      // resolve…" on one line: unaddressed, that reads as a mention of the
+      // word "please", and `pickMention` splices the name in where the "@"
+      // is, so the sentence has to start after it rather than around it.
+      const written =
+        `@\nPlease resolve the conflicts between \`${review?.branch ?? "this branch"}\`` +
+        ` and \`${review?.base ?? "the repository"}\` in ${conflicts.join(", ")}.` +
+        ` Keep both sides' behaviour, and say here what you had to drop.`;
+      state.chatDraft = written;
+      // Exactly the state typing "@" leaves behind — see `typeIntoComposer`.
+      state.composerAutocompleteTarget = "channel";
+      state.mentionActive = true;
+      state.mentionQuery = "";
+      state.mentionIndex = 0;
+      render();
+      const input = $("[data-act='channel-input']");
+      input?.focus({ preventScroll: true });
+      input?.setSelectionRange(1, 1);
+      return;
+    }
     case "branch-review-refresh": {
       const repositoryId = activeChannelId();
       render();

@@ -14035,12 +14035,288 @@ dialog.modal[open]::backdrop {
   overflow: auto;
 }
 
-.branch-summary {
+/* The opening line: what state this is in, and between which two branches. */
+.branch-headline {
   display: grid;
   gap: 8px;
   min-width: 0;
   padding: 14px 16px;
   border-bottom: 1px solid var(--border);
+}
+
+.branch-headline-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.branch-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.branch-state svg {
+  width: 13px;
+  height: 13px;
+}
+
+.branch-state.open {
+  background: var(--green-wash);
+  color: var(--green);
+}
+
+.branch-state.merged {
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+}
+
+/* head → base, the way a pull request says it. Wraps rather than truncates:
+   at 340px the two names and the arrow do not fit on one line, and a branch
+   name cut in half is the one thing here that must stay readable. */
+.branch-flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.branch-flow svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+.branch-ref {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  padding: 1px 6px;
+  overflow-wrap: anywhere;
+}
+
+/* ---- the three views ---- */
+
+.branch-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+
+.branch-tab:hover {
+  color: var(--text-2);
+}
+
+.branch-tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent-bright);
+}
+
+.branch-tab-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.branch-tab.on .branch-tab-count {
+  color: var(--text-2);
+}
+
+/* The conflict, said on the tab that holds it. A reader on the Review tab
+   should not have to open Files to find out something is wrong there. */
+.branch-tab-warn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  background: var(--red-wash);
+  color: var(--red);
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+/* ---- whether it can land ---- */
+
+.merge-box {
+  margin: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* The whole box takes the colour of the thing stopping it, so "this cannot
+   merge" is legible before a word of it is read. */
+.merge-box.blocked {
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+}
+
+.merge-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.merge-mark {
+  display: flex;
+  align-items: flex-start;
+  padding-top: 1px;
+}
+
+.merge-mark svg {
+  width: 15px;
+  height: 15px;
+}
+
+.merge-row.good .merge-mark {
+  color: var(--green);
+}
+
+.merge-row.bad .merge-mark {
+  color: var(--red);
+}
+
+.merge-row.warn .merge-mark {
+  color: var(--orange);
+}
+
+.merge-row.idle .merge-mark {
+  color: var(--text-3);
+}
+
+.merge-row-body {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.merge-row-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.merge-row-detail {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.merge-row-detail code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.merge-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.merge-conflicts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Each conflicting file is a way into the diff, not a label. */
+.merge-conflict-file {
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--red);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.merge-conflict-file:hover {
+  text-decoration: underline;
+}
+
+.merge-locally > summary {
+  font-size: 12px;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.merge-commands {
+  margin: 6px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  /* A long branch name is longer than 340px of panel, and the box scrolls
+     rather than pushing the panel wider. */
+  overflow-x: auto;
+}
+
+.merge-foot {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.merge-foot .branch-note {
+  padding: 0;
+}
+
+.btn-merge {
+  min-width: 150px;
+  justify-content: center;
 }
 
 .branch-counts {
@@ -14065,10 +14341,6 @@ dialog.modal[open]::backdrop {
   font-size: 12.5px;
   color: var(--text-3);
   line-height: 1.5;
-}
-
-.branch-summary .branch-note {
-  padding: 0;
 }
 
 .branch-note.err {
@@ -14158,6 +14430,36 @@ dialog.modal[open]::backdrop {
 }
 
 /* Who has looked at this, and the two buttons for saying so. */
+/* Inside the merge box's first row: no frame of its own, because the row is
+   the frame. */
+.merge-row .branch-reviews {
+  display: grid;
+  gap: 6px;
+  border-bottom: 0;
+}
+
+.merge-row .branch-review-actions {
+  padding: 4px 0 0;
+  border-bottom: 0;
+  justify-content: flex-start;
+}
+
+/* The two answers sit together here. Pushed apart they read as an action and
+   its opposite at opposite ends of a bar, which is what the panel-wide row
+   wanted and this row does not. */
+.merge-row .branch-actions.branch-review-actions .branch-secondary {
+  margin-right: 0;
+}
+
+.merge-row .branch-review-list {
+  padding: 0;
+}
+
+.merge-row .branch-review-note {
+  margin: 0;
+  grid-column: auto;
+}
+
 .branch-reviews {
   border-bottom: 1px solid var(--border);
 }
@@ -14229,11 +14531,10 @@ dialog.modal[open]::backdrop {
   border-bottom: 1px solid var(--border);
 }
 
-.branch-commits > summary {
+.branch-commits-head {
   padding: 10px 16px;
   font-size: 12px;
   color: var(--text-3);
-  cursor: pointer;
 }
 
 .branch-commit-list {

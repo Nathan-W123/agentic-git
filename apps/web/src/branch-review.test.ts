@@ -289,3 +289,183 @@ test("an approval of an older commit does not read as an approval of this one", 
   assert.match(chats, /on an earlier version of this branch/u);
   assert.match(chats, /left on an earlier version of this line/u);
 });
+
+test("the review is read the way a pull request is: a state, two branches, three views", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const styles = await publicFile("styles.css");
+
+  // The opening line of a pull request: what state it is in, and between
+  // which two branches. The base by name — the comparison knows it as a
+  // revision, and "5 commits ahead of b3f1a90" is not a sentence.
+  const headline = chats.slice(
+    chats.indexOf("function branchHeadline"),
+    chats.indexOf("function branchTabBar"),
+  );
+  assert.ok(headline.length > 0);
+  assert.match(headline, /branch-state \$\{merged \? "merged" : "open"\}/u);
+  assert.match(headline, /review\.base \?\? "the repository"/u);
+  assert.match(headline, /review\.branch \?\? "this branch"/u);
+
+  // Three views rather than one scroll, and the tab bar is a tab bar: the
+  // rail beside it, the file panel's Diff/Edit pair and this all announce
+  // themselves the same way.
+  const bar = chats.slice(
+    chats.indexOf("function branchTabBar"),
+    chats.indexOf("function mergeRow"),
+  );
+  assert.ok(bar.length > 0);
+  assert.match(bar, /role="tablist"/u);
+  assert.match(bar, /role="tab"/u);
+  assert.match(bar, /aria-selected="\$\{name === tab \? "true" : "false"\}"/u);
+  assert.match(bar, /data-act="branch-tab"/u);
+  assert.match(chats, /const BRANCH_TABS = \["review", "commits", "files"\]/u);
+
+  // Only one of the three is drawn at a time — that is what makes them tabs
+  // rather than headings.
+  const body = chats.slice(
+    chats.indexOf("function branchReviewBody"),
+    chats.indexOf("function branchReviewStates"),
+  );
+  assert.match(body, /tab === "commits"\s*\?\s*branchCommitList\(review\)/u);
+  assert.match(body, /tab === "files"/u);
+  assert.match(body, /branchMergeBox\(review, channelId, busy, conflicts\)/u);
+
+  // Switching views fetches nothing: all three are drawn from the review
+  // already in hand.
+  const handler = app.slice(app.indexOf('case "branch-tab"'));
+  const switched = handler.slice(
+    0,
+    handler.indexOf('case "branch-resolve-ask"'),
+  );
+  assert.ok(switched.length > 0 && switched.length < handler.length);
+  assert.match(switched, /state\.branchTab = value/u);
+  assert.doesNotMatch(switched, /loadBranchReview|fetch|api\(/u);
+  assert.match(data, /branchTab: "review"/u);
+
+  for (const rule of [
+    /\.branch-tabs \{/u,
+    /\.branch-tab\.on \{/u,
+    /\.branch-tab-count \{/u,
+    /\.branch-state\.open \{/u,
+    /\.branch-ref \{/u,
+  ]) {
+    assert.match(styles, rule);
+  }
+});
+
+test("a branch that cannot merge says so, names the files, and offers a way out", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
+
+  const box = chats.slice(
+    chats.indexOf("function branchMergeBox"),
+    chats.indexOf("function branchConflictHelp"),
+  );
+  assert.ok(box.length > 0);
+
+  // The sentence itself, in the words the reader is looking for — and
+  // gated on the conflict rather than merely present in the file. A string
+  // match alone passes just as happily over a row that always renders, which
+  // is the one way this box could be wrong in both directions at once.
+  assert.match(
+    box,
+    /blocked\s*\n\s*\? mergeRow\(\s*\n\s*"bad",\s*\n\s*"closeCircle",\s*\n\s*"This branch has conflicts that must be resolved"/u,
+  );
+  // And the other half of the pair: a branch that merges cleanly says so
+  // rather than saying nothing, which reads as "not checked yet".
+  assert.match(
+    box,
+    /: mergeRow\("good", "checkCircle", `No conflicts with \$\{base\}`\)/u,
+  );
+  // The button is off while it cannot land, and says why on hover rather
+  // than being inert with no explanation.
+  assert.match(box, /busy \|\| blocked \? "disabled" : ""/u);
+  assert.match(box, /Resolve the conflicts first/u);
+
+  const help = chats.slice(
+    chats.indexOf("function branchConflictHelp"),
+    chats.indexOf("function branchConflictHelp") + 3000,
+  );
+  // Which files. A conflict reported as a count is a conflict nobody can
+  // start on.
+  assert.match(help, /conflicts\s*\n?\s*\.map\(/u);
+  assert.match(help, /merge-conflict-file/u);
+  // Each one is a way into the diff rather than a label.
+  assert.match(help, /data-act="branch-tab" data-value="files"/u);
+  // Two ways out, both real: hand it to an agent in the room, or take the
+  // branch out and do it by hand.
+  assert.match(help, /data-act="branch-resolve-ask"/u);
+  assert.match(help, /git merge \$\{base\}/u);
+  assert.match(help, /coord repo list/u);
+  // And the refresh is offered second, hedged, because the conflict was
+  // computed against canonical as it stands.
+  assert.match(help, /Only helps if the repository moved since this was read/u);
+
+  // A reader on the Review tab is told the diff has conflicts in it without
+  // having to open the diff to find out.
+  assert.match(chats, /branch-tab-warn/u);
+  for (const rule of [
+    /\.merge-box \{/u,
+    /\.merge-box\.blocked \{/u,
+    /\.merge-row\.bad \.merge-mark \{/u,
+    /\.merge-conflict-file \{/u,
+    /\.branch-tab-warn \{/u,
+  ]) {
+    assert.match(styles, rule);
+  }
+});
+
+test("the merge box separates what blocks the merge from what only advises it", async () => {
+  const chats = await publicFile("screen-chats.js");
+
+  const box = chats.slice(
+    chats.indexOf("function branchMergeBox"),
+    chats.indexOf("function branchConflictHelp"),
+  );
+
+  // Changes requested is on the record and does not block: Kumi has no
+  // branch protection, and a red row over a working button is the one thing
+  // in this box a reader could misread.
+  assert.match(box, /asked for changes/u);
+  assert.match(box, /This does not block the merge/u);
+  // Only the conflict does.
+  assert.match(box, /const blocked = conflicts\.length > 0/u);
+  assert.doesNotMatch(box, /requested\.length > 0 \? "disabled"/u);
+
+  // Behind is a warning with the button that fixes it, and is not drawn at
+  // all while something worse is: two remedies in one box is a reader
+  // choosing between them with nothing to choose on.
+  assert.match(box, /behind > 0 && !blocked/u);
+  assert.match(box, /Update branch/u);
+  assert.match(box, /data-act="branch-review-refresh"/u);
+
+  // And no answer at all is its own row rather than an empty space.
+  assert.match(box, /No review yet/u);
+});
+
+test("the request written for an agent is addressed by a person", async () => {
+  const app = await publicFile("app.js");
+
+  const handler = app.slice(app.indexOf('case "branch-resolve-ask"'));
+  const written = handler.slice(0, handler.indexOf('case "branch-review-refresh"'));
+  assert.ok(written.length > 0);
+
+  // It writes the request — which branch, which base, which files — and
+  // stops. Dispatching it would be the panel deciding whose afternoon this
+  // is; the message is a task the moment it is sent.
+  assert.match(written, /state\.chatDraft = written/u);
+  assert.match(written, /conflicts\.join\(", "\)/u);
+  assert.match(written, /review\?\.base \?\? "the repository"/u);
+  assert.doesNotMatch(written, /sendChannelMessage|postChannelReply/u);
+
+  // The picker opens on the "@" it left behind, and the caret sits after it
+  // — the same state typing "@" produces.
+  assert.match(written, /state\.mentionActive = true/u);
+  assert.match(written, /state\.composerAutocompleteTarget = "channel"/u);
+  assert.match(written, /setSelectionRange\(1, 1\)/u);
+
+  // Nothing to resolve, nothing written into somebody's composer.
+  assert.match(written, /if \(conflicts\.length === 0\) \{\s*\n\s*return;/u);
+});

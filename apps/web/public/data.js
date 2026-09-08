@@ -753,6 +753,15 @@ export const state = {
    * branch, and the sidebar draws dozens of rows.
    */
   branchReview: {},
+  /**
+   * Which of the review's three views is open: `review`, `commits`, `files`.
+   *
+   * One field rather than one per channel. A reader who went to the diff and
+   * then changed rooms is still reading diffs, and a panel that snapped back
+   * to the decision every time would make them press Files again in every
+   * room they looked at.
+   */
+  branchTab: "review",
   /** Which channel's review is being fetched or acted on, if any. */
   branchReviewBusy: undefined,
   /** Why the last review read or merge failed, if it did. */
