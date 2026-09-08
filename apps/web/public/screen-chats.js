@@ -1823,9 +1823,17 @@ function subChannelRow(repositoryId, channel, active) {
       }
       <span class="chan-channel-name">${esc(channel.slug)}</span>
       ${
-        channel.canPost === false
-          ? `<span class="chan-channel-note" title="You can read this channel but not post in it">read&nbsp;only</span>`
-          : ""
+        // A merged work channel is finished, and that outranks read-only:
+        // both mean "you cannot post here", and only one of them says why.
+        channel.mergedAt
+          ? `<span class="chan-channel-note" title="${
+              channel.pullRequestUrl
+                ? `Merged, and on GitHub at ${esc(channel.pullRequestUrl)}`
+                : "Merged into the repository — this channel is finished"
+            }">merged</span>`
+          : channel.canPost === false
+            ? `<span class="chan-channel-note" title="You can read this channel but not post in it">read&nbsp;only</span>`
+            : ""
       }
       ${
         // What is waiting in a room the reader is not in. Suppressed on the
@@ -5123,6 +5131,20 @@ function branchReviewPanel(repositoryId) {
 
 /** Everything inside the branch panel, so its states read in one place. */
 function branchReviewBody(repositoryId, channelId, review, busy) {
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+  // The panel stays open across a room switch, so it can find itself looking
+  // at a conversation. Said plainly rather than drawn as a branch that has
+  // not been read, which reads as something waiting to load.
+  if (channel !== undefined && channel.branch === undefined) {
+    return emptyState(
+      "branch",
+      "Not a branch",
+      `#${channel.slug} is a conversation. Work said here lands on the ` +
+        "repository's own branch, so there is nothing to review or merge.",
+    );
+  }
   if (state.branchReviewError !== undefined) {
     return `<div class="branch-note err">${esc(state.branchReviewError)}</div>
       <div class="branch-actions">
@@ -5136,7 +5158,12 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
       : emptyState(
           "branch",
           "Nothing read yet",
-          "Open this channel's branch to see what it has.",
+          "This channel's branch has not been read in this session.",
+          // With the way to read it. The panel survives a room switch, so it
+          // routinely lands on a channel nothing has fetched, and an empty
+          // state with no way out of it is a dead end.
+          `<button class="btn" type="button" data-act="branch-review-reload"
+             data-value="${esc(channelId ?? "")}">Read the branch</button>`,
         );
   }
   if (review.merged === true) {

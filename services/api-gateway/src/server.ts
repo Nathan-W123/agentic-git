@@ -4623,6 +4623,28 @@ export class ApiGateway {
       return { handled: true };
     }
     if (input.command.name === "push") {
+      // `/push` publishes canonical, and a work channel's work is not on
+      // canonical until it has been merged. Typing it here would push
+      // somebody else's work under this channel's name and leave this
+      // channel's own work exactly where it was — so it is refused, with the
+      // gate it actually has to pass named.
+      const room =
+        input.channelId === undefined
+          ? undefined
+          : await this.options.store
+              .getSubChannel(repositoryId, input.channelId)
+              .catch(() => undefined);
+      if (room?.branch !== undefined && room.mergedAt === undefined) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          `#${room.slug} works on \`${room.branch}\`, and \`/push\` publishes ` +
+            "the repository's own branch. Review and merge this channel " +
+            "first — then it can go to GitHub as its own pull request.",
+          room.id,
+        );
+        return { handled: true };
+      }
       const operation = this.options.operations.pushRepository;
       if (operation === undefined) {
         await this.postChannelSystemMessage(

@@ -246,6 +246,43 @@ somebody else.
 
 This is the part that makes it multiplayer rather than a task queue with a UI.
 
+### Work channels — a channel that is a branch
+
+A channel can be opened as a *work channel*, and then it **is** a branch.
+Tick "Work on a branch" when you create it and Kumi cuts `kumi/<name>`; every
+task dispatched in that room lands there instead of on the repository's own
+branch. The room's own branch icon opens a review — how far ahead it is, what
+changed, what conflicts — and one button merges it.
+
+Two gates, in order:
+
+1. **Kumi reviews the branch into the repository.** The diff, the
+   conversation and the tasks that produced it are all in one room, so the
+   review happens where the work happened. A conflict refuses rather than
+   resolving: a merge that needs a person is a merge a person should do.
+2. **GitHub reviews the repository into main.** Merged channels offer a
+   second button that pushes canonical to the channel's own branch on GitHub
+   and opens a pull request — under *your* GitHub account, not a bot's.
+
+Merging closes the room. Its branch is gone, so anything said there would be
+dispatched against a branch nothing can check out.
+
+**What makes this different from a worktree tool.** Two channels are two
+branches, and if that were the end of it, agents in different channels would
+simply stop contending — isolation, which is worse than having no branches at
+all. `#billing` changes `SessionToken.userId`, `#login` changes
+`SessionToken.expiresAt`, neither conflicts in Git, both merge, the build
+breaks.
+
+So a claim has two tiers. What is **local** to a branch — a private helper, a
+file's internals, a test — contends only inside it, and Git arbitrates the
+rest. What crosses between them — **exported symbols, API routes, schemas,
+config keys, dependency manifests, migrations** — contends across every
+branch in the repository, on the same admission ladder with a wider scope.
+The indexer records which declarations actually leave their file, so this is
+a fact about the code rather than a guess. Conflicts Git cannot see are
+caught before either branch merges.
+
 ### Human control
 
 - **`/stop`, `/cancel`** — scoped to one agent's own tasks
@@ -348,7 +385,7 @@ Access is either an **organization membership** (reaches everything) or a
 
 ### Quality
 
-**2,862 automated tests.** Build and typecheck clean across all 19 packages.
+**2,882 automated tests.** Build and typecheck clean across all 19 packages.
 `strict`, `verbatimModuleSyntax`, `exactOptionalPropertyTypes`.
 
 The house rule: **sabotage a test before trusting it.** Break the code the test

@@ -1,6 +1,6 @@
 # Channels as branches
 
-**Proposal:** a channel *is* a branch. Agents coordinate inside it as they do
+**Built.** A channel *is* a branch. Agents coordinate inside it as they do
 now. When the work is done, one button opens a pull request into canonical,
 reviewed inside Kumi. Merge, then archive the channel.
 
@@ -169,30 +169,54 @@ loss.
 
 ## 6. Build order
 
-| Stage | What | Ships |
-|---|---|---|
-| **1** | `SubChannel.branch`, migration, branch created with the channel | Nothing visible |
-| **2** | Worktrees and integration cut from the channel's branch | Agents work on branches |
-| **3** | Claims scoped by branch, **plus the interface tier** | The thing that makes it safe |
-| **4** | Create PR, review surface, merge, archive | The whole loop |
-| **5** | Canonical → GitHub PR | Ships to production properly |
+All five stages are built. What each one turned out to be:
 
-Stage 3 is not optional and not reorderable. Stages 1–2 without it are
+| Stage | What | Where |
+|---|---|---|
+| **1** | `SubChannel.branch`, migration 58, the branch cut with the channel | `routes/channels.ts`, `repository-service.ts` |
+| **2** | Lease, bundle, plan, arbitration and integration all read the task's branch | `worker-operations.ts`, `editor-work.ts`, `recovery.ts` |
+| **3** | Claims scoped by branch, plus the interface tier | `interfaceScopeOf` in shared-types, `narrowToBranch` in `lease-admission.ts` |
+| **4** | The review surface, the merge, and the channel closing | `routes/channels.ts`, the Branch panel |
+| **5** | Canonical → GitHub pull request, migration 59 | `push-canonical.ts`, `github-connection.ts` |
+
+Stage 3 was not optional and not reorderable. Stages 1–2 without it are
 strictly worse than today.
 
 ---
 
-## 7. Open questions
+## 7. What the open questions turned out to be
 
-- **Who may open a PR?** Channel members, or `developer` and above?
-- **Does merging require a human?** The auditor could approve, but "an agent
-  reviewed an agent" is a weak gate for anything that reaches production.
-- **What happens to in-flight tasks when a channel is archived?** Cancel,
-  or block the archive?
-- **Can a channel change branch?** Probably not — it would orphan its history.
-- **Nested work.** A channel per feature is right. A channel per *bug fix*
-  might be too many channels. Do threads inside a channel ever want their own
-  branch?
+- **Who may open a PR?** `review` — admin and above. Merging into canonical
+  and shipping to GitHub are the same weight: both hand work to people who
+  did not do it, and shipping publishes under the caller's own GitHub
+  account. Reading the review is `view`; bringing canonical into a channel is
+  `submit_task`, because it touches only that channel's own branch.
+- **Does merging require a human?** Yes. There is no path that merges without
+  somebody pressing the button, and no agent action that reaches it.
+- **What happens to in-flight tasks when a channel is merged?** They keep the
+  branch they were commissioned against — that is why `branch` is stamped on
+  the task and copied to the lease, rather than looked up from the channel at
+  lease time. The room stops accepting new work the moment it merges.
+- **Can a channel change branch?** No. A rename is refused: the handle and
+  the branch are one name, and a branch cannot move without orphaning every
+  commit on it.
+- **Nested work.** Still open. A channel per feature is right; a channel per
+  bug fix is probably too many channels.
+
+### Two things worth knowing about the implementation
+
+**A branch is never adopted.** Creating a work channel writes its branch with
+`update-ref` against the zero object — git's "create only" — so two people
+opening the same channel at once produce one branch and one refusal. A branch
+that already exists is refused rather than taken over: it has commits nobody
+in this channel reviewed, and adopting it would put them inside this
+channel's pull request as though they were its work.
+
+**A merge never resolves a conflict.** `merge-tree --write-tree` answers
+whether it can merge and names what conflicts; `commit-tree` and a
+compare-and-swap `update-ref` land it when it can. A merge that needs a
+person is a merge a person should do — inventing a resolution here would put
+code nobody reviewed into canonical under a review that never saw it.
 
 ---
 

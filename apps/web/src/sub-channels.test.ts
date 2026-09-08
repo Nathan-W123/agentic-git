@@ -178,6 +178,12 @@ test("a channel can be opened as a branch, and says so everywhere it is shown", 
   // And it is visible without opening anything: the row's own title says
   // which branch, so the sigil is not the only place the fact lives.
   assert.match(chats, /works on \$\{esc\(channel\.branch\)\}/u);
+  // A merged channel reads as merged rather than as read-only. Both mean
+  // "you cannot post here", and only one of them says why.
+  assert.match(
+    chats,
+    /channel\.mergedAt\s*\n?\s*\?\s*`<span class="chan-channel-note"[\s\S]{0,400}>merged<\/span>`/u,
+  );
   // The settings panel says it in a sentence, and withholds Rename — the
   // server refuses that for a work channel, and an affordance whose only
   // outcome is an error toast is worse than no affordance.

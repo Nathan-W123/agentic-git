@@ -10120,6 +10120,10 @@ document.addEventListener("click", (event) => {
     case "branch-review-open": {
       const repositoryId = value || activeChannelId();
       const channelId = activeSubChannelId(repositoryId);
+      // Cleared before the first paint, not inside the fetch: the panel draws
+      // once before `loadBranchReview` has run, and the error left over from
+      // a different channel's read would be what it drew.
+      state.branchReviewError = undefined;
       openSecondaryContext("branch");
       render();
       if (channelId) {
