@@ -7129,4 +7129,145 @@ for (const backend of backends) {
       await cleanup();
     }
   });
+
+  test(`${backend.name}: a branch holds what landed on it until it is released`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_claims",
+        path: "/canonical/claims.git",
+        branch: "main",
+      });
+
+      const recorded = await store.recordBranchClaim({
+        repositoryId: "repo_claims",
+        branch: "kumi/payments-v2",
+        taskId: "task_a",
+        revision: "a".repeat(40),
+        symbols: ["chargeTotal", "Charge"],
+        apis: ["POST /charges"],
+        schemas: ["charges"],
+        configKeys: ["PAYMENT_LIMIT_PER_MINUTE"],
+        services: ["payments"],
+        ranges: [{ file: "src/payments.ts", start: 8, end: 14 }],
+      });
+      assert.ok(recorded.id.length > 0);
+      assert.equal(recorded.branch, "kumi/payments-v2");
+
+      // Every list reads back as the shape it was written as, on all three
+      // backends. This is the drift that JSON columns invite: an array that
+      // comes back as a string, or an object as `[object Object]`, is a claim
+      // that silently matches nothing and a conflict nobody is warned about.
+      const all = await store.listBranchClaims("repo_claims");
+      assert.equal(all.length, 1);
+      const claim = all[0];
+      assert.ok(Array.isArray(claim?.symbols));
+      assert.deepEqual(claim?.symbols, ["chargeTotal", "Charge"]);
+      assert.deepEqual(claim?.apis, ["POST /charges"]);
+      assert.deepEqual(claim?.schemas, ["charges"]);
+      assert.deepEqual(claim?.configKeys, ["PAYMENT_LIMIT_PER_MINUTE"]);
+      assert.deepEqual(claim?.services, ["payments"]);
+      assert.ok(Array.isArray(claim?.ranges));
+      assert.deepEqual(claim?.ranges, [
+        { file: "src/payments.ts", start: 8, end: 14 },
+      ]);
+      // Numbers, not strings. A range whose bounds came back as text compares
+      // wrongly against every other range and never overlaps anything.
+      assert.equal(typeof claim?.ranges[0]?.start, "number");
+      assert.equal(typeof claim?.ranges[0]?.end, "number");
+
+      // A second branch, and the exclusion that makes this usable: a task on
+      // `kumi/payments-v2` must not contend with its own branch's earlier
+      // work. That is the same line of work continuing, and git will
+      // fast-forward it.
+      await store.recordBranchClaim({
+        repositoryId: "repo_claims",
+        branch: "kumi/retry-backoff",
+        taskId: "task_b",
+        revision: "b".repeat(40),
+        symbols: ["retry"],
+      });
+      assert.equal((await store.listBranchClaims("repo_claims")).length, 2);
+      const others = await store.listBranchClaims("repo_claims", {
+        exceptBranch: "kumi/payments-v2",
+      });
+      assert.equal(others.length, 1);
+      assert.equal(others[0]?.branch, "kumi/retry-backoff");
+
+      // Absent lists default to empty rather than to undefined, so a caller
+      // reading `.symbols.length` on a sparse claim does not throw.
+      assert.deepEqual(others[0]?.apis, []);
+      assert.deepEqual(others[0]?.ranges, []);
+
+      // Another repository's claims are never anybody's business here.
+      await store.saveRepository({
+        id: "repo_elsewhere",
+        path: "/canonical/elsewhere.git",
+        branch: "main",
+      });
+      await store.recordBranchClaim({
+        repositoryId: "repo_elsewhere",
+        branch: "kumi/payments-v2",
+        taskId: "task_c",
+        revision: "c".repeat(40),
+        symbols: ["chargeTotal"],
+      });
+      assert.equal((await store.listBranchClaims("repo_claims")).length, 2);
+
+      // Released when the branch merges. Everything it held goes, and only
+      // what it held: a release that took the repository with it would open
+      // every other branch's held surface at once.
+      await store.releaseBranchClaims("repo_claims", "kumi/payments-v2");
+      const left = await store.listBranchClaims("repo_claims");
+      assert.equal(left.length, 1);
+      assert.equal(left[0]?.branch, "kumi/retry-backoff");
+      assert.equal(
+        (await store.listBranchClaims("repo_elsewhere")).length,
+        1,
+        "another repository's branch of the same name must survive",
+      );
+
+      // Twice is fine — a merge that retries must not fail on the second
+      // pass, and a branch with nothing recorded releases cleanly.
+      await store.releaseBranchClaims("repo_claims", "kumi/payments-v2");
+      await store.releaseBranchClaims("repo_claims", "kumi/never-existed");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: branch claim reads are detached snapshots`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_detached",
+        path: "/canonical/detached.git",
+        branch: "main",
+      });
+      await store.recordBranchClaim({
+        repositoryId: "repo_detached",
+        branch: "kumi/one",
+        taskId: "task_a",
+        revision: "a".repeat(40),
+        symbols: ["issueToken"],
+        ranges: [{ file: "src/session.ts", start: 1, end: 4 }],
+      });
+
+      // The in-memory store hands out what it holds unless it copies, and a
+      // caller that sorts or splices a claim's arrays would rewrite the
+      // store's own state. Caught here because only one backend can fail it.
+      const first = await store.listBranchClaims("repo_detached");
+      first[0]?.symbols.push("mutated");
+      first[0]?.ranges.push({ file: "hacked.ts", start: 1, end: 2 });
+      const second = await store.listBranchClaims("repo_detached");
+      assert.deepEqual(second[0]?.symbols, ["issueToken"]);
+      assert.deepEqual(second[0]?.ranges, [
+        { file: "src/session.ts", start: 1, end: 4 },
+      ]);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
 }

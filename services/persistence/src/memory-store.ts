@@ -35,84 +35,87 @@ import {
   type ChainedAuditEvent,
 } from "./audit-chain.js";
 import type {
-  ApiTokenRecord,
-  AppendAuditInput,
-  CreateMcpServerInput,
-  LeaseTaskInput,
-  LeasedWork,
-  McpServerRecord,
-  McpServerSecrets,
-  SaveWorkLeasePlanInput,
-  SaveWorkLeasePlanResult,
-  UpdateMcpServerInput,
-  WorkLease,
-  WorkLeaseStatus,
-  WorkerRecord,
   AddChangesetCommentInput,
   AddChannelReplyInput,
-  AppendChannelMessageInput,
-  ApprovalFilter,
   AgentCallSign,
-  ArchiveAuditInput,
-  ChangesetComment,
-  ChannelAgentMember,
-  ChannelAgentOverride,
-  ChannelEntryKind,
-  ChannelMessage,
-  ChannelChangedFile,
-  ChannelMessageCounts,
-  ChannelMessageFilter,
+  ApiTokenRecord,
+  AppendAuditInput,
+  AppendChannelMessageInput,
   AppendDirectMessageInput,
-  DirectConversation,
-  DirectMessage,
-  DirectMessageFilter,
-  ChannelReaction,
-  ChannelReply,
-  CreateSubChannelInput,
-  MergeSubChannelInput,
-  ChannelAnchor,
-  SubChannel,
-  SubChannelReview,
-  SaveSubChannelReviewInput,
-  SubChannelMember,
-  UpdateSubChannelInput,
+  ApprovalFilter,
+  ArchiveAuditInput,
   AuditArchiveResult,
   AuditEventFilter,
   AuditorCursor,
   AuthSessionRecord,
+  BranchClaim,
   CatchUpCursor,
+  ChangesetComment,
+  ChannelAgentMember,
+  ChannelAgentOverride,
+  ChannelAnchor,
+  ChannelChangedFile,
+  ChannelEntryKind,
+  ChannelMessage,
+  ChannelMessageCounts,
+  ChannelMessageFilter,
+  ChannelReaction,
+  ChannelReply,
+  ClaimedRange,
   CoordinationStore,
   CreateApprovalInput,
+  CreateMcpServerInput,
   CreateRunInput,
+  CreateSubChannelInput,
+  DirectConversation,
+  DirectMessage,
+  DirectMessageFilter,
+  InvitationRecord,
+  LeasedWork,
+  LeaseTaskInput,
+  McpServerRecord,
+  McpServerSecrets,
+  MergeSubChannelInput,
   Organization,
   OrganizationMembership,
-  Subscription,
-  SubscriptionStatus,
   OrganizationRole,
+  PasswordResetRecord,
   ProjectRecord,
+  RecordBranchClaimInput,
+  RecordTokenUsageInput,
+  RepositoryGrant,
   RunDetail,
   RunStatus,
+  SaveSubChannelReviewInput,
+  SaveWorkLeasePlanInput,
+  SaveWorkLeasePlanResult,
   SessionRecord,
+  SignupIntentRecord,
   StoredPlanRevision,
   StoredRepository,
   StoredRun,
   StoredScopeChange,
   StoredTask,
   StoredWorkspace,
+  SubChannel,
+  SubChannelMember,
+  SubChannelReview,
   SubmitTaskInput,
   SubmittedTask,
   SubmittedTaskCompletionStatus,
   SubmittedTaskFilter,
-  RecordTokenUsageInput,
+  Subscription,
+  SubscriptionStatus,
   TokenUsageFilter,
   TokenUsageRecord,
-  InvitationRecord,
-  PasswordResetRecord,
-  SignupIntentRecord,
-  WaitlistEntry,
-  RepositoryGrant,
+  UpdateMcpServerInput,
+  UpdateSubChannelInput,
   UserAccount,
   UserAppearance,
+  WaitlistEntry,
+  WorkerRecord,
+  WorkLease,
+  WorkLeaseStatus,
 } from "./store.js";
 import {
   GENERAL_SUB_CHANNEL_SLUG,
@@ -293,6 +296,9 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   /** Every sub-channel, keyed by its id. */
   private readonly subChannels = new Map<string, SubChannel>();
   /** Keyed `channelId\0userId`, which is the table's primary key. */
+  /** What each open branch holds, keyed by claim id. */
+  private readonly branchClaims = new Map<string, BranchClaim>();
+
   private readonly subChannelReviews = new Map<string, SubChannelReview>();
   /** Keyed by `channelId\0userId`. */
   private readonly subChannelMembers = new Map<string, SubChannelMember>();
@@ -3554,6 +3560,60 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     };
     this.subChannels.set(channelId, merged);
     return { ...merged };
+  }
+
+public async recordBranchClaim(
+    input: RecordBranchClaimInput,
+  ): Promise<BranchClaim> {
+    const claim: BranchClaim = {
+      id: createId("bclaim"),
+      repositoryId: input.repositoryId,
+      branch: input.branch,
+      taskId: input.taskId,
+      revision: input.revision,
+      symbols: [...(input.symbols ?? [])],
+      apis: [...(input.apis ?? [])],
+      schemas: [...(input.schemas ?? [])],
+      configKeys: [...(input.configKeys ?? [])],
+      services: [...(input.services ?? [])],
+      ranges: (input.ranges ?? []).map((range) => ({ ...range })),
+      createdAt: new Date().toISOString(),
+    };
+    this.branchClaims.set(claim.id, claim);
+    return { ...claim };
+  }
+
+  public async listBranchClaims(
+    repositoryId: string,
+    options: { exceptBranch?: string } = {},
+  ): Promise<BranchClaim[]> {
+    return [...this.branchClaims.values()]
+      .filter(
+        (claim) =>
+          claim.repositoryId === repositoryId &&
+          claim.branch !== options.exceptBranch,
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+      .map((claim) => ({
+        ...claim,
+        symbols: [...claim.symbols],
+        apis: [...claim.apis],
+        schemas: [...claim.schemas],
+        configKeys: [...claim.configKeys],
+        services: [...claim.services],
+        ranges: claim.ranges.map((range) => ({ ...range })),
+      }));
+  }
+
+  public async releaseBranchClaims(
+    repositoryId: string,
+    branch: string,
+  ): Promise<void> {
+    for (const [id, claim] of this.branchClaims) {
+      if (claim.repositoryId === repositoryId && claim.branch === branch) {
+        this.branchClaims.delete(id);
+      }
+    }
   }
 
   public async listSubChannelReviews(

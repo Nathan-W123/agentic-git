@@ -50,89 +50,92 @@ import {
 } from "./audit-chain.js";
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from "./schema.js";
 import type {
-  ApiTokenRecord,
-  AppendAuditInput,
   AddChangesetCommentInput,
   AddChannelReplyInput,
-  AppendChannelMessageInput,
-  ApprovalFilter,
-  ChannelChangedFile,
   AgentCallSign,
-  ArchiveAuditInput,
-  ChangesetComment,
-  ChannelAgentOverride,
-  ChannelEntryKind,
-  ChannelMessage,
-  ChannelMessageCounts,
-  ChannelMessageFilter,
+  ApiTokenRecord,
+  AppendAuditInput,
+  AppendChannelMessageInput,
   AppendDirectMessageInput,
-  CreateMcpServerInput,
-  DirectConversation,
-  DirectMessage,
-  DirectMessageFilter,
-  ChannelReaction,
-  ChannelReply,
-  CreateSubChannelInput,
-  MergeSubChannelInput,
-  McpServerRecord,
-  McpServerScope,
-  McpServerSecrets,
-  ChannelAnchor,
-  SubChannel,
-  SubChannelReview,
-  SaveSubChannelReviewInput,
-  SubChannelMember,
-  SubChannelVisibility,
-  UpdateMcpServerInput,
-  UpdateSubChannelInput,
+  ApprovalFilter,
+  ArchiveAuditInput,
   AuditArchiveResult,
   AuditEventFilter,
   AuditorCursor,
   AuthSessionRecord,
+  BranchClaim,
   CatchUpCursor,
+  ChangesetComment,
+  ChannelAgentOverride,
+  ChannelAnchor,
+  ChannelChangedFile,
+  ChannelEntryKind,
+  ChannelMessage,
+  ChannelMessageCounts,
+  ChannelMessageFilter,
+  ChannelReaction,
+  ChannelReply,
+  ClaimedRange,
   CoordinationStore,
   CreateApprovalInput,
+  CreateMcpServerInput,
   CreateRunInput,
+  CreateSubChannelInput,
+  DirectConversation,
+  DirectMessage,
+  DirectMessageFilter,
+  InvitationRecord,
+  LeasedWork,
+  LeaseTaskInput,
+  McpServerRecord,
+  McpServerScope,
+  McpServerSecrets,
+  MergeSubChannelInput,
   Organization,
   OrganizationMembership,
-  Subscription,
-  SubscriptionStatus,
   OrganizationRole,
+  PasswordResetRecord,
   ProjectRecord,
+  RecordBranchClaimInput,
+  RecordTokenUsageInput,
+  RepositoryGrant,
   RunDetail,
   RunMode,
   RunStatus,
+  SaveSubChannelReviewInput,
+  SaveWorkLeasePlanInput,
+  SaveWorkLeasePlanResult,
   SessionRecord,
+  SignupIntentRecord,
   StoredPlanRevision,
   StoredRepository,
   StoredRun,
   StoredScopeChange,
   StoredTask,
   StoredWorkspace,
+  SubChannel,
+  SubChannelMember,
+  SubChannelReview,
+  SubChannelVisibility,
   SubmitTaskInput,
   SubmittedTask,
-  TaskKind,
   SubmittedTaskCompletionStatus,
   SubmittedTaskFilter,
-  RecordTokenUsageInput,
+  SubmittedTaskStatus,
+  Subscription,
+  SubscriptionStatus,
+  TaskKind,
   TokenUsageFilter,
   TokenUsageRecord,
-  SubmittedTaskStatus,
-  InvitationRecord,
-  PasswordResetRecord,
-  SignupIntentRecord,
-  WaitlistEntry,
-  RepositoryGrant,
+  UpdateMcpServerInput,
+  UpdateSubChannelInput,
   UserAccount,
   UserAppearance,
-  LeaseTaskInput,
-  LeasedWork,
-  SaveWorkLeasePlanInput,
-  SaveWorkLeasePlanResult,
+  WaitlistEntry,
+  WorkerRecord,
   WorkLease,
   WorkLeasePlan,
   WorkLeaseStatus,
-  WorkerRecord,
 } from "./store.js";
 import {
   GENERAL_SUB_CHANNEL_SLUG,
@@ -5214,6 +5217,77 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return row === undefined ? undefined : this.toSubChannel(row);
   }
 
+public async recordBranchClaim(
+    input: RecordBranchClaimInput,
+  ): Promise<BranchClaim> {
+    const claim: BranchClaim = {
+      id: createId("bclaim"),
+      repositoryId: input.repositoryId,
+      branch: input.branch,
+      taskId: input.taskId,
+      revision: input.revision,
+      symbols: [...(input.symbols ?? [])],
+      apis: [...(input.apis ?? [])],
+      schemas: [...(input.schemas ?? [])],
+      configKeys: [...(input.configKeys ?? [])],
+      services: [...(input.services ?? [])],
+      ranges: (input.ranges ?? []).map((range) => ({ ...range })),
+      createdAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO branch_claims
+           (id, repository_id, branch, task_id, revision,
+            symbols, apis, schemas, config_keys, services, ranges, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        claim.id,
+        claim.repositoryId,
+        claim.branch,
+        claim.taskId,
+        claim.revision,
+        JSON.stringify(claim.symbols),
+        JSON.stringify(claim.apis),
+        JSON.stringify(claim.schemas),
+        JSON.stringify(claim.configKeys),
+        JSON.stringify(claim.services),
+        JSON.stringify(claim.ranges),
+        claim.createdAt,
+      );
+    return claim;
+  }
+
+  public async listBranchClaims(
+    repositoryId: string,
+    options: { exceptBranch?: string } = {},
+  ): Promise<BranchClaim[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM branch_claims
+          WHERE repository_id = ?
+            AND (? IS NULL OR branch <> ?)
+          ORDER BY created_at ASC, id ASC`,
+      )
+      .all(
+        repositoryId,
+        options.exceptBranch ?? null,
+        options.exceptBranch ?? null,
+      ) as Record<string, unknown>[];
+    return rows.map(sqliteBranchClaim);
+  }
+
+  public async releaseBranchClaims(
+    repositoryId: string,
+    branch: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `DELETE FROM branch_claims WHERE repository_id = ? AND branch = ?`,
+      )
+      .run(repositoryId, branch);
+  }
+
   public async listSubChannelReviews(
     repositoryId: string,
     channelId: string,
@@ -6213,4 +6287,52 @@ export class SqliteCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
     }));
   }
+}
+
+function sqliteBranchClaim(row: Record<string, unknown>): BranchClaim {
+  const list = (value: unknown): string[] => {
+    try {
+      const parsed = JSON.parse(String(value ?? "[]"));
+      return Array.isArray(parsed) ? parsed.map((entry) => String(entry)) : [];
+    } catch {
+      return [];
+    }
+  };
+  const ranges = (value: unknown): ClaimedRange[] => {
+    try {
+      const parsed = JSON.parse(String(value ?? "[]"));
+      return Array.isArray(parsed)
+        ? parsed
+            .filter(
+              (entry): entry is ClaimedRange =>
+                typeof entry === "object" &&
+                entry !== null &&
+                typeof (entry as ClaimedRange).file === "string" &&
+                Number.isFinite((entry as ClaimedRange).start) &&
+                Number.isFinite((entry as ClaimedRange).end),
+            )
+            .map((entry) => ({
+              file: entry.file,
+              start: Number(entry.start),
+              end: Number(entry.end),
+            }))
+        : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    id: String(row["id"]),
+    repositoryId: String(row["repository_id"]),
+    branch: String(row["branch"]),
+    taskId: String(row["task_id"]),
+    revision: String(row["revision"]),
+    symbols: list(row["symbols"]),
+    apis: list(row["apis"]),
+    schemas: list(row["schemas"]),
+    configKeys: list(row["config_keys"]),
+    services: list(row["services"]),
+    ranges: ranges(row["ranges"]),
+    createdAt: String(row["created_at"]),
+  };
 }
