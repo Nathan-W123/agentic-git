@@ -123,6 +123,104 @@ test("what a branch holds is read from what landed, not from the forecast", () =
   assert.equal(recorded.taskId, "task_a");
 });
 
+test("what the files hold beats what the plan predicted, both ways", () => {
+  const changeSet: ChangeSet = {
+    id: "cs_1",
+    taskId: "task_a",
+    baseVersion: 1,
+    baseRevision: "b".repeat(40),
+    patches: [patch("src/payments.ts", "@@ -1,2 +1,5 @@\n+const a = 1;\n")],
+    commandsRun: [],
+    tests: [],
+    dependenciesChanged: [],
+    // The agent's own account. Easy to mistake for something computed — it
+    // is a field the agent fills in itself on the worker path — so it is a
+    // fallback here and never the answer when the files can be read.
+    symbolsChanged: ["whatTheAgentSaid"],
+    riskAssessment: { level: "low", reasons: [] },
+    agentExplanation: "",
+    createdAt: "2026-09-08T10:00:00.000Z",
+  };
+  const plan: AgentPlan = {
+    ...PLAN,
+    taskId: "task_a",
+    // Forecast three config keys, and a route.
+    expectedConfigKeys: ["A", "B", "C"],
+    expectedApis: ["POST /predicted"],
+  };
+
+  const observed = claimFromChangeSet({
+    repositoryId: "repo",
+    branch: "kumi/payments-v2",
+    revision: "c".repeat(40),
+    changeSet,
+    plan,
+    // What the changed files actually contain, read from the index.
+    resources: {
+      symbols: ["chargeTotal"],
+      apis: ["POST /charges"],
+      // One key, not the three that were forecast — and a different one.
+      configKeys: ["PAYMENT_LIMIT_PER_MINUTE"],
+      schemas: [],
+      services: [],
+    },
+  });
+  // Under-claiming is the dangerous half: a key the plan never mentioned goes
+  // unclaimed, so another branch changes it unopposed and both merge cleanly
+  // into something broken.
+  assert.deepEqual(observed.configKeys, ["PAYMENT_LIMIT_PER_MINUTE"]);
+  // Over-claiming is the annoying half: two keys nobody touched would be held
+  // for the life of the branch, refusing work for no reason.
+  assert.equal(observed.configKeys.includes("A"), false);
+  assert.deepEqual(observed.apis, ["POST /charges"]);
+  assert.deepEqual(observed.symbols, ["chargeTotal"]);
+  // Empty is an answer, not a gap: files that declare no schema hold none,
+  // and falling back to the plan here would resurrect the forecast.
+  assert.deepEqual(observed.schemas, []);
+
+  // Stated for every field, not just the one that happened to be empty
+  // above. `?? ` is the right operator and `|| ` is the wrong one, and the
+  // difference only shows when an observation is legitimately empty — a task
+  // that changed a README exports nothing, and must not be recorded as
+  // holding whatever the agent said it would.
+  const nothing = claimFromChangeSet({
+    repositoryId: "repo",
+    branch: "kumi/payments-v2",
+    revision: "c".repeat(40),
+    changeSet,
+    plan,
+    resources: {
+      symbols: [],
+      apis: [],
+      configKeys: [],
+      schemas: [],
+      services: [],
+    },
+  });
+  for (const [field, held] of [
+    ["symbols", nothing.symbols],
+    ["apis", nothing.apis],
+    ["configKeys", nothing.configKeys],
+    ["schemas", nothing.schemas],
+    ["services", nothing.services],
+  ] as const) {
+    assert.deepEqual(held, [], `${field} should stay empty, not fall back`);
+  }
+
+  // Without the index — a coordinator that could not build one — the plan is
+  // the fallback. Weaker, and better than recording nothing.
+  const guessed = claimFromChangeSet({
+    repositoryId: "repo",
+    branch: "kumi/payments-v2",
+    revision: "c".repeat(40),
+    changeSet,
+    plan,
+  });
+  assert.deepEqual(guessed.configKeys, ["A", "B", "C"]);
+  assert.deepEqual(guessed.apis, ["POST /predicted"]);
+  assert.deepEqual(guessed.symbols, ["whatTheAgentSaid"]);
+});
+
 test("a branch's claims arbitrate as a plan, whole, for something else to narrow", () => {
   const active = branchClaimsAsActivePlans([
     claim({

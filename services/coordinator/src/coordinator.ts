@@ -4855,6 +4855,21 @@ export class Coordinator {
       if (stored?.branch === branch) {
         return;
       }
+      // What the changed files actually hold, at the revision that just
+      // landed. This is the difference between a claim and a guess: the plan
+      // was written before the work, and `changeSet.symbolsChanged` is the
+      // agent's own account rather than anything computed. Indexed at the new
+      // revision rather than the base, because a route or a symbol this task
+      // *added* does not exist in the base index — and that is the case the
+      // whole feature is for.
+      //
+      // Best effort: an index that cannot be built falls back to the plan,
+      // which is what this did before and is still better than nothing.
+      const changedFiles = result.changeSet.patches.map((patch) => patch.path);
+      const resources = await this.intelligence
+        .index(input.repository, integration.canonicalVersion.revision)
+        .then((index) => this.intelligence.changedResources(changedFiles, index))
+        .catch(() => undefined);
       await store.recordBranchClaim(
         claimFromChangeSet({
           repositoryId: input.repository.id,
@@ -4862,6 +4877,7 @@ export class Coordinator {
           revision: integration.canonicalVersion.revision,
           changeSet: result.changeSet,
           ...(result.plan === undefined ? {} : { plan: result.plan }),
+          ...(resources === undefined ? {} : { resources }),
         }),
       );
     } catch {

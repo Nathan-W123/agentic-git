@@ -96,10 +96,23 @@ function declared(
 /**
  * What a branch should hold, having just had this changeset land on it.
  *
- * `symbolsChanged` comes off the changeset because the integration already
- * computed it from the diff. The rest come off the plan: a route or a schema
- * is a statement about intent that a diff cannot always be read back into,
- * and the plan is where the agent said it.
+ * `resources` is what the *changed files actually contain*, read back out of
+ * the repository index at the revision that just landed — see
+ * `CodeIntelligenceService.changedResources`. Pass it and nothing here is a
+ * guess.
+ *
+ * Without it this falls back to the plan, and the fallback is worth naming
+ * because it is weaker in both directions. A plan is written before the work:
+ * an agent that forecast one config key and used two leaves the second
+ * unclaimed, so another branch changes it unopposed; an agent that forecast
+ * three and used one holds two nobody touched for the life of the branch. It
+ * under-claims what was done and over-claims what was not.
+ *
+ * `changeSet.symbolsChanged` is *not* the diff either, which is easy to
+ * assume and wrong: on the worker path it is a field the agent fills in
+ * itself — see the output schema in `adapters/codex` — so it is the agent's
+ * own account, not something computed. It is used only as a fallback, for the
+ * same reason the plan is.
  */
 export function claimFromChangeSet(input: {
   repositoryId: string;
@@ -107,21 +120,42 @@ export function claimFromChangeSet(input: {
   revision: string;
   changeSet: ChangeSet;
   plan?: AgentPlan;
+  /**
+   * What the changed files hold, read from the index at the landed revision.
+   *
+   * The whole difference between a claim that is true and one that is a
+   * forecast. Optional only so a caller that cannot index — a store-less
+   * coordinator, an indexer that failed — still records something rather
+   * than nothing.
+   */
+  resources?: {
+    symbols: readonly string[];
+    apis: readonly string[];
+    schemas: readonly string[];
+    configKeys: readonly string[];
+    services: readonly string[];
+  };
 }): RecordBranchClaimInput {
+  const observed = input.resources;
   return {
     repositoryId: input.repositoryId,
     branch: input.branch,
     taskId: input.changeSet.taskId,
     revision: input.revision,
-    symbols: [...input.changeSet.symbolsChanged],
-    apis: declared(input.plan, "apis", input.plan?.expectedApis),
-    schemas: declared(input.plan, "schemas", input.plan?.expectedSchemas),
-    configKeys: declared(
-      input.plan,
-      "configKeys",
-      input.plan?.expectedConfigKeys,
-    ),
-    services: declared(input.plan, "services", input.plan?.expectedServices),
+    symbols: [...(observed?.symbols ?? input.changeSet.symbolsChanged)],
+    apis: [...(observed?.apis ?? declared(input.plan, "apis", input.plan?.expectedApis))],
+    schemas: [
+      ...(observed?.schemas ??
+        declared(input.plan, "schemas", input.plan?.expectedSchemas)),
+    ],
+    configKeys: [
+      ...(observed?.configKeys ??
+        declared(input.plan, "configKeys", input.plan?.expectedConfigKeys)),
+    ],
+    services: [
+      ...(observed?.services ??
+        declared(input.plan, "services", input.plan?.expectedServices)),
+    ],
     ranges: rangesFromPatches(input.changeSet.patches),
   };
 }
