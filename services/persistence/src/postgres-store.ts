@@ -35,6 +35,7 @@ import {
   type TaskStatus,
   type TestResult,
   type ValidationCommand,
+  type UserId,
 } from "@coord/shared-types";
 
 import {
@@ -77,6 +78,8 @@ import type {
   ChannelReaction,
   ChannelReply,
   ClaimedRange,
+  HoldEditorFileInput,
+  EditorHold,
   ClaimedShape,
   CoordinationStore,
   CreateApprovalInput,
@@ -5077,6 +5080,71 @@ public async recordBranchClaim(
     );
   }
 
+  public async holdEditorFile(
+    input: HoldEditorFileInput,
+  ): Promise<EditorHold> {
+    const now = new Date();
+    const branch = input.branch ?? "";
+    const ranges = (input.ranges ?? []).map((range) => ({ ...range }));
+    // `acquired_at` is kept from the row already there — see the SQLite copy.
+    const held = await this.row(
+      `INSERT INTO editor_holds
+         (repository_id, branch, user_id, file, ranges,
+          acquired_at, renewed_at, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (repository_id, branch, user_id, file) DO UPDATE SET
+         ranges = EXCLUDED.ranges,
+         renewed_at = EXCLUDED.renewed_at,
+         expires_at = EXCLUDED.expires_at
+       RETURNING *`,
+      [
+        input.repositoryId,
+        branch,
+        input.userId,
+        input.file,
+        JSON.stringify(ranges),
+        now.toISOString(),
+        now.toISOString(),
+        new Date(now.getTime() + input.ttlMs).toISOString(),
+      ],
+    );
+    return postgresEditorHold(held as Record<string, unknown>);
+  }
+
+  public async listEditorHolds(
+    repositoryId: string,
+    options: { branch?: string; exceptUser?: UserId } = {},
+  ): Promise<EditorHold[]> {
+    const now = new Date().toISOString();
+    await this.pool.query(`DELETE FROM editor_holds WHERE expires_at <= $1`, [
+      now,
+    ]);
+    const result = await this.pool.query(
+      `SELECT * FROM editor_holds
+        WHERE repository_id = $1
+          AND ($2::text IS NULL OR branch = $2::text)
+          AND ($3::text IS NULL OR user_id <> $3::text)
+        ORDER BY file ASC, user_id ASC`,
+      [repositoryId, options.branch ?? null, options.exceptUser ?? null],
+    );
+    return result.rows.map((row) =>
+      postgresEditorHold(row as Record<string, unknown>),
+    );
+  }
+
+  public async releaseEditorHold(input: {
+    repositoryId: string;
+    branch?: string;
+    userId: UserId;
+    file: string;
+  }): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM editor_holds
+        WHERE repository_id = $1 AND branch = $2 AND user_id = $3 AND file = $4`,
+      [input.repositoryId, input.branch ?? "", input.userId, input.file],
+    );
+  }
+
   public async releaseBranchClaims(
     repositoryId: string,
     branch: string,
@@ -6156,5 +6224,41 @@ function postgresBranchClaim(row: Record<string, unknown>): BranchClaim {
     ranges: ranges(row["ranges"]),
     shapes: shapes(row["shapes"]),
     createdAt: String(row["created_at"]),
+  };
+}
+
+/** One editor hold, out of its row. */
+function postgresEditorHold(row: Record<string, unknown>): EditorHold {
+  let ranges: ClaimedRange[] = [];
+  try {
+    const parsed: unknown = JSON.parse(String(row["ranges"] ?? "[]"));
+    ranges = Array.isArray(parsed)
+      ? parsed
+          .filter(
+            (entry): entry is ClaimedRange =>
+              typeof entry === "object" &&
+              entry !== null &&
+              typeof (entry as ClaimedRange).file === "string" &&
+              Number.isFinite((entry as ClaimedRange).start) &&
+              Number.isFinite((entry as ClaimedRange).end),
+          )
+          .map((entry) => ({
+            file: entry.file,
+            start: Number(entry.start),
+            end: Number(entry.end),
+          }))
+      : [];
+  } catch {
+    ranges = [];
+  }
+  return {
+    repositoryId: String(row["repository_id"]),
+    branch: String(row["branch"] ?? ""),
+    userId: String(row["user_id"]) as EditorHold["userId"],
+    file: String(row["file"]),
+    ranges,
+    acquiredAt: String(row["acquired_at"]),
+    renewedAt: String(row["renewed_at"]),
+    expiresAt: String(row["expires_at"]),
   };
 }

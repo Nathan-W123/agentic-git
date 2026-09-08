@@ -35,6 +35,7 @@ import {
   type TaskStatus,
   type TestResult,
   type ValidationCommand,
+  type UserId,
 } from "@coord/shared-types";
 
 import {
@@ -76,6 +77,8 @@ import type {
   ChannelReaction,
   ChannelReply,
   ClaimedRange,
+  HoldEditorFileInput,
+  EditorHold,
   ClaimedShape,
   CoordinationStore,
   CreateApprovalInput,
@@ -5284,6 +5287,93 @@ public async recordBranchClaim(
     return rows.map(sqliteBranchClaim);
   }
 
+  public async holdEditorFile(
+    input: HoldEditorFileInput,
+  ): Promise<EditorHold> {
+    const now = new Date();
+    const branch = input.branch ?? "";
+    const hold: EditorHold = {
+      repositoryId: input.repositoryId,
+      branch,
+      userId: input.userId,
+      file: input.file,
+      ranges: (input.ranges ?? []).map((range) => ({ ...range })),
+      acquiredAt: now.toISOString(),
+      renewedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
+    };
+    // `acquired_at` is kept from the row that is already there. "Since when"
+    // is what a reader wants beside a name, and a renewal every few seconds
+    // would otherwise report every hold as brand new.
+    const row = this.db
+      .prepare(
+        `INSERT INTO editor_holds
+           (repository_id, branch, user_id, file, ranges,
+            acquired_at, renewed_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (repository_id, branch, user_id, file) DO UPDATE SET
+           ranges = excluded.ranges,
+           renewed_at = excluded.renewed_at,
+           expires_at = excluded.expires_at
+         RETURNING *`,
+      )
+      .get(
+        hold.repositoryId,
+        hold.branch,
+        hold.userId,
+        hold.file,
+        JSON.stringify(hold.ranges),
+        hold.acquiredAt,
+        hold.renewedAt,
+        hold.expiresAt,
+      ) as Record<string, unknown>;
+    return sqliteEditorHold(row);
+  }
+
+  public async listEditorHolds(
+    repositoryId: string,
+    options: { branch?: string; exceptUser?: UserId } = {},
+  ): Promise<EditorHold[]> {
+    const now = new Date().toISOString();
+    // Deleted on the way past rather than left to a sweeper. Nobody releases
+    // a hold deliberately — a closed tab is the ordinary end of one — so the
+    // expired rows are the common case and this is the only place that is
+    // guaranteed to run.
+    this.db
+      .prepare(`DELETE FROM editor_holds WHERE expires_at <= ?`)
+      .run(now);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM editor_holds
+          WHERE repository_id = ?
+            AND (? IS NULL OR branch = ?)
+            AND (? IS NULL OR user_id <> ?)
+          ORDER BY file ASC, user_id ASC`,
+      )
+      .all(
+        repositoryId,
+        options.branch ?? null,
+        options.branch ?? null,
+        options.exceptUser ?? null,
+        options.exceptUser ?? null,
+      ) as Record<string, unknown>[];
+    return rows.map(sqliteEditorHold);
+  }
+
+  public async releaseEditorHold(input: {
+    repositoryId: string;
+    branch?: string;
+    userId: UserId;
+    file: string;
+  }): Promise<void> {
+    this.db
+      .prepare(
+        `DELETE FROM editor_holds
+          WHERE repository_id = ? AND branch = ? AND user_id = ? AND file = ?`,
+      )
+      .run(input.repositoryId, input.branch ?? "", input.userId, input.file);
+  }
+
   public async releaseBranchClaims(
     repositoryId: string,
     branch: string,
@@ -6370,5 +6460,41 @@ function sqliteBranchClaim(row: Record<string, unknown>): BranchClaim {
     ranges: ranges(row["ranges"]),
     shapes: shapes(row["shapes"]),
     createdAt: String(row["created_at"]),
+  };
+}
+
+/** One editor hold, out of its row. */
+function sqliteEditorHold(row: Record<string, unknown>): EditorHold {
+  let ranges: ClaimedRange[] = [];
+  try {
+    const parsed: unknown = JSON.parse(String(row["ranges"] ?? "[]"));
+    ranges = Array.isArray(parsed)
+      ? parsed
+          .filter(
+            (entry): entry is ClaimedRange =>
+              typeof entry === "object" &&
+              entry !== null &&
+              typeof (entry as ClaimedRange).file === "string" &&
+              Number.isFinite((entry as ClaimedRange).start) &&
+              Number.isFinite((entry as ClaimedRange).end),
+          )
+          .map((entry) => ({
+            file: entry.file,
+            start: Number(entry.start),
+            end: Number(entry.end),
+          }))
+      : [];
+  } catch {
+    ranges = [];
+  }
+  return {
+    repositoryId: String(row["repository_id"]),
+    branch: String(row["branch"] ?? ""),
+    userId: String(row["user_id"]) as EditorHold["userId"],
+    file: String(row["file"]),
+    ranges,
+    acquiredAt: String(row["acquired_at"]),
+    renewedAt: String(row["renewed_at"]),
+    expiresAt: String(row["expires_at"]),
   };
 }

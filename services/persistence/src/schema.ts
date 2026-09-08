@@ -1813,6 +1813,33 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE branch_claims ADD COLUMN shapes TEXT NOT NULL DEFAULT '[]'`,
     ],
   },
+  {
+    version: 63,
+    name: "what-a-person-is-editing-right-now",
+    statements: [
+      // A human editing a file was arbitrated only at submit, and held
+      // nothing while they typed — so an agent could be handed the same file
+      // and both would find out afterwards. This is the person's side of the
+      // lease an agent has always had: taken on the first edit, renewed while
+      // the editor is open, and gone when it lapses.
+      //
+      // One row per person per file per branch: re-acquiring renews rather
+      // than accumulating, which is what makes an abandoned tab expire
+      // instead of leaving a pile of holds nobody can account for.
+      `CREATE TABLE editor_holds (
+         repository_id TEXT NOT NULL,
+         branch TEXT NOT NULL DEFAULT '',
+         user_id TEXT NOT NULL,
+         file TEXT NOT NULL,
+         ranges TEXT NOT NULL DEFAULT '[]',
+         acquired_at TEXT NOT NULL,
+         renewed_at TEXT NOT NULL,
+         expires_at TEXT NOT NULL,
+         PRIMARY KEY (repository_id, branch, user_id, file))`,
+      `CREATE INDEX editor_holds_by_repository
+         ON editor_holds(repository_id, branch, expires_at)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

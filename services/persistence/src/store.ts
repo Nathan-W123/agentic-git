@@ -1996,6 +1996,50 @@ export interface RecordBranchClaimInput {
   shapes?: readonly ClaimedShape[];
 }
 
+/**
+ * A file one person has open and is editing, right now.
+ *
+ * The human side of the lease an agent has always had. An agent's plan is
+ * arbitrated before it writes and its ownership expires if it stops
+ * heartbeating; a person editing in the browser used to be arbitrated only at
+ * submit and to hold nothing in between, so the same file could be handed to
+ * an agent while somebody was typing in it and both would find out afterwards.
+ *
+ * Expiry is the whole design. A person closes a laptop; an agent crashes.
+ * Neither releases anything deliberately, so a hold that did not lapse would
+ * be a lock nobody could account for and everybody would learn to route
+ * around — which is worse than no lock, because the routing around happens in
+ * a terminal where nothing can see it at all.
+ */
+export interface EditorHold {
+  repositoryId: string;
+  /** Empty string for the repository's own branch, as everywhere else. */
+  branch: string;
+  userId: UserId;
+  file: string;
+  /**
+   * The lines being edited, when the editor can say.
+   *
+   * Empty means the whole file, which is what a hold means before anything
+   * narrower is known. A person typing in one function should not hold the
+   * file the way naming it in a plan does.
+   */
+  ranges: ClaimedRange[];
+  acquiredAt: string;
+  renewedAt: string;
+  expiresAt: string;
+}
+
+export interface HoldEditorFileInput {
+  repositoryId: string;
+  branch?: string;
+  userId: UserId;
+  file: string;
+  ranges?: readonly ClaimedRange[];
+  /** How long the hold survives without a renewal. */
+  ttlMs: number;
+}
+
 /** One person's membership of one sub-channel. */
 export interface SubChannelMember {
   channelId: string;
@@ -2794,6 +2838,35 @@ export interface CoordinationStore {
   ): Promise<BranchClaim[]>;
   /** Drops everything a branch held, once it has merged or gone. */
   releaseBranchClaims(repositoryId: string, branch: string): Promise<void>;
+
+  /**
+   * Takes or renews one person's hold on a file they are editing.
+   *
+   * One call for both, because the editor cannot tell them apart and should
+   * not have to: the first keystroke acquires, every renewal after it is the
+   * same statement made again. Renewing is what keeps it alive, so an editor
+   * that stops — a closed tab, a slept machine — lets it lapse without having
+   * to say so.
+   */
+  holdEditorFile(input: HoldEditorFileInput): Promise<EditorHold>;
+  /**
+   * Which files people are editing in one repository, right now.
+   *
+   * Expired holds are never returned. They are the ordinary case rather than
+   * an error — nobody releases a hold on purpose — so a reader must not have
+   * to know that and filter for itself.
+   */
+  listEditorHolds(
+    repositoryId: string,
+    options?: { branch?: string; exceptUser?: UserId },
+  ): Promise<EditorHold[]>;
+  /** Gives one back, when somebody closes the file rather than walking away. */
+  releaseEditorHold(input: {
+    repositoryId: string;
+    branch?: string;
+    userId: UserId;
+    file: string;
+  }): Promise<void>;
 
   listSubChannels(repositoryId: string): Promise<SubChannel[]>;
   getSubChannel(

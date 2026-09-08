@@ -21,6 +21,7 @@ import {
   type TaskDefinition,
   type TaskId,
   type TaskStatus,
+  type UserId,
 } from "@coord/shared-types";
 
 import {
@@ -49,6 +50,8 @@ import type {
   AuditorCursor,
   AuthSessionRecord,
   BranchClaim,
+  HoldEditorFileInput,
+  EditorHold,
   CatchUpCursor,
   ChangesetComment,
   ChannelAgentMember,
@@ -298,6 +301,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   /** Keyed `channelId\0userId`, which is the table's primary key. */
   /** What each open branch holds, keyed by claim id. */
   private readonly branchClaims = new Map<string, BranchClaim>();
+  /** Keyed repository + branch + person + file: one hold per file per person. */
+  private readonly editorHolds = new Map<string, EditorHold>();
 
   private readonly subChannelReviews = new Map<string, SubChannelReview>();
   /** Keyed by `channelId\0userId`. */
@@ -3607,6 +3612,74 @@ public async recordBranchClaim(
         services: [...claim.services],
         ranges: claim.ranges.map((range) => ({ ...range })),
       }));
+  }
+
+
+  public async holdEditorFile(
+    input: HoldEditorFileInput,
+  ): Promise<EditorHold> {
+    const now = new Date();
+    const branch = input.branch ?? "";
+    const key = `${input.repositoryId} ${branch} ${input.userId} ${input.file}`;
+    const existing = this.editorHolds.get(key);
+    const hold: EditorHold = {
+      repositoryId: input.repositoryId,
+      branch,
+      userId: input.userId,
+      file: input.file,
+      ranges: (input.ranges ?? []).map((range) => ({ ...range })),
+      // Kept from the first hold, not reset on renewal: "since when" is what
+      // a reader wants next to a name, and a renewal every fifteen seconds
+      // would otherwise report every hold as a second old.
+      acquiredAt: existing?.acquiredAt ?? now.toISOString(),
+      renewedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
+    };
+    this.editorHolds.set(key, hold);
+    return { ...hold, ranges: hold.ranges.map((range) => ({ ...range })) };
+  }
+
+  public async listEditorHolds(
+    repositoryId: string,
+    options: { branch?: string; exceptUser?: UserId } = {},
+  ): Promise<EditorHold[]> {
+    const now = new Date().toISOString();
+    const live: EditorHold[] = [];
+    for (const [key, hold] of this.editorHolds) {
+      // Pruned on the way past. Nobody releases a hold deliberately, so the
+      // expired ones are the ordinary case and would otherwise accumulate for
+      // the life of the process.
+      if (hold.expiresAt <= now) {
+        this.editorHolds.delete(key);
+        continue;
+      }
+      if (hold.repositoryId !== repositoryId) {
+        continue;
+      }
+      if (options.branch !== undefined && hold.branch !== options.branch) {
+        continue;
+      }
+      if (options.exceptUser !== undefined && hold.userId === options.exceptUser) {
+        continue;
+      }
+      live.push({ ...hold, ranges: hold.ranges.map((range) => ({ ...range })) });
+    }
+    return live.sort(
+      (left, right) =>
+        left.file.localeCompare(right.file) ||
+        left.userId.localeCompare(right.userId),
+    );
+  }
+
+  public async releaseEditorHold(input: {
+    repositoryId: string;
+    branch?: string;
+    userId: UserId;
+    file: string;
+  }): Promise<void> {
+    this.editorHolds.delete(
+      `${input.repositoryId} ${input.branch ?? ""} ${input.userId} ${input.file}`,
+    );
   }
 
   public async releaseBranchClaims(
