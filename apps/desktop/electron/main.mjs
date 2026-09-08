@@ -54,6 +54,7 @@ import {
 // looked connected, and could run nothing.
 import { detectAgents, findAgentCommand } from "./agents.mjs";
 import { CONNECTABLE, connectEditor } from "./editor-mcp.mjs";
+import { menuTemplate } from "./menu.mjs";
 import {
   allowTerminals,
   forgetMcpServers,
@@ -298,87 +299,25 @@ async function changeServerAndRestart() {
 }
 
 function buildMenu() {
-  const help = [];
-  if (releasesUrl !== undefined) {
-    // Deliberately a link rather than an update that installs itself. These
-    // builds are unsigned, and an unsigned app replacing its own binary is
-    // something the operating system is right to refuse; pointing at the
-    // downloads is honest about what is actually on offer.
-    help.push({
-      label: "Check for Updates…",
-      click: () => void shell.openExternal(`${releasesUrl}/latest`),
-    });
-    help.push({ type: "separator" });
-  }
-  help.push(
-    { label: "Sign Out and Restart", click: () => void signOutAndRestart() },
-    { label: "Change Server…", click: () => void changeServerAndRestart() },
+  return Menu.buildFromTemplate(
+    menuTemplate({
+      platform: process.platform,
+      releasesUrl,
+      workerStatus,
+      terminalsAllowed,
+      awakeForWork,
+      actions: {
+        checkForUpdates: () =>
+          void shell.openExternal(`${releasesUrl ?? ""}/latest`),
+        signOutAndRestart: () => void signOutAndRestart(),
+        changeServer: () => void changeServerAndRestart(),
+        openWorkerLog: () => void shell.openPath(workerLogPath()),
+        forgetAllowedMcp: () => void forgetAllowedMcp(),
+        allowTerminals: (checked) => void toggleTerminals(checked),
+        keepAwake: (checked) => void toggleKeepAwake(checked),
+      },
+    }),
   );
-  // Where a person volunteers this machine. Checkable rather than a dialog,
-  // because the honest state is binary and they should be able to see which
-  // one they are in without opening anything.
-  const agents = [
-    {
-      // Shown, not offered. Whether agents run here is not a setting — but
-      // whether they *are* running is a fact somebody needs, because the
-      // reasons it can fail (no CLI signed in on this machine, an expired
-      // credential) are all things only they can fix.
-      label: workerStatus,
-      enabled: false,
-    },
-    {
-      // The rest of what that one line came from. A machine running agents
-      // has no terminal open, so without this the worker's account of a task
-      // — which phase took the time, what a CLI said before it gave up —
-      // exists only until the next line replaces it.
-      label: "Open Worker Log",
-      click: () => void shell.openPath(workerLogPath()),
-    },
-    {
-      // The other half of the question the app asks when a project offers
-      // its agents a tool. A yes that could only be taken back by editing a
-      // JSON file would be a yes kept forever.
-      label: "Forget Allowed MCP Servers…",
-      click: () => void forgetAllowedMcp(),
-    },
-    { type: "separator" },
-    {
-      // On unless somebody says otherwise, and here rather than behind a
-      // prompt on first use. Nothing here can open a shell on another
-      // person's machine, so the only party to this consent is whoever
-      // installed the app and signed it in — asking them again would be
-      // asking them to agree to what they already did.
-      label: "Allow Terminals on This Machine",
-      type: "checkbox",
-      checked: terminalsAllowed,
-      click: (item) => void toggleTerminals(item.checked),
-    },
-    { type: "separator" },
-    {
-      // Named for what it actually does. The platform call underneath is
-      // `SetThreadExecutionState`, and Microsoft is explicit that it "cannot
-      // be used to prevent the user from putting the computer to sleep" — a
-      // closed lid, the power button and Start > Sleep all go straight past
-      // it. It stops the machine idling out, and nothing more, so the label
-      // says idle rather than implying a promise it cannot keep.
-      label: "Don't Sleep While Idle (plugged in, lid open)",
-      type: "checkbox",
-      checked: awakeForWork,
-      click: (item) => void toggleKeepAwake(item.checked),
-    },
-  ];
-  return Menu.buildFromTemplate([
-    ...(process.platform === "darwin"
-      ? [{ role: "appMenu" }]
-      : [{ label: "File", submenu: [{ role: "quit" }] }]),
-    // Edit and View are not decoration: the page is a remote document, and
-    // without these there is no copy, no paste, and no way to reload it.
-    { role: "editMenu" },
-    { role: "viewMenu" },
-    { label: "Agents", submenu: agents },
-    { role: "windowMenu" },
-    { role: "help", submenu: help },
-  ]);
 }
 
 /**
