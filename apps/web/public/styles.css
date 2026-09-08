@@ -14279,6 +14279,29 @@ dialog.modal[open]::backdrop {
   gap: 8px;
   padding: 9px 16px;
   cursor: pointer;
+  /* `display: flex` on a summary drops the disclosure triangle in Chromium,
+     which left four rows that open on a click and gave no sign they did.
+     Drawn back below, and rotated on open, so a fold reads as a fold. */
+  list-style: none;
+}
+
+.branch-file-review > summary::-webkit-details-marker {
+  display: none;
+}
+
+.branch-file-review > summary::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid var(--text-4);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform var(--motion-press) var(--ease-motion);
+}
+
+.branch-file-review[open] > summary::before {
+  transform: rotate(90deg);
 }
 
 .branch-file-review > summary:hover {

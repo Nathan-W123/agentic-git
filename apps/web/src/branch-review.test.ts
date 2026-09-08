@@ -206,6 +206,15 @@ test("the diff is one fold per file, not one wall", async () => {
   assert.match(chats, /delta-add/u);
   assert.match(chats, /delta-del/u);
   assert.match(styles, /\.branch-file-review \{/u);
+  // A fold has to look like one. `display: flex` on a `<summary>` drops the
+  // disclosure triangle in Chromium, which left four rows that opened on a
+  // click and gave no sign they would — so the caret is drawn back, and
+  // turned when the fold is open.
+  assert.match(styles, /\.branch-file-review > summary::before \{/u);
+  assert.match(
+    styles,
+    /\.branch-file-review\[open\] > summary::before \{\s*transform: rotate/u,
+  );
 });
 
 test("a line can be commented on, and the remark stays on that line", async () => {
