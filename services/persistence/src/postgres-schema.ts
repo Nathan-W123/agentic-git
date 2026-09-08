@@ -1363,4 +1363,25 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON sub_channel_reviews(repository_id)`,
     ],
   },
+  {
+    version: 61,
+    name: "what-a-branch-holds-while-it-is-open",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS branch_claims (
+         id TEXT PRIMARY KEY,
+         repository_id TEXT NOT NULL,
+         branch TEXT NOT NULL,
+         task_id TEXT NOT NULL,
+         revision TEXT NOT NULL,
+         symbols TEXT NOT NULL DEFAULT '[]',
+         apis TEXT NOT NULL DEFAULT '[]',
+         schemas TEXT NOT NULL DEFAULT '[]',
+         config_keys TEXT NOT NULL DEFAULT '[]',
+         services TEXT NOT NULL DEFAULT '[]',
+         ranges TEXT NOT NULL DEFAULT '[]',
+         created_at TEXT NOT NULL)`,
+      `CREATE INDEX IF NOT EXISTS branch_claims_by_repository
+         ON branch_claims(repository_id, branch)`,
+    ],
+  },
 ];

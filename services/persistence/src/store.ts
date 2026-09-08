@@ -1885,6 +1885,78 @@ export interface SaveSubChannelReviewInput {
   reviewedAt: string;
 }
 
+/**
+ * A line range on the current side of a file, as it was actually changed.
+ *
+ * Half-open on the end so an empty range is expressible and adjacency does
+ * not read as overlap: [10, 12) and [12, 14) touch and do not collide.
+ */
+export interface ClaimedRange {
+  file: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * What one task left behind on a branch, and therefore what that branch holds
+ * for as long as it is open.
+ *
+ * The point of this table is the gap the lease table cannot cover. A plan is
+ * arbitrated against tasks that are *executing*, so two tasks an hour apart
+ * on two branches never see each other — and that is exactly the pair whose
+ * edits collide when the second branch tries to catch up after the first one
+ * merges. A claim here outlives the lease and lasts as long as the branch.
+ *
+ * Recorded from the landed diff rather than from the plan's forecast. A
+ * forecast is a guess about what a task will touch; this is a fact about what
+ * it did, which is both narrower and always true.
+ */
+export interface BranchClaim {
+  id: string;
+  repositoryId: string;
+  branch: string;
+  taskId: string;
+  /** The revision this was read from, so a stale claim can be recognised. */
+  revision: string;
+  /**
+   * The semantic surface, which is the half that is enforced.
+   *
+   * These are the cases where a clean merge produces broken software — one
+   * branch renames an exported symbol, another adds a caller of the old name,
+   * git merges both without a murmur and the build fails. No textual conflict
+   * machinery catches that, and these change rarely enough that holding them
+   * for a branch's life costs almost nothing.
+   */
+  symbols: string[];
+  apis: string[];
+  schemas: string[];
+  configKeys: string[];
+  services: string[];
+  /**
+   * The lines actually changed, which is the half that only advises.
+   *
+   * Held separately because the trade is different: files churn, and making
+   * these binding would have a branch open for three days block its files for
+   * three days. Recorded so the real contention rate can be seen before
+   * anybody decides whether it should ever be more than a warning.
+   */
+  ranges: ClaimedRange[];
+  createdAt: string;
+}
+
+export interface RecordBranchClaimInput {
+  repositoryId: string;
+  branch: string;
+  taskId: string;
+  revision: string;
+  symbols?: readonly string[];
+  apis?: readonly string[];
+  schemas?: readonly string[];
+  configKeys?: readonly string[];
+  services?: readonly string[];
+  ranges?: readonly ClaimedRange[];
+}
+
 /** One person's membership of one sub-channel. */
 export interface SubChannelMember {
   channelId: string;
@@ -2661,6 +2733,29 @@ export interface CoordinationStore {
    * from somebody who is not in it is the gateway's job, because only it
    * knows who is asking.
    */
+/**
+   * Records what a task left on a branch, so the branch goes on holding it.
+   *
+   * Called when a changeset integrates onto a work channel's branch. Nothing
+   * is recorded for work that lands on canonical: canonical is the thing
+   * everybody merges into, and a claim against it would block every branch in
+   * the repository.
+   */
+  recordBranchClaim(input: RecordBranchClaimInput): Promise<BranchClaim>;
+  /**
+   * What the open branches of one repository are holding.
+   *
+   * `exceptBranch` is how a task avoids contending with its own branch's
+   * earlier work, which is not contention at all — it is the same line of
+   * work continuing, and git will fast-forward it.
+   */
+  listBranchClaims(
+    repositoryId: string,
+    options?: { exceptBranch?: string },
+  ): Promise<BranchClaim[]>;
+  /** Drops everything a branch held, once it has merged or gone. */
+  releaseBranchClaims(repositoryId: string, branch: string): Promise<void>;
+
   listSubChannels(repositoryId: string): Promise<SubChannel[]>;
   getSubChannel(
     repositoryId: string,
