@@ -9015,11 +9015,34 @@ function fileEditor(path) {
       </div>`;
   }
   const dirty = state.chanFileDraft !== state.chanFileBase;
-  return `<div class="thread-body fp-editor-wrap"
+  const holds = state.chanFileHolds ?? [];
+  return `${fileHoldBanner(holds)}
+    <div class="thread-body fp-editor-wrap"
       data-scroll-key="file:${esc(activeChannelId())}:${esc(path)}:edit">
+      <!-- Behind the textarea, and positioned by paintFileHolds rather than
+           by anything here: a textarea cannot colour its own lines, so the
+           blocks are a layer under a transparent one and the arithmetic needs
+           the rendered line height. -->
+      <div class="fp-hold-layer" data-hold-layer aria-hidden="true"></div>
       <textarea class="fp-editor" data-act="chan-file-edit" spellcheck="false"
         wrap="off" aria-label="${esc(path)}">${esc(state.chanFileDraft ?? "")}</textarea>
     </div>
+    ${
+      state.chanFileBlocked === true
+        ? `<div class="fp-blocked">
+             <span>${esc(holdSentence(holds))} Saving now writes over
+               ${holds.length === 1 ? "their" : "the"} work.</span>
+             <button class="btn" type="button"
+               data-act="chan-file-blocked-dismiss">Leave it</button>
+             <!-- Not btn-quiet: that class is a popover menu row, 100% wide
+                  and left-aligned, and it made this bar three stacked lines.
+                  btn-danger on the override is the honest pairing anyway:
+                  writing over somebody's open edit is the destructive half. -->
+             <button class="btn btn-danger" type="button"
+               data-act="chan-file-override">Save anyway</button>
+           </div>`
+        : ""
+    }
     <div class="fp-actions">
       <span class="fp-state">${dirty ? "Unsaved changes" : "No changes"}</span>
       <span class="spacer"></span>
@@ -9030,6 +9053,125 @@ function fileEditor(path) {
           state.chanFileSaving ? "Saving…" : "Save"
         }</button>
     </div>`;
+}
+
+/** Who is in here, in one sentence. */
+function holdSentence(holds) {
+  const name = (hold) =>
+    hold.kind === "agent"
+      ? (agentLabelOf(hold.principalId) ?? hold.principalId)
+      : (memberName(hold.principalId) ?? hold.principalId);
+  const names = [...new Set(holds.map(name))];
+  if (names.length === 0) {
+    return "";
+  }
+  return names.length === 1
+    ? `${names[0]} is editing this file.`
+    : `${names.slice(0, -1).join(", ")} and ${names.at(-1)} are editing this file.`;
+}
+
+/**
+ * A line above the editor naming whoever else is in it.
+ *
+ * The blocks in the margin say *where*; this says *who*, once, because a
+ * colour with no name attached is a thing to wonder about rather than a thing
+ * to act on — and somebody whose hold covers the whole file has no block to
+ * hover over at all.
+ */
+function fileHoldBanner(holds) {
+  return `<div class="fp-holders" data-hold-banner${
+    holds.length === 0 ? " hidden" : ""
+  }>${fileHoldItems(holds)}</div>`;
+}
+
+/** The chips themselves, so a repaint can write them without the wrapper. */
+function fileHoldItems(holds) {
+  return `${holds
+      .map(
+        (hold, index) => `<span class="fp-holder fp-holder-${index % 4}">
+          ${icon(hold.kind === "agent" ? "robot" : "personBust")}
+          ${esc(
+            hold.kind === "agent"
+              ? (agentLabelOf(hold.principalId) ?? hold.principalId)
+              : (memberName(hold.principalId) ?? hold.principalId),
+          )}
+          ${
+            hold.ranges.length === 0
+              ? "· the whole file"
+              : `· ${hold.ranges
+                  .map(
+                    (range) =>
+                      `${String(range.start)}–${String(Math.max(range.start, range.end - 1))}`,
+                  )
+                  .join(", ")}`
+          }
+        </span>`,
+      )
+      .join("")}`;
+}
+
+/**
+ * Draws the blocks, in pixels, over the lines somebody else is holding.
+ *
+ * A textarea has one colour for all of its text and no way to mark a line, so
+ * this is the same trick the composer's ping highlighting uses: a layer
+ * underneath, positioned by arithmetic, with the real control transparent on
+ * top. Line height is measured rather than assumed — it comes from a rem and
+ * a unitless multiplier, so the only honest source is what the browser
+ * actually computed.
+ *
+ * Called after every render and on scroll. Cheap: a handful of divs whose
+ * count is the number of ranges somebody else holds, which is almost always
+ * nought.
+ */
+export function paintFileHolders() {
+  const banner = document.querySelector("[data-hold-banner]");
+  const holds = state.chanFileHolds ?? [];
+  if (banner !== null) {
+    banner.innerHTML = fileHoldItems(holds);
+    banner.hidden = holds.length === 0;
+  }
+  paintFileHolds();
+}
+
+export function paintFileHolds() {
+  const layer = document.querySelector("[data-hold-layer]");
+  const editor = document.querySelector(".fp-editor");
+  if (layer === null || editor === null) {
+    return;
+  }
+  const holds = state.chanFileHolds ?? [];
+  const style = window.getComputedStyle(editor);
+  const lineHeight = Number.parseFloat(style.lineHeight);
+  const top = Number.parseFloat(style.paddingTop);
+  if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+    layer.innerHTML = "";
+    return;
+  }
+  layer.innerHTML = holds
+    .flatMap((hold, index) =>
+      // A hold with no ranges is the whole file. Drawn as one block over
+      // everything rather than left blank: "somebody has all of this" is the
+      // strongest thing this layer can say and the easiest to say wrong by
+      // saying nothing.
+      (hold.ranges.length === 0
+        ? [{ start: 1, end: editor.value.split("\n").length + 1 }]
+        : hold.ranges
+      ).map((range) => {
+        const start = Math.max(1, Number(range.start) || 1);
+        const end = Math.max(start + 1, Number(range.end) || start + 1);
+        return `<div class="fp-hold fp-holder-${index % 4}" style="top:${
+          top + (start - 1) * lineHeight
+        }px;height:${(end - start) * lineHeight}px"></div>`;
+      }),
+    )
+    .join("");
+  layer.style.transform = `translateY(${-editor.scrollTop}px)`;
+  // Assigned rather than added, so a repaint on every render cannot pile up
+  // listeners on the one element that survives them.
+  editor.onscroll = () => {
+    layer.style.transform = `translateY(${-editor.scrollTop}px)`;
+  };
 }
 
 /**
