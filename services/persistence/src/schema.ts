@@ -1741,6 +1741,45 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE sub_channels ADD COLUMN shipped_at TEXT`,
     ],
   },
+  {
+    version: 60,
+    name: "review-a-branch-in-its-own-room",
+    statements: [
+      // Where in the diff a message was said.
+      //
+      // A review comment is a channel message, not a parallel comment
+      // system. The channel already *is* the pull request's conversation —
+      // the tasks that produced the work are threads in it — so a second
+      // store of comments beside it would be two places to look and one of
+      // them would go stale. What a comment needs on top of a message is
+      // where it was pointed, which is these three columns.
+      //
+      // The revision as well as the path and line, because a line number is
+      // only meaningful against a particular commit: the branch moves, and a
+      // comment left on line 42 of one revision is not about line 42 of the
+      // next. Anything reading these has to check the revision still matches
+      // before drawing the comment against a line.
+      `ALTER TABLE channel_messages ADD COLUMN anchor_path TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN anchor_line INTEGER`,
+      `ALTER TABLE channel_messages ADD COLUMN anchor_revision TEXT`,
+      // One review per person per channel, replaced rather than accumulated:
+      // changing your mind is the ordinary case, and a history of somebody
+      // approving and un-approving is noise nobody asked for. The room keeps
+      // the narrative; this keeps the standing answer.
+      `CREATE TABLE sub_channel_reviews (
+         channel_id TEXT NOT NULL,
+         repository_id TEXT NOT NULL,
+         user_id TEXT NOT NULL,
+         state TEXT NOT NULL,
+         note TEXT,
+         revision TEXT,
+         reviewed_at TEXT NOT NULL,
+         PRIMARY KEY (channel_id, user_id)
+       )`,
+      `CREATE INDEX sub_channel_reviews_by_repository
+         ON sub_channel_reviews(repository_id)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

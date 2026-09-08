@@ -18,6 +18,23 @@ import {
 import { GitBatchReader } from "./batch-reader.js";
 import { GitClient, GitCommandError } from "./git-client.js";
 
+/**
+ * One commit a branch has that the branch it is measured against does not.
+ *
+ * Deliberately not {@link CanonicalHistoryEntry}: that one carries a
+ * `sequence`, which is a commit's depth in canonical's history and is
+ * meaningless for a commit that is not on canonical yet. Naming the same
+ * field for both would invite somebody to compare the two.
+ */
+export interface BranchCommit {
+  revision: string;
+  /** The first line of the message, which is what a reviewer scans. */
+  subject: string;
+  author: string;
+  /** When it was committed, ISO-8601. */
+  createdAt: string;
+}
+
 /** One promotion in the canonical branch's history. */
 export interface CanonicalHistoryEntry {
   revision: string;
@@ -1439,6 +1456,15 @@ export class RepositoryService {
   public async compareBranches(
     repository: CanonicalRepository,
     branch: string,
+    /**
+     * How many of the branch's own commits to describe.
+     *
+     * A cap rather than everything, because the panel that shows these is a
+     * column beside a conversation and a branch somebody left open for a
+     * month is not a list anybody reads to the end of. `ahead` is the honest
+     * total either way, so a reader can always tell there is more.
+     */
+    commitLimit = 50,
   ): Promise<{
     mergeBase: string;
     head: string;
@@ -1447,6 +1473,11 @@ export class RepositoryService {
     behind: number;
     files: string[];
     conflicts: string[];
+    /**
+     * The work this branch is made of, newest first, capped at
+     * `commitLimit`. Empty for a branch that has nothing on it yet.
+     */
+    commits: BranchCommit[];
   }> {
     await this.assertBranchName(branch);
     const base = `refs/heads/${repository.branch}`;
@@ -1465,7 +1496,7 @@ export class RepositoryService {
       headRevision,
     ]);
     const mergeBase = mergeBaseResult.stdout.trim();
-    const [counts, files, merged] = await Promise.all([
+    const [counts, files, merged, log] = await Promise.all([
       // One walk for both directions: "ahead" is what this branch added,
       // "behind" is what canonical added while it was away, and asking twice
       // would walk the same history twice.
@@ -1490,6 +1521,18 @@ export class RepositoryService {
         ],
         { allowFailure: true },
       ),
+      // What this branch added, and only that: `mergeBase..head` excludes
+      // everything the two already agreed on. The same record separators
+      // `listCanonicalHistory` uses, for the same reason — a commit subject
+      // containing a tab or a newline must not split a record.
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "log",
+        `--max-count=${commitLimit}`,
+        "--format=%H%x1f%cI%x1f%an%x1f%s%x00",
+        "--end-of-options",
+        `${mergeBase}..${headRevision}`,
+      ]),
     ]);
     const [behindText = "0", aheadText = "0"] = counts.stdout.trim().split(/\s+/u);
     return {
@@ -1504,6 +1547,19 @@ export class RepositoryService {
       // `conflictedPaths`.
       conflicts:
         merged.exitCode === 0 ? [] : this.conflictedPaths(merged.stdout),
+      commits: log.stdout
+        .split("\0")
+        .map((record) => record.trim())
+        .filter((record) => record.length > 0)
+        .map((record): BranchCommit => {
+          const [revision, createdAt, author, subject] = record.split("\x1f");
+          return {
+            revision: revision ?? "",
+            createdAt: createdAt ?? "",
+            author: author ?? "",
+            subject: subject ?? "",
+          };
+        }),
     };
   }
 
