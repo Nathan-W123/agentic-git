@@ -14157,6 +14157,244 @@ dialog.modal[open]::backdrop {
   overflow-x: auto;
 }
 
+/* Who has looked at this, and the two buttons for saying so. */
+.branch-reviews {
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 12px 16px 0;
+  display: grid;
+  gap: 8px;
+}
+
+.branch-review {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 2px 8px;
+  font-size: 12.5px;
+}
+
+.branch-review svg {
+  width: 13px;
+  height: 13px;
+  align-self: center;
+}
+
+.branch-review.approved svg {
+  color: var(--green);
+}
+
+.branch-review.changes_requested svg {
+  color: var(--orange);
+}
+
+/* A review of a branch that has moved since is not a review of this one, and
+   reads quieter so nobody counts it as one. */
+.branch-review.stale {
+  opacity: 0.62;
+}
+
+.branch-review-who {
+  font-weight: 600;
+}
+
+.branch-review-what,
+.branch-review-note {
+  grid-column: 2;
+  color: var(--text-3);
+}
+
+.branch-review-note {
+  font-style: italic;
+}
+
+.branch-review-actions {
+  border-bottom: 0;
+}
+
+/* The answer you have already given reads as given, so the pair is a state
+   rather than two offers. */
+.branch-actions .btn.on {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+  color: var(--text-1);
+}
+
+/* What the branch is made of. */
+.branch-commits {
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-commits > summary {
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.branch-commit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 16px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.branch-commit {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  font-size: 12.5px;
+}
+
+.branch-commit-sha {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.branch-commit-subject {
+  min-width: 0;
+}
+
+.branch-commit-who {
+  grid-column: 2;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+/* One file at a time, folded, with its own stats. */
+.branch-file-review {
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.branch-file-review > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  cursor: pointer;
+}
+
+.branch-file-review > summary:hover {
+  background: var(--bg-hover);
+}
+
+.branch-file-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  /* Read from the end: the file matters more than the directory it is in. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.branch-file-review.conflicted .branch-file-path {
+  color: var(--red);
+}
+
+.branch-file-comments {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--bg-inset);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+/* The affordance for saying something about a line. Hidden until the row is
+   under the pointer, like the message bar in the transcript: a plus on every
+   line of every diff would be the loudest thing on the screen. */
+.dline.commentable {
+  position: relative;
+}
+
+.dline-comment {
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.dline-comment svg {
+  width: 10px;
+  height: 10px;
+}
+
+.dline.commentable:hover .dline-comment,
+.dline-comment:focus-visible {
+  opacity: 1;
+}
+
+.branch-comment {
+  display: grid;
+  gap: 2px;
+  margin: 4px 10px 6px 30px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent-line);
+  background: var(--bg-inset);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 12.5px;
+  white-space: normal;
+}
+
+.branch-comment.stale {
+  opacity: 0.62;
+  border-left-color: var(--border-strong);
+}
+
+.branch-comment-who {
+  font-weight: 600;
+}
+
+.branch-comment-note {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.branch-comment-form {
+  display: grid;
+  gap: 8px;
+  margin: 4px 10px 8px 30px;
+  padding: 8px;
+  border-left: 2px solid var(--accent-line);
+  background: var(--bg-inset);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.branch-comment-form textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+}
+
+.branch-comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .branch-panel .fp-stats {
   display: inline-flex;
   gap: 6px;

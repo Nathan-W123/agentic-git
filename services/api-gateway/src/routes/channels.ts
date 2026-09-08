@@ -687,7 +687,17 @@ export async function routeChannels(
     if (verb === "review") {
       const body = objectBody(await gw.readJson(request));
       const state = body["state"];
-      const note = stringField(body["note"], "note", { max: 2000 }) ?? "";
+      // Optional, and allowed to be empty. Most reviews are a press of a
+      // button and nothing else — the panel sends no note at all — and
+      // `stringField` refuses `undefined` and an empty string alike unless
+      // told otherwise. Without both of these Approve answered 400 every
+      // time somebody pressed it without typing.
+      const note =
+        stringField(body["note"], "note", {
+          min: 0,
+          max: 2000,
+          optional: true,
+        }) ?? "";
       // Withdrawing is a state of its own rather than a DELETE, because it is
       // the same decision as the other two — what do I think of this — and a
       // second HTTP verb for one of three answers would put it somewhere

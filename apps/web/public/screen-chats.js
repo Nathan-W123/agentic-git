@@ -110,6 +110,8 @@ import {
   FLAG_FOR_STATUS,
   buildTree,
   parsePatch,
+  splitPatchByFile,
+  highlight,
   patchStats,
   renderUnified,
 } from "./code-view.js";
@@ -5104,6 +5106,15 @@ function conversationInfoPanel(repositoryId) {
 }
 
 /**
+ * How many files a review opens without being asked.
+ *
+ * Small enough that a typical change is readable in one scroll, and past it
+ * everything starts folded so a twenty-file branch is a list of files rather
+ * than the wall of diff the per-file split exists to replace.
+ */
+const BRANCH_FILES_OPEN_BY_DEFAULT = 4;
+
+/**
  * The pull request a work channel is.
  *
  * A work channel is already the unit a pull request describes — the
@@ -5253,33 +5264,275 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
           : `<span class="branch-note">Somebody with review rights merges this.</span>`
       }
     </div>
-    <ul class="branch-files">
-      ${files
+    ${branchReviewStates(review, channelId, busy)}
+    ${branchCommitList(review)}
+    ${branchFileReview(review, channelId, conflicts, files)}
+    ${
+      review.truncated === true
+        ? `<div class="branch-note">The diff was too long to show in full. Every changed file is listed above.</div>`
+        : ""
+    }`;
+}
+
+/**
+ * Who has looked at this, and the two buttons for saying so.
+ *
+ * Approve and ask-for-changes rather than a third "commented" state: a
+ * comment is a message in the room, which is where comments live, and a
+ * review state that says nothing about the decision would be a row whose only
+ * purpose is to appear in a list.
+ *
+ * A review is stamped with the revision it was left against, so an approval
+ * of a branch that has moved four commits since reads as stale rather than as
+ * an approval of what is on the screen.
+ */
+function branchReviewStates(review, channelId, busy) {
+  const reviews = review.reviews ?? [];
+  const mine = review.myReview;
+  const pressed = (state) => (mine === state ? " on" : "");
+  return `<div class="branch-reviews">
+    ${
+      reviews.length === 0
+        ? `<div class="branch-note">Nobody has reviewed this yet.</div>`
+        : `<ul class="branch-review-list">${reviews
+            .map(
+              (entry) => `<li class="branch-review ${esc(entry.state)}${
+                entry.current === false ? " stale" : ""
+              }">
+                ${icon(entry.state === "approved" ? "check" : "alert")}
+                <span class="branch-review-who">${esc(
+                  memberName(entry.userId) ?? entry.userId,
+                )}</span>
+                <span class="branch-review-what">${
+                  entry.state === "approved" ? "approved" : "asked for changes"
+                }${
+                  entry.current === false
+                    ? " — on an earlier version of this branch"
+                    : ""
+                }</span>
+                ${
+                  entry.note
+                    ? `<span class="branch-review-note">${esc(entry.note)}</span>`
+                    : ""
+                }
+              </li>`,
+            )
+            .join("")}</ul>`
+    }
+    <div class="branch-actions branch-review-actions">
+      <button type="button" class="btn branch-secondary${pressed(
+        "changes_requested",
+      )}" data-act="branch-review-state" data-value="${esc(channelId ?? "")}"
+        data-state="changes_requested" ${busy ? "disabled" : ""}
+        >Request changes</button>
+      <button type="button" class="btn${pressed("approved")}"
+        data-act="branch-review-state" data-value="${esc(channelId ?? "")}"
+        data-state="approved" ${busy ? "disabled" : ""}>Approve</button>
+    </div>
+  </div>`;
+}
+
+/**
+ * What the branch is made of, newest first.
+ *
+ * A diff says what changed; the commits say what was *done*, and in what
+ * order. Without them a reviewer reads one merged blob of every agent's work
+ * at once and has to guess where one piece of work ended and the next began.
+ *
+ * `ahead` is the honest total, so a list the server capped says so rather
+ * than quietly being the whole story.
+ */
+function branchCommitList(review) {
+  const commits = review.commits ?? [];
+  if (commits.length === 0) {
+    return "";
+  }
+  const ahead = review.ahead ?? commits.length;
+  return `<details class="branch-commits" open>
+    <summary>${commits.length} of ${ahead} ${
+      ahead === 1 ? "commit" : "commits"
+    }</summary>
+    <ul class="branch-commit-list">
+      ${commits
         .map(
-          (file) => `<li class="branch-file${
-            conflicts.includes(file) ? " conflicted" : ""
-          }">
-            <button type="button" class="branch-file-open"
-              data-act="chan-file-open" data-value="${esc(file)}"
-              title="Open ${esc(file)}">${esc(file)}</button>
-            ${
-              conflicts.includes(file)
-                ? `<span class="branch-conflict">conflicts</span>`
-                : ""
-            }
+          (commit) => `<li class="branch-commit">
+            <code class="branch-commit-sha">${esc(
+              String(commit.revision ?? "").slice(0, 8),
+            )}</code>
+            <span class="branch-commit-subject">${esc(commit.subject ?? "")}</span>
+            <span class="branch-commit-who">${esc(commit.author ?? "")} · ${esc(
+              relativeTime(commit.createdAt),
+            )}</span>
           </li>`,
         )
         .join("")}
     </ul>
-    <div class="branch-diff">${
-      typeof review.patch === "string" && review.patch !== ""
-        ? renderUnified(parsePatch(review.patch))
-        : `<div class="branch-note">No text diff for these changes.</div>`
-    }${
-      review.truncated === true
-        ? `<div class="branch-note">The diff was too long to show in full. Every changed file is listed above.</div>`
+  </details>`;
+}
+
+/**
+ * The diff, one file at a time, with the comments left on it.
+ *
+ * One flat patch is what a diff *viewer* shows. A review is read file by
+ * file — you open the one you care about, say something about a line in it,
+ * and collapse it again — so each file is its own section with its own stats
+ * and its own fold.
+ *
+ * Open by default while the change is small enough to take in at once.
+ * Past that, everything starts folded and the reader chooses, because a
+ * twenty-file branch that expands all of them is the wall of diff this
+ * replaced.
+ */
+function branchFileReview(review, channelId, conflicts, files) {
+  const perFile = splitPatchByFile(review.patch ?? "");
+  const byPath = new Map(perFile.map((file) => [file.path, file.patch]));
+  const openByDefault = perFile.length <= BRANCH_FILES_OPEN_BY_DEFAULT;
+  // Every file the comparison named, whether or not the patch covered it: a
+  // binary file changes without producing a text diff, and leaving it out of
+  // the list would be the review quietly not mentioning it.
+  const paths = files.length > 0 ? files : perFile.map((file) => file.path);
+  const comments = review.comments ?? [];
+  return paths
+    .map((path) => {
+      const patch = byPath.get(path);
+      const stats = patch === undefined
+        ? { additions: 0, deletions: 0 }
+        : patchStats(patch);
+      const onThisFile = comments.filter(
+        (comment) => comment.anchor?.path === path,
+      );
+      return `<details class="branch-file-review${
+        conflicts.includes(path) ? " conflicted" : ""
+      }"${openByDefault ? " open" : ""}>
+        <summary>
+          <span class="branch-file-path">${esc(path)}</span>
+          ${
+            onThisFile.length > 0
+              ? `<span class="branch-file-comments">${onThisFile.length}</span>`
+              : ""
+          }
+          ${
+            conflicts.includes(path)
+              ? `<span class="branch-conflict">conflicts</span>`
+              : ""
+          }
+          <span class="fp-stats">
+            <span class="delta-add">+${stats.additions}</span>
+            <span class="delta-del">-${stats.deletions}</span>
+          </span>
+        </summary>
+        <div class="branch-diff">${
+          patch === undefined
+            ? `<div class="branch-note">No text diff for this file.</div>`
+            : reviewableDiff(patch, path, channelId, review, onThisFile)
+        }</div>
+      </details>`;
+    })
+    .join("");
+}
+
+/**
+ * One file's diff, with a way to say something about a line.
+ *
+ * `renderUnified` draws rows and nothing else, which is what the file panel
+ * wants. A review wants two more things per row: somewhere to press to leave
+ * a comment, and the comments already left there, under the line they are
+ * about. So the rows are drawn here rather than there — same `parsePatch`,
+ * same `highlight`, same classes, so a diff in the review and a diff in the
+ * file panel are the same object with one affordance added.
+ *
+ * Only added and context rows can be commented on. A deleted line is not in
+ * the branch any more, so a comment anchored to it points at nothing an agent
+ * could go and change.
+ */
+function reviewableDiff(patch, path, channelId, review, comments) {
+  const rows = parsePatch(patch);
+  const byLine = new Map();
+  for (const comment of comments) {
+    const line = comment.anchor?.line;
+    if (typeof line === "number") {
+      byLine.set(line, [...(byLine.get(line) ?? []), comment]);
+    }
+  }
+  const composing = state.branchComment;
+  return rows
+    .map((row) => {
+      const oldNo = row.oldNo === undefined ? "" : row.oldNo;
+      const newNo = row.newNo === undefined ? "" : row.newNo;
+      const commentable = row.kind === "add" || row.kind === "ctx";
+      const line = typeof row.newNo === "number" ? row.newNo : undefined;
+      const here = line === undefined ? [] : (byLine.get(line) ?? []);
+      const open =
+        composing !== undefined &&
+        composing.channelId === channelId &&
+        composing.path === path &&
+        composing.line === line;
+      return `<div class="dline ${row.kind}${
+        commentable ? " commentable" : ""
+      }"><span class="ln">${oldNo}</span><span class="ln">${newNo}</span><span class="src">${highlight(
+        row.text,
+      )}</span>${
+        commentable && line !== undefined
+          ? `<button type="button" class="dline-comment"
+               data-act="branch-comment-open"
+               data-value="${esc(channelId ?? "")}"
+               data-path="${esc(path)}" data-line="${String(line)}"
+               title="Comment on line ${String(line)}">${icon("plus")}</button>`
+          : ""
+      }</div>${here.map((comment) => branchCommentHtml(comment)).join("")}${
+        open ? branchCommentComposer(channelId, path, line, review) : ""
+      }`;
+    })
+    .join("");
+}
+
+/** One comment, under the line it points at. */
+function branchCommentHtml(comment) {
+  return `<div class="branch-comment${
+    comment.current === false ? " stale" : ""
+  }">
+    <span class="branch-comment-who">${esc(
+      memberName(comment.authorId) ?? comment.authorId,
+    )}</span>
+    <span class="branch-comment-body">${esc(comment.content)}</span>
+    ${
+      comment.current === false
+        ? `<span class="branch-comment-note">left on an earlier version of this line</span>`
         : ""
-    }</div>`;
+    }
+    ${
+      comment.replies > 0
+        ? `<span class="branch-comment-note">${String(comment.replies)} ${
+            comment.replies === 1 ? "reply" : "replies"
+          } in the thread</span>`
+        : ""
+    }
+  </div>`;
+}
+
+/**
+ * The box for saying something about a line.
+ *
+ * It posts a channel message, so `@`-mentioning an agent in it dispatches a
+ * task on this branch — which is the thing a pull request on GitHub
+ * structurally cannot do, and the reason the placeholder says so.
+ */
+function branchCommentComposer(channelId, path, line, review) {
+  // A div and a button, not a `<form>`. The click dispatcher walks up to the
+  // nearest `[data-act]`, so a form carrying the act *and* a submit button
+  // inside it would fire the click path and the submit path for one press,
+  // and post the comment twice.
+  return `<div class="branch-comment-form">
+    <textarea class="input" name="content" rows="2" autofocus
+      placeholder="Comment on line ${String(line)} — @mention an agent and it fixes it here"></textarea>
+    <div class="branch-comment-actions">
+      <button type="button" class="btn-quiet" data-act="branch-comment-cancel">Cancel</button>
+      <button type="button" class="btn btn-primary"
+        data-act="branch-comment-submit" data-value="${esc(channelId ?? "")}"
+        data-path="${esc(path)}" data-line="${String(line)}"
+        data-revision="${esc(review.head ?? "")}">Comment</button>
+    </div>
+  </div>`;
 }
 
 /** The one-line state of a branch: how far ahead, how far behind, what breaks. */

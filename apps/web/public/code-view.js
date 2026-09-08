@@ -130,6 +130,68 @@ export function parsePatch(patch) {
   return rows;
 }
 
+/**
+ * One unified patch, split into the files it covers.
+ *
+ * `parsePatch` deliberately drops every `diff --git` header, which is right
+ * for a patch that is already one file and wrong for one that is several: the
+ * hunks run together and the line numbers restart mid-stream with nothing
+ * saying why. A review of a branch is always several files, so it splits
+ * first and parses each piece.
+ *
+ * The path is taken from the `+++ b/…` line rather than from `diff --git`,
+ * because that one is unambiguous when a path contains a space — git quotes
+ * the pair on the `diff` line and does not always quote the `+++`. A deleted
+ * file has `+++ /dev/null`, so its name comes from the `---` side instead.
+ *
+ * Returns `[]` for empty input, and a single unnamed entry for a patch with
+ * no headers at all — which is what a caller that already knew the file
+ * passes, and is exactly `parsePatch`'s old behaviour.
+ */
+export function splitPatchByFile(patch) {
+  if (typeof patch !== "string" || patch.trim() === "") {
+    return [];
+  }
+  const lines = patch.split("\n");
+  const files = [];
+  let current;
+  const nameFrom = (line, prefix) => {
+    const raw = line.slice(prefix.length).trim();
+    if (raw === "/dev/null") {
+      return undefined;
+    }
+    // `a/` and `b/` are git's own prefixes, not part of the path.
+    return raw.replace(/^[ab]\//u, "");
+  };
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) {
+      current = { path: "", lines: [] };
+      files.push(current);
+      continue;
+    }
+    if (current === undefined) {
+      // A patch that opens with hunks and no header: one file, unnamed.
+      current = { path: "", lines: [] };
+      files.push(current);
+    }
+    if (line.startsWith("+++ ")) {
+      current.path = nameFrom(line, "+++ ") ?? current.path;
+      continue;
+    }
+    if (line.startsWith("--- ")) {
+      // Only as a fallback, so a deleted file is still named after the thing
+      // that was deleted rather than after nothing.
+      current.path = current.path || (nameFrom(line, "--- ") ?? "");
+      continue;
+    }
+    current.lines.push(line);
+  }
+  return files.map((file) => ({
+    path: file.path,
+    patch: file.lines.join("\n"),
+  }));
+}
+
 export function patchStats(patch) {
   let additions = 0;
   let deletions = 0;

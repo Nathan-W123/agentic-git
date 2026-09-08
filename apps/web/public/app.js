@@ -67,7 +67,9 @@ import {
   moveChannelFile,
   saveChannelFile,
   createSubChannel,
+  commentOnBranchLine,
   loadBranchReview,
+  reviewBranch,
   mergeBranchReview,
   refreshBranchReview,
   shipBranchReview,
@@ -10209,6 +10211,92 @@ document.addEventListener("click", (event) => {
         render();
         void ensureChannelMessages(repositoryId, render);
       });
+      return;
+    }
+    /**
+     * Comment on a line. One box at a time, drawn inside the diff at the line
+     * it is about — two of them would be two boxes in one scroll each
+     * claiming to be the comment you are writing.
+     */
+    case "branch-comment-open": {
+      const line = Number(node?.dataset?.line ?? "");
+      if (!Number.isSafeInteger(line)) {
+        return;
+      }
+      state.branchComment = {
+        channelId: value,
+        path: node?.dataset?.path ?? "",
+        line,
+      };
+      render();
+      // Focus after the render that draws it, not before: the textarea does
+      // not exist yet on this tick.
+      requestAnimationFrame(() => {
+        document.querySelector(".branch-comment-form textarea")?.focus();
+      });
+      return;
+    }
+    case "branch-comment-cancel":
+      state.branchComment = undefined;
+      render();
+      return;
+    case "branch-comment-submit": {
+      const repositoryId = activeChannelId();
+      // Read from the box this button belongs to, not from the document: two
+      // reviews can be open in the column at once and `querySelector` would
+      // find whichever came first in the DOM.
+      const box = node?.closest?.(".branch-comment-form");
+      const content = String(box?.querySelector("textarea")?.value ?? "").trim();
+      if (content === "") {
+        return;
+      }
+      const line = Number(node?.dataset?.line ?? "");
+      void commentOnBranchLine(repositoryId, value, {
+        path: node?.dataset?.path ?? "",
+        line,
+        revision: node?.dataset?.revision ?? "",
+        content,
+      }).then((posted) => {
+        if (posted === undefined) {
+          toast(state.branchReviewError ?? "Could not leave that comment", "error");
+        } else if ((posted.taskIds ?? []).length > 0) {
+          // The thing a pull request on GitHub cannot do: the comment
+          // mentioned an agent, so the fix is already running on this branch.
+          toast("Comment posted — an agent is on it", "ok");
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      render();
+      return;
+    }
+    /**
+     * Approve, or ask for changes. Pressing the one already pressed withdraws
+     * it, which is how a toggle behaves and saves a third button for the one
+     * answer nobody looks for.
+     */
+    case "branch-review-state": {
+      const repositoryId = activeChannelId();
+      const wanted = node?.dataset?.state ?? "";
+      const current = state.branchReview[value]?.myReview;
+      const next = current === wanted ? "withdrawn" : wanted;
+      void reviewBranch(repositoryId, value, next).then((saved) => {
+        if (saved === undefined) {
+          toast(state.branchReviewError ?? "Could not record that", "error");
+        } else {
+          toast(
+            next === "withdrawn"
+              ? "Review withdrawn"
+              : next === "approved"
+                ? "Approved"
+                : "Changes requested",
+            "ok",
+          );
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      render();
       return;
     }
     case "secondary-context-close": {

@@ -221,6 +221,21 @@ export interface TestRuntime {
   shipOutcome: { outcome: "done" | "refused"; explanation?: string };
   /** What `branchComparison` says changed; mutated in place by tests. */
   branchFiles: string[];
+  /**
+   * How far behind canonical `branchComparison` says every branch is.
+   *
+   * Zero by default, because a fixture whose branches were permanently
+   * drifting would make the sweep post into every room in every test. The
+   * drift test sets it, and is the only thing that reads it.
+   */
+  branchDrift: { behind: number };
+  /**
+   * What `branchComparison` calls the branch's head; mutated in place.
+   *
+   * A comment and a review are both stamped with the head they were about,
+   * and the only way to test that staleness is visible is to move it.
+   */
+  branchHead: { revision: string };
   /** The commits `branchComparison` says the branch is made of. */
   branchCommits: Array<{
     revision: string;
@@ -600,6 +615,8 @@ export async function startRuntime(
   const shipOutcome: TestRuntime["shipOutcome"] = { outcome: "done" };
   const mergedBranches: TestRuntime["mergedBranches"] = [];
   const branchFiles: TestRuntime["branchFiles"] = ["src/login.ts"];
+  const branchDrift: TestRuntime["branchDrift"] = { behind: 0 };
+  const branchHead: TestRuntime["branchHead"] = { revision: "c".repeat(40) };
   const branchCommits: TestRuntime["branchCommits"] = [
     {
       revision: "1".repeat(40),
@@ -1143,10 +1160,10 @@ export async function startRuntime(
       }
       return {
         mergeBase: "b".repeat(40),
-        head: "c".repeat(40),
+        head: branchHead.revision,
         baseHead: "b".repeat(40),
         ahead: state.conflicts.length > 0 ? 2 : 1,
-        behind: 0,
+        behind: branchDrift.behind,
         files: branchFiles,
         patch: canonicalDiff.patch,
         truncated: false,
@@ -1575,6 +1592,8 @@ export async function startRuntime(
     shippedChannels,
     shipOutcome,
     branchFiles,
+    branchDrift,
+    branchHead,
     branchCommits,
     canonicalState,
     runFailure,

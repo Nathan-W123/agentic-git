@@ -757,6 +757,14 @@ export const state = {
   branchReviewBusy: undefined,
   /** Why the last review read or merge failed, if it did. */
   branchReviewError: undefined,
+  /**
+   * The line a comment is being written about, if one is.
+   *
+   * `{ channelId, path, line }`. One at a time, because the box is drawn
+   * inside the diff at the line it is about and two of them would be two
+   * boxes in one scroll claiming to be the comment you are writing.
+   */
+  branchComment: undefined,
   /** A one-shot message id the next channel render should scroll to. */
   scrollToMessage: undefined,
   /**
@@ -4477,6 +4485,80 @@ export async function shipBranchReview(repositoryId, channelId) {
     await loadBranchReview(repositoryId, channelId);
     state.channelLoaded.delete(repositoryId);
     return outcome;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Says something about a line, in the room the branch belongs to.
+ *
+ * It posts a channel message with an anchor, through the same route any other
+ * message goes through — so `@`-mentioning an agent in one dispatches a task
+ * on this branch. The whole review is re-read afterwards rather than the
+ * comment being spliced in: the dispatch may have started work, and the panel
+ * shows what the server believes rather than what this browser hoped.
+ */
+export async function commentOnBranchLine(
+  repositoryId,
+  channelId,
+  { path, line, revision, content },
+) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const posted = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/comments`,
+      ),
+      { method: "POST", body: { path, line, revision, content } },
+    );
+    state.branchReviewBusy = undefined;
+    state.branchComment = undefined;
+    await loadBranchReview(repositoryId, channelId);
+    // The comment is a message, so the transcript is a revision behind.
+    state.channelLoaded.delete(repositoryId);
+    return posted;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
+/**
+ * Approves the branch, asks for changes, or withdraws what you said before.
+ *
+ * `withdrawn` is a state rather than a DELETE because it is the same decision
+ * as the other two — what do I think of this — and a second verb for one of
+ * three answers would put it somewhere else in a surface that offers all
+ * three together.
+ */
+export async function reviewBranch(repositoryId, channelId, state_, note) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const saved = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/review`,
+      ),
+      {
+        method: "POST",
+        body: { state: state_, ...(note ? { note } : {}) },
+      },
+    );
+    state.branchReviewBusy = undefined;
+    await loadBranchReview(repositoryId, channelId);
+    // The server says every review out loud in the room, so the transcript
+    // has a line this browser has not read yet.
+    state.channelLoaded.delete(repositoryId);
+    return saved;
   } catch (error) {
     state.branchReviewError = error.message;
     return undefined;
