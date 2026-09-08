@@ -17,6 +17,13 @@ import {
 import ts from "typescript";
 
 import {
+  contractChanges,
+  shapeOf,
+  type ContractChange,
+  type SymbolShape,
+} from "./contract-shape.js";
+
+import {
   braceSymbolRanges,
   pythonSymbolRanges,
   rubySymbolRanges,
@@ -28,6 +35,13 @@ export {
   identifierTokens,
   GENERIC_IDENTIFIER_TOKENS,
 } from "./plan-grounding.js";
+export {
+  contractChanges,
+  shapeOf,
+  type ContractChange,
+  type ShapeKind,
+  type SymbolShape,
+} from "./contract-shape.js";
 export {
   assessGroundedIntent,
   groundedIntentAssessor,
@@ -111,6 +125,28 @@ export interface IndexedFile {
    * not break it, which is worse. See `interfaceScopeOf` in `@coord/shared-types`.
    */
   exportedSymbols: string[];
+  /**
+   * The written contract of each exported symbol — see `contract-shape.ts`.
+   *
+   * The tier above {@link exportedSymbols}, and the one that catches the
+   * conflict a name cannot: two branches, one changing `password: string` to
+   * `password: number` and one still passing a string, agree on every name
+   * and merge without a murmur. A digest over the shape disagrees.
+   *
+   * Never longer than {@link exportedSymbols} and often shorter — a re-export
+   * names a declaration in another file, and there is no shape here to read.
+   */
+  exportedShapes: SymbolShape[];
+  /**
+   * Set when this file exports things whose shapes could not be read at all,
+   * because its language is scanned rather than parsed.
+   *
+   * The same distinction {@link symbolRangesUnknown} draws: "exports nothing
+   * with a shape" is safe to compare against, "cannot read shapes here" is
+   * emphatically not — a Python file would otherwise report an unchanging
+   * contract through every rewrite it ever gets.
+   */
+  exportedShapesUnknown?: boolean;
   /**
    * Empty for a file whose language the indexer does not parse into an AST.
    * Callers must not read that as "this file has no symbols" — use
@@ -318,6 +354,20 @@ function analyzeScript(
   const services = new Set<string>();
   const ranges = new Map<string, SymbolRange>();
   const calls = new Map<string, Set<string>>();
+  /**
+   * One shape per exported name, last declaration wins.
+   *
+   * A map rather than a list because an overloaded function is several nodes
+   * under one name: the implementation signature comes last and is the one a
+   * caller is bound by.
+   */
+  const shapes = new Map<string, SymbolShape>();
+  const shape = (name: string, node: ts.Node): void => {
+    const read = shapeOf(node, name, file);
+    if (read !== undefined) {
+      shapes.set(name, read);
+    }
+  };
   const ambient = /\.d\.[cm]?ts$/u.test(filePath);
 
   /**
@@ -380,6 +430,7 @@ function analyzeScript(
       symbols.add(declaration);
       if (isExported(node, ambient)) {
         exported.add(declaration);
+        shape(declaration, node);
       }
       record(declaration, node);
       if (/(?:Service|Client|Repository|Gateway|Worker)$/u.test(declaration)) {
@@ -442,6 +493,10 @@ function analyzeScript(
       // too, and asking the node this is already holding says so plainly.
       if (isExported(statement, ambient)) {
         exported.add(node.name.text);
+        // The declarator, not the statement: the type annotation belongs to
+        // the one being declared, and `export const a: A, b: B` is two
+        // contracts under one keyword.
+        shape(node.name.text, node);
       }
       record(node.name.text, statement);
     }
@@ -566,6 +621,14 @@ function analyzeScript(
     imports: uniqueStrings([...imports]),
     dependencies: uniqueStrings([...dependencies]),
     exportedSymbols: uniqueStrings([...exported]),
+    // Only for names something in this file actually declares. `export {
+    // thing } from "./other"` publishes a name whose shape is written
+    // somewhere else, and inventing an empty one here would report that
+    // re-export as an unchanging contract forever.
+    exportedShapes: [...exported]
+      .map((name) => shapes.get(name))
+      .filter((entry): entry is SymbolShape => entry !== undefined)
+      .sort((left, right) => left.symbol.localeCompare(right.symbol)),
     referencedSymbols: uniqueStrings([...referencedSymbols]),
     apis: uniqueStrings([...apis]),
     schemas: uniqueStrings([...schemas]),
@@ -651,6 +714,11 @@ function analyzeScannedFile(
     symbols: (ranges ?? []).map((range) => range.name),
     symbolRanges: ranges ?? [],
     ...(ranges === undefined ? { symbolRangesUnknown: true } : {}),
+    // Located, but not shaped. A scanner can find where a declaration starts
+    // and cannot read what it publishes, so this says so rather than
+    // reporting an unchanging contract through every rewrite the file gets.
+    exportedShapes: [],
+    exportedShapesUnknown: true,
     symbolCalls: [],
     imports: [],
     dependencies: [],
@@ -719,6 +787,8 @@ function analyzeDataFile(
     imports: [],
     dependencies: [],
     exportedSymbols: [],
+    exportedShapes: [],
+    exportedShapesUnknown: true,
     referencedSymbols: [],
     apis: [],
     schemas: uniqueStrings([...schemas]),
@@ -1480,6 +1550,153 @@ export class CodeIntelligenceService {
       tests: uniqueStrings(files.flatMap((file) => file.tests)),
       services: uniqueStrings(files.flatMap((file) => file.services)),
     };
+  }
+
+  /**
+   * Which files depend on a symbol exported from a file — the other direction.
+   *
+   * `enrichPlan` walks these edges the way a plan needs them: from the files
+   * somebody will edit, out to what those files depend on. This is the
+   * reverse, and it is the one the audit is about. Nothing here could answer
+   * "who am I about to break", so a branch changing a contract and a branch
+   * consuming it never contended: the producer's claim named the symbol, the
+   * consumer's claim named its own file's symbols, and the two sets never
+   * met.
+   *
+   * Two ways in, deliberately both:
+   *
+   * - The **import edge**, which is resolved and certain. A file importing
+   *   `./auth` depends on `auth.ts`, whatever it took from it.
+   * - The **reference**, which is a name and a guess. `referencedSymbols`
+   *   holds the identifiers a file *calls*, *constructs*, or *extends*,
+   *   unresolved — so a file calling `issueToken` counts as a consumer of the
+   *   `issueToken` exported anywhere, whether or not the import resolved.
+   *   Two consequences, both worth knowing: it over-reports where a name is
+   *   common, which is why this warns rather than blocks on its own; and it
+   *   misses a bare value reference — `const fn = issueToken` with no call —
+   *   because nothing records those. The import edge covers that case
+   *   whenever the file did import it, which is nearly always.
+   */
+  public consumersOf(
+    index: RepositoryIndex,
+    target: { file: string; symbol?: string },
+  ): string[] {
+    const importers = new Set(
+      index.edges
+        .filter((edge) => edge.kind === "import" && edge.toFile === target.file)
+        .map((edge) => edge.fromFile),
+    );
+    if (target.symbol !== undefined) {
+      for (const file of index.files) {
+        if (
+          file.path !== target.file &&
+          file.referencedSymbols.includes(target.symbol)
+        ) {
+          importers.add(file.path);
+        }
+      }
+    }
+    importers.delete(target.file);
+    return [...importers].sort();
+  }
+
+  /**
+   * Every exported contract that differs between two revisions of a
+   * repository, with who was consuming it at the earlier one.
+   *
+   * The consumers are read from `before` on purpose. What matters is who was
+   * depending on the old shape — a file that started consuming it *after* the
+   * change consumed the new one and is not stale.
+   */
+  public contractDrift(
+    before: RepositoryIndex,
+    after: RepositoryIndex,
+  ): Array<ContractChange & { consumers: string[] }> {
+    const shapesOf = (index: RepositoryIndex) =>
+      new Map(
+        index.files
+          .filter((file) => file.exportedShapesUnknown !== true)
+          .map((file) => [file.path, file.exportedShapes]),
+      );
+    return contractChanges(shapesOf(before), shapesOf(after)).map((change) => ({
+      ...change,
+      consumers: this.consumersOf(before, {
+        file: change.file,
+        symbol: change.symbol,
+      }),
+    }));
+  }
+
+  /**
+   * The exported contracts these files publish, by symbol.
+   *
+   * What a branch claim records when work lands on it, so the next plan can
+   * be compared against the shape rather than the name.
+   */
+  public shapesIn(
+    changedFiles: readonly string[],
+    index: RepositoryIndex,
+  ): Array<SymbolShape & { file: string }> {
+    const changed = new Set(changedFiles);
+    return index.files
+      .filter((file) => changed.has(file.path))
+      .flatMap((file) =>
+        file.exportedShapes.map((shape) => ({ ...shape, file: file.path })),
+      );
+  }
+
+  /**
+   * Contracts canonical has moved since a branch cut, that the branch reads.
+   *
+   * The whole silent-conflict check, in one testable piece. It lives here
+   * rather than in the caller because the caller is a closure inside a
+   * server — untestable — and every decision in it is one a sabotage should
+   * be able to reach: which two revisions are compared, which direction, and
+   * that the answer is filtered to what this branch actually touched.
+   *
+   * The two revisions are the load-bearing part. **The merge base**, not the
+   * branch's tip: the question is what this branch was written against, and
+   * its own tip includes its own changes. **Canonical's tip**, not the base
+   * again: the question is what it will land on. Reading the tip on either
+   * side turns a check that clears itself — bring the latest in, the base
+   * moves past the change, the answer empties — into one that never does.
+   */
+  public async staleContracts(
+    repository: CanonicalRepository,
+    comparison: {
+      mergeBase: string;
+      baseHead: string;
+      files: readonly string[];
+    },
+  ): Promise<
+    Array<{
+      file: string;
+      symbol: string;
+      before: string;
+      after: string;
+      through: string;
+    }>
+  > {
+    const [base, canonical] = await Promise.all([
+      this.index(repository, comparison.mergeBase),
+      this.index(repository, comparison.baseHead),
+    ]);
+    const touched = new Set(comparison.files);
+    return this.contractDrift(base, canonical).flatMap((change) =>
+      change.consumers
+        // Only what this branch has actually written against. A contract that
+        // moved on canonical and that nothing here reads is somebody else's
+        // change landing normally, and reporting it would make every merge
+        // wait on every other merge.
+        .filter((consumer) => touched.has(consumer))
+        .map((consumer) => ({
+          file: change.file,
+          symbol: change.symbol,
+          before: change.before,
+          after: change.after,
+          through: consumer,
+        })),
+    );
   }
 
   public clear(repositoryId?: string): void {

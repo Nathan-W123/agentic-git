@@ -25,7 +25,8 @@ function indexedFile(
     // Every symbol these fixtures name is exported: they stand for the
     // shared declarations grounding is about, and a fixture where nothing
     // crosses a file boundary would exercise nothing.
-    exportedSymbols: symbols,
+    exportedShapes: [],
+  exportedSymbols: symbols,
     symbolRanges: [],
     symbolCalls: [],
     imports: [],

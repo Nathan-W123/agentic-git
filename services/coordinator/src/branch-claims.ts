@@ -38,6 +38,7 @@
 import type {
   BranchClaim,
   ClaimedRange,
+  ClaimedShape,
   RecordBranchClaimInput,
 } from "@coord/persistence";
 import type { AgentPlan, ChangeSet, FilePatch } from "@coord/shared-types";
@@ -135,6 +136,21 @@ export function claimFromChangeSet(input: {
     configKeys: readonly string[];
     services: readonly string[];
   };
+  /**
+   * The exported contracts in the changed files, as this branch left them,
+   * and who depends on them.
+   *
+   * Every exported shape in every file the diff touched, not only the ones
+   * that moved — and that over-claim is deliberate, because the comparison is
+   * by digest. Two branches that both edited `auth.ts` without touching
+   * `sign` record the same digest for it and do not contend; two that left it
+   * in different states record different ones and do. Recording "what I
+   * changed" instead would need the shape at the base as well, and would
+   * answer a narrower question less reliably.
+   */
+  contracts?: {
+    shapes: readonly ClaimedShape[];
+  };
 }): RecordBranchClaimInput {
   const observed = input.resources;
   return {
@@ -157,6 +173,7 @@ export function claimFromChangeSet(input: {
         declared(input.plan, "services", input.plan?.expectedServices)),
     ],
     ranges: rangesFromPatches(input.changeSet.patches),
+    shapes: [...(input.contracts?.shapes ?? [])],
   };
 }
 
@@ -219,6 +236,148 @@ export function branchClaimsAsActivePlans(
         },
       } satisfies AgentPlan,
     }));
+}
+
+/**
+ * One contract another open branch has left in a state canonical does not
+ * share, that this plan is about to build on or edit.
+ *
+ * The case the whole contract layer exists for, and the one nothing here
+ * could see before: two branches whose files never meet, whose symbol *names*
+ * are identical, and whose merge git performs without a word.
+ */
+export interface ContractWarning {
+  branch: string;
+  taskId: string;
+  file: string;
+  symbol: string;
+  /** What that branch left the contract as. */
+  shape: string;
+  /** What canonical still says it is, or `undefined` if it is new there. */
+  canonical: string | undefined;
+  /**
+   * How this plan meets it.
+   *
+   * `contract` — the plan edits the contract itself, which is the collision
+   * the symbol-name comparison already catches; it is repeated here with the
+   * shapes so the reason can say what actually differs.
+   *
+   * `consumer` — the plan edits a file built on it. This is the new one, and
+   * the reason the dependency map needed a reverse.
+   */
+  via: "contract" | "consumer";
+  /** The plan's file that meets it, for the sentence. */
+  through: string;
+  /** That contract is partly inferred, so this comparison is partly blind. */
+  inferred?: boolean;
+}
+
+/**
+ * How a contract is addressed in the map {@link contractWarnings} takes.
+ *
+ * Exported because the caller builds that map and this reads it: two
+ * different spellings of the same key is a comparison that silently finds
+ * nothing, which looks exactly like a repository with no contention in it.
+ */
+export function contractKey(file: string, symbol: string): string {
+  return `${file}\u0000${symbol}`;
+}
+
+/**
+ * Where this plan meets a contract another branch has already moved.
+ *
+ * `canonical` is what the repository's own branch says these contracts are
+ * *now*. A claim records every exported shape in the files its branch
+ * touched, changed or not, so this is what separates the two: a shape whose
+ * digest matches canonical is one the branch left alone, and only a shape
+ * that differs is a contract that has moved somewhere and not everywhere.
+ *
+ * That comparison is also what makes the over-claim harmless. Two branches
+ * that both edited `auth.ts` without touching `sign` record identical digests
+ * for it, agree with canonical, and produce nothing.
+ */
+export function contractWarnings(input: {
+  plan: AgentPlan;
+  claims: readonly BranchClaim[];
+  canonical: ReadonlyMap<string, ClaimedShape>;
+}): ContractWarning[] {
+  const files = new Set(input.plan.expectedFiles);
+  const symbols = new Set(input.plan.expectedSymbols);
+  const warnings: ContractWarning[] = [];
+  for (const claim of input.claims) {
+    for (const shape of claim.shapes) {
+      const here = input.canonical.get(contractKey(shape.file, shape.symbol));
+      // Unchanged against canonical is not a contract that moved. A shape
+      // canonical has never heard of is: the branch added an export, and
+      // anything already calling that name was calling something else.
+      if (here !== undefined && here.digest === shape.digest) {
+        continue;
+      }
+      const meeting =
+        files.has(shape.file) || symbols.has(shape.symbol)
+          ? { via: "contract" as const, through: shape.file }
+          : (() => {
+              const consumed = shape.consumers.find((file) => files.has(file));
+              return consumed === undefined
+                ? undefined
+                : { via: "consumer" as const, through: consumed };
+            })();
+      if (meeting === undefined) {
+        continue;
+      }
+      warnings.push({
+        branch: claim.branch,
+        taskId: claim.taskId,
+        file: shape.file,
+        symbol: shape.symbol,
+        shape: shape.shape,
+        canonical: here?.shape,
+        ...meeting,
+        ...(shape.inferred === true ? { inferred: true } : {}),
+      });
+    }
+  }
+  return warnings.sort(
+    (left, right) =>
+      left.file.localeCompare(right.file) ||
+      left.symbol.localeCompare(right.symbol) ||
+      left.branch.localeCompare(right.branch),
+  );
+}
+
+/**
+ * The warnings as sentences, the contract this plan edits before the ones it
+ * merely consumes.
+ *
+ * Ordered that way because they are different problems. Editing a contract
+ * somebody else has already moved is a collision to resolve; consuming one is
+ * a thing to know before writing code against a shape that is on its way out.
+ */
+export function describeContractWarnings(
+  warnings: readonly ContractWarning[],
+): string[] {
+  const branch = (name: string): string => `#${name.replace(/^kumi\//u, "")}`;
+  return [...warnings]
+    .sort((left, right) =>
+      left.via === right.via ? 0 : left.via === "contract" ? -1 : 1,
+    )
+    .map((warning) => {
+      const moved =
+        warning.canonical === undefined
+          ? `${branch(warning.branch)} has added it as \`${warning.shape}\``
+          : `${branch(warning.branch)} has already changed it from ` +
+            `\`${warning.canonical}\` to \`${warning.shape}\``;
+      const blind =
+        warning.inferred === true
+          ? " Part of this contract is inferred rather than written, so not all of it is being watched."
+          : "";
+      return warning.via === "contract"
+        ? `${warning.file}: \`${warning.symbol}\` — ${moved}, and has not merged yet.${blind}`
+        : `${warning.through} is built on \`${warning.symbol}\` from ` +
+          `${warning.file}, and ${moved}. It has not merged yet, so code ` +
+          `written against the shape on the repository's own branch will ` +
+          `stop compiling when it does.${blind}`;
+    });
 }
 
 /** One place a plan is about to edit that another branch already changed. */

@@ -371,7 +371,7 @@ test("a branch that cannot merge says so, names the files, and offers a way out"
   // is the one way this box could be wrong in both directions at once.
   assert.match(
     box,
-    /blocked\s*\n\s*\? mergeRow\(\s*\n\s*"bad",\s*\n\s*"closeCircle",\s*\n\s*"This branch has conflicts that must be resolved"/u,
+    /conflicts\.length > 0\s*\n\s*\? mergeRow\(\s*\n\s*"bad",\s*\n\s*"closeCircle",\s*\n\s*"This branch has conflicts that must be resolved"/u,
   );
   // And the other half of the pair: a branch that merges cleanly says so
   // rather than saying nothing, which reads as "not checked yet".
@@ -468,4 +468,48 @@ test("the request written for an agent is addressed by a person", async () => {
 
   // Nothing to resolve, nothing written into somebody's composer.
   assert.match(written, /if \(conflicts\.length === 0\) \{\s*\n\s*return;/u);
+});
+
+test("a contract that moved under the branch blocks the merge and says so", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
+
+  const box = chats.slice(
+    chats.indexOf("function branchMergeBox"),
+    chats.indexOf("function branchStaleContracts"),
+  );
+  assert.ok(box.length > 0);
+
+  // Two ways to be un-mergeable, and the merge button is off for both. They
+  // are not the same problem: a conflict is text git cannot reconcile, this
+  // is text git reconciles perfectly into something that will not compile.
+  assert.match(
+    box,
+    /const blocked = conflicts\.length > 0 \|\| stale\.length > 0;/u,
+  );
+  // And they are drawn as two rows, not one — a branch can have either
+  // without the other, and a single row would have to say something vague
+  // enough to cover both.
+  assert.match(box, /conflicts\.length > 0\s*\n\s*\? mergeRow\(/u);
+  assert.match(box, /stale\.length === 0\s*\n\s*\? ""/u);
+  assert.match(box, /is built on \$\{\s*\n?\s*stale\.length === 1/u);
+
+  const help = chats.slice(
+    chats.indexOf("function branchStaleContracts"),
+    chats.indexOf("function branchStaleContracts") + 2000,
+  );
+  // The three things a reader needs: which file of theirs, which contract,
+  // and what it moved from and to. A count would be a warning to research.
+  assert.match(help, /entry\.through/u);
+  assert.match(help, /entry\.symbol/u);
+  assert.match(help, /entry\.file/u);
+  assert.match(help, /entry\.before/u);
+  assert.match(help, /entry\.after/u);
+  // And the one remedy, which is the same button as for being behind.
+  assert.match(help, /data-act="branch-review-refresh"/u);
+  assert.match(help, /Bring the latest in/u);
+
+  // Said on the tab too, so a reader on Files is not the last to know.
+  assert.match(chats, /name === "review" && stale > 0/u);
+  assert.match(styles, /\.merge-stale \{/u);
 });

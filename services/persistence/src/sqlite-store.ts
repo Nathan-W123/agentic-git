@@ -76,6 +76,7 @@ import type {
   ChannelReaction,
   ChannelReply,
   ClaimedRange,
+  ClaimedShape,
   CoordinationStore,
   CreateApprovalInput,
   CreateMcpServerInput,
@@ -5232,14 +5233,19 @@ public async recordBranchClaim(
       configKeys: [...(input.configKeys ?? [])],
       services: [...(input.services ?? [])],
       ranges: (input.ranges ?? []).map((range) => ({ ...range })),
+      shapes: (input.shapes ?? []).map((shape) => ({
+        ...shape,
+        consumers: [...shape.consumers],
+      })),
       createdAt: new Date().toISOString(),
     };
     this.db
       .prepare(
         `INSERT INTO branch_claims
            (id, repository_id, branch, task_id, revision,
-            symbols, apis, schemas, config_keys, services, ranges, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            symbols, apis, schemas, config_keys, services, ranges,
+            shapes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         claim.id,
@@ -5253,6 +5259,7 @@ public async recordBranchClaim(
         JSON.stringify(claim.configKeys),
         JSON.stringify(claim.services),
         JSON.stringify(claim.ranges),
+        JSON.stringify(claim.shapes),
         claim.createdAt,
       );
     return claim;
@@ -6321,6 +6328,34 @@ function sqliteBranchClaim(row: Record<string, unknown>): BranchClaim {
       return [];
     }
   };
+  const shapes = (value: unknown): ClaimedShape[] => {
+    try {
+      const parsed: unknown = JSON.parse(String(value ?? "[]"));
+      return Array.isArray(parsed)
+        ? parsed
+            .filter(
+              (entry): entry is ClaimedShape =>
+                typeof entry === "object" &&
+                entry !== null &&
+                typeof (entry as ClaimedShape).file === "string" &&
+                typeof (entry as ClaimedShape).symbol === "string" &&
+                typeof (entry as ClaimedShape).digest === "string",
+            )
+            .map((entry) => ({
+              file: entry.file,
+              symbol: entry.symbol,
+              shape: String(entry.shape ?? ""),
+              digest: entry.digest,
+              consumers: Array.isArray(entry.consumers)
+                ? entry.consumers.map((name) => String(name))
+                : [],
+              ...(entry.inferred === true ? { inferred: true } : {}),
+            }))
+        : [];
+    } catch {
+      return [];
+    }
+  };
   return {
     id: String(row["id"]),
     repositoryId: String(row["repository_id"]),
@@ -6333,6 +6368,7 @@ function sqliteBranchClaim(row: Record<string, unknown>): BranchClaim {
     configKeys: list(row["config_keys"]),
     services: list(row["services"]),
     ranges: ranges(row["ranges"]),
+    shapes: shapes(row["shapes"]),
     createdAt: String(row["created_at"]),
   };
 }

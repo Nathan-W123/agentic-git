@@ -36,6 +36,7 @@ function file(
     bytes: 100,
     symbols: [],
     exportedSymbols: [],
+    exportedShapes: [],
     symbolRanges: [],
     symbolCalls: [],
     imports: [],

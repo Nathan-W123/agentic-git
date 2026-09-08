@@ -492,6 +492,38 @@ export interface ApiOperations {
   }>;
 
   /**
+   * Contracts the repository's own branch has changed since this branch cut,
+   * that this branch has built on since.
+   *
+   * The silent conflict, at the one moment it can still be caught: both sides
+   * merge cleanly as text, agree on every symbol name, and disagree about
+   * what one of them means. A branch that edited a file calling `sign` while
+   * canonical changed what `sign` takes is a branch whose code compiles here
+   * and stops compiling the moment it lands.
+   *
+   * Empty for the ordinary case, and empty for a deployment that cannot read
+   * shapes out of the languages in front of it — this reports what it can see
+   * and never guesses.
+   */
+  branchContractDrift?(input: {
+    projectId: string;
+    repositoryId: string;
+    branch: string;
+  }): Promise<{
+    stale: Array<{
+      /** Where the contract is declared. */
+      file: string;
+      symbol: string;
+      /** What this branch was written against. */
+      before: string;
+      /** What the repository's own branch says it is now. */
+      after: string;
+      /** The file on this branch that is built on it. */
+      through: string;
+    }>;
+  }>;
+
+  /**
    * Merges a channel's branch into the repository's own.
    *
    * Refuses rather than resolves. A merge that needs a person is a merge a

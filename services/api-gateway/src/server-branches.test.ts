@@ -1237,3 +1237,111 @@ test("a merged channel is not swept", async (t) => {
     beforeCount,
   );
 });
+
+test("a branch built on a contract that has moved under it cannot merge", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "contract-repo");
+  const base = repositoryBase(repositoryId);
+
+  const created = await owner.request(`${base}/channels`, {
+    method: "POST",
+    body: { name: "checkout", visibility: "public", branch: true },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const channelId = created.data.channel.id as string;
+
+  // The silent conflict, staged: canonical changed what `sign` takes while
+  // this branch was open, and this branch has been editing a file that calls
+  // it. Nothing textual disagrees — the name is `sign` on both sides — and
+  // this is exactly the merge git performs without a word.
+  runtime.staleContracts.push({
+    file: "src/auth.ts",
+    symbol: "sign",
+    before: "(password: string): string",
+    after: "(password: number): string",
+    through: "src/login.ts",
+  });
+
+  // The review says so before anybody presses anything: a reason you meet at
+  // the button is a reason you meet too late to plan around.
+  const review = await owner.request(`${base}/channels/${channelId}/branch`);
+  assert.equal(review.status, 200, JSON.stringify(review.data));
+  assert.deepEqual(review.data.staleContracts, [
+    {
+      file: "src/auth.ts",
+      symbol: "sign",
+      before: "(password: string): string",
+      after: "(password: number): string",
+      through: "src/login.ts",
+    },
+  ]);
+
+  const refused = await owner.request(
+    `${base}/channels/${channelId}/branch/merge`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(refused.status, 409, JSON.stringify(refused.data));
+  assert.equal(refused.data.error.code, "stale_contract");
+  assert.equal(refused.data.error.staleContracts.length, 1);
+  // Refused, not merged: the branch is still there and canonical did not move.
+  assert.deepEqual(runtime.mergedBranches, []);
+
+  // And the room is told which contract and where, so the next question —
+  // what do I do about it — has an answer on the screen.
+  const said = await owner.request(
+    `${base}/channel/messages?channelId=${channelId}`,
+  );
+  const lines = (said.data.messages as Array<Record<string, unknown>>)
+    .filter((message) => message["kind"] === "system")
+    .map((message) => String(message["content"]));
+  assert.ok(
+    lines.some(
+      (line) =>
+        line.includes("src/login.ts is built on `sign`") &&
+        line.includes("(password: number): string") &&
+        line.includes("Bring the latest in"),
+    ),
+    lines.join("\n"),
+  );
+
+  // Cleared, the same merge lands. This is what makes the gate a gate rather
+  // than a wall: bringing the latest in moves the merge base past the change,
+  // and the drift the operation reports goes with it.
+  runtime.staleContracts.length = 0;
+  const merged = await owner.request(
+    `${base}/channels/${channelId}/branch/merge`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(merged.status, 200, JSON.stringify(merged.data));
+  assert.deepEqual(runtime.mergedBranches, ["kumi/checkout"]);
+});
+
+test("a deployment that cannot read contracts merges as it always did", async (t) => {
+  // The gate reports what it can see and never guesses. A deployment with no
+  // shape reader — an older build, a repository of languages nothing parses
+  // — has an empty answer, and an empty answer must mean "nothing found",
+  // not "cannot tell, so refuse". Refusing on ignorance would make the
+  // feature impossible to roll out.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "unshaped-repo");
+  const base = repositoryBase(repositoryId);
+
+  const created = await owner.request(`${base}/channels`, {
+    method: "POST",
+    body: { name: "plain", visibility: "public", branch: true },
+  });
+  const channelId = created.data.channel.id as string;
+
+  const review = await owner.request(`${base}/channels/${channelId}/branch`);
+  assert.deepEqual(review.data.staleContracts, []);
+  const merged = await owner.request(
+    `${base}/channels/${channelId}/branch/merge`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(merged.status, 200, JSON.stringify(merged.data));
+  assert.deepEqual(runtime.mergedBranches, ["kumi/plain"]);
+});
