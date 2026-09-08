@@ -239,7 +239,8 @@ test("a work channel's branch is reviewed and merged from the room itself", asyn
   // The merge button is drawn only for somebody the server would let merge,
   // and disabled while anything conflicts.
   assert.match(chats, /review\.canMerge === true/u);
-  assert.match(chats, /busy \|\| conflicts\.length > 0 \? "disabled" : ""/u);
+  assert.match(chats, /const blocked = conflicts\.length > 0;/u);
+  assert.match(chats, /busy \|\| blocked \? "disabled" : ""/u);
   assert.match(styles, /\.branch-panel \.fp-stats/u);
 
   // Merging closes the channel, so it is confirmed rather than a single
@@ -272,7 +273,10 @@ test("a merged channel offers the second gate, on GitHub", async () => {
   // reviews the repository into main — offering the second before the first
   // would ask a second set of reviewers for work Kumi has not accepted.
   const panel = chats.slice(chats.indexOf("function branchReviewBody"));
-  const merged = panel.slice(0, panel.indexOf("\nfunction branchSummary"));
+  const merged = panel.slice(0, panel.indexOf("\nfunction branchReviewStates"));
+  // The slice has to actually cut something, or every assertion below is
+  // being made against the rest of the file rather than against this panel.
+  assert.ok(merged.length > 0 && merged.length < panel.length);
   assert.match(merged, /review\.merged === true/u);
   assert.match(merged, /act="branch-review-ship"/u);
   // Once shipped it links to the pull request rather than offering to open a

@@ -5200,7 +5200,8 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
     // The second gate. Kumi reviewed this into the repository; GitHub reviews
     // the repository into whatever it calls main, and until somebody presses
     // this the work has landed in Kumi and nowhere else.
-    return `${emptyState(
+    return `${branchHeadline(review, undefined, [])}
+    ${emptyState(
       "check",
       "Merged",
       `${review.branch} landed on the repository ${relativeTime(
@@ -5242,43 +5243,27 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
   // Ahead of nothing is a branch with no work on it. Said plainly rather than
   // drawn as an empty diff, which reads as a failed read.
   if ((review.ahead ?? 0) === 0) {
-    return `${branchSummary(review, stats, conflicts)}
+    return `${branchHeadline(review, stats, files)}
       ${emptyState(
         "branch",
         "Nothing to merge yet",
         "No work has landed on this branch. Ask an agent here and it will.",
       )}`;
   }
-  return `${branchSummary(review, stats, conflicts)}
-    <div class="branch-actions">
-      ${
-        (review.behind ?? 0) > 0 || conflicts.length > 0
-          ? `<button class="btn branch-secondary" type="button"
-               data-act="branch-review-refresh"
-               data-value="${esc(channelId ?? "")}" ${busy ? "disabled" : ""}
-               >Bring in the latest</button>`
-          : ""
-      }
-      ${
-        review.canMerge === true
-          ? `<button class="btn btn-primary" type="button"
-               data-act="branch-review-merge" data-value="${esc(channelId ?? "")}"
-               ${busy || conflicts.length > 0 ? "disabled" : ""}
-               title="${
-                 conflicts.length > 0
-                   ? "Resolve the conflicts first"
-                   : `Merge ${esc(review.branch ?? "")} into the repository`
-               }">Merge into the repository</button>`
-          : `<span class="branch-note">Somebody with review rights merges this.</span>`
-      }
-    </div>
-    ${branchReviewStates(review, channelId, busy)}
-    ${branchCommitList(review)}
-    ${branchFileReview(review, channelId, conflicts, files)}
+  const tab = branchTab();
+  return `${branchHeadline(review, stats, files)}
+    ${branchTabBar(review, files, conflicts, tab)}
     ${
-      review.truncated === true
-        ? `<div class="branch-note">The diff was too long to show in full. Every changed file is listed above.</div>`
-        : ""
+      tab === "commits"
+        ? branchCommitList(review)
+        : tab === "files"
+          ? `${branchFileReview(review, channelId, conflicts, files)}
+             ${
+               review.truncated === true
+                 ? `<div class="branch-note">The diff was too long to show in full. Every changed file is listed above.</div>`
+                 : ""
+             }`
+          : branchMergeBox(review, channelId, busy, conflicts)
     }`;
 }
 
@@ -5293,20 +5278,36 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
  * A review is stamped with the revision it was left against, so an approval
  * of a branch that has moved four commits since reads as stale rather than as
  * an approval of what is on the screen.
+ *
+ * This is the body of the merge box's first row, and the row's title already
+ * says who and what — so a lone review adds only what they wrote, and the
+ * list is drawn when there is more than one answer to keep apart. Said twice,
+ * two inches apart, it read as two different reviews.
  */
-function branchReviewStates(review, channelId, busy) {
+function branchReviewStates(review, channelId, busy, footnote = "") {
   const reviews = review.reviews ?? [];
   const mine = review.myReview;
   const pressed = (state) => (mine === state ? " on" : "");
+  const only = reviews.length === 1 ? reviews[0] : undefined;
   return `<div class="branch-reviews">
     ${
-      reviews.length === 0
-        ? `<div class="branch-note">Nobody has reviewed this yet.</div>`
-        : `<ul class="branch-review-list">${reviews
-            .map(
-              (entry) => `<li class="branch-review ${esc(entry.state)}${
-                entry.current === false ? " stale" : ""
-              }">
+      only !== undefined
+        ? `${
+            only.note
+              ? `<p class="branch-review-note">${esc(only.note)}</p>`
+              : ""
+          }${
+            only.current === false
+              ? `<p class="merge-row-detail">Left on an earlier version of this branch.</p>`
+              : ""
+          }`
+        : reviews.length === 0
+          ? ""
+          : `<ul class="branch-review-list">${reviews
+              .map(
+                (entry) => `<li class="branch-review ${esc(entry.state)}${
+                  entry.current === false ? " stale" : ""
+                }">
                 ${icon(entry.state === "approved" ? "check" : "alert")}
                 <span class="branch-review-who">${esc(
                   memberName(entry.userId) ?? entry.userId,
@@ -5324,9 +5325,10 @@ function branchReviewStates(review, channelId, busy) {
                     : ""
                 }
               </li>`,
-            )
-            .join("")}</ul>`
+              )
+              .join("")}</ul>`
     }
+    ${footnote}
     <div class="branch-actions branch-review-actions">
       <button type="button" class="btn branch-secondary${pressed(
         "changes_requested",
@@ -5356,10 +5358,10 @@ function branchCommitList(review) {
     return "";
   }
   const ahead = review.ahead ?? commits.length;
-  return `<details class="branch-commits" open>
-    <summary>${commits.length} of ${ahead} ${
+  return `<div class="branch-commits">
+    <div class="branch-commits-head">${commits.length} of ${ahead} ${
       ahead === 1 ? "commit" : "commits"
-    }</summary>
+    }</div>
     <ul class="branch-commit-list">
       ${commits
         .map(
@@ -5375,7 +5377,7 @@ function branchCommitList(review) {
         )
         .join("")}
     </ul>
-  </details>`;
+  </div>`;
 }
 
 /**
@@ -5543,35 +5545,278 @@ function branchCommentComposer(channelId, path, line, review) {
   </div>`;
 }
 
-/** The one-line state of a branch: how far ahead, how far behind, what breaks. */
-function branchSummary(review, stats, conflicts) {
+/**
+ * The three views a branch has, in the order a pull request is read.
+ *
+ * The decision first, because that is what somebody opening this wants to
+ * know and what they came to give; then what was done; then the diff. Same
+ * three a pull request page has, and for the same reason — they answer
+ * different questions and stacking them in one scroll means scrolling past
+ * two of them to reach the third.
+ */
+const BRANCH_TABS = ["review", "commits", "files"];
+
+/** Which view is open, falling back to the one that says what happens next. */
+function branchTab() {
+  const wanted = String(state.branchTab ?? "review");
+  return BRANCH_TABS.includes(wanted) ? wanted : "review";
+}
+
+/**
+ * What this is, in the line a pull request opens with.
+ *
+ * A state, the two branches, and the size of the change. `base` is the name
+ * rather than the revision the comparison was made against: every sentence
+ * this panel says about a conflict has to name the branch the conflict is
+ * with, and "conflicts with b3f1a90" names nothing anybody can act on.
+ */
+function branchHeadline(review, stats, files) {
+  const merged = review.merged === true;
   const ahead = review.ahead ?? 0;
   const behind = review.behind ?? 0;
-  return `<div class="branch-summary">
-    <div class="branch-counts">
-      <span class="branch-count">${ahead} ${
-        ahead === 1 ? "commit" : "commits"
-      } ahead</span>
-      ${
-        behind > 0
-          ? `<span class="branch-count behind">${behind} behind</span>`
-          : `<span class="branch-count">up to date</span>`
-      }
-      <span class="fp-stats">
-        <span class="delta-add">+${stats.additions}</span>
-        <span class="delta-del">-${stats.deletions}</span>
+  return `<div class="branch-headline">
+    <div class="branch-headline-top">
+      <span class="branch-state ${merged ? "merged" : "open"}">${icon(
+        merged ? "check" : "branch",
+      )}${merged ? "Merged" : "Open"}</span>
+      <span class="branch-flow">
+        <code class="branch-ref">${esc(review.branch ?? "this branch")}</code>
+        ${icon("arrowRight")}
+        <code class="branch-ref">${esc(review.base ?? "the repository")}</code>
       </span>
     </div>
     ${
-      conflicts.length > 0
-        ? `<div class="branch-note err">${conflicts.length} ${
-            conflicts.length === 1 ? "file conflicts" : "files conflict"
-          } with the repository. Bring the latest in and resolve ${
-            conflicts.length === 1 ? "it" : "them"
-          } before this can merge.</div>`
-        : ""
+      merged || stats === undefined
+        ? ""
+        : `<div class="branch-counts">
+            <span class="branch-count">${ahead} ${
+              ahead === 1 ? "commit" : "commits"
+            }</span>
+            <span class="branch-count">${files.length} ${
+              files.length === 1 ? "file" : "files"
+            }</span>
+            ${
+              behind > 0
+                ? `<span class="branch-count behind">${behind} behind</span>`
+                : `<span class="branch-count">up to date</span>`
+            }
+            <span class="fp-stats">
+              <span class="delta-add">+${stats.additions}</span>
+              <span class="delta-del">-${stats.deletions}</span>
+            </span>
+          </div>`
     }
   </div>`;
+}
+
+/** The row that switches views, with what each one holds written on it. */
+function branchTabBar(review, files, conflicts, tab) {
+  const labels = { review: "Review", commits: "Commits", files: "Files" };
+  const counts = {
+    review: undefined,
+    commits: (review.commits ?? []).length || (review.ahead ?? 0),
+    files: files.length,
+  };
+  return `<div class="branch-tabs" role="tablist">
+    ${BRANCH_TABS.map(
+      (name) => `<button type="button" role="tab"
+        class="branch-tab${name === tab ? " on" : ""}"
+        aria-selected="${name === tab ? "true" : "false"}"
+        data-act="branch-tab" data-value="${name}">${labels[name]}${
+          counts[name] === undefined
+            ? ""
+            : `<span class="branch-tab-count">${String(counts[name])}</span>`
+        }${
+          // The one thing a reader must not have to open a tab to find out.
+          name === "files" && conflicts.length > 0
+            ? `<span class="branch-tab-warn" title="${String(
+                conflicts.length,
+              )} conflicting">!</span>`
+            : ""
+        }</button>`,
+    ).join("")}
+  </div>`;
+}
+
+/** One line of the merge box: a mark, a sentence, and a way to change it. */
+function mergeRow(tone, glyph, title, body = "") {
+  return `<div class="merge-row ${tone}">
+    <span class="merge-mark">${icon(glyph)}</span>
+    <div class="merge-row-body">
+      <span class="merge-row-title">${title}</span>
+      ${body}
+    </div>
+  </div>`;
+}
+
+/**
+ * Whether this can land, and what is stopping it if it cannot.
+ *
+ * The box at the foot of a pull request, and here for the reason it is there:
+ * the review decision, whether the branch merges cleanly, how far behind it
+ * is and the button that acts on all three are one question. Answered in four
+ * places on a page, a reader has to assemble it themselves — and the one that
+ * matters, "why is this button not doing anything", is the one they assemble
+ * last.
+ *
+ * Every row has the same shape, so the answer is read down a column.
+ */
+function branchMergeBox(review, channelId, busy, conflicts) {
+  const reviews = review.reviews ?? [];
+  const requested = reviews.filter(
+    (entry) => entry.state === "changes_requested",
+  );
+  const approvals = reviews.filter((entry) => entry.state === "approved");
+  const behind = review.behind ?? 0;
+  const base = esc(review.base ?? "the repository");
+  const blocked = conflicts.length > 0;
+  return `<div class="merge-box${blocked ? " blocked" : ""}">
+    ${
+      requested.length > 0
+        ? mergeRow(
+            "bad",
+            "alert",
+            `${
+              requested.length === 1
+                ? esc(memberName(requested[0]?.userId) ?? "Somebody")
+                : `${String(requested.length)} people`
+            } asked for changes`,
+            // The objection first, then — as a footnote under it, because it
+            // is about the panel rather than about the work — the one place
+            // this differs from what the shape leads you to expect: the row
+            // is red and the button below it still works. Kumi records the
+            // objection and trusts the room; a silent block would be a rule
+            // nobody agreed to, enforced by a panel.
+            branchReviewStates(
+              review,
+              channelId,
+              busy,
+              `<p class="merge-row-detail">This does not block the merge — it
+                is on the record, and the button below still lands it.</p>`,
+            ),
+          )
+        : approvals.length > 0
+          ? mergeRow(
+              "good",
+              "check",
+              `Approved by ${
+                approvals.length === 1
+                  ? esc(memberName(approvals[0]?.userId) ?? "somebody")
+                  : `${String(approvals.length)} people`
+              }`,
+              branchReviewStates(review, channelId, busy),
+            )
+          : mergeRow(
+              "idle",
+              "helpCircle",
+              "No review yet",
+              branchReviewStates(
+                review,
+                channelId,
+                busy,
+                `<p class="merge-row-detail">Anybody in this room can approve
+                  it or ask for changes.</p>`,
+              ),
+            )
+    }
+    ${
+      blocked
+        ? mergeRow(
+            "bad",
+            "closeCircle",
+            "This branch has conflicts that must be resolved",
+            branchConflictHelp(review, channelId, conflicts, busy),
+          )
+        : mergeRow("good", "checkCircle", `No conflicts with ${base}`)
+    }
+    ${
+      behind > 0 && !blocked
+        ? mergeRow(
+            "warn",
+            "refresh",
+            `${String(behind)} ${
+              behind === 1 ? "commit" : "commits"
+            } behind ${base}`,
+            `<p class="merge-row-detail">It merges cleanly as it stands.
+              Bringing the latest in now is the difference between finding out
+              here and finding out after somebody else lands theirs.</p>
+            <div class="merge-row-actions">
+              <button class="btn" type="button" data-act="branch-review-refresh"
+                data-value="${esc(channelId ?? "")}" ${busy ? "disabled" : ""}
+                >Update branch</button>
+            </div>`,
+          )
+        : ""
+    }
+    <div class="merge-foot">
+      ${
+        review.canMerge === true
+          ? `<button class="btn btn-primary btn-merge" type="button"
+               data-act="branch-review-merge" data-value="${esc(channelId ?? "")}"
+               ${busy || blocked ? "disabled" : ""}
+               title="${
+                 blocked
+                   ? "Resolve the conflicts first"
+                   : `Merge ${esc(review.branch ?? "")} into ${base}`
+               }">Merge into ${base}</button>`
+          : `<span class="branch-note">Somebody with review rights merges this.</span>`
+      }
+    </div>
+  </div>`;
+}
+
+/**
+ * What to do about a conflict, given that this panel will not do it for you.
+ *
+ * Kumi refuses a conflicting merge rather than resolving it, and that is the
+ * whole position: a resolution nobody reviewed is code nobody reviewed, and
+ * the coordinator would be inventing it. So this offers the two things that
+ * are real — hand it to an agent in the room, which is where the branch's
+ * work happens anyway, or take the branch out and do it by hand — and names
+ * the files either one has to deal with.
+ *
+ * "Try bringing the latest in" is offered second and deliberately hedged. The
+ * conflict was computed against canonical as it stands, so refreshing usually
+ * hits the same collision; it is worth one press only because canonical may
+ * have moved since the panel last read it.
+ */
+function branchConflictHelp(review, channelId, conflicts, busy) {
+  const base = esc(review.base ?? "the repository");
+  const branch = esc(review.branch ?? "this branch");
+  return `<p class="merge-row-detail">Merging into <code>${base}</code> would
+      collide in ${String(conflicts.length)} ${
+        conflicts.length === 1 ? "file" : "files"
+      }. Kumi will not pick a side for you — a resolution nobody reviewed is
+      code nobody reviewed.</p>
+    <ul class="merge-conflicts">${conflicts
+      .map(
+        (path) => `<li><button type="button" class="merge-conflict-file"
+          data-act="branch-tab" data-value="files"
+          title="Find ${esc(path)} in the diff">${esc(path)}</button></li>`,
+      )
+      .join("")}</ul>
+    <div class="merge-row-actions">
+      <button class="btn btn-primary" type="button"
+        data-act="branch-resolve-ask" data-value="${esc(channelId ?? "")}"
+        ${busy ? "disabled" : ""}
+        title="Write the request into the composer, for you to address and send"
+        >Ask an agent to resolve</button>
+      <button class="btn" type="button" data-act="branch-review-refresh"
+        data-value="${esc(channelId ?? "")}" ${busy ? "disabled" : ""}
+        title="Only helps if the repository moved since this was read"
+        >Try bringing the latest in</button>
+    </div>
+    <details class="merge-locally">
+      <summary>Or resolve it yourself</summary>
+      <pre class="merge-commands"><code>git fetch
+git switch ${branch}
+git merge ${base}
+# fix the files above, then
+git commit
+git push</code></pre>
+      <p class="merge-row-detail">From a clone of this repository —
+        <code>coord repo list</code> prints where it lives.</p>
+    </details>`;
 }
 
 /**

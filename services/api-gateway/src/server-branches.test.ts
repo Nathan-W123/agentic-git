@@ -275,6 +275,11 @@ test("a work channel's branch reads back as a pull request, and merges once", as
   assert.equal(review.status, 200, JSON.stringify(review.data));
   assert.equal(review.data.branch, "kumi/search-ranking");
   assert.equal(review.data.merged, false);
+  // What it would land on, by name. The comparison knows the base as a
+  // revision, and every sentence the panel says about a conflict has to name
+  // the branch the conflict is with — "conflicts with b3f1a90" names nothing
+  // anybody can act on.
+  assert.equal(review.data.base, "main");
   assert.equal(review.data.ahead, 1);
   assert.deepEqual(review.data.files, ["src/login.ts"]);
   assert.equal(typeof review.data.patch, "string");

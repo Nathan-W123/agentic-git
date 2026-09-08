@@ -464,6 +464,8 @@ export interface ApiOperations {
     mergeBase: string;
     head: string;
     baseHead: string;
+    /** The branch this would merge into, by name rather than by revision. */
+    base: string;
     ahead: number;
     behind: number;
     files: string[];

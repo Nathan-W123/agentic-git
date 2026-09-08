@@ -1162,6 +1162,7 @@ export async function startRuntime(
         mergeBase: "b".repeat(40),
         head: branchHead.revision,
         baseHead: "b".repeat(40),
+        base: "main",
         ahead: state.conflicts.length > 0 ? 2 : 1,
         behind: branchDrift.behind,
         files: branchFiles,
