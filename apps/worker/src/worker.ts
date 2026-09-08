@@ -31,7 +31,8 @@ import {
   codexExecutionSandbox,
   withModelOverride,
 } from "@coord/cli/commands";
-import type { AgentConfig, CoordinatorProject } from "@coord/cli/project";
+import { CoordinatorProject } from "@coord/cli/project";
+import type { AgentConfig } from "@coord/cli/project";
 // The exact words an in-process holder is asked with. Shared rather than
 // restated: two askers with two promptings would get two different kinds of
 // answer to a question whose whole value is that it is answered the same way.
@@ -2387,6 +2388,12 @@ export class Worker {
       workerId: this.identity?.id ?? "",
       project: this.options.project,
       client: this.options.client,
+      // Read from disk rather than from the config this worker started with.
+      // The desktop app's terminal switch writes that file while this process
+      // is running, and a consent that only took effect at the next restart
+      // would be a switch that does not switch anything.
+      reloadConfig: async () =>
+        (await CoordinatorProject.open(this.options.project.root)).config,
       workspaceFor: async () =>
         this.options.project.config.terminal?.cwd ?? this.options.workspaceRoot,
       log: (message) => console.log(`[worker] ${message}`),

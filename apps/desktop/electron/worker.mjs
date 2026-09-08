@@ -42,6 +42,11 @@ import {
   missingMcpServers,
   readAllowedMcp,
 } from "./mcp-consent.mjs";
+import {
+  ensureTerminalConsent,
+  readTerminalConsent,
+  setTerminalConsent,
+} from "./terminal-consent.mjs";
 
 /**
  * Backoff between restarts, and the point at which restarting is pointless.
@@ -258,6 +263,19 @@ async function startWorkerOnce(here, session, onEvent) {
   const root = workerRoot();
   await mkdir(root, { recursive: true });
   await ensureProject(root, agents);
+  // Terminals are on unless this machine's owner has turned them off. Written
+  // before the worker starts rather than asked for on the first press: the
+  // control plane will not open a shell on anybody else's machine, so the
+  // only person this consent is between is the one who installed the app and
+  // signed it in here. See `terminal-consent.mjs` for why the MCP list next
+  // to it does ask.
+  const terminals = await ensureTerminalConsent(root).catch(() => undefined);
+  if (terminals?.wrote === true) {
+    onEvent?.({
+      state: "running",
+      detail: "Terminals are allowed on this machine (Agents → Allow Terminals).",
+    });
+  }
 
   const startedAt = Date.now();
   child = utilityProcess.fork(bundle, [], {
@@ -631,6 +649,36 @@ function isRuntimeNoise(line) {
 }
 
 /** Where the worker's own account of itself is kept. */
+/**
+ * Whether this machine currently opens terminals.
+ *
+ * Three answers, and the menu needs all three: `true`, `false`, and
+ * `undefined` for a machine whose worker has not started yet and so has not
+ * written the consent. Undefined is not "no" — it is "about to be yes" — and
+ * a menu that drew it as an unticked box would be telling somebody their
+ * terminals are off a second before they are on.
+ */
+export async function readTerminalsAllowed() {
+  const consent = await readTerminalConsent(workerRoot()).catch(() => undefined);
+  if (consent === undefined) {
+    return undefined;
+  }
+  return consent === "all" || consent.length > 0;
+}
+
+/**
+ * The menu's switch, written where the worker reads it.
+ *
+ * No restart. The terminal loop re-reads this file — each poll for what it
+ * advertises, and again at the moment of opening — so turning it off takes a
+ * shell away from a browser within one poll and refuses the next open
+ * immediately. Restarting the worker to flip a checkbox would kill whatever
+ * task this machine is in the middle of.
+ */
+export async function allowTerminals(allowed) {
+  await setTerminalConsent(workerRoot(), allowed === true);
+}
+
 export function workerLogPath() {
   return path.join(app.getPath("userData"), "worker.log");
 }

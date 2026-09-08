@@ -17,7 +17,11 @@
  * machine that is offline, and is said differently.
  */
 
-import { terminalAllowed, type CoordinatorProject } from "@coord/cli/project";
+import {
+  terminalAllowed,
+  type CoordinatorProject,
+  type ProjectConfig,
+} from "@coord/cli/project";
 
 import {
   detectBackend,
@@ -73,6 +77,20 @@ export interface TerminalLoopOptions {
       exitCode: number,
     ): Promise<void>;
   };
+  /**
+   * The consent as it stands on disk, re-read rather than remembered.
+   *
+   * Two comments in this file used to claim the config was live — that a
+   * withdrawal took effect on the next poll, and that opening checked the
+   * config rather than the advertisement. Neither was true: `project.config`
+   * is the snapshot the worker loaded at start, so a machine that turned
+   * terminals off went on offering them until it was restarted. That is the
+   * wrong direction for a consent to lag in.
+   *
+   * Optional, because a caller with no way to re-read (a test, an embedder)
+   * is better off with the snapshot than with nothing.
+   */
+  reloadConfig?(): Promise<ProjectConfig | undefined>;
   log(message: string): void;
 }
 
@@ -87,8 +105,28 @@ const RETRY_MS = 5_000;
 export class TerminalLoop {
   private readonly sessions = new Map<string, TerminalHandle>();
   private running = false;
+  /** The last config read from disk; the start-up snapshot until one is. */
+  private current: ProjectConfig;
 
-  public constructor(private readonly options: TerminalLoopOptions) {}
+  public constructor(private readonly options: TerminalLoopOptions) {
+    this.current = options.project.config;
+  }
+
+  /**
+   * Re-reads the consent, and says nothing when it cannot.
+   *
+   * A config that has gone missing or stopped parsing leaves the last good
+   * answer in place rather than becoming a refusal. Both are defensible; this
+   * one is chosen because the alternative makes an editor saving a broken
+   * JSON file for half a second look like the owner revoking their consent.
+   * A revocation is a deliberate act, and it writes a file that parses.
+   */
+  private async refresh(): Promise<void> {
+    const config = await this.options.reloadConfig?.().catch(() => undefined);
+    if (config !== undefined) {
+      this.current = config;
+    }
+  }
 
   /**
    * What this machine can offer, recomputed each poll.
@@ -98,7 +136,7 @@ export class TerminalLoop {
    * takes effect on the next poll rather than at the next restart.
    */
   private capability(): { backend: string; shells: { id: string; label: string }[] } | undefined {
-    const config = this.options.project.config;
+    const config = this.current;
     // Absent consent is a refusal. A machine that has never been asked
     // advertises nothing, so the browser offers no terminal against it rather
     // than offering one that will fail.
@@ -136,6 +174,7 @@ export class TerminalLoop {
   private async loop(): Promise<void> {
     while (this.running) {
       try {
+        await this.refresh();
         const work = (await this.options.client.terminalPoll(
           this.options.workerId,
           this.capability(),
@@ -189,11 +228,15 @@ export class TerminalLoop {
     // Consent, per repository, checked at the moment of opening rather than
     // trusted from the advertisement — the two are seconds apart and the
     // config can change between them.
-    if (!terminalAllowed(this.options.project.config, request.repositoryId)) {
+    // Re-read here as well as before the poll: the advertisement is up to a
+    // poll old by the time somebody presses it, and a withdrawal made in that
+    // window should refuse this open rather than the next one.
+    await this.refresh();
+    if (!terminalAllowed(this.current, request.repositoryId)) {
       await say(
         `This machine has not been allowed to open a terminal for ` +
-          `${request.repositoryId}. Allow it in the desktop app, on this ` +
-          `computer, and try again.\r\n`,
+          `${request.repositoryId}. Turn it on in the desktop app on this ` +
+          `computer — Agents → Allow Terminals on This Machine.\r\n`,
       );
       await end(126);
       return;
