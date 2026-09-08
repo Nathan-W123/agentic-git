@@ -775,3 +775,155 @@ test("a plan enrichment could not see through says so", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a contract change and who was consuming it, across two revisions", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-contract-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    // The shape of the whole problem in three files: one publishes a
+    // contract, one imports it, one merely says the name.
+    await writeFile(
+      path.join(source, "src", "auth.ts"),
+      "export function sign(password: string): string { return password; }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "login.ts"),
+      'import { sign } from "./auth.js";\nexport const go = () => sign("secret");\n',
+    );
+    // Calls it without importing it — the name path, on its own.
+    await writeFile(
+      path.join(source, "src", "report.ts"),
+      "export const summary = () => sign(1 as never);\n",
+    );
+    // Mentions the name and never calls it. Not a consumer, and this is the
+    // edge of what the name path can see: nothing records a bare value
+    // reference, so a file like this is caught only if it imported the file.
+    await writeFile(
+      path.join(source, "src", "docs.ts"),
+      "export const note = `call sign() first`;\n",
+    );
+    await writeFile(path.join(source, "src", "idle.ts"), "export const idle = 1;\n");
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "contracts",
+    );
+    const service = new CodeIntelligenceService(repositories);
+    const before = await service.index(
+      repository,
+      (await repositories.getCanonicalVersion(repository)).revision,
+    );
+
+    // A shape is read off the declaration, and it is the written one.
+    const auth = before.files.find((file) => file.path === "src/auth.ts");
+    assert.deepEqual(
+      auth?.exportedShapes.map((shape) => [shape.symbol, shape.kind]),
+      [["sign", "function"]],
+    );
+    // Readable, because this is what a warning shows somebody.
+    assert.equal(auth?.exportedShapes[0]?.shape, "(password: string): string");
+    assert.equal(auth?.exportedShapesUnknown, undefined);
+
+    // Who depends on it, both ways in: `login.ts` imports the file, `docs.ts`
+    // only mentions the name. Neither was reachable before — the edges were
+    // only ever walked from a plan outwards to what it depends on.
+    assert.deepEqual(
+      service.consumersOf(before, { file: "src/auth.ts", symbol: "sign" }),
+      ["src/login.ts", "src/report.ts"],
+    );
+    // The file itself is never its own consumer; an unrelated file is not
+    // one; and neither is a file that only says the name in prose.
+    for (const path_ of ["src/auth.ts", "src/idle.ts", "src/docs.ts"]) {
+      assert.equal(
+        service
+          .consumersOf(before, { file: "src/auth.ts", symbol: "sign" })
+          .includes(path_),
+        false,
+        path_,
+      );
+    }
+    // Without a symbol it is the import edge alone, which is the certain half.
+    assert.deepEqual(service.consumersOf(before, { file: "src/auth.ts" }), [
+      "src/login.ts",
+    ]);
+
+    // Now the change git will not report: the type moves, the name does not.
+    await writeFile(
+      path.join(source, "src", "auth.ts"),
+      "export function sign(password: number): string { return String(password); }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "idle.ts"),
+      "export const idle = 2;\nexport function added(): void {}\n",
+    );
+    await repositories.commitAll(source, "retype");
+    await advanceCanonical(source, repository);
+    const after = await service.index(
+      repository,
+      (await repositories.getCanonicalVersion(repository)).revision,
+    );
+
+    const drift = service.contractDrift(before, after);
+    assert.deepEqual(
+      drift.map((change) => [change.file, change.symbol, change.consumers]),
+      [["src/auth.ts", "sign", ["src/login.ts", "src/report.ts"]]],
+    );
+    assert.match(drift[0]?.before ?? "", /string/u);
+    assert.match(drift[0]?.after ?? "", /number/u);
+    // `added` arrived and `idle`'s value moved: neither is a contract change.
+    // A mechanism that reported new exports would fire on every branch.
+    assert.equal(drift.length, 1);
+
+    // And what a branch claim records when this lands on it.
+    assert.deepEqual(
+      service
+        .shapesIn(["src/auth.ts"], after)
+        .map((shape) => [shape.file, shape.symbol]),
+      [["src/auth.ts", "sign"]],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a language whose shapes cannot be read says so rather than reporting stability", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-unshaped-"));
+  try {
+    const source = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    // Scanned, not parsed. Its declarations can be located and its contracts
+    // cannot be read, and those are different facts: an empty shape list read
+    // as "no contracts here" would report this file as unchanging through
+    // every rewrite it ever gets.
+    await writeFile(
+      path.join(source, "service.py"),
+      "def sign(password: str) -> str:\n    return password\n",
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      "unshaped",
+    );
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(
+      repository,
+      (await repositories.getCanonicalVersion(repository)).revision,
+    );
+    const file = index.files.find((entry) => entry.path === "service.py");
+    assert.deepEqual(file?.exportedShapes, []);
+    assert.equal(file?.exportedShapesUnknown, true);
+
+    // And the drift comparison leaves it out entirely rather than treating
+    // "unknown" as "unchanged".
+    assert.deepEqual(service.contractDrift(index, index), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
