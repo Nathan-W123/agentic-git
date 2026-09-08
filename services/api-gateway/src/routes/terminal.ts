@@ -178,6 +178,15 @@ export async function routeTerminal(
         return {
           id: worker.id,
           name: worker.name,
+          // Which build, and when it last spoke. Both are here for the same
+          // reason: several machines can carry the same name — one person's
+          // laptop, running the app twice, is three rows all called the same
+          // thing — and when none of them offers a terminal, "which of these
+          // am I looking at, and is it new enough to have the setting" is the
+          // only question worth answering. Without a version the answer to
+          // "I updated and it still says no" is unreachable from the screen.
+          version: worker.version,
+          lastSeen: worker.lastSeenAt,
           // Absent means the machine has not offered one — either an older
           // desktop build, or its owner has not allowed it. Said as absence
           // rather than as an empty list, because those are different facts.

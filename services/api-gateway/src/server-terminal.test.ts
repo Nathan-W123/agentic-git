@@ -90,6 +90,14 @@ test("a machine that has not allowed a terminal is offered without one", async (
   // nothing" are different facts and the browser says different things about
   // them — the first names the desktop app, the second does not.
   assert.equal(found?.["terminal"], undefined);
+  // Which build it is on, and when it last spoke. Both matter exactly here,
+  // in the case where nothing is offered: several machines can carry one
+  // name, and the commonest reason none of them offers a terminal is a copy
+  // of the app older than the setting. Without these the screen cannot say
+  // that, and "I updated and it still says no" has no answer on it.
+  assert.equal(typeof found?.["version"], "string");
+  assert.equal(typeof found?.["lastSeen"], "string");
+  assert.ok(!Number.isNaN(Date.parse(String(found?.["lastSeen"]))));
 
   // And opening one is refused with the sentence that says what to do, on the
   // machine, rather than a bare 409.

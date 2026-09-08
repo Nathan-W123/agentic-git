@@ -17473,6 +17473,34 @@ dialog.modal[open]::backdrop {
 /* The one thing on this screen a reader must not mistake for a real
    terminal. Coloured rather than italicised: it is a limitation, not an
    aside, and somebody about to type `vim` should see it before they do. */
+/* One row per machine, because several can carry one name and the row is
+   what tells them apart. */
+.terminal-machine-list {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  text-align: left;
+}
+
+.terminal-machine-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.terminal-machine-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
 .terminal-degraded {
   color: var(--amber, #d19a2f);
 }
