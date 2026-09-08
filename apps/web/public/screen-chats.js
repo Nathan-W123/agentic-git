@@ -7948,13 +7948,36 @@ function terminalPicker(machines) {
   }
   const offering = machines.filter((machine) => machine.terminal !== undefined);
   if (offering.length === 0) {
+    // Listed rather than joined into a sentence. One person running the app
+    // twice is three rows with one name, and "NathansComputer,
+    // NathansComputer, NathansComputer are connected" tells them nothing
+    // about which is which — or, more to the point, about the thing that
+    // actually explains this: a copy too old to have the setting at all.
     return `<div class="terminal-empty">
-      <p>${esc(machines.map((machine) => machine.name).join(", "))}
-      ${machines.length === 1 ? "is" : "are"} connected, but
-      ${machines.length === 1 ? "has" : "have"} not allowed a terminal.</p>
-      <p class="modal-hint">Allow it in the desktop app, on that computer.
-      Nobody here can turn it on for you: a shell there runs as you, so the
-      machine gets the say.</p>
+      <p>${
+        machines.length === 1
+          ? "Your machine is connected, but does not open terminals."
+          : `${String(machines.length)} of your machines are connected. None of
+             them opens terminals.`
+      }</p>
+      <ul class="terminal-machine-list">
+        ${machines
+          .map(
+            (machine) => `<li>
+              <span class="terminal-machine-name">${esc(machine.name)}</span>
+              <span class="terminal-machine-meta">${
+                machine.version ? `${esc(machine.version)} · ` : ""
+              }seen ${esc(relativeTime(machine.lastSeen))}</span>
+            </li>`,
+          )
+          .join("")}
+      </ul>
+      <p class="modal-hint">Turn it on there: <b>Agents → Allow Terminals on
+      This Machine</b>. Nobody here can turn it on for you — a shell there runs
+      as you, so the machine gets the say.</p>
+      <p class="modal-hint">No such menu item? That copy of the desktop app is
+      older than the setting, and no amount of allowing on this side will
+      reach it. Update it on that machine and open it again.</p>
     </div>`;
   }
   return `<div class="terminal-picker">

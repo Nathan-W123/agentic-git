@@ -422,8 +422,22 @@ test("a terminal says which of three things is wrong, not just 'unavailable'", a
   // steps. Collapsing the middle one into "unavailable" is what leaves
   // somebody guessing whether to open their laptop or change a setting.
   assert.match(chats, /No machine of yours is connected/u);
-  assert.match(chats, /have not allowed a terminal|has not allowed a terminal/u);
-  assert.match(chats, /Allow it in the desktop app, on that computer/u);
+  assert.match(chats, /does not open terminals|None of\s*\n?\s*them opens terminals/u);
+  // Named, so it is a thing to do rather than a place to go looking.
+  assert.match(chats, /Agents → Allow Terminals on\s*\n?\s*This Machine/u);
+  // And the answer to the question this screen could not answer: a copy of
+  // the app older than the setting will never offer one however hard
+  // somebody looks for a switch that is not in it.
+  assert.match(chats, /older\s*\n?\s*than the setting/u);
+  // One row per machine, with the build and when it last spoke, because
+  // several machines can carry one name — a laptop running the app twice is
+  // two rows with the same word on them.
+  // The class exactly, not as a prefix: `terminal-machine-list-unused` reads
+  // as a match to a loose pattern and draws nothing.
+  assert.match(chats, /class="terminal-machine-list"/u);
+  assert.match(await publicFile("styles.css"), /\.terminal-machine-list \{/u);
+  assert.match(chats, /machine\.version/u);
+  assert.match(chats, /relativeTime\(machine\.lastSeen\)/u);
   // And where the shell will actually run, because that is the whole reason
   // it has the reader's files and keys.
   assert.match(chats, /not on the control plane/u);
