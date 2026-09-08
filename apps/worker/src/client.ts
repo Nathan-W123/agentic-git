@@ -682,6 +682,51 @@ export class WorkerClient {
    * the request open while that person decides, exactly as it does for a
    * gated changeset.
    */
+  /**
+   * Asks what this terminal should do next, and waits for an answer.
+   *
+   * Held open by the control plane until there is something, so this is one
+   * request in flight rather than a loop hammering a laptop. The timeout has
+   * to outlast the hold or every poll ends as a client-side abort — which
+   * reads in the log as a network fault and is really this number.
+   */
+  public async terminalPoll(
+    workerId: string,
+    capability: unknown,
+  ): Promise<unknown> {
+    const { json } = await this.request(
+      `/api/v1/workers/${encodeURIComponent(workerId)}/terminal`,
+      { method: "POST", body: { capability }, timeoutMs: 40_000 },
+    );
+    return json;
+  }
+
+  /** Everything the shell has said since the last time this was called. */
+  public async terminalOutput(
+    workerId: string,
+    sessionId: string,
+    data: string,
+  ): Promise<void> {
+    await this.request(
+      `/api/v1/workers/${encodeURIComponent(workerId)}/terminal/` +
+        `${encodeURIComponent(sessionId)}/output`,
+      { method: "POST", body: { data } },
+    );
+  }
+
+  /** The shell is gone, and with what status. */
+  public async terminalExit(
+    workerId: string,
+    sessionId: string,
+    exitCode: number,
+  ): Promise<void> {
+    await this.request(
+      `/api/v1/workers/${encodeURIComponent(workerId)}/terminal/` +
+        `${encodeURIComponent(sessionId)}/exit`,
+      { method: "POST", body: { exitCode } },
+    );
+  }
+
   public async requestScopeChange(
     leaseId: string,
     request: ScopeChangeRequest,

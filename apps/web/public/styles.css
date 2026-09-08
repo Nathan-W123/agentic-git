@@ -17125,3 +17125,102 @@ dialog.modal[open]::backdrop {
   border: 1px solid var(--settings-border);
   border-radius: var(--settings-control-radius);
 }
+
+/* ---------------------------------------------------------- terminal ---- */
+
+.terminal-conversation {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  min-height: 0;
+  min-width: 0;
+}
+
+.terminal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.terminal-where {
+  font-size: 0.82rem;
+  color: var(--text-3);
+}
+
+.terminal-error {
+  margin: 10px 16px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--red-soft, rgba(220, 80, 80, 0.12));
+  color: var(--red);
+  font-size: 0.85rem;
+}
+
+.terminal-body {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  min-width: 0;
+  padding: 0 16px 16px;
+  gap: 8px;
+}
+
+.terminal-meta {
+  font-size: 0.78rem;
+  color: var(--text-3);
+}
+
+/* The one thing on this screen a reader must not mistake for a real
+   terminal. Coloured rather than italicised: it is a limitation, not an
+   aside, and somebody about to type `vim` should see it before they do. */
+.terminal-degraded {
+  color: var(--amber, #d19a2f);
+}
+
+.terminal-ended {
+  color: var(--text-4);
+}
+
+/* xterm draws its own grid inside; this only gives it somewhere with a
+   known size and the inset background the rest of the code surfaces use. */
+.terminal-screen {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #0f1115;
+  padding: 8px;
+}
+
+.terminal-empty {
+  padding: 24px 16px;
+  color: var(--text-3);
+  max-width: 62ch;
+  display: grid;
+  gap: 8px;
+}
+
+.terminal-picker {
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.terminal-machine {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.terminal-machine-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.terminal-shells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

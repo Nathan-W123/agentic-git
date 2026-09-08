@@ -221,6 +221,21 @@ export interface ProjectConfig {
    * name the lease carries.
    */
   mcp?: McpAllowlist;
+  /**
+   * Whether this machine will open a terminal for somebody reading Kumi.
+   *
+   * The same decision as {@link mcp}, taken for a sharper thing. A terminal
+   * on a worker is a shell on its owner's own computer, with their login,
+   * their files, their network and their keys — and it is driven from a web
+   * page, by whoever holds `run_task` on a repository this machine works in.
+   * Nothing about the control plane's own permissions makes that acceptable
+   * on its own, so the machine gets a say and it is taken here.
+   *
+   * Absent means refuse. A machine that has never been asked opens no
+   * terminal and says why, rather than quietly handing out a shell — which
+   * is the failure that could not be walked back.
+   */
+  terminal?: TerminalConsent;
 }
 
 /** See {@link ProjectConfig.mcp}. */
@@ -242,6 +257,43 @@ export interface McpAllowEntry {
 
 export interface McpAllowlist {
   allow: "all" | McpAllowEntry[];
+}
+
+/**
+ * What this machine's owner agreed to when they allowed a terminal.
+ *
+ * Deliberately not a digest of anything, unlike {@link McpAllowEntry}: an MCP
+ * server is a definition that can be changed under the person who approved
+ * it, and a shell is not — it is the same shell it was. What can change is
+ * *who* is allowed to open one, which is why the consent is per repository
+ * rather than blanket unless somebody says otherwise.
+ */
+export interface TerminalConsent {
+  /** `"all"`, or the repository ids a terminal may be opened against. */
+  allow: "all" | string[];
+  /**
+   * Where a terminal is allowed to start.
+   *
+   * Absent means the workspace the reader is looking at, which is the only
+   * one they could have meant. Set to a path to pin every session there.
+   */
+  cwd?: string;
+}
+
+/**
+ * Whether this machine will open a terminal against that repository.
+ *
+ * Absent consent is a refusal, not a default — see {@link ProjectConfig.terminal}.
+ */
+export function terminalAllowed(
+  config: ProjectConfig,
+  repositoryId: string,
+): boolean {
+  const allow = config.terminal?.allow;
+  if (allow === "all") {
+    return true;
+  }
+  return Array.isArray(allow) && allow.includes(repositoryId);
 }
 
 /** A {@link ValidationCommand} that may also carry the app's configuration. */

@@ -91,6 +91,30 @@ export function defaultMonacoDirectory(): string | undefined {
 }
 
 /**
+ * The vendored terminal emulator (`@xterm/xterm`).
+ *
+ * Served same-origin under /vendor/xterm for the same reason Monaco is: the
+ * gateway's CSP allows no external script or style sources, so a CDN copy
+ * would simply be blocked.
+ *
+ * Why an emulator at all, rather than a `<pre>` with the bytes in it: the
+ * worker hands back a *terminal*, and a terminal's output is not text. It is
+ * text interleaved with instructions — move the cursor here, clear to end of
+ * line, set this colour — and a `<pre>` renders those as mojibake. Every
+ * argument for giving the shell a real PTY (`apps/worker/src/pty.ts`) is an
+ * argument for rendering what a PTY produces, or the fidelity is thrown away
+ * at the last step and `vim` still does not work.
+ */
+export function defaultXtermDirectory(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    return path.dirname(require.resolve("@xterm/xterm/package.json"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The compiled collaborative-editing engine (`@coord/collab/dist`).
  *
  * The same module runs in the gateway and in the browser: operational
@@ -255,6 +279,8 @@ export async function loadStaticAssets(
   monacoDirectory: string | false | undefined = defaultMonacoDirectory(),
   /** `false` disables live collaborative editing (used by tests). */
   collabDirectory: string | false | undefined = defaultCollabDirectory(),
+  /** `false` disables the vendored terminal emulator (used by tests). */
+  xtermDirectory: string | false | undefined = defaultXtermDirectory(),
 ): Promise<ReadonlyMap<string, StaticAsset>> {
   const root = path.resolve(directory);
   const sources = new Map<string, { body: Buffer; contentType: string }>();
@@ -272,6 +298,33 @@ export async function loadStaticAssets(
   // editor tab reports that its assets are unavailable.
   if (monacoDirectory !== undefined && monacoDirectory !== false) {
     await loadDirectory(assets, path.resolve(monacoDirectory), "/vendor/monaco/vs/");
+  }
+  if (xtermDirectory !== undefined && xtermDirectory !== false) {
+    // Only the two files the page loads. The package ships sources, maps and
+    // typings, and serving a directory because it happens to be there is how
+    // a deployment ends up publishing things nobody meant to.
+    for (const [file, url] of [
+      ["lib/xterm.js", "/vendor/xterm/xterm.js"],
+      ["css/xterm.css", "/vendor/xterm/xterm.css"],
+    ] as const) {
+      try {
+        const full = path.resolve(xtermDirectory, file);
+        // Straight into `assets`, the way `loadDirectory` does for Monaco and
+        // collab. `sources` is the public-files map and has already been
+        // drained by the time this runs, so writing there lands in something
+        // nobody reads — a vendored file that resolves, loads and is never
+        // served.
+        assets.set(url, {
+          body: await readFile(full),
+          contentType: url.endsWith(".css")
+            ? "text/css; charset=utf-8"
+            : "text/javascript; charset=utf-8",
+        });
+      } catch {
+        // A build without the package still serves the dashboard; the
+        // terminal tab says it is unavailable rather than the page failing.
+      }
+    }
   }
   if (collabDirectory !== undefined && collabDirectory !== false) {
     try {

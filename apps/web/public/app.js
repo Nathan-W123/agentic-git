@@ -25,6 +25,7 @@ import {
   channelMessagesFor,
   closeChannelFile,
   closeSocket,
+  closeTerminal,
   commentOnBranchLine,
   connectSocket,
   createSubChannel,
@@ -83,6 +84,7 @@ import {
   loadProviders,
   loadSubChannelMembers,
   loadSubChannels,
+  loadTerminalMachines,
   loadWaitlist,
   markChannelRead,
   markRead,
@@ -107,11 +109,13 @@ import {
   noteTyping,
   notifications,
   openBillingPortal,
+  openTerminalSession,
   persist,
   personOnline,
   phoneLayout,
   previewKey,
   PROVIDER_VENDOR,
+  readTerminal,
   refreshBranchReview,
   refreshChannelLiveness,
   refreshChannelMessages,
@@ -124,6 +128,7 @@ import {
   repositoryLabel,
   resendChannelMessage,
   resetBilling,
+  resizeTerminal,
   resolveAttachmentImages,
   reviewBranch,
   revokeRepositoryGrant,
@@ -131,6 +136,7 @@ import {
   saveChannelFile,
   selectSubChannel,
   sendDirectMessage,
+  sendTerminalInput,
   sendTyping,
   setAuditorPaused,
   setChannelAgentSetting,
@@ -3926,6 +3932,146 @@ state.providerConnecting = providerConnecting;
  * binds its port is a broken app, and a page that asks about it forever is a
  * second broken thing.
  */
+/* --------------------------------------------------------- terminal ---- */
+
+/**
+ * The live terminal, kept across renders.
+ *
+ * The page re-renders by replacing HTML, and a terminal cannot be redrawn
+ * from state: it *is* state — a scrollback, a cursor, a program mid-draw. So
+ * one emulator is made per session and re-attached to whatever container the
+ * latest render produced, rather than rebuilt with it.
+ */
+let liveTerminal;
+
+/** Loads the vendored emulator once, on the first terminal anybody opens. */
+async function loadXterm() {
+  if (window.Terminal !== undefined) {
+    return window.Terminal;
+  }
+  await new Promise((resolve, reject) => {
+    const style = document.createElement("link");
+    style.rel = "stylesheet";
+    style.href = "/vendor/xterm/xterm.css";
+    document.head.append(style);
+    const script = document.createElement("script");
+    script.src = "/vendor/xterm/xterm.js";
+    script.onload = resolve;
+    script.onerror = () =>
+      reject(new Error("The terminal emulator could not be loaded."));
+    document.head.append(script);
+  });
+  return window.Terminal;
+}
+
+/**
+ * Attaches the emulator to the container the last render drew, if any.
+ *
+ * Called after every render rather than once, because the container is a new
+ * element each time and xterm holds a reference to the old one.
+ */
+function syncTerminal() {
+  const host = document.querySelector(".terminal-screen");
+  if (host === null || liveTerminal === undefined) {
+    return;
+  }
+  if (host.dataset.terminal !== liveTerminal.sessionId) {
+    return;
+  }
+  if (host.childElementCount === 0) {
+    liveTerminal.term.open(host);
+    liveTerminal.term.focus();
+  }
+}
+
+/** Reads output until the shell ends or the reader closes the pane. */
+async function pumpTerminal(repositoryId, channelId, session) {
+  let after = 0;
+  while (liveTerminal !== undefined && liveTerminal.sessionId === session.id) {
+    let read;
+    try {
+      read = await readTerminal(repositoryId, channelId, session.id, after);
+    } catch {
+      // The session is gone — closed here, or its machine went away. Said in
+      // the terminal itself, which is where somebody is looking.
+      liveTerminal?.term.write(
+        "\r\n\u001b[2mThis terminal is no longer open.\u001b[0m\r\n",
+      );
+      break;
+    }
+    if (read?.truncated === true) {
+      liveTerminal?.term.write(
+        "\r\n\u001b[2m…earlier output was dropped\u001b[0m\r\n",
+      );
+    }
+    if (typeof read?.data === "string" && read.data !== "") {
+      liveTerminal?.term.write(read.data);
+    }
+    after = typeof read?.seq === "number" ? read.seq : after;
+    if (read?.exitCode !== undefined) {
+      liveTerminal?.term.write(
+        `\r\n\u001b[2mThe shell exited (${String(read.exitCode)}).\u001b[0m\r\n`,
+      );
+      const held = state.terminals[previewKey(repositoryId, channelId)];
+      if (held !== undefined) {
+        held.exitCode = read.exitCode;
+      }
+      scheduleRender();
+      break;
+    }
+    // A short wait between reads. The server answers at once, so this is what
+    // keeps a quiet terminal from being a request every millisecond.
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+  }
+}
+
+async function openTerminalAction(repositoryId, workerId, shell) {
+  const Terminal = await loadXterm().catch((error) => {
+    toast(error.message, "error");
+    return undefined;
+  });
+  if (Terminal === undefined) {
+    return;
+  }
+  const channelId = activeSubChannelId(repositoryId);
+  const term = new Terminal({
+    convertEol: false,
+    cursorBlink: true,
+    fontSize: 12,
+    fontFamily:
+      'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+    theme: { background: "#0f1115", foreground: "#d5d9e0" },
+  });
+  const session = await openTerminalSession(
+    repositoryId,
+    { workerId, shell, cols: term.cols, rows: term.rows },
+    channelId,
+  );
+  if (session === undefined) {
+    term.dispose();
+    render();
+    return;
+  }
+  liveTerminal = { term, sessionId: session.id, repositoryId, channelId };
+  term.onData((data) => {
+    void sendTerminalInput(repositoryId, session.id, data);
+  });
+  term.onResize(({ cols, rows }) => {
+    void resizeTerminal(repositoryId, session.id, cols, rows);
+  });
+  render();
+  syncTerminal();
+  void pumpTerminal(repositoryId, channelId, session);
+}
+
+async function closeTerminalAction(repositoryId, sessionId) {
+  const channelId = liveTerminal?.channelId ?? activeSubChannelId(repositoryId);
+  liveTerminal?.term.dispose();
+  liveTerminal = undefined;
+  await closeTerminal(repositoryId, channelId, sessionId);
+  render();
+}
+
 async function watchPreviewReady(
   repositoryId,
   channelId = activeSubChannelId(repositoryId),
@@ -7475,6 +7621,12 @@ export function render() {
     if (renderAgain) {
       renderAgain = false;
       render();
+    } else {
+      // The terminal is the one thing on the page that cannot be redrawn
+      // from state — it *is* state, a scrollback and a cursor and a program
+      // mid-draw — so it is re-attached to the container this render made
+      // rather than rebuilt with it.
+      syncTerminal();
     }
   }
 }
@@ -10425,6 +10577,20 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
+    case "terminal-toggle":
+      selectPrimaryDestination({ kind: "terminal" }, activeChannelId());
+      void loadTerminalMachines(activeChannelId()).then(scheduleRender);
+      break;
+    case "terminal-open":
+      void openTerminalAction(
+        activeChannelId(),
+        value,
+        node.dataset.shell ?? "",
+      );
+      break;
+    case "terminal-close":
+      void closeTerminalAction(activeChannelId(), value);
+      break;
     case "preview-start":
       void startPreviewAction(value);
       return;

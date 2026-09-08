@@ -762,10 +762,39 @@ test("serves the vendored Monaco build same-origin under /vendor", async () => {
 });
 
 test("a missing vendor directory degrades to dashboard-only assets", async () => {
-  const assets = await loadStaticAssets(undefined, false, false);
+  const assets = await loadStaticAssets(undefined, false, false, false);
   assert.equal(assets.get("/app.js") !== undefined, true);
   assert.equal(assets.get("/vendor/monaco/vs/loader.js"), undefined);
   assert.equal(assets.get("/vendor/collab/index.js"), undefined);
+  // The terminal emulator is vendored the same way and degrades the same
+  // way: no package, no asset, and a Terminal tab that says so rather than a
+  // page that fails to load.
+  assert.equal(assets.get("/vendor/xterm/xterm.js"), undefined);
+});
+
+test("the terminal emulator is served same-origin, and only its two files", async () => {
+  const assets = await loadStaticAssets();
+  // A terminal's output is not text — it is text interleaved with cursor and
+  // colour instructions — so the page needs an emulator, and the CSP allows
+  // no external scripts. Vendored exactly as Monaco is.
+  assert.equal(
+    assets.get("/vendor/xterm/xterm.js")?.contentType,
+    "text/javascript; charset=utf-8",
+  );
+  assert.equal(
+    assets.get("/vendor/xterm/xterm.css")?.contentType,
+    "text/css; charset=utf-8",
+  );
+  // Two files, named. The package also ships sources, maps and typings, and
+  // serving a directory because it happens to be there is how a deployment
+  // publishes things nobody meant to.
+  const vendored = [...assets.keys()].filter((url) =>
+    url.startsWith("/vendor/xterm/"),
+  );
+  assert.deepEqual(vendored.sort(), [
+    "/vendor/xterm/xterm.css",
+    "/vendor/xterm/xterm.js",
+  ]);
 });
 
 test("serves the collaboration engine the gateway itself runs", async () => {

@@ -164,6 +164,7 @@ import {
   type ProxyTarget,
 } from "./mcp-proxy.js";
 import { dialMcp } from "./mcp-dialer.js";
+import { TerminalSessions } from "./terminal-sessions.js";
 import { BundleTickets, EditorPresence } from "./editor-sessions.js";
 import {
   buildCatchUpDigest,
@@ -253,6 +254,7 @@ import { routeProjects } from "./routes/projects.js";
 import { routeRepositories } from "./routes/repositories.js";
 import { routeTasks } from "./routes/tasks.js";
 import { routeChannels } from "./routes/channels.js";
+import { routeTerminal } from "./routes/terminal.js";
 import { routeMessages } from "./routes/messages.js";
 import { routeChat } from "./routes/chat.js";
 import { routeSettings } from "./routes/settings.js";
@@ -279,6 +281,7 @@ const AUTHENTICATED_ROUTES: ReadonlyArray<
   routeRepositories,
   routeTasks,
   routeChannels,
+  routeTerminal,
   routeMessages,
   routeChat,
   routeSettings,
@@ -1654,6 +1657,15 @@ export class ApiGateway {
   private readonly editors = new EditorPresence();
   /** One-shot permission to fetch one lease's bundle. Same file, same reason. */
   readonly bundleTickets = new BundleTickets();
+  /**
+   * Live terminal sessions, held in memory because that is what they are.
+   *
+   * See `terminal-sessions.ts`: a session is a process on somebody's laptop,
+   * so it cannot outlive the worker holding it and a restart here ends every
+   * one of them — which readers are told rather than left to infer from a
+   * shell that has stopped answering.
+   */
+  readonly terminals = new TerminalSessions();
   /**
    * What each approved MCP server offers, so a handshake does not dial them.
    *

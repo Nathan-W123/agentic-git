@@ -1930,6 +1930,13 @@ function chanSidebar(activeRepositoryId) {
            they say what they are: rows with names, the width of the column,
            beside the two destinations they were always siblings of. The
            running app's address follows the control that started it. -->
+      <button type="button" class="chan-quick-link${
+        destination.kind === "terminal" ? " on" : ""
+      }" data-act="terminal-toggle" aria-current="${
+        destination.kind === "terminal" ? "page" : "false"
+      }" title="Open a terminal on one of your machines">
+        ${icon("terminal")}<span>Terminal</span>
+      </button>
       ${pinsQuickLink()}
       ${previewControl(activeRepositoryId)}
       ${previewLink(activeRepositoryId)}
@@ -7622,6 +7629,116 @@ function filesConversation(repositoryId) {
     .replace(/<\/aside>$/u, "</section>");
 }
 
+/**
+ * A shell on one of the reader's own machines.
+ *
+ * Three states, and the distinction between the last two is the whole of the
+ * usefulness: no machine connected at all, a machine connected whose owner
+ * has not allowed a terminal on it, and a machine ready to open one. The
+ * middle case used to be the one every remote-shell feature reports as
+ * "unavailable", leaving somebody to guess whether to open their laptop or
+ * change a setting.
+ */
+function terminalConversation(repositoryId) {
+  const session = state.terminals[previewKey(repositoryId)];
+  const machines = state.terminalMachines;
+  const room = subChannelLabel(activeSubChannelId(repositoryId), repositoryId);
+  return `<section class="primary-private-conversation terminal-conversation"
+      aria-label="Terminal">
+    <div class="primary-file-toolbar terminal-head">
+      ${panelKind("Terminal")}
+      <span class="terminal-where">${esc(room)}</span>
+      <span class="spacer"></span>
+      ${
+        session === undefined
+          ? ""
+          : `<button type="button" class="btn-quiet" data-act="terminal-close"
+               data-value="${esc(session.id ?? "")}">Close</button>`
+      }
+    </div>
+    ${
+      state.terminalError === undefined
+        ? ""
+        : `<div class="terminal-error">${esc(state.terminalError)}</div>`
+    }
+    ${
+      session !== undefined
+        ? terminalLive(session)
+        : machines === undefined
+          ? `<div class="terminal-empty">Looking for your machines…</div>`
+          : terminalPicker(machines)
+    }
+  </section>`;
+}
+
+/** The running shell. xterm draws into this; the renderer leaves it alone. */
+function terminalLive(session) {
+  return `<div class="terminal-body">
+    <div class="terminal-meta">
+      ${esc(session.shell ?? "shell")} on ${esc(session.workerName ?? "your machine")}${
+        session.backend === "pipes"
+          ? ' — <span class="terminal-degraded">no pseudo-terminal on this machine, ' +
+            "so full-screen programs and Ctrl-C will not work</span>"
+          : ""
+      }
+      ${
+        session.exitCode === undefined
+          ? ""
+          : `<span class="terminal-ended">· exited ${String(session.exitCode)}</span>`
+      }
+    </div>
+    <div class="terminal-screen" data-terminal="${esc(session.id ?? "")}"></div>
+  </div>`;
+}
+
+/** Which machine, and which of the shells it actually has. */
+function terminalPicker(machines) {
+  if (machines.length === 0) {
+    return `<div class="terminal-empty">
+      <p>No machine of yours is connected.</p>
+      <p class="modal-hint">Open the desktop app on the computer you want the
+      shell to run on. A terminal runs there, not on the control plane — which
+      is why it has your files, your tools and your keys.</p>
+    </div>`;
+  }
+  const offering = machines.filter((machine) => machine.terminal !== undefined);
+  if (offering.length === 0) {
+    return `<div class="terminal-empty">
+      <p>${esc(machines.map((machine) => machine.name).join(", "))}
+      ${machines.length === 1 ? "is" : "are"} connected, but
+      ${machines.length === 1 ? "has" : "have"} not allowed a terminal.</p>
+      <p class="modal-hint">Allow it in the desktop app, on that computer.
+      Nobody here can turn it on for you: a shell there runs as you, so the
+      machine gets the say.</p>
+    </div>`;
+  }
+  return `<div class="terminal-picker">
+    ${offering
+      .map(
+        (machine) => `<div class="terminal-machine">
+          <div class="terminal-machine-name">${esc(machine.name)}</div>
+          <div class="terminal-shells">
+            ${(machine.terminal.shells ?? [])
+              .map(
+                (shell) => `<button type="button" class="btn"
+                  data-act="terminal-open" data-value="${esc(machine.id)}"
+                  data-shell="${esc(shell.id)}">${esc(shell.label)}</button>`,
+              )
+              .join("")}
+          </div>
+          ${
+            machine.terminal.backend === "pipes"
+              ? `<div class="terminal-degraded">This machine has no
+                 pseudo-terminal, so full-screen programs like vim, and Ctrl-C
+                 as an interrupt, will not work here.</div>`
+              : ""
+          }
+        </div>`,
+      )
+      .join("")}
+  </div>`;
+}
+
 /** A selected file replaces the primary destination while keeping its tools. */
 function fileConversation() {
   return filePanel()
@@ -7641,6 +7758,9 @@ function primaryConversation(repositoryId) {
   }
   if (destination.kind === "agent") {
     return agentConversation(repositoryId);
+  }
+  if (destination.kind === "terminal") {
+    return terminalConversation(repositoryId);
   }
   if (destination.kind === "files") {
     return filesConversation(repositoryId);

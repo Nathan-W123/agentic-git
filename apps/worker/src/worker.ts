@@ -21,6 +21,7 @@ import type {
   AgentEvent,
   AgentTokenUsage,
 } from "@coord/agent-protocol";
+import { TerminalLoop } from "./terminal-loop.js";
 import {
   WORKER_PROTOCOL_VERSION,
   derivedRepositoryParallelism,
@@ -1293,6 +1294,9 @@ export class Worker {
    * this is also the repair path. A cache that was deleted, or was never
    * there, is simply built again on the next task.
    */
+  /** The terminal poll, when this worker is running one. */
+  private terminals: TerminalLoop | undefined;
+
   private async repositoryCache(
     git: GitClient,
     repositoryId: string,
@@ -2359,6 +2363,38 @@ export class Worker {
     // Connected after registering, so a nudge can never arrive for a worker
     // the control plane does not yet know about.
     this.options.nudge?.start();
+    // The same rule, for the same reason: a terminal poll names a worker id,
+    // so it cannot go out before there is one.
+    //
+    // Started only where the machine's owner has said something about
+    // terminals at all. A machine that has never been asked has nothing to
+    // advertise and nothing to collect, so a poll from it would be a request
+    // held open forever on behalf of a feature nobody turned on — which is
+    // also what made every worker test hang: `run()` never returned because
+    // this never stopped asking.
+    if (this.options.project.config.terminal !== undefined) {
+      this.startTerminals();
+    }
+    // And then the thing this method is for. Splitting the setup out above
+    // left this call behind for one build, which typechecked perfectly and
+    // produced a worker that registered, announced itself, and leased nothing
+    // ever again.
+    await this.runLoop();
+  }
+
+  private startTerminals(): void {
+    this.terminals = new TerminalLoop({
+      workerId: this.identity?.id ?? "",
+      project: this.options.project,
+      client: this.options.client,
+      workspaceFor: async () =>
+        this.options.project.config.terminal?.cwd ?? this.options.workspaceRoot,
+      log: (message) => console.log(`[worker] ${message}`),
+    });
+    this.terminals.start();
+  }
+
+  private async runLoop(): Promise<void> {
     const idle = this.options.pollIntervalMs ?? DEFAULT_POLL_MS;
     /** One entry per task in flight; `done` is what prunes it. */
     const slots: Array<{ done: boolean; settled: Promise<void> }> = [];
@@ -2448,6 +2484,10 @@ export class Worker {
    */
   public async stop(): Promise<void> {
     this.stopping = true;
+    // Stopped with everything else, so closing the app does not leave a poll
+    // in flight and a shell running on somebody's machine.
+    await this.terminals?.stop();
+    this.terminals = undefined;
     // Released first: it holds a socket and may have a caller parked in
     // `wait`, and neither should outlive the decision to shut down.
     this.options.nudge?.stop();

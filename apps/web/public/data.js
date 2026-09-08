@@ -785,6 +785,17 @@ export const state = {
    * between states on every render.
    */
   previews: {},
+  /**
+   * The terminal, per room.
+   *
+   * Keyed the same way a preview is, because it is the same question: a work
+   * channel's terminal and the repository's are two shells and one key would
+   * have the second overwrite the first.
+   */
+  terminals: {},
+  /** Machines that could offer one, and what each says it can do. */
+  terminalMachines: undefined,
+  terminalError: undefined,
   /** Images being uploaded from the composer right now, for the note beside it. */
   attaching: 0,
   /** The same, counted separately for the thread panel's own reply composer. */
@@ -6855,6 +6866,92 @@ export async function startPreview(
   const key = previewKey(repositoryId, channelId);
   state.previews[key] = response?.preview ?? null;
   return state.previews[key];
+}
+
+/* --------------------------------------------------------- terminal ---- */
+
+/**
+ * The machines that could open a terminal, and what each of them offers.
+ *
+ * Only the reader's own: a terminal runs with its owner's login and files, so
+ * the server never lists anybody else's, and this never asks it to.
+ */
+export async function loadTerminalMachines(repositoryId) {
+  if (!repositoryId) {
+    return [];
+  }
+  try {
+    const response = await api(repositoryPath(repositoryId, "/terminal/machines"));
+    state.terminalMachines = response?.machines ?? [];
+  } catch {
+    // A deployment without the route, or a reader without `run_task`. Absent
+    // rather than an error: the tab says there is nothing to open one on.
+    state.terminalMachines = [];
+  }
+  return state.terminalMachines;
+}
+
+/** Opens a shell on one of them, in the room the reader is looking at. */
+export async function openTerminalSession(
+  repositoryId,
+  { workerId, shell, cols, rows },
+  channelId = activeSubChannelId(repositoryId),
+) {
+  state.terminalError = undefined;
+  try {
+    const response = await api(
+      repositoryPath(
+        repositoryId,
+        `/terminal${channelQuery(repositoryId, channelId)}`,
+      ),
+      { method: "POST", body: { workerId, shell, cols, rows } },
+    );
+    const key = previewKey(repositoryId, channelId);
+    state.terminals[key] = { ...response?.session, seq: 0, output: "" };
+    return state.terminals[key];
+  } catch (error) {
+    state.terminalError = error.message;
+    return undefined;
+  }
+}
+
+/**
+ * Everything the shell has said since last time.
+ *
+ * By sequence number rather than "since I last asked", because a poll that
+ * retried after a dropped connection would otherwise lose whatever arrived
+ * in between — and a terminal that silently drops a line is worse than one
+ * that stops.
+ */
+export async function readTerminal(repositoryId, channelId, sessionId, after) {
+  return await api(
+    repositoryPath(
+      repositoryId,
+      `/terminal/${encodeURIComponent(sessionId)}?after=${String(after)}`,
+    ),
+  );
+}
+
+export async function sendTerminalInput(repositoryId, sessionId, data) {
+  await api(
+    repositoryPath(repositoryId, `/terminal/${encodeURIComponent(sessionId)}/input`),
+    { method: "POST", body: { data } },
+  );
+}
+
+export async function resizeTerminal(repositoryId, sessionId, cols, rows) {
+  await api(
+    repositoryPath(repositoryId, `/terminal/${encodeURIComponent(sessionId)}/resize`),
+    { method: "POST", body: { cols, rows } },
+  ).catch(() => undefined);
+}
+
+export async function closeTerminal(repositoryId, channelId, sessionId) {
+  await api(
+    repositoryPath(repositoryId, `/terminal/${encodeURIComponent(sessionId)}`),
+    { method: "DELETE" },
+  ).catch(() => undefined);
+  delete state.terminals[previewKey(repositoryId, channelId)];
 }
 
 /** Remembers how this repository starts, so it is asked once and not again. */
