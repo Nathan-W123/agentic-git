@@ -22,8 +22,8 @@ import type { ResourceLease } from "@coord/shared-types";
 
 /** One holder of one file, whichever kind of thing is holding it. */
 export interface FileHolder {
-  kind: "human" | "agent";
-  /** A user id for a person, an agent id for an agent. */
+  kind: "human" | "agent" | "shell";
+  /** A user id for a person or a shell, an agent id for an agent. */
   principalId: string;
   /** Present for an agent: what it is holding the file in order to do. */
   taskId?: string;
@@ -40,6 +40,25 @@ export interface FileHolder {
   since: string;
   /** Present for a person: when it lapses without a renewal. */
   expiresAt?: string;
+  /**
+   * True for a holder that warns and never refuses.
+   *
+   * A shell is the only one. It has no scope — nothing can see which files a
+   * terminal touches — so it would otherwise read as a whole-file hold and
+   * lock every file on the branch for as long as somebody left a tab open.
+   * Naming it is useful; enforcing it is not, and a lock that broad would
+   * only teach people to keep the tab closed.
+   */
+  advisory?: boolean;
+  /** Present for a shell: the machine it is running on. */
+  machine?: string;
+}
+
+/** Somebody with a live shell on the branch, scope unknown by definition. */
+export interface ShellPresence {
+  userId: string;
+  machine: string;
+  since: string;
 }
 
 /** An agent's holdings, as they sit on an admitted plan. */
@@ -70,6 +89,15 @@ function rangesOf(grant: ResourceLease): ClaimedRange[] {
 export function holdersOfFile(input: {
   humans: readonly EditorHold[];
   agents: readonly AgentHolding[];
+  /**
+   * Live terminals on this branch, whoever opened them.
+   *
+   * The third kind of holder and the only advisory one. It is here rather
+   * than left out because "somebody is in a shell on this branch" is the
+   * single most useful thing a reader can know before editing, and it is
+   * invisible everywhere else — a shell takes no lease and writes no row.
+   */
+  shells?: readonly ShellPresence[];
   path?: string;
   exceptUser?: string;
 }): FileHolder[] {
@@ -112,6 +140,23 @@ export function holdersOfFile(input: {
       });
     }
   }
+  for (const shell of input.shells ?? []) {
+    if (shell.userId === input.exceptUser) {
+      continue;
+    }
+    holders.push({
+      kind: "shell",
+      principalId: shell.userId,
+      // Not the file that was asked about: a shell holds no file in
+      // particular, and saying it held this one would be an invention the
+      // margin would then draw a block around.
+      file: "",
+      ranges: [],
+      since: shell.since,
+      advisory: true,
+      machine: shell.machine,
+    });
+  }
   return holders.sort(
     (left, right) =>
       left.file.localeCompare(right.file) ||
@@ -132,6 +177,12 @@ export function holderBlocks(
   holder: FileHolder,
   ranges: readonly ClaimedRange[],
 ): boolean {
+  if (holder.advisory === true) {
+    // A shell. It has no ranges, so every branch below would call it a
+    // whole-file hold and refuse the save — which is how one open terminal
+    // tab would come to lock a branch nobody was actually editing.
+    return false;
+  }
   if (holder.ranges.length === 0 || ranges.length === 0) {
     return true;
   }

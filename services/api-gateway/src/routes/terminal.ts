@@ -31,6 +31,8 @@ import { authorizeRepository } from "../authorization.js";
 import { matchPath } from "../gateway-util.js";
 import { API_PREFIX } from "../http-util.js";
 import { WORKER_POLL_MS } from "../terminal-sessions.js";
+import { holdersOfFile } from "../editor-holds.js";
+import { terminalBanner } from "../terminal-banner.js";
 import type { TerminalCapability } from "../terminal-sessions.js";
 import type { ApiGateway } from "../server.js";
 import type { AuthenticatedRouteRequest } from "./context.js";
@@ -251,6 +253,14 @@ export async function routeTerminal(
         channel?.branch !== undefined && channel.mergedAt === undefined
           ? channel.branch
           : undefined;
+      // What is already held here, written into the shell before its first
+      // prompt. This is the whole of what a terminal can be told: it will not
+      // be stopped from editing any of it, and the banner says so too.
+      const banner = await openingBanner(gw, {
+        repositoryId,
+        userId: principal.user.id,
+        ...(branch === undefined ? {} : { branch }),
+      });
       const session = gw.terminals.open({
         userId: principal.user.id,
         projectId,
@@ -261,6 +271,7 @@ export async function routeTerminal(
         shell,
         cols: dimension(body["cols"], 80, 500),
         rows: dimension(body["rows"], 24, 200),
+        ...(banner === "" ? {} : { banner }),
       });
       await gw.options.store.appendAudit(undefined, {
         type: "workspace_command_executed",
@@ -332,4 +343,84 @@ export async function routeTerminal(
   }
 
   throw new HttpError(405, "method_not_allowed", "Unsupported method");
+}
+
+
+/**
+ * The lines a shell opens with: the branch, who is holding it, and the
+ * warning that none of that is enforced in here.
+ *
+ * Best effort on purpose. Every lookup below is a nicety and none of them is
+ * a reason to refuse somebody a terminal, so a store that is unhappy costs
+ * the reader a banner rather than their shell.
+ */
+async function openingBanner(
+  gw: ApiGateway,
+  input: { repositoryId: string; userId: string; branch?: string },
+): Promise<string> {
+  try {
+    const humans = await gw.options.store
+      .listEditorHolds(input.repositoryId, {
+        branch: input.branch ?? "",
+        exceptUser: input.userId,
+      })
+      .catch((): [] => []);
+    const leases = await gw.options.store
+      .listWorkLeases({ status: "active", repositoryId: input.repositoryId })
+      .catch((): [] => []);
+    const holders = holdersOfFile({
+      humans,
+      agents: leases.flatMap((lease) => {
+        const grants = lease.plan?.admission.ownershipGrants ?? [];
+        return grants.length === 0
+          ? []
+          : [
+              {
+                principalId: lease.plan?.plan.taskId ?? lease.workerId,
+                taskId: lease.taskId,
+                grants,
+              },
+            ];
+      }),
+      // Other people's shells on the same branch, which is the one holder
+      // nothing else in the system would ever have mentioned.
+      shells: gw.terminals
+        .shellsOn(input.repositoryId, input.branch)
+        .filter((shell) => shell.userId !== input.userId)
+        .map((shell) => ({
+          userId: shell.userId,
+          machine: shell.workerName,
+          since: shell.since,
+        })),
+      exceptUser: input.userId,
+    });
+    const names = new Map<string, string>();
+    for (const holder of holders) {
+      if (holder.kind === "agent" || names.has(holder.principalId)) {
+        continue;
+      }
+      const account = await gw.options.store
+        .getUser(holder.principalId)
+        .catch(() => undefined);
+      if (account !== undefined) {
+        names.set(holder.principalId, account.displayName);
+      }
+    }
+    const repository = await gw.options.store
+      .getRepository(input.repositoryId)
+      .catch(() => undefined);
+    return terminalBanner({
+      ...(input.branch === undefined ? {} : { branch: input.branch }),
+      // The display name when it has one, the id otherwise — the same rule
+      // every other reader of a repository follows.
+      repositoryName: repository?.displayName ?? input.repositoryId,
+      holders,
+      nameOf: (holder) =>
+        holder.kind === "agent"
+          ? holder.principalId
+          : (names.get(holder.principalId) ?? "Somebody"),
+    });
+  } catch {
+    return "";
+  }
 }

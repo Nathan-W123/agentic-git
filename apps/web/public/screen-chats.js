@@ -9089,21 +9089,32 @@ function fileHoldItems(holds) {
   return `${holds
       .map(
         (hold, index) => `<span class="fp-holder fp-holder-${index % 4}">
-          ${icon(hold.kind === "agent" ? "robot" : "personBust")}
+          ${icon(
+            hold.kind === "agent"
+              ? "robot"
+              : hold.kind === "shell"
+                ? "terminal"
+                : "personBust",
+          )}
           ${esc(
             hold.kind === "agent"
               ? (agentLabelOf(hold.principalId) ?? hold.principalId)
               : (memberName(hold.principalId) ?? hold.principalId),
           )}
           ${
-            hold.ranges.length === 0
-              ? "· the whole file"
-              : `· ${hold.ranges
-                  .map(
-                    (range) =>
-                      `${String(range.start)}–${String(Math.max(range.start, range.end - 1))}`,
-                  )
-                  .join(", ")}`
+            // A shell has no lines and never will: nothing can see what a
+            // terminal edits. Saying where it is would be an invention, so
+            // it says what it is instead.
+            hold.kind === "shell"
+              ? `· in a shell${hold.machine === undefined ? "" : ` on ${esc(hold.machine)}`}`
+              : hold.ranges.length === 0
+                ? "· the whole file"
+                : `· ${hold.ranges
+                    .map(
+                      (range) =>
+                        `${String(range.start)}–${String(Math.max(range.start, range.end - 1))}`,
+                    )
+                    .join(", ")}`
           }
         </span>`,
       )
@@ -9149,22 +9160,29 @@ export function paintFileHolds() {
     return;
   }
   layer.innerHTML = holds
-    .flatMap((hold, index) =>
+    .flatMap((hold, index) => {
+      // A shell is named above the file and drawn nowhere. It has no ranges,
+      // so the whole-file branch below would tint every line of every file on
+      // the branch for as long as somebody left a terminal tab open.
+      if (hold.advisory === true) {
+        return [];
+      }
       // A hold with no ranges is the whole file. Drawn as one block over
       // everything rather than left blank: "somebody has all of this" is the
       // strongest thing this layer can say and the easiest to say wrong by
       // saying nothing.
-      (hold.ranges.length === 0
-        ? [{ start: 1, end: editor.value.split("\n").length + 1 }]
-        : hold.ranges
+      return (
+        hold.ranges.length === 0
+          ? [{ start: 1, end: editor.value.split("\n").length + 1 }]
+          : hold.ranges
       ).map((range) => {
         const start = Math.max(1, Number(range.start) || 1);
         const end = Math.max(start + 1, Number(range.end) || start + 1);
         return `<div class="fp-hold fp-holder-${index % 4}" style="top:${
           top + (start - 1) * lineHeight
         }px;height:${(end - start) * lineHeight}px"></div>`;
-      }),
-    )
+      });
+    })
     .join("");
   layer.style.transform = `translateY(${-editor.scrollTop}px)`;
   // Assigned rather than added, so a repaint on every render cannot pile up

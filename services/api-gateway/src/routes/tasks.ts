@@ -1025,6 +1025,17 @@ export async function routeTasks(
         .catch((): [] => []);
       return holdersOfFile({
         humans,
+        // And anybody sitting in a shell on this branch. Advisory: it is
+        // named in the editor and never refuses a save, because a terminal
+        // has no scope and a lock that broad would cover every file here.
+        shells: gw.terminals
+          .shellsOn(repositoryId, branch)
+          .filter((shell) => shell.userId !== principal.user.id)
+          .map((shell) => ({
+            userId: shell.userId,
+            machine: shell.workerName,
+            since: shell.since,
+          })),
         agents: leases.flatMap((lease) => {
           const grants = lease.plan?.admission.ownershipGrants ?? [];
           return grants.length === 0

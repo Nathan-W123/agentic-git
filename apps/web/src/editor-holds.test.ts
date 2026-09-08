@@ -142,3 +142,28 @@ test("a refused save names who is in the way and offers a way through", async ()
   // And the override is sent as one, so the server can record it.
   assert.match(data, /\.\.\.\(override \? \{ override: true \} : \{\}\)/u);
 });
+
+test("a shell is named above the file and drawn over none of it", async () => {
+  const chats = await publicFile("screen-chats.js");
+
+  // A terminal has no scope: nothing can see which files it edits. So it gets
+  // a chip saying what it is and where it is running...
+  const banner = chats.slice(chats.indexOf("function fileHoldItems("));
+  const body = banner.slice(0, banner.indexOf("\n}"));
+  assert.match(body, /hold\.kind === "shell"/u);
+  assert.match(body, /"terminal"/u);
+  assert.match(body, /in a shell/u);
+  assert.match(body, /hold\.machine/u);
+
+  // ...and no block. It has no ranges, and the whole-file rule would
+  // otherwise tint every line of every file on the branch for as long as
+  // somebody left a terminal tab open.
+  const paint = chats.slice(chats.indexOf("export function paintFileHolds"));
+  const drawing = paint.slice(0, paint.indexOf("\n}"));
+  const guard = drawing.indexOf("hold.advisory === true");
+  assert.notEqual(guard, -1);
+  assert.match(
+    drawing.slice(guard, drawing.indexOf("hold.ranges.length === 0")),
+    /return \[\];/u,
+  );
+});
