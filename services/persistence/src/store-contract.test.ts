@@ -7152,6 +7152,12 @@ for (const backend of backends) {
         { file: "src/login.ts", start: 10, end: 24 },
       ]);
 
+      // Far enough apart to tell the two timestamps apart. Without this the
+      // acquire and the renewal land in the same millisecond, `acquiredAt`
+      // reads the same either way, and the assertion below passes against a
+      // store that resets it on every renewal.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
       // The second keystroke is the same statement made again, not a second
       // hold. One row per person per file, or an editor renewing every few
       // seconds would leave a pile nobody could account for.
@@ -7164,7 +7170,8 @@ for (const backend of backends) {
         ttlMs: 60_000,
       });
       assert.equal(renewed.acquiredAt, first.acquiredAt, "since when it began");
-      assert.ok(renewed.expiresAt >= first.expiresAt, "and how long it lasts");
+      assert.ok(renewed.renewedAt > first.renewedAt, "and when it last spoke");
+      assert.ok(renewed.expiresAt > first.expiresAt, "and how long it lasts");
       const held = await store.listEditorHolds("repo_holds");
       assert.equal(held.length, 1);
       assert.deepEqual(held[0]?.ranges, [
