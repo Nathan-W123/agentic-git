@@ -350,7 +350,7 @@ export async function routeChannels(
   const branchMatch = matchPath(
     path,
     new RegExp(
-      `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channels/([^/]+)/branch(?:/(refresh|merge|ship))?$`,
+      `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channels/([^/]+)/branch(?:/(refresh|merge|ship|comments|review))?$`,
       "u",
     ),
   );
@@ -360,7 +360,14 @@ export async function routeChannels(
     const permission =
       verb === undefined
         ? "view"
-        : // Landing on canonical is the most consequential write in the
+        : // Saying something about the work is not doing anything to it.
+          // A comment is a channel message and a review is an opinion, and
+          // anybody who can see the branch may leave either — withholding
+          // them from the people who can read the code is how a review
+          // becomes a rubber stamp by the two people allowed to speak.
+          verb === "comments" || verb === "review"
+          ? "view"
+          : // Landing on canonical is the most consequential write in the
           // system, and `review` is the permission that says so by name.
           // Shipping asks a second set of reviewers, on GitHub, to take work
           // Kumi has already accepted — the same weight, and it publishes
@@ -538,10 +545,54 @@ export async function routeChannels(
             branch,
           }),
       );
+      // The comments left on this diff, and where each one points. Read
+      // from the room rather than from a comment table beside it: the room is
+      // the pull request's conversation, and a comment is a message in it.
+      // An anchor whose revision is not the one being drawn is left out of
+      // the placed set below — a line number counted in another commit is a
+      // guess — but the message is still in the transcript, which is where
+      // somebody would go looking for it.
+      const comments = (
+        await gw.options.store
+          .listChannelMessages(repositoryId, principal.user.id, {
+            channelId: channel.id,
+          })
+          .catch(() => [])
+      )
+        .filter((message) => message.anchor !== undefined)
+        .map((message) => ({
+          id: message.id,
+          authorId: message.authorId,
+          kind: message.kind,
+          content: message.content,
+          createdAt: message.createdAt,
+          anchor: message.anchor,
+          replies: message.replies.length,
+          // Whether it is about the diff on the screen. Said rather than
+          // filtered, so a comment on an older revision is visibly stale
+          // instead of silently gone.
+          current: message.anchor?.revision === comparison.head,
+        }));
+      const reviews = await gw.options.store
+        .listSubChannelReviews(repositoryId, channel.id)
+        .catch(() => []);
       gw.sendJson(response, 200, {
         branch,
         merged: false,
         ...comparison,
+        comments,
+        // Each person's standing answer, and whether it was about what is
+        // there now: an approval of a branch that has moved four commits
+        // since is not an approval of this.
+        reviews: reviews.map((review) => ({
+          ...review,
+          current: review.revision === comparison.head,
+        })),
+        // What the caller themselves has said, so the browser can show which
+        // button is already pressed rather than offering both as if neither
+        // were.
+        myReview:
+          reviews.find((review) => review.userId === principal.user.id)?.state,
         // Whether the person asking could land it themselves, so the browser
         // knows whether to draw the button. Derived rather than asked for
         // separately: the answer is already in hand, and a review surface
@@ -563,6 +614,144 @@ export async function routeChannels(
 
     if (method !== "POST") {
       throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
+    if (verb === "comments") {
+      // A review comment is a message in the room, posted through the same
+      // path as any other — which is the whole design: mentioning an agent in
+      // one dispatches a task on this branch, the thread hangs off it, the
+      // unread count moves, and none of that had to be rebuilt for reviews.
+      // That path does its own membership check, so there is not a second one
+      // here to disagree with it.
+      const body = objectBody(await gw.readJson(request));
+      const content =
+        stringField(body["content"], "content", { min: 1, max: 8000 }) ?? "";
+      const path_ =
+        stringField(body["path"], "path", { min: 1, max: 1000 }) ?? "";
+      const revision =
+        stringField(body["revision"], "revision", { min: 7, max: 64 }) ?? "";
+      const line = body["line"];
+      if (
+        typeof line !== "number" ||
+        !Number.isSafeInteger(line) ||
+        line < 1
+      ) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "A review comment needs the line it is about",
+        );
+      }
+      // The revision is checked against the branch rather than trusted: a
+      // comment stamped with a revision this branch never had could never be
+      // placed against any diff, and would sit in the room pointing nowhere.
+      const comparison = await gw.performOperation(
+        "branch_failed",
+        async () =>
+          await operations.branchComparison!({
+            projectId,
+            repositoryId,
+            branch,
+          }),
+      );
+      if (revision !== comparison.head) {
+        throw new HttpError(
+          409,
+          "revision_moved",
+          "The branch moved while you were reading it. Reload the review — " +
+            "the line you were pointing at may not be that line any more.",
+        );
+      }
+      if (!comparison.files.includes(path_)) {
+        throw new HttpError(
+          400,
+          "not_in_this_change",
+          `${path_} is not one of the files this branch changed.`,
+        );
+      }
+      const dispatch = await gw.postChannelMessageAndDispatch({
+        projectId,
+        repositoryId,
+        channelId: channel.id,
+        principal,
+        content,
+        anchor: { path: path_, line, revision },
+      });
+      gw.sendJson(response, 201, {
+        message: dispatch.message,
+        taskIds: dispatch.taskIds,
+      });
+      return true;
+    }
+
+    if (verb === "review") {
+      const body = objectBody(await gw.readJson(request));
+      const state = body["state"];
+      const note = stringField(body["note"], "note", { max: 2000 }) ?? "";
+      // Withdrawing is a state of its own rather than a DELETE, because it is
+      // the same decision as the other two — what do I think of this — and a
+      // second HTTP verb for one of three answers would put it somewhere
+      // else in every client that offers all three together.
+      if (state === "withdrawn") {
+        await gw.options.store.clearSubChannelReview(
+          repositoryId,
+          channel.id,
+          principal.user.id,
+        );
+        gw.sendJson(response, 200, { state: null });
+        return true;
+      }
+      if (state !== "approved" && state !== "changes_requested") {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "A review is approved, changes_requested, or withdrawn",
+        );
+      }
+      const comparison = await gw.performOperation(
+        "branch_failed",
+        async () =>
+          await operations.branchComparison!({
+            projectId,
+            repositoryId,
+            branch,
+          }),
+      );
+      const saved = await gw.options.store.saveSubChannelReview({
+        repositoryId,
+        channelId: channel.id,
+        userId: principal.user.id,
+        state,
+        ...(note === "" ? {} : { note }),
+        // Stamped with what was actually reviewed, so four commits later a
+        // reader can tell this approved something else.
+        revision: comparison.head,
+        reviewedAt: new Date().toISOString(),
+      });
+      // Said out loud. A review nobody in the room can see is a decision made
+      // in a panel, and the room is where the rest of the conversation is.
+      await gw.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        `${principal.user.displayName} ${
+          state === "approved" ? "approved" : "asked for changes on"
+        } \`${branch}\`${note === "" ? "." : `: ${note}`}`,
+        channel.id,
+      );
+      await gw.options.store.appendAudit(undefined, {
+        type: "channel_updated",
+        data: {
+          projectId,
+          repositoryId,
+          channelId: channel.id,
+          slug: channel.slug,
+          branch,
+          reviewState: state,
+          actorId: principal.user.id,
+        },
+      });
+      gw.sendJson(response, 200, { review: saved });
+      return true;
     }
 
     if (verb === "refresh") {
@@ -667,6 +856,14 @@ export async function routeChannels(
         actorId: principal.user.id,
       },
     });
+    // Canonical just moved, so every other open work channel in this
+    // repository is now one commit further behind than it was. Catching them
+    // up here rather than waiting for the next sweep is the difference
+    // between a conflict discovered while somebody is still looking at the
+    // merge that caused it and one discovered next week. Not awaited: the
+    // person who pressed Merge is waiting on the merge, not on other
+    // channels, and the sweep repeats this anyway.
+    void gw.refreshBranchesAfterMerge(repositoryId).catch(() => undefined);
     gw.sendJson(response, 200, {
       merged: true,
       revision: merged.revision,

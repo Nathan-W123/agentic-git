@@ -68,7 +68,10 @@ import type {
   McpServerRecord,
   McpServerScope,
   McpServerSecrets,
+  ChannelAnchor,
   SubChannel,
+  SubChannelReview,
+  SaveSubChannelReviewInput,
   SubChannelMember,
   SubChannelVisibility,
   UpdateMcpServerInput,
@@ -172,6 +175,44 @@ function text(row: Row, column: string): string {
 function optionalText(row: Row, column: string): string | undefined {
   const value = row[column];
   return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * The anchor on a message row, when it carries a whole one.
+ *
+ * A review comment points at a line in a particular revision of a particular
+ * file. Any one of those three missing makes the other two unplaceable — a
+ * line number means nothing without the commit it was counted in — so this
+ * answers all-or-nothing rather than handing back a fragment every reader
+ * downstream would have to re-check.
+ *
+ * Spread into a message, so an ordinary message has no `anchor` key at all
+ * rather than one holding `undefined`, which is what
+ * `exactOptionalPropertyTypes` asks for and what tells "not a review comment"
+ * apart from "a review comment whose anchor was lost".
+ */
+function channelAnchor(row: Row): { anchor?: ChannelAnchor } {
+  const path = optionalText(row, "anchor_path");
+  const revision = optionalText(row, "anchor_revision");
+  const rawLine = row["anchor_line"];
+  const line =
+    typeof rawLine === "bigint"
+      ? Number(rawLine)
+      : typeof rawLine === "number"
+        ? rawLine
+        : undefined;
+  if (
+    path === undefined ||
+    path === "" ||
+    revision === undefined ||
+    revision === "" ||
+    line === undefined ||
+    !Number.isSafeInteger(line) ||
+    line < 1
+  ) {
+    return {};
+  }
+  return { anchor: { path, line, revision } };
 }
 
 function integer(row: Row, column: string): number {
@@ -4298,8 +4339,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
     await this.query(
       `INSERT INTO channel_messages
          (id, repository_id, channel_id, project_id, kind, author_id, content,
-          created_at, task_id, referenced_message_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          created_at, task_id, referenced_message_id,
+          anchor_path, anchor_line, anchor_revision)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         message.id,
         message.repositoryId,
@@ -4311,6 +4353,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
         message.createdAt,
         input.taskId ?? null,
         input.referencedMessageId ?? null,
+        // All three together or all three null: a half-written anchor would
+        // read back as no anchor anyway, and storing one invites somebody to
+        // trust a line number whose revision was lost.
+        input.anchor?.path ?? null,
+        input.anchor?.line ?? null,
+        input.anchor?.revision ?? null,
       ],
     );
     return {
@@ -4318,6 +4366,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       replies: [],
       reactions: {},
       taskId: input.taskId,
+      ...(input.anchor === undefined ? {} : { anchor: input.anchor }),
       ...(input.referencedMessageId === undefined
         ? {}
         : { referencedMessageId: input.referencedMessageId }),
@@ -4962,6 +5011,78 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return row === undefined ? undefined : this.toSubChannel(row);
   }
 
+  public async listSubChannelReviews(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<SubChannelReview[]> {
+    const rows = await this.rows(
+      `SELECT * FROM sub_channel_reviews
+        WHERE repository_id = $1 AND channel_id = $2
+        ORDER BY reviewed_at, user_id`,
+      [repositoryId, channelId],
+    );
+    return rows.map((row) => this.toSubChannelReview(row));
+  }
+
+  public async saveSubChannelReview(
+    input: SaveSubChannelReviewInput,
+  ): Promise<SubChannelReview> {
+    // One row per person per channel, replaced. `RETURNING` rather than a
+    // second read: the row this statement wrote is the row to describe.
+    const row = await this.row(
+      `INSERT INTO sub_channel_reviews
+         (channel_id, repository_id, user_id, state, note, revision, reviewed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (channel_id, user_id) DO UPDATE SET
+         state = excluded.state,
+         note = excluded.note,
+         revision = excluded.revision,
+         reviewed_at = excluded.reviewed_at
+       RETURNING *`,
+      [
+        input.channelId,
+        input.repositoryId,
+        input.userId,
+        input.state,
+        input.note ?? null,
+        input.revision ?? null,
+        input.reviewedAt,
+      ],
+    );
+    if (row === undefined) {
+      throw new Error("The review could not be recorded");
+    }
+    return this.toSubChannelReview(row);
+  }
+
+  public async clearSubChannelReview(
+    repositoryId: string,
+    channelId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const row = await this.row(
+      `DELETE FROM sub_channel_reviews
+        WHERE repository_id = $1 AND channel_id = $2 AND user_id = $3
+        RETURNING user_id`,
+      [repositoryId, channelId, userId],
+    );
+    return row !== undefined;
+  }
+
+  private toSubChannelReview(row: Row): SubChannelReview {
+    const note = optionalText(row, "note");
+    const revision = optionalText(row, "revision");
+    return {
+      channelId: text(row, "channel_id"),
+      repositoryId: text(row, "repository_id"),
+      userId: text(row, "user_id"),
+      state: text(row, "state") as SubChannelReview["state"],
+      ...(note === undefined || note === "" ? {} : { note }),
+      ...(revision === undefined || revision === "" ? {} : { revision }),
+      reviewedAt: text(row, "reviewed_at"),
+    };
+  }
+
   public async shipSubChannel(
     repositoryId: string,
     channelId: string,
@@ -5363,6 +5484,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
       ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
       taskId: optionalText(row, "task_id") as TaskId | undefined,
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
+      // All three or none. A path without a line cannot be placed, and a line
+      // without the revision it was counted in is a guess.
+      ...channelAnchor(row),
       pinnedAt: optionalText(row, "pinned_at"),
       pinnedBy: optionalText(row, "pinned_by"),
       endedAt: optionalText(row, "ended_at"),

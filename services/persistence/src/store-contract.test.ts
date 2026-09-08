@@ -6969,6 +6969,161 @@ for (const backend of backends) {
           ?.pullRequestUrl,
         undefined,
       );
+
+      // ---- reviewing the branch in its own room ----------------------
+      //
+      // A review comment is a channel message with an anchor, not a parallel
+      // comment system: the room is already the pull request's conversation,
+      // so a second store beside it would be two places to look and one of
+      // them would go stale.
+      const plain = await store.appendChannelMessage({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        channelId: work.id,
+        authorId: "user_who",
+        content: "Taking a look now.",
+      });
+      assert.equal(plain.anchor, undefined);
+
+      const anchored = await store.appendChannelMessage({
+        repositoryId: "repo_branching",
+        projectId: DEFAULT_PROJECT_ID,
+        channelId: work.id,
+        authorId: "user_who",
+        content: "This should clamp from below too.",
+        anchor: { path: "src/login.ts", line: 42, revision: "c".repeat(40) },
+      });
+      assert.deepEqual(anchored.anchor, {
+        path: "src/login.ts",
+        line: 42,
+        revision: "c".repeat(40),
+      });
+      // And it survives the round trip, which is the whole reason it is a
+      // column: the panel draws these against a diff on every later read.
+      const readBack = await store.getChannelMessage(
+        "repo_branching",
+        anchored.id,
+        "user_who",
+      );
+      assert.deepEqual(readBack?.anchor, {
+        path: "src/login.ts",
+        line: 42,
+        revision: "c".repeat(40),
+      });
+      const listed = await store.listChannelMessages(
+        "repo_branching",
+        "user_who",
+        { channelId: work.id },
+      );
+      assert.equal(
+        listed.find((message) => message.id === anchored.id)?.anchor?.line,
+        42,
+      );
+      assert.equal(
+        listed.find((message) => message.id === plain.id)?.anchor,
+        undefined,
+      );
+
+      // One review per person, replaced rather than accumulated: changing
+      // your mind is the ordinary case, and a history of somebody approving
+      // and un-approving is noise nobody asked for.
+      assert.deepEqual(
+        await store.listSubChannelReviews("repo_branching", work.id),
+        [],
+      );
+      await store.saveSubChannelReview({
+        repositoryId: "repo_branching",
+        channelId: work.id,
+        userId: "user_who",
+        state: "changes_requested",
+        note: "The clamp is still one-sided.",
+        revision: "c".repeat(40),
+        reviewedAt: "2026-01-02T05:00:00.000Z",
+      });
+      await store.saveSubChannelReview({
+        repositoryId: "repo_branching",
+        channelId: work.id,
+        userId: "user_other",
+        state: "approved",
+        reviewedAt: "2026-01-02T05:01:00.000Z",
+      });
+      const reviews = await store.listSubChannelReviews(
+        "repo_branching",
+        work.id,
+      );
+      assert.equal(reviews.length, 2);
+      assert.deepEqual(
+        reviews.map((review) => review.userId),
+        ["user_who", "user_other"],
+        "oldest first, so who looked reads in the order they looked",
+      );
+      assert.equal(reviews[0]?.state, "changes_requested");
+      assert.equal(reviews[0]?.note, "The clamp is still one-sided.");
+      assert.equal(reviews[0]?.revision, "c".repeat(40));
+      // Absent rather than empty for the one who said nothing: "no note" and
+      // "an empty note" are different statements.
+      assert.equal(reviews[1]?.note, undefined);
+      assert.equal(reviews[1]?.revision, undefined);
+
+      await store.saveSubChannelReview({
+        repositoryId: "repo_branching",
+        channelId: work.id,
+        userId: "user_who",
+        state: "approved",
+        reviewedAt: "2026-01-02T06:00:00.000Z",
+      });
+      const afterChangingMind = await store.listSubChannelReviews(
+        "repo_branching",
+        work.id,
+      );
+      assert.equal(afterChangingMind.length, 2, "a second review replaces");
+      assert.equal(
+        afterChangingMind.find((review) => review.userId === "user_who")?.state,
+        "approved",
+      );
+      // The old note goes with the old answer rather than outliving it.
+      assert.equal(
+        afterChangingMind.find((review) => review.userId === "user_who")?.note,
+        undefined,
+      );
+
+      assert.equal(
+        await store.clearSubChannelReview(
+          "repo_branching",
+          work.id,
+          "user_who",
+        ),
+        true,
+      );
+      assert.deepEqual(
+        (await store.listSubChannelReviews("repo_branching", work.id)).map(
+          (review) => review.userId,
+        ),
+        ["user_other"],
+      );
+      // Withdrawing one nobody left, and one named by the wrong repository,
+      // both answer false rather than throwing.
+      assert.equal(
+        await store.clearSubChannelReview(
+          "repo_branching",
+          work.id,
+          "user_who",
+        ),
+        false,
+      );
+      assert.equal(
+        await store.clearSubChannelReview(
+          "repo_elsewhere",
+          work.id,
+          "user_other",
+        ),
+        false,
+      );
+      assert.equal(
+        (await store.listSubChannelReviews("repo_branching", work.id)).length,
+        1,
+        "a wrong-repository withdrawal must not remove a real review",
+      );
     } finally {
       await store.close();
       await cleanup();

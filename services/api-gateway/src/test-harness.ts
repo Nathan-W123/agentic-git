@@ -221,6 +221,13 @@ export interface TestRuntime {
   shipOutcome: { outcome: "done" | "refused"; explanation?: string };
   /** What `branchComparison` says changed; mutated in place by tests. */
   branchFiles: string[];
+  /** The commits `branchComparison` says the branch is made of. */
+  branchCommits: Array<{
+    revision: string;
+    subject: string;
+    author: string;
+    createdAt: string;
+  }>;
   /** Where `canonicalHead` says canonical stands; mutated in place. */
   canonicalState: { head: string | undefined };
   /** Set `reason` to make `runRepository` reject, as a run that cannot start does. */
@@ -593,6 +600,14 @@ export async function startRuntime(
   const shipOutcome: TestRuntime["shipOutcome"] = { outcome: "done" };
   const mergedBranches: TestRuntime["mergedBranches"] = [];
   const branchFiles: TestRuntime["branchFiles"] = ["src/login.ts"];
+  const branchCommits: TestRuntime["branchCommits"] = [
+    {
+      revision: "1".repeat(40),
+      subject: "Clamp the login width from below as well",
+      author: "Claude (Nathan)",
+      createdAt: "2026-02-02T10:00:00.000Z",
+    },
+  ];
   const performChat = async (
     input: any,
     onEvent?: (event: Record<string, unknown>) => void,
@@ -1136,6 +1151,7 @@ export async function startRuntime(
         patch: canonicalDiff.patch,
         truncated: false,
         conflicts: state.conflicts,
+        commits: branchCommits,
       };
     },
     async mergeBranch(input) {
@@ -1559,6 +1575,7 @@ export async function startRuntime(
     shippedChannels,
     shipOutcome,
     branchFiles,
+    branchCommits,
     canonicalState,
     runFailure,
   };

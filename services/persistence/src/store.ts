@@ -1338,6 +1338,14 @@ export interface ChannelMessage {
    * task changed nothing, which is a different statement.
    */
   changedFiles: ChannelChangedFile[] | undefined;
+  /**
+   * Where in a branch's diff this was said, when it was said in one.
+   *
+   * Absent for every ordinary message, which is almost all of them. See
+   * {@link ChannelAnchor}: the revision travels with the line because a line
+   * number without one is a guess.
+   */
+  anchor?: ChannelAnchor;
   /** When somebody pinned this message to the channel's banner, if anyone has. */
   pinnedAt: string | undefined;
   /**
@@ -1444,6 +1452,30 @@ export interface AppendChannelMessageInput {
    * the process that started it.
    */
   taskId?: TaskId;
+  /**
+   * Where in a branch's diff this was said, for a review comment.
+   *
+   * A review comment is a channel message and not a parallel comment system:
+   * the channel already *is* the pull request's conversation, so a second
+   * store of comments beside it would be two places to look and one of them
+   * would go stale. What a comment needs on top of a message is where it was
+   * pointed.
+   *
+   * The revision is part of the anchor, not decoration. A line number is only
+   * meaningful against a particular commit — the branch moves, and a comment
+   * left on line 42 of one revision is not about line 42 of the next — so a
+   * reader has to compare it against the revision it is drawing before
+   * placing the comment on a line.
+   */
+  anchor?: ChannelAnchor;
+}
+
+/** Where in a branch's diff a message was said. */
+export interface ChannelAnchor {
+  path: string;
+  /** 1-based, in the revision named here and no other. */
+  line: number;
+  revision: string;
 }
 
 /** One file a thread's task changed, for the summary hanging off the thread. */
@@ -1813,6 +1845,44 @@ export interface SubChannel {
   shippedAt?: string;
   createdAt: string;
   createdBy?: string;
+}
+
+/**
+ * What somebody thinks of a work channel's branch.
+ *
+ * `approved` and `changes_requested` are the two answers that mean something
+ * about whether it should land. There is deliberately no third "commented"
+ * state: a comment is a message in the room, which is where comments live —
+ * a review state that says nothing about the decision would be a row whose
+ * only purpose is to appear in a list.
+ */
+export type SubChannelReviewState = "approved" | "changes_requested";
+
+export interface SubChannelReview {
+  channelId: string;
+  repositoryId: string;
+  userId: UserId;
+  state: SubChannelReviewState;
+  /** What they said when they left it, if they said anything. */
+  note?: string;
+  /**
+   * The branch head this was an answer to.
+   *
+   * An approval of a branch that has moved four commits since is not an
+   * approval of what is there now, and a reader has to be able to tell.
+   */
+  revision?: string;
+  reviewedAt: string;
+}
+
+export interface SaveSubChannelReviewInput {
+  repositoryId: string;
+  channelId: string;
+  userId: UserId;
+  state: SubChannelReviewState;
+  note?: string;
+  revision?: string;
+  reviewedAt: string;
 }
 
 /** One person's membership of one sub-channel. */
@@ -2623,6 +2693,37 @@ export interface CoordinationStore {
     channelId: string,
     input: MergeSubChannelInput,
   ): Promise<SubChannel | undefined>;
+  /**
+   * Every review left on a work channel, one per person.
+   *
+   * Ordered oldest first, so "who has looked at this" reads in the order
+   * people looked.
+   */
+  listSubChannelReviews(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<SubChannelReview[]>;
+  /**
+   * Records one person's standing answer to a channel's work.
+   *
+   * Replaces rather than accumulates: changing your mind is the ordinary
+   * case, and a history of somebody approving and un-approving is noise
+   * nobody asked for. The room keeps the narrative — every review is said out
+   * loud there — and this keeps the answer that still stands.
+   *
+   * The revision is recorded with it so a reader can tell an approval of what
+   * is there now from an approval of what was there before somebody pushed
+   * four more commits.
+   */
+  saveSubChannelReview(
+    input: SaveSubChannelReviewInput,
+  ): Promise<SubChannelReview>;
+  /** Withdraws one person's review, leaving no standing answer from them. */
+  clearSubChannelReview(
+    repositoryId: string,
+    channelId: string,
+    userId: UserId,
+  ): Promise<boolean>;
   /**
    * Records where a channel's work went on GitHub.
    *

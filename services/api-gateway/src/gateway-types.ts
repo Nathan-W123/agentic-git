@@ -470,6 +470,23 @@ export interface ApiOperations {
     patch: string;
     truncated: boolean;
     conflicts: string[];
+    /**
+     * The work this branch is made of, newest first.
+     *
+     * A diff says what changed; the commits say what was *done*, in the order
+     * somebody did it. Reviewing without them means reading one merged blob
+     * of every agent's work at once and guessing where one piece of work
+     * ended and the next began.
+     *
+     * Capped by the implementation — `ahead` is the honest total, so a reader
+     * can always tell there is more than the list shows.
+     */
+    commits: Array<{
+      revision: string;
+      subject: string;
+      author: string;
+      createdAt: string;
+    }>;
   }>;
 
   /**
