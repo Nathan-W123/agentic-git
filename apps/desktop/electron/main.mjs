@@ -303,6 +303,7 @@ function buildMenu() {
     menuTemplate({
       platform: process.platform,
       releasesUrl,
+      version: app.getVersion(),
       workerStatus,
       terminalsAllowed,
       awakeForWork,
