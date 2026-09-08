@@ -1645,6 +1645,60 @@ export class CodeIntelligenceService {
       );
   }
 
+  /**
+   * Contracts canonical has moved since a branch cut, that the branch reads.
+   *
+   * The whole silent-conflict check, in one testable piece. It lives here
+   * rather than in the caller because the caller is a closure inside a
+   * server — untestable — and every decision in it is one a sabotage should
+   * be able to reach: which two revisions are compared, which direction, and
+   * that the answer is filtered to what this branch actually touched.
+   *
+   * The two revisions are the load-bearing part. **The merge base**, not the
+   * branch's tip: the question is what this branch was written against, and
+   * its own tip includes its own changes. **Canonical's tip**, not the base
+   * again: the question is what it will land on. Reading the tip on either
+   * side turns a check that clears itself — bring the latest in, the base
+   * moves past the change, the answer empties — into one that never does.
+   */
+  public async staleContracts(
+    repository: CanonicalRepository,
+    comparison: {
+      mergeBase: string;
+      baseHead: string;
+      files: readonly string[];
+    },
+  ): Promise<
+    Array<{
+      file: string;
+      symbol: string;
+      before: string;
+      after: string;
+      through: string;
+    }>
+  > {
+    const [base, canonical] = await Promise.all([
+      this.index(repository, comparison.mergeBase),
+      this.index(repository, comparison.baseHead),
+    ]);
+    const touched = new Set(comparison.files);
+    return this.contractDrift(base, canonical).flatMap((change) =>
+      change.consumers
+        // Only what this branch has actually written against. A contract that
+        // moved on canonical and that nothing here reads is somebody else's
+        // change landing normally, and reporting it would make every merge
+        // wait on every other merge.
+        .filter((consumer) => touched.has(consumer))
+        .map((consumer) => ({
+          file: change.file,
+          symbol: change.symbol,
+          before: change.before,
+          after: change.after,
+          through: consumer,
+        })),
+    );
+  }
+
   public clear(repositoryId?: string): void {
     if (repositoryId === undefined) {
       this.cache.clear();

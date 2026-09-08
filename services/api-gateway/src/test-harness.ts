@@ -230,6 +230,18 @@ export interface TestRuntime {
    */
   branchDrift: { behind: number };
   /**
+   * Contracts a branch is built on that canonical has changed under it;
+   * mutated in place. Empty by default, or the gate would refuse every merge
+   * in the suite.
+   */
+  staleContracts: Array<{
+    file: string;
+    symbol: string;
+    before: string;
+    after: string;
+    through: string;
+  }>;
+  /**
    * What `branchComparison` calls the branch's head; mutated in place.
    *
    * A comment and a review are both stamped with the head they were about,
@@ -616,6 +628,7 @@ export async function startRuntime(
   const mergedBranches: TestRuntime["mergedBranches"] = [];
   const branchFiles: TestRuntime["branchFiles"] = ["src/login.ts"];
   const branchDrift: TestRuntime["branchDrift"] = { behind: 0 };
+  const staleContracts: TestRuntime["staleContracts"] = [];
   const branchHead: TestRuntime["branchHead"] = { revision: "c".repeat(40) };
   const branchCommits: TestRuntime["branchCommits"] = [
     {
@@ -1172,6 +1185,16 @@ export async function startRuntime(
         commits: branchCommits,
       };
     },
+    /**
+     * What the fixture says has moved under a branch.
+     *
+     * Empty unless a test sets it: the whole suite would otherwise have to
+     * know about a gate it is not testing, and a fixture that blocked merges
+     * by default would fail every test that merges one.
+     */
+    async branchContractDrift() {
+      return { stale: [...staleContracts] };
+    },
     async mergeBranch(input) {
       const key = `${input.repositoryId}\u0000${input.branch}`;
       const state = branches.get(key);
@@ -1594,6 +1617,7 @@ export async function startRuntime(
     shipOutcome,
     branchFiles,
     branchDrift,
+    staleContracts,
     branchHead,
     branchCommits,
     canonicalState,

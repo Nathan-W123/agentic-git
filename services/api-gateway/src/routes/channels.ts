@@ -576,6 +576,12 @@ export async function routeChannels(
       const reviews = await gw.options.store
         .listSubChannelReviews(repositoryId, channel.id)
         .catch(() => []);
+      // What moved under this branch while it was open. Read here as well as
+      // enforced at the merge, because a reason somebody meets when they
+      // press the button is a reason they meet too late to plan around.
+      const drift = await operations
+        .branchContractDrift?.({ projectId, repositoryId, branch })
+        .catch(() => undefined);
       gw.sendJson(response, 200, {
         branch,
         merged: false,
@@ -588,6 +594,10 @@ export async function routeChannels(
           ...review,
           current: review.revision === comparison.head,
         })),
+        // Contracts this branch is built on that the repository has changed
+        // since it cut. Empty for the ordinary case, and empty on a
+        // deployment that cannot read shapes — never a guess.
+        staleContracts: drift?.stale ?? [],
         // What the caller themselves has said, so the browser can show which
         // button is already pressed rather than offering both as if neither
         // were.
@@ -804,6 +814,54 @@ export async function routeChannels(
         },
       });
       gw.sendJson(response, 200, refreshed);
+      return true;
+    }
+
+    // The gate the audit is about, and the one thing a clean textual merge
+    // cannot stand in for. Both sides agree on every symbol name; one of them
+    // changed what a name means, and the other has been writing against the
+    // old meaning ever since. Git merges that without a word, and the build
+    // breaks on canonical rather than on either branch.
+    //
+    // Refused rather than resolved, like a conflict is: the remedy is the
+    // button beside this one. Bringing the latest in moves the merge base
+    // past the change, which is what makes this clear itself — either the
+    // branch compiles against the new shape, or it now has a real conflict,
+    // and both are better than finding out afterwards.
+    //
+    // Absent is not a refusal. A deployment with no shape reader answers
+    // nothing, and refusing on that would make the feature impossible to roll
+    // out — the compiler enforces it, as it happens: narrowing `drift` is
+    // what lets the body below read `drift.stale` at all.
+    const drift = await operations
+      .branchContractDrift?.({ projectId, repositoryId, branch })
+      .catch(() => undefined);
+    if (drift !== undefined && drift.stale.length > 0) {
+      const said = drift.stale
+        .map(
+          (entry) =>
+            `${entry.through} is built on \`${entry.symbol}\` from ` +
+            `${entry.file}, which is \`${entry.after}\` on the repository's ` +
+            `own branch and was \`${entry.before}\` when this branch cut`,
+        )
+        .join("; ");
+      await gw.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        `\`${branch}\` cannot merge yet: ${said}. Bring the latest in — the ` +
+          "code here was written against a contract that has moved.",
+        channel.id,
+      );
+      gw.sendJson(response, 409, {
+        error: {
+          code: "stale_contract",
+          message:
+            `${branch} is built on ${drift.stale.length} ` +
+            `${drift.stale.length === 1 ? "contract" : "contracts"} the ` +
+            "repository has changed since it cut",
+          staleContracts: drift.stale,
+        },
+      });
       return true;
     }
 

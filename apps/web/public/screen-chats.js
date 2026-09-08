@@ -5611,6 +5611,7 @@ function branchHeadline(review, stats, files) {
 
 /** The row that switches views, with what each one holds written on it. */
 function branchTabBar(review, files, conflicts, tab) {
+  const stale = (review.staleContracts ?? []).length;
   const labels = { review: "Review", commits: "Commits", files: "Files" };
   const counts = {
     review: undefined,
@@ -5632,6 +5633,12 @@ function branchTabBar(review, files, conflicts, tab) {
             ? `<span class="branch-tab-warn" title="${String(
                 conflicts.length,
               )} conflicting">!</span>`
+            : ""
+        }${
+          name === "review" && stale > 0
+            ? `<span class="branch-tab-warn" title="${String(
+                stale,
+              )} built on a contract that moved">!</span>`
             : ""
         }</button>`,
     ).join("")}
@@ -5669,7 +5676,11 @@ function branchMergeBox(review, channelId, busy, conflicts) {
   const approvals = reviews.filter((entry) => entry.state === "approved");
   const behind = review.behind ?? 0;
   const base = esc(review.base ?? "the repository");
-  const blocked = conflicts.length > 0;
+  const stale = review.staleContracts ?? [];
+  // Two ways to be un-mergeable, and they are not the same problem. A
+  // conflict is text git cannot reconcile; this is text git reconciles
+  // perfectly into something that does not compile.
+  const blocked = conflicts.length > 0 || stale.length > 0;
   return `<div class="merge-box${blocked ? " blocked" : ""}">
     ${
       requested.length > 0
@@ -5720,7 +5731,7 @@ function branchMergeBox(review, channelId, busy, conflicts) {
             )
     }
     ${
-      blocked
+      conflicts.length > 0
         ? mergeRow(
             "bad",
             "closeCircle",
@@ -5728,6 +5739,18 @@ function branchMergeBox(review, channelId, busy, conflicts) {
             branchConflictHelp(review, channelId, conflicts, busy),
           )
         : mergeRow("good", "checkCircle", `No conflicts with ${base}`)
+    }
+    ${
+      stale.length === 0
+        ? ""
+        : mergeRow(
+            "bad",
+            "closeCircle",
+            `This branch is built on ${
+              stale.length === 1 ? "a contract" : `${String(stale.length)} contracts`
+            } that ${base} has changed since`,
+            branchStaleContracts(review, channelId, stale, busy),
+          )
     }
     ${
       behind > 0 && !blocked
@@ -5763,6 +5786,43 @@ function branchMergeBox(review, channelId, busy, conflicts) {
       }
     </div>
   </div>`;
+}
+
+/**
+ * The conflict git cannot see, and what clears it.
+ *
+ * A textual conflict is text git cannot reconcile. This is the opposite and
+ * worse: text git reconciles perfectly into something that does not compile,
+ * because both sides agree on every name and one of them changed what a name
+ * means. Nothing in a diff shows it, which is why it is said here in words
+ * rather than left for somebody to notice.
+ */
+function branchStaleContracts(review, channelId, stale, busy) {
+  const base = esc(review.base ?? "the repository");
+  return `<p class="merge-row-detail">Merging would compile against a
+      contract this branch has not seen. Bringing the latest in is the whole
+      remedy — it moves this branch onto the new shape, and either it still
+      compiles or the disagreement becomes one you can see.</p>
+    <ul class="merge-conflicts">${stale
+      .map(
+        (entry) => `<li class="merge-stale">
+          <button type="button" class="merge-conflict-file" data-act="branch-tab"
+            data-value="files" title="Find ${esc(entry.through)} in the diff"
+            >${esc(entry.through)}</button>
+          <span class="merge-stale-what">is built on
+            <code>${esc(entry.symbol)}</code> from ${esc(entry.file)}</span>
+          <span class="merge-stale-move"><code>${esc(entry.before)}</code>
+            ${icon("arrowRight")} <code>${esc(entry.after)}</code></span>
+        </li>`,
+      )
+      .join("")}</ul>
+    <div class="merge-row-actions">
+      <button class="btn btn-primary" type="button"
+        data-act="branch-review-refresh" data-value="${esc(channelId ?? "")}"
+        ${busy ? "disabled" : ""}
+        title="Bring ${base} into this branch, so it is written against what it will land on"
+        >Bring the latest in</button>
+    </div>`;
 }
 
 /**

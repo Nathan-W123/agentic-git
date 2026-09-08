@@ -818,6 +818,25 @@ async function serve(
         truncated: diff.truncated,
       };
     },
+    /**
+     * What moved under this branch while it was open, that it is built on.
+     *
+     * The comparison, and then `staleContracts`, which is where every
+     * decision worth testing lives — the two revisions it reads, and the
+     * filter to what this branch actually consumes. This function is a
+     * closure inside a server and nothing can reach it, so it holds no
+     * judgement of its own.
+     */
+    async branchContractDrift(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      const comparison = await repositories.compareBranches(
+        repository,
+        input.branch,
+      );
+      return {
+        stale: await intelligence.staleContracts(repository, comparison),
+      };
+    },
     async mergeBranch(input) {
       const repository = await canonicalRepository(input.repositoryId);
       const merged = await repositories.mergeBranchInto(

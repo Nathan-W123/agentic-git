@@ -239,7 +239,12 @@ test("a work channel's branch is reviewed and merged from the room itself", asyn
   // The merge button is drawn only for somebody the server would let merge,
   // and disabled while anything conflicts.
   assert.match(chats, /review\.canMerge === true/u);
-  assert.match(chats, /const blocked = conflicts\.length > 0;/u);
+  // Two ways to be un-mergeable now: text git cannot reconcile, and text it
+  // reconciles into something that will not compile.
+  assert.match(
+    chats,
+    /const blocked = conflicts\.length > 0 \|\| stale\.length > 0;/u,
+  );
   assert.match(chats, /busy \|\| blocked \? "disabled" : ""/u);
   assert.match(styles, /\.branch-panel \.fp-stats/u);
 

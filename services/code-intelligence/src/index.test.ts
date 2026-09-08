@@ -927,3 +927,111 @@ test("a language whose shapes cannot be read says so rather than reporting stabi
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("what a branch is built on that canonical has moved under it", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-stale-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "auth.ts"),
+      "export function sign(password: string): string { return password; }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "login.ts"),
+      'import { sign } from "./auth.js";\nexport const go = () => sign("secret");\n',
+    );
+    await writeFile(
+      path.join(source, "src", "unrelated.ts"),
+      "export const spacing = 4;\n",
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "stale",
+    );
+    // Where the branch cut.
+    const mergeBase = (await repositories.getCanonicalVersion(repository))
+      .revision;
+
+    // Canonical moves: `sign` now takes a number. Nothing about the name
+    // changes, so nothing textual will disagree with anybody.
+    await writeFile(
+      path.join(source, "src", "auth.ts"),
+      "export function sign(password: number): string { return String(password); }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "unrelated.ts"),
+      "export const spacing = 8;\n",
+    );
+    await repositories.commitAll(source, "retype sign");
+    await advanceCanonical(source, repository);
+    const baseHead = (await repositories.getCanonicalVersion(repository))
+      .revision;
+
+    const service = new CodeIntelligenceService(repositories);
+
+    // A branch that edited the consumer. This is the whole case: two clean
+    // diffs, no shared file, no shared symbol name, and a merge that
+    // compiles on neither side afterwards.
+    assert.deepEqual(
+      await service.staleContracts(repository, {
+        mergeBase,
+        baseHead,
+        files: ["src/login.ts"],
+      }),
+      [
+        {
+          file: "src/auth.ts",
+          symbol: "sign",
+          before: "(password: string): string",
+          after: "(password: number): string",
+          through: "src/login.ts",
+        },
+      ],
+    );
+
+    // A branch that touched something else is not held up by it. A contract
+    // moving on canonical is an ordinary landing; reporting it to everybody
+    // would make every merge wait on every other merge.
+    assert.deepEqual(
+      await service.staleContracts(repository, {
+        mergeBase,
+        baseHead,
+        files: ["src/unrelated.ts"],
+      }),
+      [],
+    );
+
+    // And the property that makes this a gate rather than a wall: once the
+    // branch has the change, the base is past it and the answer empties.
+    // Read as "the branch brought the latest in" — its merge base is now
+    // canonical's tip.
+    assert.deepEqual(
+      await service.staleContracts(repository, {
+        mergeBase: baseHead,
+        baseHead,
+        files: ["src/login.ts"],
+      }),
+      [],
+    );
+
+    // The revisions are not interchangeable, which is the thing most easily
+    // got backwards: comparing canonical against the base asks "what did
+    // this branch's base have that canonical lost", which is a different
+    // question with a different answer.
+    const backwards = await service.staleContracts(repository, {
+      mergeBase: baseHead,
+      baseHead: mergeBase,
+      files: ["src/login.ts"],
+    });
+    assert.equal(backwards[0]?.after, "(password: string): string");
+    assert.equal(backwards[0]?.before, "(password: number): string");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
