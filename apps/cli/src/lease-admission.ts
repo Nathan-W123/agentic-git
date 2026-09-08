@@ -12,6 +12,7 @@ import {
   askBlanketHolderOnce,
   blanketHolderSession,
   blanketPlan,
+  branchClaimsAsActivePlans,
   contestedPlanResources,
   declaredPlanFromClaim,
   deferredScopeObjective,
@@ -645,6 +646,20 @@ export class LeasePlanAuthority implements PlanAuthority {
       })
     ).filter((candidate) => candidate.id !== lease.id);
     if (others.length > 0) {
+      return undefined;
+    }
+    // Alone in the lease table is no longer the same as unopposed. A blanket
+    // claim covers the whole repository and nothing can be admitted while it
+    // is held, so granting one while another branch is sitting on an exported
+    // symbol would hand this task the very thing the claim system exists to
+    // protect — and it would do it on the fast path, without planning, which
+    // is where nobody would look for it.
+    const held = await this.store
+      .listBranchClaims?.(lease.repositoryId, {
+        ...(lease.branch === undefined ? {} : { exceptBranch: lease.branch }),
+      })
+      .catch((): [] => []);
+    if ((held ?? []).length > 0) {
       return undefined;
     }
     // Recorded on the claim so the next arrival can narrow it on contact
@@ -1751,6 +1766,28 @@ export class LeasePlanAuthority implements PlanAuthority {
     return { ...holder, plan: frozen };
   }
 
+  /**
+   * What this plan is arbitrated against: what is running, and what is open.
+   *
+   * The lease table alone answers "who is writing right now", which is the
+   * wrong question for a repository with branches in it. Two tasks an hour
+   * apart, on two branches, never overlap in time and so never appear in each
+   * other's set — and that is precisely the pair whose edits collide when the
+   * second branch tries to catch up after the first one merges. The claim
+   * arrived, did its job for the length of a lease, and expired long before
+   * the collision it existed to prevent.
+   *
+   * So open branches are added to it. They are dressed as plans and given
+   * their branch in `branchOf`, which sends them through `narrowToBranch` and
+   * `interfaceScopeOf` exactly as a concurrently-running task on another
+   * branch already goes — same reduction, same ladder, same wording in a
+   * refusal. Nothing here decides what crosses; that line is drawn once, in
+   * the place that already had to draw it.
+   *
+   * A branch never contends with itself: `exceptBranch` drops this lease's
+   * own branch, because its earlier work is the same line of work continuing
+   * and git will fast-forward it.
+   */
   private async executingPlans(
     lease: WorkLease,
   ): Promise<{
@@ -1773,23 +1810,46 @@ export class LeasePlanAuthority implements PlanAuthority {
       repositoryId: lease.repositoryId,
     });
     const agentFor = new Map(tasks.map((task) => [task.id, task.agentId]));
+    // What other open branches have already landed and not yet merged. A
+    // store without the method — an older deployment, or a fake in a test
+    // that predates this — simply contributes nothing, which is the behaviour
+    // before branch claims existed.
+    const branchClaims = await this.store
+      .listBranchClaims?.(lease.repositoryId, {
+        ...(lease.branch === undefined ? {} : { exceptBranch: lease.branch }),
+      })
+      .catch((): [] => []);
+    const held = branchClaimsAsActivePlans(branchClaims ?? []);
     return {
-      active: admitted.map(
-        (candidate): ActivePlan => ({
-          taskId: candidate.taskId,
-          agentId: agentFor.get(candidate.taskId) ?? candidate.workerId,
-          // Guarded by the filter above.
-          plan: (candidate.plan as { plan: AgentPlan }).plan,
-        }),
-      ),
+      active: [
+        ...admitted.map(
+          (candidate): ActivePlan => ({
+            taskId: candidate.taskId,
+            agentId: agentFor.get(candidate.taskId) ?? candidate.workerId,
+            // Guarded by the filter above.
+            plan: (candidate.plan as { plan: AgentPlan }).plan,
+          }),
+        ),
+        ...held,
+      ],
       approvedLeaseIds: admitted.map((candidate) => candidate.id).sort(),
       // Read from the lease rather than from the task, because the lease is
       // what the work is actually happening on: the task's branch is what it
       // was commissioned against, and the lease copies it once at claim time
       // and is the thing that outlives a channel being merged underneath it.
-      branchOf: new Map(
-        admitted.map((candidate) => [candidate.taskId, candidate.branch]),
-      ),
+      branchOf: new Map([
+        ...admitted.map(
+          (candidate): [TaskId, string | undefined] => [
+            candidate.taskId,
+            candidate.branch,
+          ],
+        ),
+        // Named with their own branch, which is what routes them through the
+        // interface reduction rather than being taken whole.
+        ...(branchClaims ?? []).map(
+          (claim): [TaskId, string | undefined] => [claim.taskId, claim.branch],
+        ),
+      ]),
     };
   }
 

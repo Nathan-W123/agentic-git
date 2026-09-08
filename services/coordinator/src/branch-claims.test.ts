@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { BranchClaim } from "@coord/persistence";
+import { interfaceScopeOf } from "@coord/shared-types";
 import type { AgentPlan, ChangeSet, FilePatch } from "@coord/shared-types";
 
 import {
@@ -22,7 +23,6 @@ import {
   describeRangeWarnings,
   rangeWarnings,
   rangesFromPatches,
-  rangesOverlap,
 } from "./branch-claims.js";
 
 function patch(path: string, body: string): FilePatch {
@@ -80,21 +80,6 @@ test("the lines a patch changed are read from its hunk headers", () => {
   ]);
 });
 
-test("adjacent edits do not collide, overlapping ones do", () => {
-  const at = (start: number, end: number) => ({ file: "a.ts", start, end });
-  // Half-open, so two edits on neighbouring lines are two edits rather than
-  // a conflict. This is the difference between a warning worth reading and
-  // one that fires on every file anybody has been near.
-  assert.equal(rangesOverlap(at(10, 12), at(12, 14)), false);
-  assert.equal(rangesOverlap(at(10, 13), at(12, 14)), true);
-  assert.equal(rangesOverlap(at(10, 12), at(8, 11)), true);
-  // A different file is never a collision, whatever the numbers say.
-  assert.equal(
-    rangesOverlap(at(10, 20), { file: "b.ts", start: 10, end: 20 }),
-    false,
-  );
-});
-
 test("what a branch holds is read from what landed, not from the forecast", () => {
   const changeSet: ChangeSet = {
     id: "cs_1",
@@ -138,34 +123,77 @@ test("what a branch holds is read from what landed, not from the forecast", () =
   assert.equal(recorded.taskId, "task_a");
 });
 
-test("a branch's claims arbitrate as a plan, and carry no files", () => {
+test("a branch's claims arbitrate as a plan, whole, for something else to narrow", () => {
   const active = branchClaimsAsActivePlans([
-    // With ranges, deliberately. Without them this test passed against a
-    // synthetic plan that *did* carry files — `expectedFiles` was empty
-    // either way — so the one assertion that guards the enforcement boundary
-    // was checking nothing.
     claim({
       symbols: ["issueToken"],
       apis: ["POST /session"],
-      ranges: [{ file: "src/session.ts", start: 10, end: 20 }],
+      ranges: [
+        { file: "src/session.ts", start: 10, end: 20 },
+        // Two hunks in one file are one file to claim.
+        { file: "src/session.ts", start: 40, end: 44 },
+      ],
     }),
-    // Nothing semantic to hold: a task that only moved lines around inside a
-    // function contributes no enforcement, which is right — its collisions
-    // are textual, and textual is the advisory half.
-    claim({ id: "bclaim_2", ranges: [{ file: "a.ts", start: 1, end: 2 }] }),
   ]);
   assert.equal(active.length, 1);
   const plan = active[0]?.plan;
   assert.deepEqual(plan?.expectedSymbols, ["issueToken"]);
   assert.deepEqual(plan?.expectedApis, ["POST /session"]);
-  // The enforcement boundary, in one assertion. A synthetic plan carrying
-  // files would make the detector's file overlap fire and turn the whole
-  // thing binding — which is the opposite of what this is for.
-  assert.deepEqual(plan?.expectedFiles, []);
   assert.deepEqual(plan?.declared?.symbols, ["issueToken"]);
+  // The whole surface, files included, because `interfaceScopeOf` is what
+  // decides which of them cross between branches — and it already had to,
+  // for two agents running at the same time. Emptying files here would be a
+  // second, blunter copy of that rule.
+  assert.deepEqual(plan?.expectedFiles, ["src/session.ts"]);
   // Named so a refusal can say where the contention came from rather than
   // pointing at a task id nobody recognises.
   assert.equal(active[0]?.agentId, "branch:kumi/payments-v2");
+});
+
+test("what a branch holds is reduced to what actually crosses to another one", () => {
+  // The line the whole design turns on, checked against the function that
+  // draws it rather than against my description of it. An ordinary source
+  // file is local and drops out; a migration and a route do not.
+  const [entry] = branchClaimsAsActivePlans([
+    claim({
+      symbols: ["issueToken"],
+      apis: ["POST /session"],
+      ranges: [
+        { file: "src/session.ts", start: 1, end: 9 },
+        { file: "database/migrations/003_sessions.sql", start: 1, end: 4 },
+      ],
+    }),
+  ]);
+  assert.ok(entry !== undefined);
+  const shared = interfaceScopeOf(entry.plan, {
+    exported: new Set(["issuetoken"]),
+    known: new Set(["issuetoken"]),
+  });
+  assert.ok(shared !== undefined, "an exported symbol has to survive");
+  assert.deepEqual(shared?.expectedApis, ["POST /session"]);
+  assert.deepEqual(shared?.expectedSymbols, ["issueToken"]);
+  // Ordinary source is the branch's own business; a migration is everybody's.
+  assert.deepEqual(shared?.expectedFiles, [
+    "database/migrations/003_sessions.sql",
+  ]);
+
+  // And a branch holding nothing shared says nothing to another branch —
+  // which is the whole benefit of branching, and the thing that stops a
+  // channel queueing behind work that cannot affect it.
+  const [local] = branchClaimsAsActivePlans([
+    claim({
+      symbols: ["helper"],
+      ranges: [{ file: "src/local.ts", start: 1, end: 9 }],
+    }),
+  ]);
+  assert.ok(local !== undefined);
+  assert.equal(
+    interfaceScopeOf(local.plan, {
+      exported: new Set<string>(),
+      known: new Set(["helper"]),
+    }),
+    undefined,
+  );
 });
 
 test("a plan is told which lines another branch is already holding", () => {

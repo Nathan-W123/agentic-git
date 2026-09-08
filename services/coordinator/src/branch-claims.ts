@@ -81,13 +81,6 @@ export function rangesFromPatches(
   return ranges;
 }
 
-/** Whether two half-open ranges in the same file share a line. */
-export function rangesOverlap(left: ClaimedRange, right: ClaimedRange): boolean {
-  return (
-    left.file === right.file && left.start < right.end && right.start < left.end
-  );
-}
-
 function declared(
   plan: AgentPlan | undefined,
   key: "apis" | "schemas" | "configKeys" | "services",
@@ -143,31 +136,31 @@ export function claimFromChangeSet(input: {
  * mechanism for branches would mean two things to keep in step, and the
  * second one would be the one nobody remembers.
  *
- * **`expectedFiles` is deliberately empty.** Files are the advisory half. A
- * synthetic plan carrying them would make the detector's file overlap fire
- * and turn the whole thing binding, which is the opposite of what was asked
- * for — so the enforcement boundary lives here, in one visible line, rather
- * than in a flag somewhere downstream.
+ * **The whole surface goes in, including files, and something else narrows
+ * it.** `narrowToBranch` already reduces a plan from another branch through
+ * `interfaceScopeOf`, which keeps what crosses between branches — routes,
+ * schemas, config keys, exported symbols, and interface files like
+ * migrations and dependency manifests — and drops what is local, ordinary
+ * source files included. That is exactly the line between the enforced half
+ * and the advisory one, drawn once, in the place that already had to draw it
+ * for two agents running at the same time. An `expectedFiles: []` here would
+ * be a second, blunter copy of the same rule, and the two would drift.
  */
 export function branchClaimsAsActivePlans(
   claims: readonly BranchClaim[],
 ): ActivePlan[] {
   return claims
-    .filter(
-      (claim) =>
-        claim.symbols.length > 0 ||
-        claim.apis.length > 0 ||
-        claim.schemas.length > 0 ||
-        claim.configKeys.length > 0 ||
-        claim.services.length > 0,
-    )
     .map((claim) => ({
       taskId: claim.taskId,
       agentId: `branch:${claim.branch}`,
       plan: {
         taskId: claim.taskId,
         objective: `work already landed on ${claim.branch}`,
-        expectedFiles: [],
+        // Every file the claim actually touched. `interfaceScopeOf` keeps
+        // only the ones that cross — a migration, a manifest — and drops the
+        // rest, so an ordinary source file two branches both edited stays
+        // advisory without this having to know which is which.
+        expectedFiles: [...new Set(claim.ranges.map((range) => range.file))],
         expectedSymbols: [...claim.symbols],
         expectedApis: [...claim.apis],
         expectedSchemas: [...claim.schemas],

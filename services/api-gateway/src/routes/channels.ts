@@ -873,6 +873,15 @@ export async function routeChannels(
     // merge that caused it and one discovered next week. Not awaited: the
     // person who pressed Merge is waiting on the merge, not on other
     // channels, and the sweep repeats this anyway.
+    // Whatever this branch was holding, it is holding no longer: its work is
+    // in canonical, so every other branch now has it too and contending over
+    // it would be contending with the thing they all just merged. Awaited,
+    // unlike the sweep below, because a claim outliving its branch refuses
+    // work for a reason that has stopped being true — and the next plan may
+    // be seconds away.
+    await gw.options.store
+      .releaseBranchClaims?.(repositoryId, branch)
+      .catch(() => undefined);
     void gw.refreshBranchesAfterMerge(repositoryId).catch(() => undefined);
     gw.sendJson(response, 200, {
       merged: true,
@@ -927,6 +936,12 @@ export async function routeChannels(
       // would leave a name nothing owns that the next channel of that name
       // could not take.
       if (channel.branch !== undefined) {
+        // And so does what it was holding. An abandoned branch that goes on
+        // refusing other people's work is the worst of both: the work is not
+        // coming, and nobody can see why they are being told to wait.
+        await gw.options.store
+          .releaseBranchClaims?.(repositoryId, channel.branch)
+          .catch(() => undefined);
         await gw.options.operations
           .deleteBranch?.({
             projectId,
