@@ -381,3 +381,50 @@ test("switching rooms clears every cache it names, and cannot half-finish", asyn
     );
   }
 });
+
+/* ---------------------------------------------------------- terminal ---- */
+
+test("the Terminal destination is one the router will actually keep", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+
+  // `normalPrimaryDestination` is an allow-list, and it rewrites anything it
+  // does not recognise to the main chat *silently*. That is right for a stale
+  // value out of localStorage and it is how a new destination ships broken:
+  // the rail entry highlights, the click is accepted, the pane never
+  // changes, and nothing anywhere says why. Found on a screenshot, not in a
+  // test, so it is pinned here.
+  const normal = data.slice(
+    data.indexOf("function normalPrimaryDestination"),
+    data.indexOf("/** The selected primary destination for one workspace. */"),
+  );
+  assert.match(normal, /"threads", "files", "terminal"/u);
+
+  // And the three halves that have to agree: something to press, a pane to
+  // draw, and an action joining them.
+  assert.match(chats, /data-act="terminal-toggle"/u);
+  assert.match(chats, /destination\.kind === "terminal"/u);
+  assert.match(chats, /function terminalConversation\(/u);
+  assert.match(app, /case "terminal-toggle":/u);
+  assert.match(app, /selectPrimaryDestination\(\{ kind: "terminal" \}/u);
+});
+
+test("a terminal says which of three things is wrong, not just 'unavailable'", async () => {
+  const chats = await publicFile("screen-chats.js");
+
+  // No machine at all, a machine that has not been allowed, and a machine
+  // ready to go are three different situations with three different next
+  // steps. Collapsing the middle one into "unavailable" is what leaves
+  // somebody guessing whether to open their laptop or change a setting.
+  assert.match(chats, /No machine of yours is connected/u);
+  assert.match(chats, /have not allowed a terminal|has not allowed a terminal/u);
+  assert.match(chats, /Allow it in the desktop app, on that computer/u);
+  // And where the shell will actually run, because that is the whole reason
+  // it has the reader's files and keys.
+  assert.match(chats, /not on the control plane/u);
+  // A machine with no pseudo-terminal is said before somebody types `vim`,
+  // not after.
+  assert.match(chats, /terminal-degraded/u);
+  assert.match(chats, /full-screen programs/u);
+});

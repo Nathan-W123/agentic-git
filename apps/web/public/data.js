@@ -8014,7 +8014,14 @@ function normalPrimaryDestination(destination) {
     const id = String(destination?.id ?? "");
     return id === "" ? { kind: "main" } : { kind, id };
   }
-  return ["threads", "files"].includes(kind) ? { kind } : { kind: "main" };
+  // An allow-list, and silently: anything not named here becomes the main
+  // chat. That is right for a stale value out of `localStorage`, and it is
+  // how a new destination gets a rail entry that highlights while the pane
+  // stays on the conversation — the click is accepted, normalized away, and
+  // nothing anywhere says so.
+  return ["threads", "files", "terminal"].includes(kind)
+    ? { kind }
+    : { kind: "main" };
 }
 
 /** The selected primary destination for one workspace. */
