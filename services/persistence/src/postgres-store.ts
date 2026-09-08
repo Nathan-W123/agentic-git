@@ -4813,6 +4813,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const branch = optionalText(row, "branch");
     const mergedAt = optionalText(row, "merged_at");
     const mergedBy = optionalText(row, "merged_by");
+    const pullRequestUrl = optionalText(row, "pull_request_url");
+    const shippedAt = optionalText(row, "shipped_at");
     return {
       id: text(row, "id"),
       repositoryId: text(row, "repository_id"),
@@ -4825,6 +4827,10 @@ export class PostgresCoordinationStore implements CoordinationStore {
       ...(branch === undefined || branch === "" ? {} : { branch }),
       ...(mergedAt === undefined ? {} : { mergedAt }),
       ...(mergedBy === undefined ? {} : { mergedBy }),
+      ...(pullRequestUrl === undefined || pullRequestUrl === ""
+        ? {}
+        : { pullRequestUrl }),
+      ...(shippedAt === undefined ? {} : { shippedAt }),
       createdAt: text(row, "created_at"),
       ...(createdBy === undefined ? {} : { createdBy }),
     };
@@ -4952,6 +4958,23 @@ export class PostgresCoordinationStore implements CoordinationStore {
           AND merged_at IS NULL
         RETURNING *`,
       [input.mergedAt, input.mergedBy, channelId, repositoryId],
+    );
+    return row === undefined ? undefined : this.toSubChannel(row);
+  }
+
+  public async shipSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: { pullRequestUrl: string; shippedAt: string },
+  ): Promise<SubChannel | undefined> {
+    // Unconditional, unlike the merge above: shipping twice reaches the same
+    // pull request, so the second write restates a fact rather than claiming
+    // work somebody else's write already claimed.
+    const row = await this.row(
+      `UPDATE sub_channels SET pull_request_url = $1, shipped_at = $2
+        WHERE id = $3 AND repository_id = $4
+        RETURNING *`,
+      [input.pullRequestUrl, input.shippedAt, channelId, repositoryId],
     );
     return row === undefined ? undefined : this.toSubChannel(row);
   }

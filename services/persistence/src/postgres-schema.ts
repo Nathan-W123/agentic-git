@@ -1076,6 +1076,11 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         branch TEXT,
         merged_at TEXT,
         merged_by TEXT,
+        -- Where a merged channel's work went on GitHub, and when. The second
+        -- gate: Kumi reviews the branch into canonical, GitHub reviews
+        -- canonical into main. See migration 59.
+        pull_request_url TEXT,
+        shipped_at TEXT,
         created_at TEXT NOT NULL,
         created_by TEXT,
         UNIQUE (repository_id, slug)

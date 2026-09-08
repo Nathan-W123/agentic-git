@@ -5140,13 +5140,43 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
         );
   }
   if (review.merged === true) {
-    return emptyState(
+    // The second gate. Kumi reviewed this into the repository; GitHub reviews
+    // the repository into whatever it calls main, and until somebody presses
+    // this the work has landed in Kumi and nowhere else.
+    return `${emptyState(
       "check",
       "Merged",
       `${review.branch} landed on the repository ${relativeTime(
         review.mergedAt,
       )}. This channel is finished — open a new one for follow-up work.`,
-    );
+    )}
+    ${
+      review.pullRequestUrl
+        ? `<div class="branch-note">On GitHub as
+             <a href="${esc(review.pullRequestUrl)}" target="_blank"
+               rel="noreferrer noopener">${esc(review.pullRequestUrl)}</a>,
+             opened ${esc(relativeTime(review.shippedAt))}.</div>
+           <div class="branch-actions">
+             <span class="spacer"></span>
+             ${
+               review.canShip === true
+                 ? `<button class="btn" type="button" data-act="branch-review-ship"
+                      data-value="${esc(channelId ?? "")}" ${busy ? "disabled" : ""}
+                      >Update the pull request</button>`
+                 : ""
+             }
+           </div>`
+        : review.canShip === true
+          ? `<div class="branch-actions">
+               <span class="spacer"></span>
+               <button class="btn btn-primary" type="button"
+                 data-act="branch-review-ship" data-value="${esc(channelId ?? "")}"
+                 ${busy ? "disabled" : ""}
+                 title="Push this to GitHub and open a pull request"
+                 >Open a pull request on GitHub</button>
+             </div>`
+          : `<div class="branch-note">Somebody with review rights ships this to GitHub.</div>`
+    }`;
   }
   const conflicts = review.conflicts ?? [];
   const files = review.files ?? [];

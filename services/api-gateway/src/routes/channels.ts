@@ -350,7 +350,7 @@ export async function routeChannels(
   const branchMatch = matchPath(
     path,
     new RegExp(
-      `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channels/([^/]+)/branch(?:/(refresh|merge))?$`,
+      `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channels/([^/]+)/branch(?:/(refresh|merge|ship))?$`,
       "u",
     ),
   );
@@ -362,9 +362,12 @@ export async function routeChannels(
         ? "view"
         : // Landing on canonical is the most consequential write in the
           // system, and `review` is the permission that says so by name.
-          // Bringing canonical *into* a channel touches only that channel's
-          // own branch, so it is work, and anybody who can do work here may.
-          verb === "merge"
+          // Shipping asks a second set of reviewers, on GitHub, to take work
+          // Kumi has already accepted — the same weight, and it publishes
+          // under the caller's own GitHub account. Bringing canonical *into*
+          // a channel touches only that channel's own branch, so it is work,
+          // and anybody who can do work here may.
+          verb === "merge" || verb === "ship"
           ? "review"
           : "submit_task";
     await authorizeRepository(
@@ -407,6 +410,76 @@ export async function routeChannels(
       );
     }
 
+    // Shipping happens after the merge, not instead of it: Kumi reviews the
+    // branch into canonical, and GitHub reviews canonical into main. So this
+    // is the one verb a merged channel still answers, and the one an
+    // unmerged channel does not.
+    if (verb === "ship") {
+      if (channel.mergedAt === undefined) {
+        throw new HttpError(
+          409,
+          "not_merged",
+          `#${channel.slug} has not merged yet. Kumi reviews it into the ` +
+            "repository first, then GitHub reviews that.",
+        );
+      }
+      if (operations.shipChannel === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot ship to GitHub",
+        );
+      }
+      if (method !== "POST") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      const shipped = await gw.performOperation(
+        "ship_failed",
+        async () =>
+          await operations.shipChannel!({
+            projectId,
+            repositoryId,
+            actorId: principal.user.id,
+            branch,
+            title: `#${channel.slug}`,
+            body:
+              `Merged from Kumi's \`${branch}\`, reviewed in the ` +
+              `#${channel.slug} channel.`,
+          }),
+      );
+      // Recorded only on success. A channel marked shipped whose pull request
+      // was never opened is a channel that has stopped asking for the one
+      // thing it still needs.
+      const url = shipped.detail?.url;
+      if (shipped.outcome === "done" && url !== undefined) {
+        await gw.options.store.shipSubChannel(repositoryId, channel.id, {
+          pullRequestUrl: url,
+          shippedAt: new Date().toISOString(),
+        });
+      }
+      await gw.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        shipped.explanation,
+        channel.id,
+      );
+      await gw.options.store.appendAudit(undefined, {
+        type: "channel_updated",
+        data: {
+          projectId,
+          repositoryId,
+          channelId: channel.id,
+          slug: channel.slug,
+          branch,
+          shipped: shipped.outcome === "done",
+          ...(url === undefined ? {} : { pullRequestUrl: url }),
+          actorId: principal.user.id,
+        },
+      });
+      gw.sendJson(response, 200, shipped);
+      return true;
+    }
+
     // A merged channel is finished. Its branch is gone, so there is nothing
     // left to compare, refresh or merge — and answering anything but "this
     // landed" would describe a branch that no longer exists.
@@ -424,6 +497,30 @@ export async function routeChannels(
         merged: true,
         mergedAt: channel.mergedAt,
         mergedBy: channel.mergedBy,
+        // Where it went on GitHub, when it has been anywhere. Absent is a
+        // channel that merged and has not shipped, which is the state the
+        // review surface offers the Ship button in.
+        ...(channel.pullRequestUrl === undefined
+          ? {}
+          : { pullRequestUrl: channel.pullRequestUrl }),
+        ...(channel.shippedAt === undefined
+          ? {}
+          : { shippedAt: channel.shippedAt }),
+        // The same derivation the unmerged read makes, for the same reason:
+        // a Ship button drawn for somebody the server would refuse is worse
+        // than one that was never drawn.
+        canShip:
+          operations.shipChannel !== undefined &&
+          (await authorizeRepository(
+            gw.options.store,
+            principal,
+            projectId,
+            repositoryId,
+            "review",
+          ).then(
+            () => true,
+            () => false,
+          )),
       });
       return true;
     }

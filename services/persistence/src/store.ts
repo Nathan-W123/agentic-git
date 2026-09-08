@@ -1794,6 +1794,23 @@ export interface SubChannel {
    */
   mergedAt?: string;
   mergedBy?: string;
+  /**
+   * Where this channel's merged work went on GitHub, and when it went.
+   *
+   * The second of two gates. Kumi reviews the channel's branch into
+   * canonical; GitHub reviews canonical into whatever the remote calls main.
+   * Kept here because the pull request is *about* this room — the diff, the
+   * conversation and the tasks that produced it are all in it — and a link
+   * held anywhere else would have to be joined back to the room every time
+   * anybody wanted to see it.
+   *
+   * Absent for a channel that has not shipped. Shipping is deliberately
+   * separate from merging: a deployment with no GitHub remote merges
+   * perfectly well and never ships, and somebody may want to ship a channel
+   * that merged last week.
+   */
+  pullRequestUrl?: string;
+  shippedAt?: string;
   createdAt: string;
   createdBy?: string;
 }
@@ -2605,6 +2622,21 @@ export interface CoordinationStore {
     repositoryId: string,
     channelId: string,
     input: MergeSubChannelInput,
+  ): Promise<SubChannel | undefined>;
+  /**
+   * Records where a channel's work went on GitHub.
+   *
+   * Overwrites rather than refusing a second call, unlike
+   * {@link mergeSubChannel}: shipping the same channel twice reaches the same
+   * pull request — GitHub answers an existing one rather than opening a
+   * second — so the second write is the same fact restated, not a conflict.
+   *
+   * Returns undefined for a channel this repository does not have.
+   */
+  shipSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: { pullRequestUrl: string; shippedAt: string },
   ): Promise<SubChannel | undefined>;
   updateSubChannel(
     repositoryId: string,

@@ -3543,6 +3543,27 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return { ...merged };
   }
 
+  public async shipSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: { pullRequestUrl: string; shippedAt: string },
+  ): Promise<SubChannel | undefined> {
+    const channel = this.subChannels.get(channelId);
+    if (channel === undefined || channel.repositoryId !== repositoryId) {
+      return undefined;
+    }
+    // Unconditional, unlike the merge above: shipping twice reaches the same
+    // pull request, so the second write restates a fact rather than claiming
+    // work somebody else's write already claimed.
+    const shipped: SubChannel = {
+      ...channel,
+      pullRequestUrl: input.pullRequestUrl,
+      shippedAt: input.shippedAt,
+    };
+    this.subChannels.set(channelId, shipped);
+    return { ...shipped };
+  }
+
   public async updateSubChannel(
     repositoryId: string,
     channelId: string,

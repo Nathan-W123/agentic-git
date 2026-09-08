@@ -5011,6 +5011,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
     const branch = optionalText(row, "branch");
     const mergedAt = optionalText(row, "merged_at");
     const mergedBy = optionalText(row, "merged_by");
+    const pullRequestUrl = optionalText(row, "pull_request_url");
+    const shippedAt = optionalText(row, "shipped_at");
     return {
       id: text(row, "id"),
       repositoryId: text(row, "repository_id"),
@@ -5023,6 +5025,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
       ...(branch === undefined || branch === "" ? {} : { branch }),
       ...(mergedAt === undefined ? {} : { mergedAt }),
       ...(mergedBy === undefined ? {} : { mergedBy }),
+      ...(pullRequestUrl === undefined || pullRequestUrl === ""
+        ? {}
+        : { pullRequestUrl }),
+      ...(shippedAt === undefined ? {} : { shippedAt }),
       createdAt: text(row, "created_at"),
       ...(createdBy === undefined ? {} : { createdBy }),
     };
@@ -5157,6 +5163,26 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare("SELECT * FROM sub_channels WHERE id = ? AND repository_id = ?")
       .get(channelId, repositoryId) as Row | undefined;
     return row === undefined ? undefined : this.toSubChannel(row);
+  }
+
+  public async shipSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: { pullRequestUrl: string; shippedAt: string },
+  ): Promise<SubChannel | undefined> {
+    // Unconditional, unlike the merge above: shipping twice reaches the same
+    // pull request, so the second write restates a fact rather than claiming
+    // work somebody else's write already claimed.
+    const changed = this.db
+      .prepare(
+        `UPDATE sub_channels SET pull_request_url = ?, shipped_at = ?
+          WHERE id = ? AND repository_id = ?`,
+      )
+      .run(input.pullRequestUrl, input.shippedAt, channelId, repositoryId);
+    if (changed.changes === 0) {
+      return undefined;
+    }
+    return await this.getSubChannel(repositoryId, channelId);
   }
 
   public async updateSubChannel(

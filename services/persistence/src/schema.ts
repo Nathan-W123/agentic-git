@@ -1723,6 +1723,24 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE work_leases ADD COLUMN branch TEXT`,
     ],
   },
+  {
+    version: 59,
+    name: "channels-ship-to-github",
+    statements: [
+      // Where a merged channel's work went on GitHub.
+      //
+      // The second of the two gates: a channel's branch merges into canonical
+      // under Kumi's own review, and canonical goes to GitHub as a pull
+      // request somebody there reviews. Kept on the channel because that is
+      // what the pull request is *about* — a link stored anywhere else would
+      // have to be joined back to the room every time it was shown.
+      //
+      // Null for every channel that has not shipped, which is every channel
+      // that has not merged and most that have.
+      `ALTER TABLE sub_channels ADD COLUMN pull_request_url TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN shipped_at TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

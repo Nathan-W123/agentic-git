@@ -52,6 +52,7 @@ import { pullCanonical } from "./pull-canonical.js";
 import {
   pushCanonical,
   pushCanonicalForActor,
+  shipChannelToGitHub,
 } from "./push-canonical.js";
 import {
   captureCredentialKey,
@@ -772,6 +773,15 @@ async function serve(
       return {
         created: await repositories.ensureBranch(repository, input.branch),
       };
+    },
+    async shipChannel(input) {
+      return await shipChannelToGitHub(project, store, github, {
+        repositoryId: input.repositoryId,
+        actorId: input.actorId,
+        branch: input.branch,
+        title: input.title,
+        body: input.body,
+      });
     },
     async deleteBranch(input) {
       await repositories.deleteBranch(

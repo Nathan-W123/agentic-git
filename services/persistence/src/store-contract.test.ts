@@ -6919,6 +6919,56 @@ for (const backend of backends) {
         }),
         undefined,
       );
+
+      // Shipping is the second gate, and a separate fact. A channel that has
+      // merged has not necessarily gone to GitHub — a deployment with no
+      // remote never does — so the two are recorded apart.
+      assert.equal(
+        (await store.getSubChannel("repo_branching", work.id))?.pullRequestUrl,
+        undefined,
+      );
+      const shipped = await store.shipSubChannel("repo_branching", work.id, {
+        pullRequestUrl: "https://github.com/acme/app/pull/7",
+        shippedAt: "2026-01-02T04:00:00.000Z",
+      });
+      assert.equal(
+        shipped?.pullRequestUrl,
+        "https://github.com/acme/app/pull/7",
+      );
+      assert.equal(shipped?.shippedAt, "2026-01-02T04:00:00.000Z");
+      // And it survives the round trip, which is the whole reason it is a
+      // column rather than something the browser remembers.
+      const reread = await store.getSubChannel("repo_branching", work.id);
+      assert.equal(reread?.pullRequestUrl, "https://github.com/acme/app/pull/7");
+      assert.equal(
+        (await store.listSubChannels("repo_branching")).find(
+          (channel) => channel.id === work.id,
+        )?.pullRequestUrl,
+        "https://github.com/acme/app/pull/7",
+      );
+
+      // Unlike merging, shipping twice is not a conflict: GitHub answers the
+      // pull request that already exists rather than opening a second, so the
+      // second write restates a fact rather than claiming somebody's work.
+      const again = await store.shipSubChannel("repo_branching", work.id, {
+        pullRequestUrl: "https://github.com/acme/app/pull/7",
+        shippedAt: "2026-01-03T04:00:00.000Z",
+      });
+      assert.equal(again?.shippedAt, "2026-01-03T04:00:00.000Z");
+
+      // A channel this repository does not have is not shipped by naming it.
+      assert.equal(
+        await store.shipSubChannel("repo_branching", elsewhere.id, {
+          pullRequestUrl: "https://github.com/acme/app/pull/8",
+          shippedAt: "2026-01-03T04:00:00.000Z",
+        }),
+        undefined,
+      );
+      assert.equal(
+        (await store.getSubChannel("repo_elsewhere", elsewhere.id))
+          ?.pullRequestUrl,
+        undefined,
+      );
     } finally {
       await store.close();
       await cleanup();

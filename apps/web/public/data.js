@@ -4447,6 +4447,44 @@ export async function mergeBranchReview(repositoryId, channelId) {
   }
 }
 
+/**
+ * Puts a merged channel's work on GitHub as a pull request.
+ *
+ * The second gate, and the only one that reaches outside this deployment: it
+ * pushes canonical to a branch named for the channel, under the caller's own
+ * GitHub account, and asks for it to go into whatever the remote calls main.
+ *
+ * A refusal is an answer, not a failure — no remote, no connected GitHub
+ * account, a token without write access — so this reads `outcome` rather than
+ * treating everything but success as an error. The merge already landed
+ * either way, which is what the explanation says.
+ */
+export async function shipBranchReview(repositoryId, channelId) {
+  state.branchReviewBusy = channelId;
+  state.branchReviewError = undefined;
+  try {
+    const outcome = await api(
+      channelsPath(
+        repositoryId,
+        `/${encodeURIComponent(channelId)}/branch/ship`,
+      ),
+      { method: "POST", body: {} },
+    );
+    state.branchReviewBusy = undefined;
+    // Re-read rather than patched in: the pull request's link lives on the
+    // channel now, and the server is what knows whether it was recorded.
+    await loadSubChannels(repositoryId);
+    await loadBranchReview(repositoryId, channelId);
+    state.channelLoaded.delete(repositoryId);
+    return outcome;
+  } catch (error) {
+    state.branchReviewError = error.message;
+    return undefined;
+  } finally {
+    state.branchReviewBusy = undefined;
+  }
+}
+
 /** Renames a room, or changes whether it is listed to the whole project. */
 export async function updateSubChannel(repositoryId, channelId, patch) {
   await api(channelsPath(repositoryId, `/${encodeURIComponent(channelId)}`), {

@@ -70,6 +70,7 @@ import {
   loadBranchReview,
   mergeBranchReview,
   refreshBranchReview,
+  shipBranchReview,
   deleteSubChannel,
   ensureChannelMessages,
   ensureChannelRoster,
@@ -10182,6 +10183,28 @@ document.addEventListener("click", (event) => {
           toast(`Could not merge: ${error.message}`, "error"),
         );
       render();
+      return;
+    }
+    /**
+     * The second gate, on GitHub. Not confirmed the way the merge is: this
+     * opens a pull request for people to look at, which is reversible by
+     * closing it, and pressing it twice reaches the same one.
+     */
+    case "branch-review-ship": {
+      const repositoryId = activeChannelId();
+      render();
+      void shipBranchReview(repositoryId, value).then((outcome) => {
+        if (outcome?.outcome === "done") {
+          toast(outcome.explanation ?? "Opened a pull request", "ok");
+        } else if (outcome !== undefined) {
+          // A refusal is a real answer with a real reason — no remote, no
+          // connected account, a token without write access — and every one
+          // of them is something the person reading it can fix.
+          toast(outcome.explanation ?? "Could not ship this", "error");
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
       return;
     }
     case "secondary-context-close": {

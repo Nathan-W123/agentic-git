@@ -408,6 +408,33 @@ export interface ApiOperations {
   }): Promise<{ created: boolean }>;
 
   /**
+   * Puts a merged channel's work on GitHub as a pull request.
+   *
+   * The second of two gates. Kumi reviews the channel's branch into
+   * canonical; this pushes canonical to a branch named for the channel and
+   * asks GitHub to merge it into whatever the remote calls main, so the
+   * people reviewing there see one pull request per channel rather than one
+   * per push under a generated name.
+   *
+   * Runs on the caller's own stored GitHub credential, the same rule the
+   * ordinary push follows. Refuses rather than throws for every reason a
+   * person can fix — no remote, no connected account, a token without write
+   * access — because the merge it follows has already landed and the channel
+   * needs to be told that nothing was lost.
+   *
+   * Absent on a deployment with no repository access.
+   */
+  shipChannel?(input: {
+    projectId: string;
+    repositoryId: string;
+    actorId: string;
+    /** The branch to push canonical to, and open the pull request from. */
+    branch: string;
+    title: string;
+    body: string;
+  }): Promise<RepositoryPushResult>;
+
+  /**
    * Drops a channel's branch, and says nothing if it was already gone.
    *
    * Two callers: a work channel being deleted, and the rollback when a

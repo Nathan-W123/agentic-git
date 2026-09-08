@@ -240,6 +240,46 @@ test("a work channel's branch is reviewed and merged from the room itself", asyn
   }
 });
 
+test("a merged channel offers the second gate, on GitHub", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+
+  // Only after the merge. Kumi reviews the branch into the repository, GitHub
+  // reviews the repository into main — offering the second before the first
+  // would ask a second set of reviewers for work Kumi has not accepted.
+  const panel = chats.slice(chats.indexOf("function branchReviewBody"));
+  const merged = panel.slice(0, panel.indexOf("\nfunction branchSummary"));
+  assert.match(merged, /review\.merged === true/u);
+  assert.match(merged, /act="branch-review-ship"/u);
+  // Once shipped it links to the pull request rather than offering to open a
+  // second one, and the button changes to what it now does.
+  assert.match(merged, /review\.pullRequestUrl/u);
+  assert.match(merged, /Update the pull request/u);
+  assert.match(merged, /Open a pull request on GitHub/u);
+  // And it is not drawn for somebody the server would refuse.
+  assert.match(merged, /review\.canShip === true/u);
+
+  // Not confirmed the way the merge is: this opens a pull request for people
+  // to look at, closing one is how it is undone, and pressing twice reaches
+  // the same one.
+  const ship = app.slice(app.indexOf('case "branch-review-ship"'));
+  const handler = ship.slice(0, ship.indexOf('case "secondary-context-close"'));
+  assert.doesNotMatch(handler, /showModal\(/u);
+  assert.match(handler, /shipBranchReview\(repositoryId, value\)/u);
+  // A refusal is a real answer with a fixable reason, not a thrown error, so
+  // its explanation is what reaches the person.
+  assert.match(handler, /outcome\?\.outcome === "done"/u);
+  assert.match(handler, /outcome\.explanation/u);
+
+  // The link lives on the channel, so the channel list is re-read rather than
+  // the response patched in.
+  const fn = data.slice(data.indexOf("export async function shipBranchReview"));
+  const body = fn.slice(0, fn.indexOf("\n}"));
+  assert.match(body, /loadSubChannels\(repositoryId\)/u);
+  assert.match(body, /loadBranchReview\(repositoryId, channelId\)/u);
+});
+
 test("switching rooms clears every cache it names, and cannot half-finish", async () => {
   const data = await publicFile("data.js");
 

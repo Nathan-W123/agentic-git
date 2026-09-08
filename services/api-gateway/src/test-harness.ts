@@ -208,6 +208,17 @@ export interface TestRuntime {
   branches: Map<string, { conflicts: string[]; merged: boolean }>;
   /** Every branch a merge actually landed, in order. */
   mergedBranches: string[];
+  /** Every channel handed to GitHub, in order. */
+  shippedChannels: Array<{ branch: string; title: string; body: string }>;
+  /**
+   * What `shipChannel` answers; mutated in place by tests.
+   *
+   * A refusal is what a deployment with no remote, no connected GitHub
+   * account or a token without write access produces — and the merge it
+   * follows has already landed, so the route has to say so without recording
+   * a pull request that does not exist.
+   */
+  shipOutcome: { outcome: "done" | "refused"; explanation?: string };
   /** What `branchComparison` says changed; mutated in place by tests. */
   branchFiles: string[];
   /** Where `canonicalHead` says canonical stands; mutated in place. */
@@ -578,6 +589,8 @@ export async function startRuntime(
     truncated: false,
   };
   const branches: TestRuntime["branches"] = new Map();
+  const shippedChannels: TestRuntime["shippedChannels"] = [];
+  const shipOutcome: TestRuntime["shipOutcome"] = { outcome: "done" };
   const mergedBranches: TestRuntime["mergedBranches"] = [];
   const branchFiles: TestRuntime["branchFiles"] = ["src/login.ts"];
   const performChat = async (
@@ -1082,6 +1095,28 @@ export async function startRuntime(
       branches.set(key, { conflicts: [], merged: false });
       return { created: true };
     },
+    async shipChannel(input) {
+      shippedChannels.push(input);
+      // Faithful in the one respect the route acts on: a refusal is an
+      // outcome, not a throw, and it carries no URL — so a route that
+      // recorded a pull request on a refusal would be caught here rather than
+      // by somebody wondering later why a channel links to nothing.
+      if (shipOutcome.outcome === "refused") {
+        return {
+          outcome: "refused",
+          explanation:
+            shipOutcome.explanation ??
+            "You haven't connected GitHub, so there is no account to ship as.",
+        };
+      }
+      return {
+        outcome: "done",
+        detail: { url: `https://github.com/acme/app/pull/${shippedChannels.length}` },
+        explanation:
+          `Opened a pull request from ${input.branch} into main: ` +
+          `https://github.com/acme/app/pull/${shippedChannels.length}`,
+      };
+    },
     async deleteBranch(input) {
       branches.delete(`${input.repositoryId}\u0000${input.branch}`);
     },
@@ -1369,6 +1404,7 @@ export async function startRuntime(
     delete operations.branchComparison;
     delete operations.mergeBranch;
     delete operations.refreshBranch;
+    delete operations.shipChannel;
   }
   const gateway = new ApiGateway({
     store,
@@ -1520,6 +1556,8 @@ export async function startRuntime(
     canonicalDiff,
     branches,
     mergedBranches,
+    shippedChannels,
+    shipOutcome,
     branchFiles,
     canonicalState,
     runFailure,
