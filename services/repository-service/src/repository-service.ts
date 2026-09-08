@@ -1389,6 +1389,39 @@ export class RepositoryService {
   }
 
   /**
+   * The conflicted paths in `git merge-tree --write-tree --name-only` output.
+   *
+   * The format is three sections, and only the middle one is paths:
+   *
+   *     <oid of the merged tree>
+   *     <conflicted path>...
+   *     <blank line>
+   *     <informational messages>
+   *
+   * The blank line is the whole of the separator, so dropping empty lines
+   * before splitting — which is the obvious thing to do with git output —
+   * silently glues the two halves together. Measured against a real
+   * conflicting merge, that reported `Auto-merging src/login.ts` and
+   * `CONFLICT (content): Merge conflict in src/login.ts` as two conflicted
+   * *files*, both of which the channel would then have named to somebody and
+   * asked them to go and fix.
+   *
+   * On a clean merge there is one line and nothing after it, which is the
+   * empty list this returns.
+   */
+  private conflictedPaths(stdout: string): string[] {
+    const paths: string[] = [];
+    // `split("\n")` and not a trim-then-filter: the blank line is data.
+    for (const line of stdout.split("\n").slice(1)) {
+      if (line.trim().length === 0) {
+        break;
+      }
+      paths.push(line);
+    }
+    return paths;
+  }
+
+  /**
    * What one branch has that another does not, and whether it can be merged.
    *
    * Everything a pull request is made of, in one pass. The diff is taken from
@@ -1466,18 +1499,11 @@ export class RepositoryService {
       ahead: Number.parseInt(aheadText, 10) || 0,
       behind: Number.parseInt(behindText, 10) || 0,
       files,
-      // The first line is the merged tree's id; the conflicted paths follow.
-      // On a clean merge there is nothing after it, which is the empty list
-      // this returns.
+      // The first line is the merged tree's id; the conflicted paths follow,
+      // and git's own commentary follows those after a blank line. See
+      // `conflictedPaths`.
       conflicts:
-        merged.exitCode === 0
-          ? []
-          : merged.stdout
-              .trim()
-              .split("\n")
-              .slice(1)
-              .map((line) => line.trim())
-              .filter((line) => line.length > 0),
+        merged.exitCode === 0 ? [] : this.conflictedPaths(merged.stdout),
     };
   }
 
@@ -1544,15 +1570,10 @@ export class RepositoryService {
       ],
       { allowFailure: true },
     );
-    const lines = merged.stdout
-      .trim()
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
     if (merged.exitCode !== 0) {
-      return { merged: false, conflicts: lines.slice(1) };
+      return { merged: false, conflicts: this.conflictedPaths(merged.stdout) };
     }
-    const tree = lines[0];
+    const tree = merged.stdout.split("\n")[0]?.trim();
     if (tree === undefined || tree.length === 0) {
       throw new Error(`git merge-tree produced no tree for ${branch}`);
     }

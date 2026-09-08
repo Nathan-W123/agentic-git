@@ -287,3 +287,163 @@ test("revision metadata and concurrent bundle requests remain deterministic", as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+/**
+ * The branch machinery, against real Git rather than a description of it.
+ *
+ * Everything here turns on what `git merge-tree --write-tree --name-only`
+ * actually prints, and the shape of that output is the whole reason this test
+ * exists: the conflicted paths and Git's own commentary about the merge are
+ * two sections separated by a *blank line*, so the obvious way to read the
+ * output — drop the empty lines, take everything after the tree id — quietly
+ * reports "Auto-merging src/login.ts" as a conflicted file. A fixture cannot
+ * catch that, because a fixture is written by whoever misread the format.
+ */
+test("a branch comparison names the files that conflict, and nothing else", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-branch-compare-"));
+  const source = path.join(root, "source");
+  const canonicalPath = path.join(root, "canonical.git");
+  const repositories = new RepositoryService();
+  try {
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "login.ts"),
+      "export function clamp(n: number) {\n  return Math.min(n, 80);\n}\n",
+    );
+    await writeFile(path.join(source, "README.md"), "# demo\n");
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "compare",
+    );
+
+    // Two branches, one of which touches a file canonical also moves.
+    assert.equal(await repositories.ensureBranch(repository, "kumi/clean"), true);
+    assert.equal(
+      await repositories.ensureBranch(repository, "kumi/clashing"),
+      true,
+    );
+    const git = repositories.getGitClient();
+    const commitOnto = async (
+      branch: string,
+      file: string,
+      contents: string,
+      message: string,
+    ): Promise<void> => {
+      const tree = path.join(root, `tree-${branch.replace(/\W/gu, "-")}`);
+      await git.run(["clone", "--quiet", "--branch", branch, canonicalPath, tree]);
+      await mkdir(path.join(tree, path.dirname(file)), { recursive: true });
+      await writeFile(path.join(tree, file), contents);
+      await git.run([`-C`, tree, "add", "-A"]);
+      await git.run([
+        `-C`,
+        tree,
+        "-c",
+        "user.email=t@example.com",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "-qm",
+        message,
+      ]);
+      await git.run([`-C`, tree, "push", "--quiet", "origin", branch]);
+    };
+
+    await commitOnto("kumi/clean", "docs/notes.md", "notes\n", "Add notes");
+    await commitOnto(
+      "kumi/clashing",
+      "src/login.ts",
+      "export function clamp(n: number) {\n  return Math.min(n, 120);\n}\n",
+      "Widen to 120",
+    );
+    await commitOnto(
+      repository.branch,
+      "src/login.ts",
+      "export function clamp(n: number) {\n  return Math.min(n, 100);\n}\n",
+      "Widen to 100",
+    );
+
+    const clean = await repositories.compareBranches(repository, "kumi/clean");
+    assert.equal(clean.ahead, 1);
+    assert.equal(clean.behind, 1);
+    assert.deepEqual(clean.files, ["docs/notes.md"]);
+    assert.deepEqual(clean.conflicts, []);
+
+    const clashing = await repositories.compareBranches(
+      repository,
+      "kumi/clashing",
+    );
+    assert.deepEqual(clashing.files, ["src/login.ts"]);
+    // The path, and only the path. Git prints "Auto-merging src/login.ts" and
+    // "CONFLICT (content): Merge conflict in src/login.ts" after a blank line,
+    // and neither is a file anybody can open and fix.
+    assert.deepEqual(clashing.conflicts, ["src/login.ts"]);
+
+    // The merge refuses rather than resolving, and says the same thing.
+    const refused = await repositories.mergeBranchInto(
+      repository,
+      "kumi/clashing",
+      { message: "Merge kumi/clashing" },
+    );
+    assert.equal(refused.merged, false);
+    assert.deepEqual(
+      refused.merged === false ? refused.conflicts : [],
+      ["src/login.ts"],
+    );
+
+    // And the clean one lands, as a real merge commit with two parents.
+    const merged = await repositories.mergeBranchInto(repository, "kumi/clean", {
+      message: "Merge kumi/clean",
+    });
+    assert.equal(merged.merged, true);
+    const parents = await git.run([
+      `--git-dir=${repository.path}`,
+      "rev-list",
+      "--parents",
+      "-n",
+      "1",
+      merged.merged === true ? merged.revision : "",
+    ]);
+    assert.equal(
+      parents.stdout.trim().split(/\s+/u).length,
+      3,
+      "a merge commit has the commit and two parents",
+    );
+    // Canonical moved to it, and the branch is still there — deleting it is
+    // the caller's decision, made after the merge is known to have landed.
+    const head = await repositories.getCanonicalVersion(repository);
+    assert.equal(head.revision, merged.merged === true ? merged.revision : "");
+    assert.equal(await repositories.branchExists(repository, "kumi/clean"), true);
+
+    // Merging the same branch again is a no-op rather than an empty commit:
+    // it is already contained, and canonical does not move.
+    const again = await repositories.mergeBranchInto(repository, "kumi/clean", {
+      message: "Merge kumi/clean",
+    });
+    assert.equal(again.merged, true);
+    assert.equal(
+      again.merged === true ? again.revision : "",
+      head.revision,
+      "a contained branch must not write a second merge commit",
+    );
+
+    // Deleting it is allowed; deleting canonical's own branch is not.
+    await repositories.deleteBranch(repository, "kumi/clean");
+    assert.equal(await repositories.branchExists(repository, "kumi/clean"), false);
+    await assert.rejects(
+      async () => await repositories.deleteBranch(repository, repository.branch),
+      /Refusing to delete the canonical branch/u,
+    );
+
+    // And a branch is never handed over: the second creation fails rather
+    // than moving somebody else's back to the base.
+    assert.equal(
+      await repositories.ensureBranch(repository, "kumi/clashing"),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

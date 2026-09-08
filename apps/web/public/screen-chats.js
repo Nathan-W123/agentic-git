@@ -4801,10 +4801,21 @@ function composer(repositoryId) {
   // right now" and this is "not you" — with the thing to do about it.
   if (!canPostInActiveSubChannel(repositoryId)) {
     const label = subChannelLabel(repositoryId, activeSubChannelId(repositoryId));
+    // Two reasons a room refuses the composer, and they want opposite things
+    // of the reader. "Not you" is answered by asking to be added; a merged
+    // work channel is answered by nobody, because it is finished — its branch
+    // is gone, and anything said here would be dispatched against a branch
+    // nothing can check out. Telling somebody to ask an admin to add them to a
+    // room that has shipped sends them to ask for something nobody can give.
+    const merged = openSubChannel(repositoryId)?.mergedAt;
     return `<div class="chan-composer-wrap">
       <div class="chan-composer-locked">
-        ${icon("lock")}
-        <span>You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.</span>
+        ${icon(merged ? "check" : "lock")}
+        <span>${
+          merged
+            ? `${esc(label)} merged and is finished. Open a new channel for follow-up work.`
+            : `You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.`
+        }</span>
       </div>
     </div>`;
   }
@@ -5184,7 +5195,6 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
                rel="noreferrer noopener">${esc(review.pullRequestUrl)}</a>,
              opened ${esc(relativeTime(review.shippedAt))}.</div>
            <div class="branch-actions">
-             <span class="spacer"></span>
              ${
                review.canShip === true
                  ? `<button class="btn" type="button" data-act="branch-review-ship"
@@ -5195,7 +5205,6 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
            </div>`
         : review.canShip === true
           ? `<div class="branch-actions">
-               <span class="spacer"></span>
                <button class="btn btn-primary" type="button"
                  data-act="branch-review-ship" data-value="${esc(channelId ?? "")}"
                  ${busy ? "disabled" : ""}
@@ -5225,12 +5234,12 @@ function branchReviewBody(repositoryId, channelId, review, busy) {
     <div class="branch-actions">
       ${
         (review.behind ?? 0) > 0 || conflicts.length > 0
-          ? `<button class="btn" type="button" data-act="branch-review-refresh"
+          ? `<button class="btn branch-secondary" type="button"
+               data-act="branch-review-refresh"
                data-value="${esc(channelId ?? "")}" ${busy ? "disabled" : ""}
                >Bring in the latest</button>`
           : ""
       }
-      <span class="spacer"></span>
       ${
         review.canMerge === true
           ? `<button class="btn btn-primary" type="button"

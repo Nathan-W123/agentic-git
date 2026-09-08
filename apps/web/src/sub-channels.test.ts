@@ -184,12 +184,29 @@ test("a channel can be opened as a branch, and says so everywhere it is shown", 
     chats,
     /channel\.mergedAt\s*\n?\s*\?\s*`<span class="chan-channel-note"[\s\S]{0,400}>merged<\/span>`/u,
   );
+  // And so does the composer it replaces. The two refusals want opposite
+  // things of the reader: "not you" is answered by asking to be added, and a
+  // merged room is answered by nobody — sending somebody to ask an admin to
+  // add them to a room that has shipped asks for something nobody can give.
+  const locked = chats.slice(chats.indexOf("chan-composer-locked"));
+  const notice = locked.slice(0, locked.indexOf("</div>"));
+  assert.match(notice, /merged and is finished/u);
+  assert.match(notice, /not a member, so you cannot post here/u);
   // The settings panel says it in a sentence, and withholds Rename — the
   // server refuses that for a work channel, and an affordance whose only
   // outcome is an error toast is worse than no affordance.
   const manage = chats.slice(chats.indexOf("export function subChannelManagePopoverHtml"));
   const panel = manage.slice(0, manage.indexOf("\nexport function", 1));
   assert.match(panel, /Work in this\s+channel lands on/u);
+  // `icon()` emits a bare SVG with no intrinsic width, so one dropped into a
+  // paragraph fills it — the branch glyph came out about two hundred pixels
+  // tall. Every other inline use sizes it at the call site; this one is prose,
+  // so the stylesheet does it.
+  const inline = styles.slice(styles.indexOf(".channel-info-summary svg {"));
+  assert.match(inline.slice(0, inline.indexOf("}")), /width: 13px;/u);
+  // And inline, because the global `svg` rule is `display: block` — without
+  // this the glyph took its own line and the sentence started under it.
+  assert.match(inline.slice(0, inline.indexOf("}")), /display: inline-block;/u);
   assert.match(panel, /channel\.branch\s*\?\s*""\s*:\s*`<button[^`]*sub-channel-rename/u);
 });
 

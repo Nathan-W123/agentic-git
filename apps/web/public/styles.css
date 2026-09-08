@@ -14026,12 +14026,19 @@ dialog.modal[open]::backdrop {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Both, and the width one is load-bearing. A grid item defaults to
+     `min-width: auto`, which is "never smaller than my content" — so a wide
+     diff pushed this box out through the panel's rounded edge and took the
+     merge button off the screen with it. The diff scrolls inside
+     `.branch-diff` instead, which is what the file panel beside it does. */
+  min-width: 0;
   overflow: auto;
 }
 
 .branch-summary {
   display: grid;
   gap: 8px;
+  min-width: 0;
   padding: 14px 16px;
   border-bottom: 1px solid var(--border);
 }
@@ -14072,13 +14079,28 @@ dialog.modal[open]::backdrop {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Two buttons in a column that starts at 340px, where they do not both
+     fit on one line. Wrapping is what keeps "Merge into the repository" whole
+     instead of half of it, and the action that lands the work stays at the
+     right-hand end whether it is sharing a line or has one to itself. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
+}
+
+/* The one that does not land anything keeps the left, and does the pushing —
+   a spacer element would take a whole line to itself the moment the row
+   wrapped, and leave the button it was meant to push sitting on the left of
+   the next one. */
+.branch-actions .branch-secondary {
+  margin-right: auto;
 }
 
 .branch-files {
   list-style: none;
   margin: 0;
+  min-width: 0;
   padding: 8px 0;
   border-bottom: 1px solid var(--border);
 }
@@ -14128,6 +14150,10 @@ dialog.modal[open]::backdrop {
 
 .branch-diff {
   min-height: 0;
+  /* The one place sideways scrolling is allowed, so a long line scrolls the
+     diff rather than the panel or the page. */
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
 }
 
@@ -14191,6 +14217,29 @@ dialog.modal[open]::backdrop {
   color: var(--text-2);
   font-size: 12.5px;
   line-height: 1.45;
+}
+
+/* An icon in the middle of a sentence takes the sentence's size.
+   `icon()` emits a bare SVG with no intrinsic width, so one dropped into a
+   block of prose fills the block — the branch glyph beside "Work in this
+   channel lands on…" came out about two hundred pixels tall. Every other
+   inline use in this file sizes it at its own call site; this is the one that
+   is a paragraph rather than a control, so it sizes it here. */
+.channel-info-summary svg {
+  /* `display: inline-block` as well as the size: the global `svg` rule sets
+     `display: block`, which is right for a glyph that is a control's whole
+     content and wrong for one at the head of a sentence — it took its own
+     line and left the sentence starting under it. */
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  vertical-align: -2px;
+  margin-right: 3px;
+}
+
+.channel-info-summary code {
+  font-family: var(--mono);
+  font-size: 11.5px;
 }
 
 .secondary-facts {
