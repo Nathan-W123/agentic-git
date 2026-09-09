@@ -19,6 +19,7 @@ import {
   cancelTasks,
   pauseTasks,
   repoCreate,
+  repoImportArchive,
   repoImportGitHub,
   repoRemove,
   resumeTasks,
@@ -509,6 +510,15 @@ async function serve(
     },
     async deleteRepository(input) {
       await repoRemove(project, store, { id: input.repositoryId });
+    },
+    async importLocalArchive(input) {
+      return await repoImportArchive(project, store, {
+        archive: input.bytes,
+        projectId: input.projectId,
+        ...(input.id === undefined ? {} : { id: input.id }),
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+        ...(input.actorId === undefined ? {} : { createdBy: input.actorId }),
+      });
     },
     async importGitHub(input) {
       return await repoImportGitHub(project, store, {

@@ -1693,3 +1693,89 @@ test("a gateway configured with a padded token still starts and accepts it", asy
   });
   assert.equal(response.status, 201, JSON.stringify(response.data));
 });
+
+test("a zipped folder becomes a repository, and anything else does not", async (t) => {
+  // The third way in. A project that lives only on somebody's laptop has no
+  // remote to import from, so the folder itself travels — and arrives as a
+  // canonical repository like any other, which is what the audit record and
+  // the repository list both have to show.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`;
+
+  // The two bytes every ZIP opens with, which is all the fixture needs to be:
+  // unpacking is the repository service's business and is tested there.
+  const archive = Buffer.concat([
+    Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+    Buffer.alloc(60),
+  ]);
+  const uploaded = await owner.request(`${base}/upload?id=laptop&branch=work`, {
+    method: "POST",
+    raw: archive,
+    rawType: "application/zip",
+  });
+  assert.equal(uploaded.status, 201, JSON.stringify(uploaded.data));
+  assert.equal(uploaded.data.repository.id, "laptop");
+  assert.equal(uploaded.data.repository.branch, "work");
+
+  const listed = await owner.request(base);
+  assert.ok(
+    (listed.data.repositories as { id: string }[]).some(
+      (entry) => entry.id === "laptop",
+    ),
+    "the uploaded repository should be in the project",
+  );
+
+  // Where a repository came from is the question an audit of one is most
+  // often asked, so "local" sits beside "github" rather than being absent.
+  const imported = (
+    await runtime.store.listAuditEvents({ types: ["repository_imported"] })
+  ).find((entry) => entry.event.data["repositoryId"] === "laptop");
+  assert.equal(imported?.event.data["provider"], "local");
+
+  // Bytes that are not an archive are a refusal and not a repository.
+  const refused = await owner.request(`${base}/upload?id=not-a-zip`, {
+    method: "POST",
+    raw: Buffer.from("this is a text file, not an archive", "utf8"),
+    rawType: "application/zip",
+  });
+  assert.equal(refused.status, 422, JSON.stringify(refused.data));
+  const empty = await owner.request(`${base}/upload?id=nothing`, {
+    method: "POST",
+    raw: Buffer.alloc(0),
+    rawType: "application/zip",
+  });
+  assert.equal(empty.status, 400, JSON.stringify(empty.data));
+});
+
+test("uploading a repository takes the same permission importing one does", async (t) => {
+  // It is the same act — registering a new canonical repository in this
+  // project — so a colleague who may not import from GitHub may not sidestep
+  // that by uploading a folder instead.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const outsider = new TestClient(runtime.origin);
+  await registerAccount(runtime.store, outsider, {
+    email: "upload-outsider@example.com",
+    displayName: "Outsider",
+    password: PASSWORD,
+  });
+
+  const refused = await outsider.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/upload?id=sneaky`,
+    {
+      method: "POST",
+      raw: Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(60)]),
+      rawType: "application/zip",
+    },
+  );
+  assert.ok(
+    refused.status === 403 || refused.status === 404,
+    `an outsider should not be able to upload a repository (got ${String(
+      refused.status,
+    )})`,
+  );
+  assert.equal(await runtime.store.getRepository("sneaky"), undefined);
+});

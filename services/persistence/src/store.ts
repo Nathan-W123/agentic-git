@@ -2082,6 +2082,8 @@ export interface UpdateSubChannelInput {
   slug?: string;
   name?: string;
   visibility?: SubChannelVisibility;
+  /** Put the room away, or bring it back. Absent leaves it as it is. */
+  archived?: boolean;
 }
 
 export const DEFAULT_ORGANIZATION_ID = "org_local";

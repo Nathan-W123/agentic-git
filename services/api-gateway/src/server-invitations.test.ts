@@ -370,7 +370,7 @@ test("an invitation cannot name a repository the sender does not own", async (t)
   assert.equal(wide.status, 400, JSON.stringify(wide.data));
 });
 
-test("a recipient name makes a readable invitation link", async (t) => {
+test("a short recipient name makes a unique readable invitation link", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
@@ -382,37 +382,41 @@ test("a recipient name makes a readable invitation link", async (t) => {
       method: "POST",
       body: {
         ...inviteBody("", "developer", repo),
-        recipientName: "Nathan",
+        recipientName: "Ethan",
       },
     },
   );
   assert.equal(invited.status, 201, JSON.stringify(invited.data));
-  assert.equal(invited.data.token, "NATHAN");
+  assert.match(invited.data.token, /^inv_[\w-]+\.ETHAN$/u);
 
-  // The readable token remains a bearer credential, and only its hash is
-  // kept. The deterministic internal id is what makes the code resolvable
-  // without adding a second persisted field.
+  // The readable name is still the bearer secret, while the random internal
+  // id lets more than one invitation use the same name.
   const stored = await runtime.store.getInvitation(
     invited.data.invitation.id as string,
   );
   assert.ok(stored);
-  assert.notEqual(stored.secretHash, "NATHAN");
-  assert.notEqual(stored.id, "NATHAN");
+  assert.notEqual(stored.secretHash, "ETHAN");
+  assert.notEqual(stored.id, "ETHAN");
 
   const joiner = new TestClient(runtime.origin);
-  const preview = await joiner.request("/api/v1/invitations/NATHAN");
+  const preview = await joiner.request(
+    `/api/v1/invitations/${invited.data.token}`,
+  );
   assert.equal(preview.status, 200, JSON.stringify(preview.data));
   assert.equal(preview.data.invitation.repositoryId, repo);
   assert.equal(preview.data.invitation.open, true);
 
-  const accepted = await joiner.request("/api/v1/invitations/NATHAN/accept", {
-    method: "POST",
-    body: {
-      email: "nathan@example.com",
-      displayName: "Nathan",
-      password: PASSWORD,
+  const accepted = await joiner.request(
+    `/api/v1/invitations/${invited.data.token}/accept`,
+    {
+      method: "POST",
+      body: {
+        email: "nathan@example.com",
+        displayName: "Nathan",
+        password: PASSWORD,
+      },
     },
-  });
+  );
   assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
   assert.equal(accepted.data.user.email, "nathan@example.com");
   assert.equal(
@@ -423,7 +427,7 @@ test("a recipient name makes a readable invitation link", async (t) => {
   );
 });
 
-test("invalid and reserved readable invitation names are refused", async (t) => {
+test("invalid invitation names are refused while duplicate names get distinct links", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
@@ -448,24 +452,26 @@ test("invalid and reserved readable invitation names are refused", async (t) => 
     method: "POST",
     body: {
       ...inviteBody("", "viewer", repo),
-      recipientName: "Nathan",
+      recipientName: "Ethan",
     },
   });
   assert.equal(first.status, 201, JSON.stringify(first.data));
-  assert.equal(first.data.token, "NATHAN");
+  assert.match(first.data.token, /^inv_[\w-]+\.ETHAN$/u);
 
-  const reserved = await owner.request(endpoint, {
+  const duplicate = await owner.request(endpoint, {
     method: "POST",
     body: {
       ...inviteBody("", "viewer", repo),
-      recipientName: "  nathan  ",
+      recipientName: "  ethan  ",
     },
   });
-  assert.equal(reserved.status, 409, JSON.stringify(reserved.data));
-  assert.equal(
-    reserved.data.error?.code ?? reserved.data.code,
-    "invitation_code_unavailable",
+  assert.equal(duplicate.status, 201, JSON.stringify(duplicate.data));
+  assert.match(duplicate.data.token, /^inv_[\w-]+\.ETHAN$/u);
+  assert.notEqual(duplicate.data.token, first.data.token);
+  const preview = await new TestClient(runtime.origin).request(
+    `/api/v1/invitations/${duplicate.data.token}`,
   );
+  assert.equal(preview.status, 200, JSON.stringify(preview.data));
 });
 
 /**

@@ -69,6 +69,12 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(chats, /function secondaryPanel\(repositoryId\)/u);
   assert.match(hierarchyCss, /\.topbar \{[^}]*display: grid;[^}]*background: color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\);[^}]*border-bottom: 0;/u);
   assert.match(hierarchyCss, /grid-template-columns: minmax\(76px, 1fr\) minmax\(240px, 640px\) minmax\(76px, 1fr\);/u);
+  assert.match(hierarchyCss, /height: calc\(44px \+ var\(--safe-top\)\);/u);
+  assert.match(hierarchyCss, /\.global-search \{[\s\S]*?min-height: 30px;/u);
+  assert.match(
+    hierarchyCss,
+    /@media \(max-width: 600px\)[\s\S]*?\.topbar \{[\s\S]*?grid-template-columns: minmax\(40px, 1fr\) 40px minmax\(80px, 1fr\);[\s\S]*?height: calc\(48px \+ var\(--safe-top\)\);/u,
+  );
   assert.match(hierarchyCss, /\.topbar-icon-btn \{[\s\S]*?flex: 0 0 34px;[\s\S]*?width: 34px;[\s\S]*?height: 34px;/u);
   assert.doesNotMatch(hierarchyCss, /\.topbar-account-btn/u);
   // And no box in the bar sized to the switcher underneath it, at any width.

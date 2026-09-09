@@ -4924,10 +4924,16 @@ export class ApiGateway {
         await this.isRepositoryAdmin(principal, projectId, repositoryId),
       ))
     ) {
+      // Two different refusals wearing one sentence otherwise: an archived
+      // room turns everybody away, including its own members, and telling
+      // somebody they are "not a member" of a room they are plainly in sends
+      // them after a permission that would change nothing.
       throw new HttpError(
         403,
-        "not_a_member",
-        `You are not a member of #${channel.slug}`,
+        channel.archived ? "channel_archived" : "not_a_member",
+        channel.archived
+          ? `#${channel.slug} is archived and is not taking new messages`
+          : `You are not a member of #${channel.slug}`,
       );
     }
     const message = await this.options.store.appendChannelMessage({
@@ -7950,13 +7956,18 @@ export class ApiGateway {
   }
 
   /**
-   * Rewrites the images in a request into something an agent can open.
+   * Rewrites the files in a request into something an agent can open.
    *
    * A pasted screenshot reaches the channel as `![alt](attachment:<id>)`,
    * which the dashboard turns into an `<img>` and an agent could only read as
    * punctuation. The bytes are already on the same filesystem the task runs
    * on, so the shortest honest answer is to say where: the reference becomes
    * the absolute path, and an agent that can read files can look at it.
+   *
+   * The same reference carries a ZIP or a Markdown document now, and for
+   * those the path is not a convenience but the only way in at all — an agent
+   * cannot be shown an archive, so being told where one is, is the whole of
+   * what it can be given.
    *
    * Left exactly as it was when the deployment cannot answer for a path, or
    * when the id names nothing. A wrong path is worse than a visible id — one
@@ -7986,9 +7997,14 @@ export class ApiGateway {
         continue;
       }
       const alt = (match[1] ?? "").trim();
+      // A picture is looked at and a file is read, and the difference is
+      // worth the two words: an agent told to "see" a ZIP has been told
+      // something slightly untrue about what it is holding.
+      const isImage = /\.(?:png|jpg|gif|webp)$/u.test(id);
       result = result.replace(
         match[0],
-        `[image${alt === "" ? "" : ` "${alt}"`}: ${full} — open this file to see it]`,
+        `[${isImage ? "image" : "file"}${alt === "" ? "" : ` "${alt}"`}: ` +
+          `${full} — open this file to ${isImage ? "see" : "read"} it]`,
       );
     }
     return result;
@@ -13058,13 +13074,19 @@ export class ApiGateway {
   async readBinary(
     request: IncomingMessage,
     limit: number,
+    /**
+     * What to say when there is too much of it. Two routes take bytes now and
+     * they take very different things, and "that image is too large" about a
+     * repository is a sentence that sends somebody looking for a picture.
+     */
+    tooLarge = "That file is too large",
   ): Promise<Buffer> {
     const declared = Number.parseInt(
       request.headers["content-length"] ?? "0",
       10,
     );
     if (Number.isFinite(declared) && declared > limit) {
-      throw new HttpError(413, "body_too_large", "That image is too large");
+      throw new HttpError(413, "body_too_large", tooLarge);
     }
     const chunks: Buffer[] = [];
     let size = 0;
@@ -13074,7 +13096,7 @@ export class ApiGateway {
       // Checked as it arrives as well as up front, because `content-length` is
       // the sender's claim and a chunked body does not carry one at all.
       if (size > limit) {
-        throw new HttpError(413, "body_too_large", "That image is too large");
+        throw new HttpError(413, "body_too_large", tooLarge);
       }
       chunks.push(buffer);
     }

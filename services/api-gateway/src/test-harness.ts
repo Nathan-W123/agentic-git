@@ -896,6 +896,24 @@ export async function startRuntime(
       await store.removeRepository(input.repositoryId);
       canonicalRepositoryNames.delete(input.repositoryId);
     },
+    // A zipped folder, registered the way the real one is. The bytes are only
+    // checked for being a ZIP at all: what unpacking does with them is the
+    // repository service's business and is tested there.
+    async importLocalArchive(input) {
+      if (input.bytes.subarray(0, 2).toString("latin1") !== "PK") {
+        throw new Error("That file is not a ZIP archive");
+      }
+      const repository = {
+        id: input.id ?? "uploaded",
+        path: `/canonical/${input.id ?? "uploaded"}.git`,
+        branch: input.branch ?? "main",
+        createdBy: input.actorId,
+      };
+      await store.saveRepository(repository);
+      await store.linkRepository(input.projectId, repository.id);
+      canonicalRepositoryNames.add(repository.id);
+      return repository;
+    },
     async importGitHub(input) {
       const repository = {
         id: input.id ?? "imported",
@@ -1230,7 +1248,7 @@ export async function startRuntime(
     async attachmentPath(id: string) {
       // Only the ids a test stored; anything else is genuinely missing, which
       // is the case the second attachment test covers.
-      return /^a{32}\.(png|jpg|gif|webp)$/u.test(id)
+      return /^a{32}\.(png|jpg|gif|webp|zip|md)$/u.test(id)
         ? `/var/data/.coordinator/attachments/${id}`
         : undefined;
     },
@@ -1251,13 +1269,19 @@ export async function startRuntime(
       );
     },
     // The real store's allowlist, in miniature: the deployment decides what an
-    // image is, and the gateway only ever passes bytes through.
+    // attachment is, and the gateway only ever passes bytes through.
     async attachmentSave(input) {
-      const extension = { "image/png": "png", "image/jpeg": "jpg" }[
-        input.contentType.split(";")[0]?.trim() ?? ""
-      ];
+      const extension = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "application/zip": "zip",
+        "text/markdown": "md",
+      }[input.contentType.split(";")[0]?.trim() ?? ""];
       if (extension === undefined) {
-        throw new Error(`Images must be PNG or JPEG (not ${input.contentType})`);
+        throw new Error(
+          `Attachments must be PNG, JPEG, ZIP or Markdown ` +
+            `(not ${input.contentType})`,
+        );
       }
       const id = `${"a".repeat(32)}.${extension}`;
       attachmentBytes.set(id, {

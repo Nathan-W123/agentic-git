@@ -5514,13 +5514,23 @@ public async recordBranchClaim(
           ? slug
           : trimmed;
     const visibility = input.visibility ?? current.visibility;
+    // `#general` is the room every unaddressed message falls back to, so it
+    // can no more be put away than it can be deleted. Refused here as well as
+    // at the HTTP edge: every caller of this store gets the same guarantee.
+    if (
+      input.archived === true &&
+      current.slug === GENERAL_SUB_CHANNEL_SLUG
+    ) {
+      throw new Error("The #general channel cannot be archived");
+    }
+    const archived = input.archived ?? current.archived;
     this.db
       .prepare(
-        `UPDATE sub_channels SET slug = ?, name = ?, visibility = ?
+        `UPDATE sub_channels SET slug = ?, name = ?, visibility = ?, archived = ?
           WHERE id = ? AND repository_id = ?`,
       )
-      .run(slug, name, visibility, channelId, repositoryId);
-    return { ...current, slug, name, visibility };
+      .run(slug, name, visibility, archived ? 1 : 0, channelId, repositoryId);
+    return { ...current, slug, name, visibility, archived };
   }
 
   public async deleteSubChannel(

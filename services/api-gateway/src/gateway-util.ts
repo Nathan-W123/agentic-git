@@ -24,6 +24,17 @@ import { CHANNEL_ARBITRATION_PREFIX } from "./task-narration.js";
 export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
 /**
+ * A whole repository arriving as one ZIP, which is a different size of thing
+ * from a file dropped into a conversation.
+ *
+ * Two hundred megabytes: comfortably a real project with its history, and
+ * still small enough that one upload cannot fill the volume canonical lives
+ * on. Above this the answer is to push the repository to GitHub and import it
+ * from there, which is the path that streams instead of buffering.
+ */
+export const MAX_REPOSITORY_ARCHIVE_BYTES = 200 * 1024 * 1024;
+
+/**
  * Far shorter than an audit's, because somebody is watching a button.
  *
  * Rewriting text that is already on the screen is a small ask of a model, and
@@ -67,15 +78,15 @@ export const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * Turns the recipient label into the credential used in a readable link.
  *
- * Six characters keeps the shortest codes out of the especially easy-to-
- * guess range. Spaces become dashes, while everything else must already be a
- * URL-safe letter, digit or separator so the link says exactly what its
- * creator intended.
+ * Spaces become dashes, while everything else must already be a URL-safe
+ * letter, digit or separator so the link says exactly what its creator
+ * intended. The invitation itself has a random id, so a short label does not
+ * make the link easy to guess.
  */
 export function normalizeInvitationCode(value: string): string | undefined {
   const code = value.trim().toUpperCase().replace(/\s+/gu, "-");
   if (
-    code.length < 6 ||
+    code.length === 0 ||
     code.length > 48 ||
     !/^[A-Z0-9]+(?:-[A-Z0-9]+)*$/u.test(code)
   ) {

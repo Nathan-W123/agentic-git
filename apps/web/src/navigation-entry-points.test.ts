@@ -359,6 +359,18 @@ test("direct messages are offered with people and with nobody else", async () =>
   assert.match(list, /!talking\.has\(person\.id\)/u);
   assert.match(list, /label: "Nobody else on this project yet"/u);
 
+  // One glyph for the whole menu. Every row runs `dm-open`, so the lower half
+  // carrying the roster's people icon made a single list of identical doors
+  // look like two kinds of row; the separator and each row's meta are what
+  // distinguish a conversation already going from one not started yet.
+  // Sliced down to the rows array, because `list` runs on past this function
+  // and the menus below it carry icons of their own.
+  const dmRows = slice(list, "const rows = [", "\n  ];");
+  assert.deepEqual(
+    [...dmRows.matchAll(/iconName: "([A-Za-z]+)"/gu)].map((match) => match[1]),
+    ["chatBubble", "chatBubble"],
+  );
+
   // The account menu still reaches the same door.
   const destinations = slice(app, "function accountDestinations() {", "\n/**");
   assert.match(destinations, /act: "dm-list"/u);
@@ -513,6 +525,7 @@ test("a NATHAN-style invite link enters the invitation flow in a running session
   );
   assert.match(invite, /name="recipientName"/u);
   assert.match(invite, /placeholder="Nathan"/u);
+  assert.doesNotMatch(invite, /minlength="6"/u);
   assert.match(
     invite,
     /createInvitation\(\s*values\.recipientName,\s*values\.role,\s*values\.repositoryId,/u,
@@ -543,5 +556,5 @@ test("a NATHAN-style invite link enters the invitation flow in a running session
     "async function showInviteLink(token, repositoryId) {",
     "\n/**\n * Removes one agent membership",
   );
-  assert.match(linkDialog, /anyone\s+who guesses it can use this invitation/u);
+  assert.match(linkDialog, /anyone with the link can use this invitation/u);
 });

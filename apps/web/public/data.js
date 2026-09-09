@@ -205,9 +205,13 @@ function rememberedRosterSections() {
       channels: saved?.channels !== false,
       people: saved?.people !== false,
       agents: saved?.agents !== false,
+      // The one section that starts rolled up. Archived rooms are kept to be
+      // looked at when somebody goes looking, not to stand permanently
+      // between the live rooms and the people in them.
+      archived: saved?.archived === true,
     };
   } catch {
-    return { channels: true, people: true, agents: true };
+    return { channels: true, people: true, agents: true, archived: false };
   }
 }
 
@@ -4222,15 +4226,49 @@ const scopedChannelPath = (repositoryId, suffix = "") => {
 };
 
 /**
- * The rooms in one repository, as the sidebar knows them.
+ * The rooms in one repository that are in use, as the sidebar knows them.
  *
  * Empty until `loadSubChannels` has answered. Deliberately not synthesised
  * into a fake `#general` in the meantime: a list of one that turns into a
  * list of four is a sidebar that moves under the reader's cursor, and the
  * section simply does not draw until it knows.
+ *
+ * Archived rooms are not in here — see `archivedSubChannelsFor`. Split at the
+ * source rather than filtered where the list is drawn, so nothing downstream
+ * has to remember that a room somebody put away is not a room to offer.
  */
 export function subChannelsFor(repositoryId) {
-  return state.subChannels[repositoryId] ?? [];
+  return (state.subChannels[repositoryId] ?? []).filter(
+    (channel) => channel.archived !== true,
+  );
+}
+
+/**
+ * The rooms in one repository that have been put away.
+ *
+ * Kept in the same list the server sent — archiving does not remove a room,
+ * so nothing is lost by holding both states in one array — and split out here
+ * because the two belong in different parts of the sidebar. This is the pile
+ * somebody opens when they want to read one back or bring it out again.
+ */
+export function archivedSubChannelsFor(repositoryId) {
+  return (state.subChannels[repositoryId] ?? []).filter(
+    (channel) => channel.archived === true,
+  );
+}
+
+/**
+ * One room by id, archived or not.
+ *
+ * For the settings that act *on* a room rather than listing them: the gear on
+ * an archived row opens the same menu the live rows have, so a lookup that
+ * only searched the live list would decide the room it was opened from had
+ * ceased to exist.
+ */
+export function subChannelById(repositoryId, channelId) {
+  return (state.subChannels[repositoryId] ?? []).find(
+    (channel) => channel.id === channelId,
+  );
 }
 
 /**
@@ -4244,30 +4282,31 @@ export function subChannelsFor(repositoryId) {
 export function activeSubChannelId(
   repositoryId = activeChannelId(),
 ) {
-  const channels = subChannelsFor(repositoryId);
-  if (channels.length === 0) {
+  // Every room, including the archived ones: an archived room stays openable
+  // so it can be read back, so one somebody has deliberately opened must not
+  // be swapped out from under them by the fallback below.
+  const all = state.subChannels[repositoryId] ?? [];
+  if (all.length === 0) {
     return undefined;
   }
   const chosen = state.activeSubChannel[repositoryId];
-  if (channels.some((channel) => channel.id === chosen)) {
+  if (all.some((channel) => channel.id === chosen)) {
     return chosen;
   }
-  return channels[0]?.id;
+  // Nothing chosen, or what was chosen is gone: land in a room still in use.
+  // `#general` sorts first and is never archived, so this is #general for
+  // everybody unless the server sent something stranger.
+  return (subChannelsFor(repositoryId)[0] ?? all[0])?.id;
 }
 
 /** The open room's record, when the list has loaded. */
 export function activeSubChannel(repositoryId = activeChannelId()) {
-  const channelId = activeSubChannelId(repositoryId);
-  return subChannelsFor(repositoryId).find(
-    (channel) => channel.id === channelId,
-  );
+  return subChannelById(repositoryId, activeSubChannelId(repositoryId));
 }
 
 /** `#slug` for a room, for placeholders and headings. */
 export function subChannelLabel(repositoryId, channelId) {
-  const channel = subChannelsFor(repositoryId).find(
-    (candidate) => candidate.id === channelId,
-  );
+  const channel = subChannelById(repositoryId, channelId);
   return channel === undefined ? "" : `#${channel.slug}`;
 }
 
@@ -4613,6 +4652,32 @@ export async function updateSubChannel(repositoryId, channelId, patch) {
     body: patch,
   });
   await loadSubChannels(repositoryId);
+}
+
+/**
+ * Puts a room away, or brings it back. Never `#general`.
+ *
+ * The reversible half of Delete. Archiving leaves everything said in the room
+ * exactly where it is — the server simply stops accepting new messages there
+ * and the sidebar moves it under "Archived", from where it can be read and
+ * restored. Archiving the room that is open moves the reader out of it, since
+ * staying in a room they can no longer write in and can no longer find in the
+ * list is a dead end; restoring one opens it, because somebody bringing a
+ * room back means to use it.
+ */
+export async function setSubChannelArchived(repositoryId, channelId, archived) {
+  await api(channelsPath(repositoryId, `/${encodeURIComponent(channelId)}`), {
+    method: "PATCH",
+    body: { archived },
+  });
+  if (archived && state.activeSubChannel[repositoryId] === channelId) {
+    delete state.activeSubChannel[repositoryId];
+  }
+  await loadSubChannels(repositoryId);
+  selectSubChannel(
+    repositoryId,
+    archived ? activeSubChannelId(repositoryId) : channelId,
+  );
 }
 
 /** Removes a room and everything said in it. Never `#general`. */
@@ -6853,25 +6918,70 @@ export async function loadPreview(repositoryId, channelId = activeSubChannelId(r
 }
 
 /**
- * Stores one image and answers with the reference a message carries.
+ * Stores one file and answers with the reference a message carries.
  *
  * The bytes go up as the body with their own content type — no multipart, no
- * form encoding — because the endpoint takes one image and the browser
- * already knows what it is. What comes back is inserted into the draft as
+ * form encoding — because the endpoint takes one file and the browser already
+ * knows what it is. What comes back is inserted into the draft as
  * `![name](attachment:<id>)`, which is the one pattern the transcript renders
  * and the one the gateway rewrites into a path an agent can open.
+ *
+ * The type is passed in rather than read off the file, because a browser does
+ * not always know: Windows reports nothing at all for a `.md`, and a `.zip`
+ * arrives as `application/x-zip-compressed` or as nothing depending on what
+ * is in the registry. The caller resolves that from the name; the store still
+ * checks the bytes against whatever is claimed here, so a wrong claim is
+ * refused rather than believed.
  */
-export async function uploadAttachment(repositoryId, file) {
+export async function uploadAttachment(
+  repositoryId,
+  file,
+  contentType = file.type,
+) {
   const response = await api(repositoryPath(repositoryId, "/attachments"), {
     method: "POST",
     body: file,
-    contentType: file.type,
+    contentType,
   });
   const id = response?.id;
   if (typeof id !== "string" || id === "") {
-    throw new Error("The image was not stored");
+    throw new Error("The file was not stored");
   }
   return id;
+}
+
+/**
+ * Sends a zipped local repository up, and answers with what it became.
+ *
+ * The third way a workspace comes into being, beside creating an empty one
+ * and importing from GitHub. The archive travels as the body for the same
+ * reason an attachment does, and the two things the server cannot read out of
+ * it — what to call it, and which branch — ride in the query string.
+ *
+ * Whatever `.git` the archive contains comes with it, so a repository that
+ * has been worked on locally arrives with its history rather than as a first
+ * commit of its current state.
+ */
+export async function uploadRepositoryArchive(archive, { id, branch } = {}) {
+  const query = new URLSearchParams();
+  if (id !== undefined && id !== "") {
+    query.set("id", id);
+  }
+  if (branch !== undefined && branch !== "") {
+    query.set("branch", branch);
+  }
+  const search = query.toString();
+  const response = await api(
+    `/projects/${encodeURIComponent(state.projectId)}/repositories/upload${
+      search === "" ? "" : `?${search}`
+    }`,
+    {
+      method: "POST",
+      body: archive,
+      contentType: "application/zip",
+    },
+  );
+  return response?.repository;
 }
 
 /**

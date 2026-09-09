@@ -230,6 +230,7 @@ import {
   createRepository,
   openRepository,
   syncRepositoryFromGitHub,
+  uploadRepository,
 } from "./screen-repos.js";
 import {
   closeFile,
@@ -3282,7 +3283,7 @@ async function inviteSomebody(rerender, repositoryId) {
     body: `<label class="field">
         <span>Name for the invite link</span>
         <input class="input" name="recipientName" autocomplete="off"
-          autocapitalize="characters" spellcheck="false" minlength="6" maxlength="48"
+          autocapitalize="characters" spellcheck="false" maxlength="48"
           pattern="[A-Za-z0-9]+([ -][A-Za-z0-9]+)*" placeholder="Nathan" required autofocus>
       </label>${
         fixed
@@ -3344,9 +3345,8 @@ async function showInviteLink(token, repositoryId) {
     subtitle: `Anyone who opens it joins ${
       repositoryId ? `#${repositoryId}` : "this project"
     }, and as many people can as you send it to. It works for seven days
-      unless you revoke it. The readable name is the link's key, so anyone
-      who guesses it can use this invitation. The link is not stored — so
-      this is the only time it can be copied.`,
+      unless you revoke it. Anyone with the link can use this invitation. The
+      link is not stored — so this is the only time it can be copied.`,
     confirm: "Copy link",
     cancel: "Done",
     body: `<div class="invite-link"><code>${esc(link)}</code></div>`,
@@ -3821,7 +3821,36 @@ const ATTACH_TARGETS = {
 };
 
 /**
- * Puts images in the draft, as the reference a message carries, and says
+ * What the store will take, and what this browser should call each thing.
+ *
+ * A browser's own idea of a file's type is unreliable exactly where it
+ * matters: Windows reports nothing at all for `.md`, and a `.zip` arrives as
+ * `application/zip`, `application/x-zip-compressed` or nothing depending on
+ * what is in the registry. So the name decides for the two formats where that
+ * happens, and the browser's answer is trusted only for images, where it is
+ * derived from the bytes.
+ *
+ * This is a claim, not a verdict. The store checks the bytes against whatever
+ * is claimed here and refuses a file that is not what it says it is — see
+ * `attachments.ts`, where the allowlist actually lives.
+ */
+function attachmentContentType(file) {
+  const type = String(file.type ?? "").split(";")[0].trim().toLowerCase();
+  if (["image/png", "image/jpeg", "image/gif", "image/webp"].includes(type)) {
+    return type;
+  }
+  const name = String(file.name ?? "").toLowerCase();
+  if (name.endsWith(".zip")) {
+    return "application/zip";
+  }
+  if (name.endsWith(".md") || name.endsWith(".markdown")) {
+    return "text/markdown";
+  }
+  return undefined;
+}
+
+/**
+ * Puts files in the draft, as the reference a message carries, and says
  * plainly what it would not take.
  *
  * Uploaded one at a time and appended as they land, so a slow one does not
@@ -3830,18 +3859,21 @@ const ATTACH_TARGETS = {
  * anyway — this is one of the few places a composer render is the point
  * rather than the cost.
  */
-async function attachChannelImages(files, target = "channel") {
+async function attachChannelFiles(files, target = "channel") {
   const where = ATTACH_TARGETS[target] ?? ATTACH_TARGETS.channel;
   const repositoryId = activeChannelId();
   const dmUserId = target === "dm" ? state.activeDm : undefined;
-  const images = files.filter((file) => file.type.startsWith("image/"));
+  const allowed = files
+    .map((file) => ({ file, contentType: attachmentContentType(file) }))
+    .filter((entry) => entry.contentType !== undefined);
   // Named, not counted. Dropping a screenshot and a log together attached the
   // screenshot and said nothing at all about the log — the message went out
   // referring to a file that was never uploaded, and the sender had no way to
-  // know. The allowlist itself is deliberately short and is not widened here:
-  // that crosses a security boundary `attachments.ts` keeps on purpose and
-  // deserves its own review.
-  const skipped = files.filter((file) => !file.type.startsWith("image/"));
+  // know. The allowlist is still deliberately short: images, ZIP archives and
+  // Markdown, and nothing that a browser might decide to execute.
+  const skipped = files.filter(
+    (file) => attachmentContentType(file) === undefined,
+  );
   if (skipped.length > 0) {
     const named = skipped
       .slice(0, 3)
@@ -3850,22 +3882,22 @@ async function attachChannelImages(files, target = "channel") {
     toast(
       `Not attached: ${named}${
         skipped.length > 3 ? ` and ${skipped.length - 3} more` : ""
-      } — only PNG, JPEG, GIF and WebP images can be attached.`,
+      } — only images, .zip archives and .md files can be attached.`,
       "error",
     );
   }
   if (
     repositoryId === undefined ||
-    images.length === 0 ||
+    allowed.length === 0 ||
     (target === "dm" && dmUserId === undefined)
   ) {
     return;
   }
-  state[where.counter] = (state[where.counter] ?? 0) + images.length;
+  state[where.counter] = (state[where.counter] ?? 0) + allowed.length;
   render();
-  for (const file of images) {
+  for (const { file, contentType } of allowed) {
     try {
-      const id = await uploadAttachment(repositoryId, file);
+      const id = await uploadAttachment(repositoryId, file, contentType);
       // A DM upload belongs to the person whose panel started it. If the
       // reader opens a different conversation before the bytes arrive, do
       // not append the old reference to the new person's draft.
@@ -3878,7 +3910,7 @@ async function attachChannelImages(files, target = "channel") {
         draft === "" || draft.endsWith("\n") ? "" : "\n"
       }![${alt}](attachment:${id})\n`;
     } catch (error) {
-      toast(error.message ?? "That image could not be attached.", "error");
+      toast(error.message ?? "That file could not be attached.", "error");
     } finally {
       state[where.counter] = Math.max(0, (state[where.counter] ?? 1) - 1);
       render();
@@ -8069,11 +8101,16 @@ function showDirectMessageMenu(node) {
     ...(conversations.length > 0 && others.length > 0
       ? [{ separator: true }]
       : []),
+    // The same glyph as the half above, deliberately. Every row here does one
+    // thing — open a private conversation with a person — so a second icon on
+    // the lower half read as a second kind of row rather than as the same door
+    // to somebody not written to yet. The half-separator and the per-row meta
+    // (what is unread, or that they are online) are what tell the two apart.
     ...others.slice(0, 12).map((person) => ({
       act: "dm-open",
       value: person.id,
       label: person.name ?? memberName(person.id) ?? person.id,
-      iconName: "users",
+      iconName: "chatBubble",
       ...(personOnline(person.id) ? { meta: "online" } : {}),
     })),
   ];
@@ -8125,8 +8162,9 @@ function repositoryMenuItems(repositoryId) {
 }
 
 function conversationMenuItems(repositoryId) {
-  const channel = subChannelsFor(repositoryId).find(
-    (candidate) => candidate.id === activeSubChannelId(repositoryId),
+  const channel = subChannelById(
+    repositoryId,
+    activeSubChannelId(repositoryId),
   );
   const channelLabel = `#${channel?.slug ?? repositoryLabel(repositoryId)}`;
   return [
@@ -8307,6 +8345,83 @@ async function confirmDestructive({
     danger: true,
   });
   return answer !== undefined;
+}
+
+/**
+ * Removing a room, asked in the interface's own dialog.
+ *
+ * This was the last delete in the product still handled by `window.confirm`
+ * — the operating system's grey box, in the operating system's typeface, with
+ * an OK button that looks nothing like the red one every other irreversible
+ * press in Kumi is given, and no room to offer anything but yes or no. It
+ * asks the way removing a token or an MCP server asks now.
+ *
+ * The third button is the point of the change beyond the paint. "Delete this
+ * channel" is usually somebody meaning "I am finished with this channel", and
+ * those are not the same sentence: one takes the transcript with it and one
+ * keeps it. Offering the gentler reading at the moment of the harder press is
+ * where it is actually useful, so the dialog carries it — except on a room
+ * that is already archived, where there is nothing left to offer.
+ */
+async function deleteSubChannelAction(repositoryId, channelId) {
+  const current = subChannelById(repositoryId, channelId);
+  const label = `#${current?.slug ?? "this channel"}`;
+  const answer = await showModal({
+    title: `Delete ${label}?`,
+    subtitle:
+      `Everything said in ${label} goes with it, for everyone in this ` +
+      `workspace. This cannot be undone.`,
+    confirm: "Delete channel",
+    cancel: "Keep it",
+    ...(current?.archived === true ? {} : { alt: "Archive instead" }),
+    danger: true,
+  });
+  if (answer === undefined) {
+    return;
+  }
+  if (answer.action === "alt") {
+    await archiveSubChannelAction(repositoryId, channelId);
+    return;
+  }
+  try {
+    await deleteSubChannel(repositoryId, channelId);
+    render();
+    await ensureChannelMessages(repositoryId, render);
+  } catch (error) {
+    toast(`Could not delete that channel: ${error.message}`, "error");
+  }
+}
+
+/**
+ * Putting a room away. Asked for nothing, because nothing is lost.
+ *
+ * No confirmation: a dialog in front of a reversible action teaches people to
+ * dismiss dialogs. The toast says where it went instead, which is the thing
+ * somebody actually needs to know the moment a room leaves their sidebar.
+ */
+async function archiveSubChannelAction(repositoryId, channelId) {
+  const label = `#${subChannelById(repositoryId, channelId)?.slug ?? "channel"}`;
+  try {
+    await setSubChannelArchived(repositoryId, channelId, true);
+    render();
+    await ensureChannelMessages(repositoryId, render);
+    toast(`${label} archived — it is under Archived, whole.`, "ok");
+  } catch (error) {
+    toast(`Could not archive that channel: ${error.message}`, "error");
+  }
+}
+
+/** Bringing an archived room back into use, and opening it. */
+async function unarchiveSubChannelAction(repositoryId, channelId) {
+  const label = `#${subChannelById(repositoryId, channelId)?.slug ?? "channel"}`;
+  try {
+    await setSubChannelArchived(repositoryId, channelId, false);
+    render();
+    await ensureChannelMessages(repositoryId, render);
+    toast(`${label} is back in your channels.`, "ok");
+  } catch (error) {
+    toast(`Could not restore that channel: ${error.message}`, "error");
+  }
 }
 
 /** Disconnecting an agent from its own row, after its own confirmation. */
@@ -8740,7 +8855,15 @@ function writeChatLocation() {
   // Only when there is more than one room to be in. A repository nobody has
   // divided keeps the exact URL it has always had.
   const channelId = activeSubChannelId(workspaceId);
-  if (channelId !== undefined && subChannelsFor(workspaceId).length > 1) {
+  // Archived rooms count towards "more than one": one of them can be the room
+  // the reader has open — that is what keeping them readable means — and a
+  // link back to it that dropped the room would land on #general.
+  if (
+    channelId !== undefined &&
+    subChannelsFor(workspaceId).length +
+      archivedSubChannelsFor(workspaceId).length >
+      1
+  ) {
     query.set("channel", channelId);
   }
   if (secondary !== undefined) {
@@ -8955,7 +9078,7 @@ function typeIntoComposer(character, opened) {
   }
   const at = input.selectionStart ?? input.value.length;
   const attachments = state.chatDraft.match(
-    /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+    /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp|zip|md)\)/gu,
   );
   state.chatDraft = `${input.value.slice(0, at)}${character}${input.value.slice(at)}${
     attachments === null ? "" : `\n${attachments.join("\n")}\n`
@@ -9472,6 +9595,9 @@ document.addEventListener("click", (event) => {
     case "repo-connect":
       void connectRepository(render);
       return;
+    case "repo-upload":
+      void uploadRepository(render);
+      return;
     case "open-repo":
       invalidateCode();
       openRepository(value, navigate);
@@ -9589,6 +9715,12 @@ document.addEventListener("click", (event) => {
       showMenu(node, [
         { act: "repo-create", label: "Create new repository", iconName: "cloud" },
         { act: "repo-connect", label: "Connect external repository", iconName: "link" },
+        {
+          act: "repo-upload",
+          label: "Copy from this computer",
+          hint: "A folder, with its Git history",
+          iconName: "folder",
+        },
       ]);
       return;
     case "channel-open":
@@ -10564,7 +10696,7 @@ document.addEventListener("click", (event) => {
         // characters just put in front of them: the mirror kept showing the
         // old sentence while the caret stood a whole "@agents " to its right.
         const attachments = state.chatDraft.match(
-          /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+          /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp|zip|md)\)/gu,
         );
         const written = `@${address} ${input.value.replace(
           new RegExp(`^@${address}\\s*`, "u"),
@@ -11545,9 +11677,7 @@ document.addEventListener("click", (event) => {
     }
     case "sub-channel-rename": {
       const repositoryId = activeChannelId();
-      const current = subChannelsFor(repositoryId).find(
-        (channel) => channel.id === value,
-      );
+      const current = subChannelById(repositoryId, value);
       closePopover();
       void showModal({
         title: "Rename channel",
@@ -11571,9 +11701,7 @@ document.addEventListener("click", (event) => {
     }
     case "sub-channel-visibility": {
       const repositoryId = activeChannelId();
-      const current = subChannelsFor(repositoryId).find(
-        (channel) => channel.id === value,
-      );
+      const current = subChannelById(repositoryId, value);
       // A toggle could only flip between two of the three states, so the
       // third was unreachable from here however the server stored it.
       closePopover();
@@ -11595,26 +11723,18 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "sub-channel-delete": {
-      const repositoryId = activeChannelId();
-      const current = subChannelsFor(repositoryId).find(
-        (channel) => channel.id === value,
-      );
-      if (
-        !window.confirm(
-          `Delete #${current?.slug ?? "this channel"} and everything said in it? This cannot be undone.`,
-        )
-      ) {
-        return;
-      }
       closePopover();
-      void deleteSubChannel(repositoryId, value)
-        .then(() => {
-          render();
-          void ensureChannelMessages(repositoryId, render);
-        })
-        .catch((error) =>
-          toast(`Could not delete that channel: ${error.message}`, "error"),
-        );
+      void deleteSubChannelAction(activeChannelId(), value);
+      return;
+    }
+    case "sub-channel-archive": {
+      closePopover();
+      void archiveSubChannelAction(activeChannelId(), value);
+      return;
+    }
+    case "sub-channel-unarchive": {
+      closePopover();
+      void unarchiveSubChannelAction(activeChannelId(), value);
       return;
     }
     case "sub-channel-member-toggle": {
@@ -12215,7 +12335,7 @@ document.addEventListener("change", (event) => {
         : picker.dataset.act === "dm-attach-input"
           ? "dm"
           : "channel";
-    void attachChannelImages(
+    void attachChannelFiles(
       [...(picker.files ?? [])],
       target,
     );
@@ -12330,7 +12450,7 @@ document.addEventListener("paste", (event) => {
     return;
   }
   event.preventDefault();
-  void attachChannelImages(
+  void attachChannelFiles(
     files,
     act === "channel-thread-input"
       ? "thread"
@@ -12480,7 +12600,7 @@ document.addEventListener("input", (event) => {
     // submitted, and re-rendering the panel on every keystroke is what made
     // typing lag in the channel composer.
     const attachments = String(state.dmDraft ?? "").match(
-      /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+      /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp|zip|md)\)/gu,
     );
     state.dmDraft = `${node.value}${
       attachments === null ? "" : `\n${attachments.join("\n")}\n`

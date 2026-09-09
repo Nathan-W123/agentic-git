@@ -572,6 +572,15 @@ export const ICONS = {
     '<path d="m14.6 2.9 6.5 6.5-2.6.65-3.45 3.45-.3 3.85-1.5 1.5L4.9 10.4l1.5-1.53.85-.3 3.45-3.45z"/>' +
       '<path d="M7.77 14.67L3.12 19.32A1.1 1.1 0 0 0 4.68 20.88L9.33 16.23A1.1 1.1 0 0 0 7.77 14.67Z"/>',
   ),
+  // A lidded box with its pull cut out of the front rather than drawn on it,
+  // the way the folder's tab is cut into that silhouette. It stands for
+  // "kept, not thrown away" beside the bin, so the two have to be
+  // unmistakable at 13px: one is a box, the other is a bin.
+  archive: S(
+    '<path d="M4.6 4.3h14.8a2 2 0 0 1 2 2v1.2a2 2 0 0 1-2 2H4.6a2 2 0 0 1-2-2V6.3a2 2 0 0 1 2-2Z"/>' +
+      '<path fill-rule="evenodd" d="M4.1 11.1h15.8v6.3a3.2 3.2 0 0 1-3.2 3.2H7.3a3.2 3.2 0 0 1-3.2-3.2z' +
+      'M9.6 13.5a1.05 1.05 0 0 0 0 2.1h4.8a1.05 1.05 0 0 0 0-2.1z"/>',
+  ),
   hash: S(
     '<path d="M9.31 3.67L7.51 20.07A1.2 1.2 0 0 0 9.89 20.33L11.69 3.93A1.2 1.2 0 0 0 9.31 3.67Z"/>' +
       '<path d="M15.11 3.67L13.31 20.07A1.2 1.2 0 0 0 15.69 20.33L17.49 3.93A1.2 1.2 0 0 0 15.11 3.67Z"/>' +
@@ -1899,6 +1908,16 @@ export function showModal({
   body = "",
   confirm = "Confirm",
   cancel = "Cancel",
+  /**
+   * A third way out, for the dialog whose real answer is neither yes nor no.
+   *
+   * "Delete this channel?" has a gentler reading — put it away instead — and
+   * offering it as a second dialog behind a link means the softer choice is
+   * the one that costs more presses. Named here, it stands beside Cancel and
+   * resolves as `{ action: "alt" }`; leave it empty and the dialog is exactly
+   * the two-button one it has always been.
+   */
+  alt = "",
   image,
   // A confirmation whose Confirm removes something says so in the button, not
   // only in the sentence above it. Red before the press is the whole point.
@@ -1936,6 +1955,16 @@ export function showModal({
                 ? ""
                 : `<button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>`
             }
+            ${
+              // Between Cancel and the red button, because that is the order
+              // it reads in: back out, do the reversible thing, do the one
+              // that does not come back. `formnovalidate` for the same reason
+              // Cancel has it — a way out must not be gated on a field the
+              // person was never going to fill in.
+              alt === ""
+                ? ""
+                : `<button class="btn modal-alt" value="alt" type="submit" formnovalidate>${esc(alt)}</button>`
+            }
             <button class="btn ${danger ? "btn-danger" : "btn-primary"}" value="confirm" type="submit">${esc(confirm)}</button>
           </div>
         </form>`;
@@ -1950,11 +1979,15 @@ export function showModal({
       if (image && returnFocus instanceof HTMLElement && returnFocus.isConnected) {
         returnFocus.focus();
       }
-      if (dialog.returnValue !== "confirm") {
+      if (dialog.returnValue !== "confirm" && dialog.returnValue !== "alt") {
         resolve(undefined);
         return;
       }
-      const values = {};
+      // Which button was pressed, on every answered dialog rather than only
+      // on the three-button ones — a caller that never offers `alt` reads a
+      // key it can ignore, and one that does can branch on it without having
+      // to know that the plain case resolves without it.
+      const values = { action: dialog.returnValue };
       for (const field of $$("[name]", dialog)) {
         // A radio group is several fields sharing one name, and only the
         // checked one is the answer. Assigning every match in turn left the
@@ -1970,6 +2003,14 @@ export function showModal({
             // that exists and is empty, rather than to `undefined`.
             values[field.name] = "";
           }
+          continue;
+        }
+        // A file input's `value` is `C:\fakepath\name`, which is the browser
+        // refusing to say where the file is and is of no use to anybody. The
+        // files themselves are the answer, and a dialog that offers a picker
+        // has to be able to read them.
+        if (field.type === "file") {
+          values[field.name] = [...(field.files ?? [])];
           continue;
         }
         values[field.name] =

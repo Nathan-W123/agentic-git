@@ -5083,7 +5083,8 @@ button.chip.lg:hover {
    height that the fold reads as immediate at either end. */
 .chan-sec-channels,
 .chan-sec-people,
-.chan-sec-agents {
+.chan-sec-agents,
+.chan-sec-archived {
   max-height: 60px;
   overflow: hidden;
   opacity: 1;
@@ -7888,8 +7889,10 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
  *
  * The insets are left alone. The picker above the box and the row of staged
  * attachments are both indented to the composer's margin by the rules either
- * side of this one, and the safe-area rule at the foot of the file owns the
- * bottom, so this is shape and edge only. */
+ * side of this one, and the composer-floor rules at the foot of the file own
+ * the bottom — they are where the panel card's gutter is handed back, so this
+ * box ends on the same line of the window as the room's. Shape and edge
+ * only, here. */
 .thread-composer-wrap .composer {
   --composer-shape: 17px;
   border-color: var(--border);
@@ -8449,6 +8452,79 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-inset);
+}
+
+/* A file that is not a picture, under the words that came with it.
+
+   Sized like the message rather than like an image: an archive has nothing to
+   show, so the row is exactly as wide as its name needs and stops. The whole
+   chip is the link, because a name you cannot click is a name you have to ask
+   somebody to send again. */
+.cmsg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(420px, 100%);
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-2);
+  color: var(--text-1);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.cmsg-file:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-inset);
+}
+
+.cmsg-file-icon {
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+}
+
+.cmsg-file-icon .ui-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.cmsg-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* What it is, in the quietest voice on the row: the name is what somebody
+   reads, and the format is only there to say what will land in Downloads. */
+.cmsg-file-kind {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-3);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+/* The same file staged in a composer. The thumbnail slot holds an icon
+   instead, so the row keeps the height every other staged attachment has and
+   the strip does not jump as one is added. */
+.composer-attachment-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 5px;
+  background: var(--bg-inset);
+  color: var(--text-3);
+}
+
+.composer-attachment-icon .ui-icon {
+  width: 17px;
+  height: 17px;
 }
 
 /* The running app's address, in the workspace's navigation under the row that
@@ -10784,6 +10860,31 @@ dialog.modal[open]::backdrop {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
+  /* A dialog may offer a third way out — "Archive instead" beside Keep it and
+     Delete channel — and three labelled pills do not always fit one line on a
+     phone. Wrapping keeps every answer reachable instead of pushing the red
+     one off the edge of the card. */
+  flex-wrap: wrap;
+}
+
+/* The third way out, told apart from the way back.
+   "Archive instead" and "Keep it" are different answers — one puts the room
+   away, the other changes nothing — and drawn as two identical grey pills
+   they read as the same button twice, so the gentler option costs a moment
+   of working out which is which at exactly the wrong moment. The accent wash
+   is the interface's existing "this is the one you probably want" and is not
+   the red reserved for what does not come back: three pills, three meanings,
+   in the order back / aside / gone. */
+.modal-alt {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.modal-alt:hover:not(:disabled) {
+  background: var(--accent-wash-strong);
+  border-color: var(--accent-line);
+  color: var(--accent);
 }
 
 /* Posted images use the same native dialog as decisions, but without turning
@@ -11726,7 +11827,12 @@ dialog.modal[open]::backdrop {
     width: 256px;
   }
 
-  .chats-shell.chan-collapsed :is(.chan-sec-channels, .chan-sec-people, .chan-sec-agents),
+  .chats-shell.chan-collapsed :is(
+      .chan-sec-channels,
+      .chan-sec-people,
+      .chan-sec-agents,
+      .chan-sec-archived
+    ),
   .chats-shell.chan-collapsed .chan-roster {
     opacity: 0;
     visibility: hidden;
@@ -11734,7 +11840,12 @@ dialog.modal[open]::backdrop {
     transform: translateY(-10px);
   }
 
-  .chats-shell.chan-collapsed :is(.chan-sec-channels, .chan-sec-people, .chan-sec-agents) {
+  .chats-shell.chan-collapsed :is(
+      .chan-sec-channels,
+      .chan-sec-people,
+      .chan-sec-agents,
+      .chan-sec-archived
+    ) {
     max-height: 0;
     padding-top: 0;
     padding-bottom: 0;
@@ -11752,6 +11863,7 @@ dialog.modal[open]::backdrop {
       .chan-sec-channels,
       .chan-sec-people,
       .chan-sec-agents,
+      .chan-sec-archived,
       .chan-roster
     ) {
     transition: none;
@@ -13549,6 +13661,14 @@ dialog.modal[open]::backdrop {
   min-height: 0;
 }
 
+/* One floor for every box you type into. A thread stands open beside the
+   room it came out of, so the two boxes are read as a pair and the height
+   they end at is a number both of them ask for rather than one each of them
+   happens to have. */
+:root {
+  --composer-floor: 12px;
+}
+
 /* The home indicator, and on iOS Safari the floating address bar, overlap the
    bottom of the viewport — which is where the composer and its send button
    live.
@@ -13558,13 +13678,35 @@ dialog.modal[open]::backdrop {
    bare class is outranked and silently does nothing. The wrapper is the
    element that actually carries the gap. */
 .chan-composer-wrap {
-  margin-bottom: calc(12px + var(--safe-bottom));
+  margin-bottom: calc(var(--composer-floor) + var(--safe-bottom));
 }
 
 /* The one-on-one chat panel and any other composer that is not inside the
    channel wrapper. */
 .composer:not(.chan-composer-wrap .composer) {
-  margin-bottom: calc(12px + var(--safe-bottom));
+  margin-bottom: calc(var(--composer-floor) + var(--safe-bottom));
+}
+
+/* Except in a panel, where the floor is the window's and not the card's.
+ *
+ * The rule above is measured from whatever holds the composer, which for the
+ * room is the conversation column — and that column reaches the bottom of the
+ * window. A thread is held by a card instead: it is set down 8px inside the
+ * shell and edged with a hairline, so twelve pixels from *its* floor left the
+ * reply box nine pixels higher than the room's, and two boxes on one row
+ * ending on two different lines read as one of them having slipped.
+ *
+ * The card's own inset comes back off the margin here, which puts the bottom
+ * of the reply box on the same line of the window as the bottom of the room's
+ * — the card keeps its gutter, and what stands in it does not pay for it
+ * twice. Taken from a variable the card publishes rather than from a second
+ * literal 8px, because below 1180px the panel covers the conversation edge to
+ * edge and has no gutter to give back; it zeroes the variable there and this
+ * arithmetic quietly becomes the plain floor again. */
+.chats-shell > .thread-panel .thread-composer-wrap .composer {
+  margin-bottom: calc(
+    var(--composer-floor) - var(--panel-gutter, 0px) + var(--safe-bottom)
+  );
 }
 
 /* Landscape puts the cutout on a side instead, where it would clip the
@@ -13679,7 +13821,7 @@ dialog.modal[open]::backdrop {
   align-items: center;
   min-width: 0;
   gap: 10px;
-  height: calc(48px + var(--safe-top));
+  height: calc(44px + var(--safe-top));
   padding: var(--safe-top) 12px 0;
   background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg));
   border-bottom: 0;
@@ -13758,7 +13900,7 @@ dialog.modal[open]::backdrop {
 .global-search {
   width: 100%;
   min-width: 0;
-  min-height: 32px;
+  min-height: 30px;
   justify-content: flex-start;
   padding: 5px 10px;
   background: var(--bg-inset);
@@ -14076,6 +14218,12 @@ dialog.modal[open]::backdrop {
    It may be resized only while the primary conversation can keep its usable
    floor; intermediate layouts overlay it instead. */
 .chats-shell > .thread-panel {
+  /* How far the card's floor stands above the window's: the eight pixels it
+     is set down by, and the one it is drawn with. Published because anything
+     inside that lines itself up with the conversation rather than with the
+     card has to give it back — the reply box, whose floor is set with the
+     other composer rules further up this file, is the one that does. */
+  --panel-gutter: 9px;
   margin: 8px;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-xl);
@@ -14974,6 +15122,8 @@ dialog.modal[open]::backdrop {
     width: min(var(--panel-w, 420px), calc(100% - 72px));
     max-width: calc(100% - 72px);
     z-index: 20;
+    /* Nothing to give back: the panel's floor is the window's here. */
+    --panel-gutter: 0px;
     margin: 0;
     border: 0;
     border-left: 1px solid var(--border-soft);
@@ -14983,15 +15133,15 @@ dialog.modal[open]::backdrop {
 
 @media (max-width: 600px) {
   .topbar {
-    grid-template-columns: minmax(44px, 1fr) 44px minmax(88px, 1fr);
-    height: calc(54px + var(--safe-top));
+    grid-template-columns: minmax(40px, 1fr) 40px minmax(80px, 1fr);
+    height: calc(48px + var(--safe-top));
     padding: var(--safe-top) 8px 0;
   }
 
   .global-search {
-    min-width: 44px;
-    width: 44px;
-    min-height: 44px;
+    min-width: 40px;
+    width: 40px;
+    min-height: 40px;
     justify-content: center;
     padding: 0;
   }
@@ -15002,14 +15152,14 @@ dialog.modal[open]::backdrop {
   .thread-head .icon-btn,
   .channel-rail-new,
   .channel-rail-button {
-    width: 44px;
-    height: 44px;
+    width: 40px;
+    height: 40px;
   }
 
   .topbar-icon-btn {
-    flex-basis: 44px;
-    width: 44px;
-    height: 44px;
+    flex-basis: 40px;
+    width: 40px;
+    height: 40px;
   }
 
   .global-search span,
@@ -15108,6 +15258,7 @@ dialog.modal[open]::backdrop {
     max-width: 100vw;
     min-width: 0;
     z-index: 80;
+    --panel-gutter: 0px;
     margin: 0;
     border: 0;
     border-radius: 0;
@@ -16030,6 +16181,26 @@ dialog.modal[open]::backdrop {
   letter-spacing: 0.02em;
   text-transform: uppercase;
   opacity: 0.55;
+}
+
+/* A room that has been put away, in the fold it was put into.
+   Quieter than a live room and not otherwise different: it is still a name
+   you press to read what is in it, so making it look disabled would say the
+   wrong thing about a transcript that is entirely intact. The box in front of
+   the name carries the difference, and the row comes back to full strength on
+   hover and while it is the one open. */
+.chan-channel-archived .chan-channel {
+  opacity: 0.68;
+}
+
+.chan-channel-archived:hover .chan-channel,
+.chan-channel-archived.on .chan-channel,
+.chan-channel-archived .chan-channel:focus-visible {
+  opacity: 1;
+}
+
+.chan-channel-archived .chan-channel-sigil {
+  opacity: 0.5;
 }
 
 /* What is waiting in a room the reader is not in. Inline at the end of the

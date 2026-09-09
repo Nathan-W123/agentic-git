@@ -49,6 +49,54 @@ test("the secondary panel is a rounded card with its own gutter", async () => {
   );
 });
 
+test("the thread's reply box stands on the same floor as the room's", async () => {
+  const [chats, css] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+
+  // The two boxes are read side by side, so how high above the window they
+  // end is one number rather than one each.
+  assert.match(css, /:root \{\s*--composer-floor: 12px;\s*\}/u);
+  assert.match(
+    css,
+    /\.chan-composer-wrap \{\s*margin-bottom: calc\(var\(--composer-floor\) \+ var\(--safe-bottom\)\);/u,
+  );
+  assert.match(
+    css,
+    /\.composer:not\(\.chan-composer-wrap \.composer\) \{\s*margin-bottom: calc\(var\(--composer-floor\) \+ var\(--safe-bottom\)\);/u,
+  );
+
+  // The room's composer measures that floor from a column which reaches the
+  // bottom of the window; the thread's measures it from a card set 8px inside
+  // the shell and edged with a hairline. Without giving those nine pixels
+  // back, the reply box ended nine pixels above the box beside it.
+  assert.match(css, /\.chats-shell > \.thread-panel \{[\s\S]*?--panel-gutter: 9px;/u);
+  assert.match(
+    css,
+    /\.chats-shell > \.thread-panel \.thread-composer-wrap \.composer \{\s*margin-bottom: calc\(\s*var\(--composer-floor\) - var\(--panel-gutter, 0px\) \+ var\(--safe-bottom\)\s*\);/u,
+  );
+
+  // Both overlay tiers cover the conversation edge to edge, so there is no
+  // gutter to hand back and the plain floor is the right one again.
+  assert.match(
+    css,
+    /@media \(max-width: 1180px\) and \(min-width: 601px\)[\s\S]*?\.chats-shell > \.thread-panel \{[\s\S]*?--panel-gutter: 0px;/u,
+  );
+  assert.match(
+    css,
+    /@media \(max-width: 600px\)[\s\S]*?\.chats-shell > \.thread-panel \{[\s\S]*?--panel-gutter: 0px;/u,
+  );
+
+  // And the box the rules above are aiming at is still the last row of the
+  // panel's grid, under the transcript rather than floating over it.
+  assert.match(css, /\.thread-panel \{[\s\S]*?grid-template-rows: auto 1fr auto;/u);
+  assert.match(
+    chats,
+    /<div class="thread-composer-wrap[\s\S]*?placeholder="Add to this thread\.\.\."/u,
+  );
+});
+
 test("intermediate and compact secondary contexts overlay instead of squeezing chat", async () => {
   const css = await publicFile("styles.css");
   assert.match(css, /@media \(max-width: 1180px\) and \(min-width: 601px\)[\s\S]*?\.chats-shell > \.thread-panel \{[\s\S]*?position: absolute;/u);
