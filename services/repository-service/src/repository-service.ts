@@ -1434,13 +1434,27 @@ export class RepositoryService {
         allowFailure: true,
       });
       if (resolvedMerge.exitCode !== 0) {
-        await this.git.run(["-C", worktreePath, "merge", "--abort"], {
-          allowFailure: true,
-        });
-        // A collision `-X` cannot settle — the same file deleted on one side
-        // and edited on the other is the usual one — is still a refusal,
-        // because there is no version of it for a preference to pick.
-        throw new SyncDivergedError(upstreamBranch, conflicts);
+        // `-X` is a preference between hunks, and a file deleted on one side
+        // and edited on the other has no hunks to prefer — so it is left
+        // unmerged and the merge fails, with the person's answer already
+        // given. This used to refuse here, which the browser reads as "ask
+        // again": the same dialog reopened on the same files forever, and
+        // neither button could ever end it.
+        //
+        // A delete against an edit has an answer; it is just not one `-X`
+        // can express. Taking GitHub's side means taking what GitHub did
+        // with the file, deletion included.
+        const settled = await this.settleUnmergedPaths(
+          worktreePath,
+          emptyHooks,
+          strategy,
+        );
+        if (!settled) {
+          await this.git.run(["-C", worktreePath, "merge", "--abort"], {
+            allowFailure: true,
+          });
+          throw new SyncDivergedError(upstreamBranch, conflicts);
+        }
       }
       const merged = await this.git.run([
         "-C",
@@ -1472,6 +1486,111 @@ export class RepositoryService {
       await rm(worktreePath, { recursive: true, force: true });
       await rm(emptyHooks, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Finishes a merge `-X` left half-resolved, by taking one side outright.
+   *
+   * `-X ours/theirs` decides hunks inside a file. It has nothing to say
+   * about a file that exists on one side and not the other, so a
+   * modify/delete collision survives it and the merge stops with the path
+   * still unmerged. That is the ordinary shape of a sync after somebody has
+   * deleted a file, not an exotic one.
+   *
+   * The index knows enough to settle it: an unmerged path carries stage 2
+   * for our version and stage 3 for theirs, and a missing stage is that side
+   * having deleted it. Taking a side means taking what that side did —
+   * its content when it has one, and its deletion when it does not.
+   *
+   * The merge is left in progress and committed here, so both parents
+   * survive and the losing content stays reachable through the other one,
+   * exactly as it does when `-X` settles a file by itself.
+   *
+   * Returns false rather than throwing: the caller aborts and refuses, which
+   * is the right answer for a collision nothing here understood.
+   */
+  private async settleUnmergedPaths(
+    worktreePath: string,
+    emptyHooks: string,
+    strategy: "theirs" | "ours",
+  ): Promise<boolean> {
+    assertIdentity(this.identity);
+    const listed = await this.git.run(
+      ["-C", worktreePath, "ls-files", "--unmerged", "-z"],
+      { allowFailure: true },
+    );
+    if (listed.exitCode !== 0) {
+      return false;
+    }
+    // Each record is "<mode> <sha> <stage>\t<path>", NUL separated so a path
+    // with a newline in it cannot split one record into two.
+    const stages = new Map<string, Set<number>>();
+    for (const entry of listed.stdout.split("\0")) {
+      if (entry.length === 0) {
+        continue;
+      }
+      const tab = entry.indexOf("\t");
+      if (tab < 0) {
+        return false;
+      }
+      const stage = Number(entry.slice(0, tab).trim().split(/\s+/u)[2]);
+      if (!Number.isInteger(stage)) {
+        return false;
+      }
+      const file = entry.slice(tab + 1);
+      stages.set(file, (stages.get(file) ?? new Set<number>()).add(stage));
+    }
+    if (stages.size === 0) {
+      return false;
+    }
+    const wanted = strategy === "theirs" ? 3 : 2;
+    for (const [file, present] of stages) {
+      if (present.has(wanted)) {
+        const taken = await this.git.run(
+          ["-C", worktreePath, "checkout", `--${strategy}`, "--", file],
+          { allowFailure: true },
+        );
+        if (taken.exitCode !== 0) {
+          return false;
+        }
+        const staged = await this.git.run(
+          ["-C", worktreePath, "add", "--", file],
+          { allowFailure: true },
+        );
+        if (staged.exitCode !== 0) {
+          return false;
+        }
+        continue;
+      }
+      // The chosen side deleted it, so the deletion is the choice.
+      const removed = await this.git.run(
+        ["-C", worktreePath, "rm", "--force", "--quiet", "--", file],
+        { allowFailure: true },
+      );
+      if (removed.exitCode !== 0) {
+        return false;
+      }
+    }
+    // `--no-edit` keeps the message the merge already wrote, which names the
+    // side that won.
+    const committed = await this.git.run(
+      [
+        "-C",
+        worktreePath,
+        "-c",
+        `user.name=${this.identity.name}`,
+        "-c",
+        `user.email=${this.identity.email}`,
+        "-c",
+        `core.hooksPath=${emptyHooks}`,
+        "commit",
+        "--no-edit",
+        "--no-gpg-sign",
+        "--no-verify",
+      ],
+      { allowFailure: true },
+    );
+    return committed.exitCode === 0;
   }
 
   public async assertBranchName(branch: string): Promise<void> {
