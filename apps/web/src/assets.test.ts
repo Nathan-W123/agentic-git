@@ -8841,6 +8841,10 @@ test("deleting a channel asks in the app's own dialog and offers archiving inste
   assert.match(ui, /const values = \{ action: dialog\.returnValue \}/u);
   // Three pills can outgrow one line on a phone; none of them may fall off.
   assert.match(css, /\.modal-actions \{[\s\S]{0,400}flex-wrap: wrap;/u);
+  // And the middle one is drawn as its own answer. Two identical grey pills
+  // beside the red one make "Archive instead" read as a second Cancel, which
+  // is the opposite of offering it.
+  assert.match(css, /\.modal-alt \{[\s\S]{0,160}background: var\(--accent-wash\);/u);
 
   // Archiving is reversible, so it does not ask at all — a dialog in front of
   // a reversible action teaches people to dismiss dialogs.

@@ -10867,6 +10867,26 @@ dialog.modal[open]::backdrop {
   flex-wrap: wrap;
 }
 
+/* The third way out, told apart from the way back.
+   "Archive instead" and "Keep it" are different answers — one puts the room
+   away, the other changes nothing — and drawn as two identical grey pills
+   they read as the same button twice, so the gentler option costs a moment
+   of working out which is which at exactly the wrong moment. The accent wash
+   is the interface's existing "this is the one you probably want" and is not
+   the red reserved for what does not come back: three pills, three meanings,
+   in the order back / aside / gone. */
+.modal-alt {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.modal-alt:hover:not(:disabled) {
+  background: var(--accent-wash-strong);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
 /* Posted images use the same native dialog as decisions, but without turning
    a picture into a card full of confirmation chrome. The image owns the
    surface and stays inside the viewport at every aspect ratio. */
