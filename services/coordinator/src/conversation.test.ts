@@ -598,9 +598,10 @@ test("a conflicting advance between turns opens the turn as a replan", async () 
     const request = agent.replanRequests[0];
     assert.equal(request?.taskId, "turn_2");
     assert.equal(request?.previousPlan.taskId, "turn_1");
-    assert.ok(request?.canonicalChange.changedFiles.includes("src/bc.txt"));
+    assert.ok(request?.canonicalChange);
+    assert.ok(request.canonicalChange.changedFiles.includes("src/bc.txt"));
     assert.equal(
-      request?.canonicalChange.previousVersion.revision,
+      request.canonicalChange.previousVersion.revision,
       syncedRevision,
     );
     assert.equal(

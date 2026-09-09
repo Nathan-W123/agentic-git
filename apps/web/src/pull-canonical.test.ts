@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { CoordinatorProject } from "@coord/cli/project";
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import {
   SyncDivergedError,
   type RepositoryService,
@@ -31,7 +31,7 @@ async function harness(t: { after: (fn: () => Promise<void>) => void }) {
   const projectRoot = path.join(root, "p");
   await mkdir(projectRoot, { recursive: true });
   const project = await CoordinatorProject.init(projectRoot);
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const credentials = await UserCredentialStore.open(path.join(root, "secrets"));
   const github = new GitHubConnectionService({
     credentials,

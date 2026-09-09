@@ -8,7 +8,11 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import type { ResolvedMcpServer, ValidationCommand } from "@coord/shared-types";
+import type {
+  AffectedTestCommand,
+  ResolvedMcpServer,
+  ValidationCommand,
+} from "@coord/shared-types";
 import {
   openCoordinationStore,
   type CoordinationStore,
@@ -136,6 +140,15 @@ export interface ProjectConfig {
   defaultAgent?: string;
   /** Commands every task must pass before its changeset can be promoted. */
   validationCommands: ValidationCommand[];
+  /**
+   * How to ask this repository which tests a set of changed files affects.
+   *
+   * Optional, and absent means the before-run uses the full
+   * `validationCommands`. Supplied, it is used for the baseline and the
+   * fail-to-pass comparison only — never to decide what gates the merge, so a
+   * selector that under-reports costs wall clock rather than coverage.
+   */
+  affectedTestCommand?: AffectedTestCommand;
   agents: Record<string, AgentConfig>;
   sandbox?: SandboxConfig;
   /**
@@ -208,6 +221,21 @@ export interface ProjectConfig {
    * name the lease carries.
    */
   mcp?: McpAllowlist;
+  /**
+   * Whether this machine will open a terminal for somebody reading Kumi.
+   *
+   * The same decision as {@link mcp}, taken for a sharper thing. A terminal
+   * on a worker is a shell on its owner's own computer, with their login,
+   * their files, their network and their keys — and it is driven from a web
+   * page, by whoever holds `run_task` on a repository this machine works in.
+   * Nothing about the control plane's own permissions makes that acceptable
+   * on its own, so the machine gets a say and it is taken here.
+   *
+   * Absent means refuse. A machine that has never been asked opens no
+   * terminal and says why, rather than quietly handing out a shell — which
+   * is the failure that could not be walked back.
+   */
+  terminal?: TerminalConsent;
 }
 
 /** See {@link ProjectConfig.mcp}. */
@@ -231,6 +259,43 @@ export interface McpAllowlist {
   allow: "all" | McpAllowEntry[];
 }
 
+/**
+ * What this machine's owner agreed to when they allowed a terminal.
+ *
+ * Deliberately not a digest of anything, unlike {@link McpAllowEntry}: an MCP
+ * server is a definition that can be changed under the person who approved
+ * it, and a shell is not — it is the same shell it was. What can change is
+ * *who* is allowed to open one, which is why the consent is per repository
+ * rather than blanket unless somebody says otherwise.
+ */
+export interface TerminalConsent {
+  /** `"all"`, or the repository ids a terminal may be opened against. */
+  allow: "all" | string[];
+  /**
+   * Where a terminal is allowed to start.
+   *
+   * Absent means the workspace the reader is looking at, which is the only
+   * one they could have meant. Set to a path to pin every session there.
+   */
+  cwd?: string;
+}
+
+/**
+ * Whether this machine will open a terminal against that repository.
+ *
+ * Absent consent is a refusal, not a default — see {@link ProjectConfig.terminal}.
+ */
+export function terminalAllowed(
+  config: ProjectConfig,
+  repositoryId: string,
+): boolean {
+  const allow = config.terminal?.allow;
+  if (allow === "all") {
+    return true;
+  }
+  return Array.isArray(allow) && allow.includes(repositoryId);
+}
+
 /** A {@link ValidationCommand} that may also carry the app's configuration. */
 export interface PreviewCommand extends ValidationCommand {
   /**
@@ -248,6 +313,12 @@ export const DEFAULT_CONFIG: ProjectConfig = {
       executable: "git",
       args: ["diff", "--check"],
       label: "patch integrity",
+      // Marked for what it is. This checks the shape of the patch and never
+      // executes the program, so a project that never edits this file was
+      // getting a green "Validation: patch integrity(exit 0)" for free — a
+      // pass recorded identically to one from a real test suite. It still
+      // runs; it no longer counts as evidence the change works.
+      proves: "integrity",
     },
   ],
   /*
@@ -707,6 +778,45 @@ function assertMcp(value: unknown): McpAllowlist {
 }
 
 /**
+ * The machine owner's answer about terminals, kept through a save.
+ *
+ * Rebuilt here for the reason `assertMcp` is, and it was missed once: this
+ * object is what `save` writes back, so a field this function forgets is a
+ * field the next save silently drops. Dropping this one turns a machine whose
+ * owner allowed terminals into one that refuses them, with nothing changed
+ * that anybody did on purpose — and the desktop app writes this file at every
+ * start, so it would have happened on the next launch, every time.
+ *
+ * A list of ids narrows what the machine will open a shell for; an empty one
+ * is a decision — "none" — and not the same as the key being absent, which is
+ * "never asked". The desktop app's switch depends on telling those apart.
+ */
+function assertTerminal(value: unknown): TerminalConsent {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(`"terminal" must be an object`);
+  }
+  const consent = value as Partial<TerminalConsent>;
+  const allow = consent.allow;
+  const cwd = consent.cwd;
+  if (cwd !== undefined && (typeof cwd !== "string" || cwd.trim().length === 0)) {
+    fail(`"terminal.cwd" must be a path`);
+  }
+  const where = cwd === undefined ? {} : { cwd };
+  if (allow === "all") {
+    return { allow: "all", ...where };
+  }
+  if (!Array.isArray(allow)) {
+    fail(`"terminal.allow" must be "all" or an array of repository ids`);
+  }
+  for (const entry of allow) {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      fail(`"terminal.allow" must be "all" or an array of repository ids`);
+    }
+  }
+  return { allow: [...(allow as string[])], ...where };
+}
+
+/**
  * What a machine owner is agreeing to when they allow a server.
  *
  * Everything that decides what runs and where it reaches: the name, how it
@@ -931,6 +1041,9 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     // dropping this one turns a machine that ran its tools into one that
     // withholds them, with nothing changed that anybody did on purpose.
     ...(config.mcp === undefined ? {} : { mcp: assertMcp(config.mcp) }),
+    ...(config.terminal === undefined
+      ? {}
+      : { terminal: assertTerminal(config.terminal) }),
   };
 }
 

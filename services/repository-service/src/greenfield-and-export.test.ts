@@ -863,3 +863,190 @@ test("a clean merge reports no resolution, because it decided nothing", async ()
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+/* -------------------------------------------------------------------------
+ * Peeking at the remote
+ *
+ * Somebody pushing straight to the origin is the last way code reaches this
+ * system unarbitrated. A sync would find out and would also move canonical
+ * underneath running agents to do it, which is not a trade anybody would
+ * take. These cover the read that does not.
+ * ---------------------------------------------------------------------- */
+
+test("a peek sees what somebody pushed and moves canonical nowhere", async () => {
+  const fixture = await pushFixture();
+  try {
+    const before = await fixture.repositories.getCanonicalVersion(fixture.canonical);
+    const remoteTip = await advanceRemote(fixture, "src/charge.ts", "export {};\n");
+
+    const peeked = await fixture.repositories.peekRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+    });
+    assert.equal(peeked.current, false);
+    assert.equal(peeked.ahead, false);
+    assert.equal(peeked.upstreamRevision, remoteTip);
+    assert.equal(peeked.previousRevision, before.revision);
+    assert.deepEqual(peeked.files, ["src/charge.ts"]);
+
+    // The whole promise of this method. A watcher on a timer that moved the
+    // base out from under running agents would be a far worse bug than the
+    // one it exists to fix.
+    assert.equal(
+      (await fixture.repositories.getCanonicalVersion(fixture.canonical)).revision,
+      before.revision,
+    );
+    // And the import point is untouched, so a later push still refuses for
+    // the right reason rather than being quietly unblocked by a read.
+    assert.equal(
+      await fixture.repositories.importedRevision(fixture.canonical, "main"),
+      before.revision,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a mirror level with its origin is current, and one ahead is not behind", async () => {
+  const fixture = await pushFixture();
+  try {
+    const level = await fixture.repositories.peekRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+    });
+    assert.equal(level.current, true);
+    // Level is not ahead. `merge-base --is-ancestor` is true of equal
+    // revisions, so both flags would read true without the difference being
+    // excluded, and every quiet repository would report an unpushed commit.
+    assert.equal(level.ahead, false);
+    assert.deepEqual(level.files, []);
+
+    // Canonical moves, the origin does not: nothing was pushed *to us*, so
+    // there is nothing to warn anybody about.
+    await advanceCanonical(fixture);
+    const ahead = await fixture.repositories.peekRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+    });
+    assert.equal(ahead.current, true);
+    assert.equal(ahead.ahead, true);
+    assert.deepEqual(ahead.files, []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a diverged peek reports what they pushed, not what we did", async () => {
+  const fixture = await pushFixture();
+  try {
+    // Both sides moved, which is the ordinary state of a repository people
+    // work in. Diffed tip to tip, canonical's own file would come back as
+    // though somebody upstream had deleted it — the exact opposite of the
+    // question, and a claim built on it would hold files nobody touched.
+    await advanceCanonical(fixture, "ours.txt", "local\n");
+    const remoteTip = await advanceRemote(fixture, "theirs.txt", "remote\n");
+
+    const peeked = await fixture.repositories.peekRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+    });
+    assert.equal(peeked.current, false);
+    assert.equal(peeked.upstreamRevision, remoteTip);
+    assert.deepEqual(peeked.files, ["theirs.txt"]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Deletes a file from canonical, the way an agent's landed work does.
+ *
+ * `a.txt` is in the fixture's seed, so it is in the merge base — which is
+ * what makes a deletion here and an edit on the origin a *modify/delete*
+ * collision rather than two independent adds.
+ */
+async function deleteFromCanonical(
+  fixture: PushFixture,
+  file = "a.txt",
+): Promise<void> {
+  const git = new GitClient();
+  const work = path.join(
+    fixture.root,
+    `drop-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  await git.run(["clone", "--branch", "main", fixture.canonical.path, work]);
+  await rm(path.join(work, file), { force: true });
+  await fixture.repositories.commitAll(work, `coord: drop ${file}`);
+  await git.run([
+    `--git-dir=${fixture.canonical.path}`,
+    "fetch",
+    work,
+    "HEAD:refs/heads/main",
+    "--force",
+  ]);
+}
+
+test("a file deleted here and edited on GitHub is settled by the answer given", async () => {
+  const fixture = await pushFixture();
+  try {
+    // The shape that produced an unescapable dialog: one side deleted a file
+    // the other edited. `-X theirs` has no hunks to prefer, so the merge
+    // stopped with the path unmerged, the sync refused with the person's
+    // answer already given, and the browser read that refusal as "ask again"
+    // — the same two buttons on the same files, forever.
+    await advanceRemote(fixture, "a.txt", "edited on github\n");
+    await deleteFromCanonical(fixture);
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-remote",
+    });
+    assert.equal(synced.status, "merged");
+    assert.equal(synced.resolved?.side, "remote");
+    assert.deepEqual(synced.resolved?.files, ["a.txt"]);
+    // Taking GitHub's side means taking what GitHub did with it, so the file
+    // is back — with GitHub's content.
+    const files = await fixture.repositories.listFiles(
+      fixture.canonical,
+      synced.revision,
+    );
+    assert.ok(files.includes("a.txt"), files.join(", "));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("keeping this side's answer keeps its deletion, and both parents survive", async () => {
+  const fixture = await pushFixture();
+  try {
+    await advanceRemote(fixture, "a.txt", "edited on github\n");
+    await deleteFromCanonical(fixture);
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-local",
+    });
+    assert.equal(synced.status, "merged");
+    assert.equal(synced.resolved?.side, "local");
+    // The deletion *was* this side's edit, so it stands.
+    const files = await fixture.repositories.listFiles(
+      fixture.canonical,
+      synced.revision,
+    );
+    assert.ok(!files.includes("a.txt"), files.join(", "));
+
+    // And it is a real merge: the losing content is still reachable through
+    // the other parent, which is the promise the whole dialog rests on.
+    const git = new GitClient();
+    for (const parent of ["^1", "^2"]) {
+      const resolved = await git.run([
+        `--git-dir=${fixture.canonical.path}`,
+        "rev-parse",
+        "--verify",
+        `${synced.revision}${parent}`,
+      ]);
+      assert.equal(resolved.stdout.trim().length, 40, parent);
+    }
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+

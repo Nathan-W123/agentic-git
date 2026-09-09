@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   type CoordinationStore,
 } from "@coord/persistence";
 import { IntegrationService } from "@coord/integration-service";
@@ -62,7 +62,7 @@ async function createHarness(): Promise<Harness> {
     "main",
   );
   const version = await repositories.getCanonicalVersion(canonical);
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: canonical.id,
     path: canonical.path,

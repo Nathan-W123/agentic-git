@@ -18,7 +18,7 @@ import { CLAUDE_PROFILE, PromptCliAdapter } from "@coord/adapter-prompt-cli";
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
 import { IntegrationService } from "@coord/integration-service";
 import {
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   type CoordinationStore,
 } from "@coord/persistence";
 import type { TaskWorkspace } from "@coord/workspace-manager";
@@ -147,7 +147,7 @@ export async function runCoordinatedFixture(
   // of coordination — especially since the uncoordinated arm has no gate to
   // stop at. Standing a reviewer in keeps the arms comparable: the blocked
   // task still waits for a later wave, it just is not abandoned.
-  const store = options.store ?? new InMemoryCoordinationStore();
+  const store = options.store ?? SqliteCoordinationStore.open(":memory:");
   const coordinator = new Coordinator({
     repositories: fixture.repositories,
     workspaces: fixture.workspaces,

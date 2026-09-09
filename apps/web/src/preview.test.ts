@@ -213,7 +213,7 @@ test("a preview whose command exits immediately is reported, not called running"
       );
       // And nothing is left claiming to run, so the control does not offer a
       // stop button for a process that is gone.
-      assert.equal(await previews.status(repository.id), undefined);
+      assert.equal(await previews.status({ repositoryId: repository.id }), undefined);
     } finally {
       await previews.close();
     }
@@ -285,7 +285,7 @@ async function reported(
 ): Promise<string | undefined> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    const line = ((await previews.status(repositoryId))?.recentOutput ?? []).find(
+    const line = ((await previews.status({ repositoryId: repositoryId }))?.recentOutput ?? []).find(
       (entry) => entry.startsWith(`${name}=`),
     );
     if (line !== undefined) {
@@ -739,7 +739,7 @@ test("a second press joins the start in flight instead of killing it", async () 
       assert.equal(first.port, second.port);
       assert.equal(first.exited, undefined);
 
-      const running = await previews.status(repository.id);
+      const running = await previews.status({ repositoryId: repository.id });
       assert.equal(running?.exited, undefined);
       assert.equal((await fetch(first.url)).status, 200);
     } finally {
@@ -1024,7 +1024,7 @@ test("a build that fails is reported as a build failure, not a dead server", asy
           return true;
         },
       );
-      assert.equal(await previews.status(repository.id), undefined);
+      assert.equal(await previews.status({ repositoryId: repository.id }), undefined);
     } finally {
       await previews.close();
     }
@@ -1218,7 +1218,7 @@ test("an app started on a build that failed says so instead of just being blank"
       );
       // It survives the poll the header reads, rather than only being in the
       // answer to the press.
-      const later = await previews.status(repository.id);
+      const later = await previews.status({ repositoryId: repository.id });
       assert.match(later?.buildFailure ?? "", /run build/u);
     } finally {
       await previews.close();
@@ -1226,5 +1226,138 @@ test("an app started on a build that failed says so instead of just being blank"
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------- an app per channel ---- */
+
+/**
+ * A repository with a static page whose text says which branch it is on.
+ *
+ * A static page rather than a `dev` server on purpose: the preview serves it
+ * in-process, so it is up the moment `start` returns and the test can read
+ * the branch back over HTTP instead of waiting on somebody's npm.
+ */
+async function pagePerBranch(): Promise<{
+  root: string;
+  sourcePath: string;
+  project: CoordinatorProject;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "preview-branch-"));
+  const sourcePath = path.join(root, "src-repo");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(sourcePath);
+  await writeFile(
+    path.join(sourcePath, "index.html"),
+    "<!doctype html><title>app</title><p>main</p>\n",
+    "utf8",
+  );
+  await repositories.commitAll(sourcePath, "a page on main");
+
+  const projectRoot = path.join(root, "proj");
+  await mkdir(projectRoot, { recursive: true });
+  const project = await CoordinatorProject.init(projectRoot);
+  return { root, sourcePath, project };
+}
+
+test("two work channels run two apps, each on its own branch", async () => {
+  const { sourcePath, project } = await pagePerBranch();
+  const store = project.openStore();
+  const previews = new PreviewService(project, store);
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "branchy",
+    });
+    const stored = await store.getRepository(repository.id);
+    const git = new RepositoryService().getGitClient();
+
+    // Two work channels, each a branch with its own page.
+    for (const [branch, body] of [
+      ["kumi/payments-v2", "payments"],
+      ["kumi/retry-backoff", "retry"],
+    ] as const) {
+      const work = path.join(
+        path.dirname(sourcePath),
+        `wt-${branch.replaceAll("/", "-")}`,
+      );
+      await git.run([
+        `--git-dir=${stored?.path ?? ""}`,
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        work,
+        "HEAD",
+      ]);
+      await writeFile(
+        path.join(work, "index.html"),
+        `<!doctype html><title>app</title><p>${body}</p>\n`,
+        "utf8",
+      );
+      await new RepositoryService().commitAll(work, `a page on ${branch}`);
+    }
+
+    const payments = await previews.start({
+      repositoryId: repository.id,
+      branch: "kumi/payments-v2",
+    });
+    const retry = await previews.start({
+      repositoryId: repository.id,
+      branch: "kumi/retry-backoff",
+    });
+
+    // Two ports. Starting the second must not have replaced the first: two
+    // channels being worked on side by side is the ordinary case, and
+    // `start` replaces *the same* preview rather than every preview.
+    assert.notEqual(payments.port, retry.port);
+    assert.equal(payments.branch, "kumi/payments-v2");
+    assert.equal(retry.branch, "kumi/retry-backoff");
+
+    // And each serves its own branch's page. This is the whole feature: a
+    // Run button in #payments-v2 that served main would be the repository's
+    // app wearing the channel's name, which is worse than no button because
+    // it looks right.
+    assert.match((await get(payments.port, "/")).body, /payments/u);
+    assert.match((await get(retry.port, "/")).body, /retry/u);
+
+    // Asked about separately, and neither answer is the other's.
+    assert.equal(
+      (await previews.status({
+        repositoryId: repository.id,
+        branch: "kumi/payments-v2",
+      }))?.port,
+      payments.port,
+    );
+    // Canonical was never started, so it has no preview — a third entry, not
+    // an alias for whichever branch ran last.
+    assert.equal(
+      await previews.status({ repositoryId: repository.id }),
+      undefined,
+    );
+
+    // Stopping one leaves the other running.
+    await previews.stop({
+      repositoryId: repository.id,
+      branch: "kumi/payments-v2",
+    });
+    assert.equal(
+      await previews.status({
+        repositoryId: repository.id,
+        branch: "kumi/payments-v2",
+      }),
+      undefined,
+    );
+    assert.equal(
+      (await previews.status({
+        repositoryId: repository.id,
+        branch: "kumi/retry-backoff",
+      }))?.port,
+      retry.port,
+    );
+    assert.match((await get(retry.port, "/")).body, /retry/u);
+  } finally {
+    await previews.close();
+    store.close?.();
   }
 });

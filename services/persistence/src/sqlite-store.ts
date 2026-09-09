@@ -35,6 +35,7 @@ import {
   type TaskStatus,
   type TestResult,
   type ValidationCommand,
+  type UserId,
 } from "@coord/shared-types";
 
 import {
@@ -50,85 +51,95 @@ import {
 } from "./audit-chain.js";
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from "./schema.js";
 import type {
-  ApiTokenRecord,
-  AppendAuditInput,
   AddChangesetCommentInput,
   AddChannelReplyInput,
-  AppendChannelMessageInput,
-  ApprovalFilter,
-  ChannelChangedFile,
   AgentCallSign,
-  ArchiveAuditInput,
-  ChangesetComment,
-  ChannelAgentOverride,
-  ChannelEntryKind,
-  ChannelMessage,
-  ChannelMessageCounts,
-  ChannelMessageFilter,
+  ApiTokenRecord,
+  AppendAuditInput,
+  AppendChannelMessageInput,
   AppendDirectMessageInput,
-  CreateMcpServerInput,
-  DirectConversation,
-  DirectMessage,
-  DirectMessageFilter,
-  ChannelReaction,
-  ChannelReply,
-  CreateSubChannelInput,
-  McpServerRecord,
-  McpServerScope,
-  McpServerSecrets,
-  SubChannel,
-  SubChannelMember,
-  SubChannelVisibility,
-  UpdateMcpServerInput,
-  UpdateSubChannelInput,
+  ApprovalFilter,
+  ArchiveAuditInput,
   AuditArchiveResult,
   AuditEventFilter,
   AuditorCursor,
   AuthSessionRecord,
+  BranchClaim,
   CatchUpCursor,
+  ChangesetComment,
+  ChannelAgentOverride,
+  ChannelAnchor,
+  ChannelChangedFile,
+  ChannelEntryKind,
+  ChannelMessage,
+  ChannelMessageCounts,
+  ChannelMessageFilter,
+  ChannelReaction,
+  ChannelReply,
+  ClaimedRange,
+  HoldEditorFileInput,
+  EditorHold,
+  ClaimedShape,
   CoordinationStore,
   CreateApprovalInput,
+  CreateMcpServerInput,
   CreateRunInput,
+  CreateSubChannelInput,
+  DirectConversation,
+  DirectMessage,
+  DirectMessageFilter,
+  InvitationRecord,
+  LeasedWork,
+  LeaseTaskInput,
+  McpServerRecord,
+  McpServerScope,
+  McpServerSecrets,
+  MergeSubChannelInput,
   Organization,
   OrganizationMembership,
-  Subscription,
-  SubscriptionStatus,
   OrganizationRole,
+  PasswordResetRecord,
   ProjectRecord,
+  RecordBranchClaimInput,
+  RecordTokenUsageInput,
+  RepositoryGrant,
   RunDetail,
   RunMode,
   RunStatus,
+  SaveSubChannelReviewInput,
+  SaveWorkLeasePlanInput,
+  SaveWorkLeasePlanResult,
   SessionRecord,
+  SignupIntentRecord,
   StoredPlanRevision,
   StoredRepository,
   StoredRun,
   StoredScopeChange,
   StoredTask,
   StoredWorkspace,
+  SubChannel,
+  SubChannelMember,
+  SubChannelReview,
+  SubChannelVisibility,
   SubmitTaskInput,
   SubmittedTask,
-  TaskKind,
   SubmittedTaskCompletionStatus,
   SubmittedTaskFilter,
-  RecordTokenUsageInput,
+  SubmittedTaskStatus,
+  Subscription,
+  SubscriptionStatus,
+  TaskKind,
   TokenUsageFilter,
   TokenUsageRecord,
-  SubmittedTaskStatus,
-  InvitationRecord,
-  PasswordResetRecord,
-  SignupIntentRecord,
-  WaitlistEntry,
-  RepositoryGrant,
+  UpdateMcpServerInput,
+  UpdateSubChannelInput,
   UserAccount,
   UserAppearance,
-  LeaseTaskInput,
-  LeasedWork,
-  SaveWorkLeasePlanInput,
-  SaveWorkLeasePlanResult,
+  WaitlistEntry,
+  WorkerRecord,
   WorkLease,
   WorkLeasePlan,
   WorkLeaseStatus,
-  WorkerRecord,
 } from "./store.js";
 import {
   GENERAL_SUB_CHANNEL_SLUG,
@@ -172,6 +183,44 @@ function text(row: Row, column: string): string {
 function optionalText(row: Row, column: string): string | undefined {
   const value = row[column];
   return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * The anchor on a message row, when it carries a whole one.
+ *
+ * A review comment points at a line in a particular revision of a particular
+ * file. Any one of those three missing makes the other two unplaceable — a
+ * line number means nothing without the commit it was counted in — so this
+ * answers all-or-nothing rather than handing back a fragment every reader
+ * downstream would have to re-check.
+ *
+ * Spread into a message, so an ordinary message has no `anchor` key at all
+ * rather than one holding `undefined`, which is what
+ * `exactOptionalPropertyTypes` asks for and what tells "not a review comment"
+ * apart from "a review comment whose anchor was lost".
+ */
+function channelAnchor(row: Row): { anchor?: ChannelAnchor } {
+  const path = optionalText(row, "anchor_path");
+  const revision = optionalText(row, "anchor_revision");
+  const rawLine = row["anchor_line"];
+  const line =
+    typeof rawLine === "bigint"
+      ? Number(rawLine)
+      : typeof rawLine === "number"
+        ? rawLine
+        : undefined;
+  if (
+    path === undefined ||
+    path === "" ||
+    revision === undefined ||
+    revision === "" ||
+    line === undefined ||
+    !Number.isSafeInteger(line) ||
+    line < 1
+  ) {
+    return {};
+  }
+  return { anchor: { path, line, revision } };
 }
 
 function integer(row: Row, column: string): number {
@@ -1027,6 +1076,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
         projectId: task.projectId,
         status: "active",
         baseRevision: input.baseRevision,
+        // From the task, not from the caller. The caller passes a revision it
+        // resolved against some branch; taking the branch from the same row
+        // the revision was resolved for is what keeps the two describing one
+        // place rather than two.
+        branch: task.branch,
         issuedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
         heartbeatAt: now.toISOString(),
@@ -1045,8 +1099,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .prepare(
           `INSERT INTO work_leases
              (id, task_id, worker_id, repository_id, project_id, status,
-              base_revision, issued_at, expires_at, heartbeat_at)
-           VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+              base_revision, branch, issued_at, expires_at, heartbeat_at)
+           VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
         )
         .run(
           lease.id,
@@ -1055,6 +1109,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
           lease.repositoryId,
           lease.projectId ?? null,
           lease.baseRevision,
+          lease.branch ?? null,
           lease.issuedAt,
           lease.expiresAt,
           lease.heartbeatAt,
@@ -1294,6 +1349,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       projectId: optionalText(row, "project_id"),
       status: text(row, "status") as WorkLeaseStatus,
       baseRevision: text(row, "base_revision"),
+      branch: optionalText(row, "branch"),
       issuedAt: text(row, "issued_at"),
       expiresAt: text(row, "expires_at"),
       heartbeatAt: text(row, "heartbeat_at"),
@@ -2487,6 +2543,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       answerTo: input.answerTo,
       repositoryId: input.repositoryId,
       projectId,
+      branch: input.branch,
       objective: input.objective,
       agentId: input.agentId,
       validationCommands: input.validationCommands,
@@ -2540,16 +2597,17 @@ export class SqliteCoordinationStore implements CoordinationStore {
       this.db
         .prepare(
           `INSERT INTO submitted_tasks
-             (id, repository_id, project_id, objective, agent_id,
+             (id, repository_id, project_id, branch, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
               context, conversation_id, model, effort, after_task_id,
               kind, answer_to)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           task.id,
           task.repositoryId,
           task.projectId ?? DEFAULT_PROJECT_ID,
+          task.branch ?? null,
           task.objective,
           task.agentId,
           JSON.stringify(task.validationCommands),
@@ -2863,6 +2921,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       answerTo: optionalText(row, "answer_to"),
       repositoryId: text(row, "repository_id"),
       projectId: optionalText(row, "project_id"),
+      branch: optionalText(row, "branch"),
       objective: text(row, "objective"),
       agentId: text(row, "agent_id"),
       validationCommands: parseJson<ValidationCommand[]>(
@@ -4197,8 +4256,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `INSERT INTO channel_messages
            (id, repository_id, channel_id, project_id, kind, author_id, content,
-            created_at, task_id, referenced_message_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            created_at, task_id, referenced_message_id,
+            anchor_path, anchor_line, anchor_revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         message.id,
@@ -4211,6 +4271,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
         message.createdAt,
         input.taskId ?? null,
         input.referencedMessageId ?? null,
+        // All three together or all three null: a half-written anchor would
+        // read back as no anchor anyway, and storing one invites somebody to
+        // trust a line number whose revision was lost.
+        input.anchor?.path ?? null,
+        input.anchor?.line ?? null,
+        input.anchor?.revision ?? null,
       );
     return {
       ...message,
@@ -4220,6 +4286,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       ...(input.referencedMessageId === undefined
         ? {}
         : { referencedMessageId: input.referencedMessageId }),
+      ...(input.anchor === undefined ? {} : { anchor: input.anchor }),
       changedFiles: undefined,
       pinnedAt: undefined,
       pinnedBy: undefined,
@@ -4997,6 +5064,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   private toSubChannel(row: Row): SubChannel {
     const createdBy = optionalText(row, "created_by");
+    const branch = optionalText(row, "branch");
+    const mergedAt = optionalText(row, "merged_at");
+    const mergedBy = optionalText(row, "merged_by");
+    const pullRequestUrl = optionalText(row, "pull_request_url");
+    const shippedAt = optionalText(row, "shipped_at");
     return {
       id: text(row, "id"),
       repositoryId: text(row, "repository_id"),
@@ -5004,7 +5076,15 @@ export class SqliteCoordinationStore implements CoordinationStore {
       slug: text(row, "slug"),
       name: text(row, "name"),
       visibility: text(row, "visibility") as SubChannelVisibility,
-      archived: integer(row, "archived") === 1,
+      // Absent, not empty. A channel with no branch is a conversation, and
+      // `""` would be a channel claiming a branch nobody can check out.
+      ...(branch === undefined || branch === "" ? {} : { branch }),
+      ...(mergedAt === undefined ? {} : { mergedAt }),
+      ...(mergedBy === undefined ? {} : { mergedBy }),
+      ...(pullRequestUrl === undefined || pullRequestUrl === ""
+        ? {}
+        : { pullRequestUrl }),
+      ...(shippedAt === undefined ? {} : { shippedAt }),
       createdAt: text(row, "created_at"),
       ...(createdBy === undefined ? {} : { createdBy }),
     };
@@ -5072,7 +5152,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       slug,
       name: name === undefined || name === "" ? slug : name,
       visibility: input.visibility ?? "read_only",
-      archived: false,
+      ...(input.branch === undefined || input.branch === ""
+        ? {}
+        : { branch: input.branch }),
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
@@ -5082,11 +5164,24 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (existing !== undefined) {
       throw new Error("A sub-channel with that name already exists");
     }
+    // Said here as well as by the unique index, because the index's own
+    // message names a constraint rather than the thing that went wrong.
+    if (channel.branch !== undefined) {
+      const taken = this.db
+        .prepare(
+          "SELECT id FROM sub_channels WHERE repository_id = ? AND branch = ?",
+        )
+        .get(input.repositoryId, channel.branch) as Row | undefined;
+      if (taken !== undefined) {
+        throw new Error("Another channel is already working that branch");
+      }
+    }
     this.db
       .prepare(
         `INSERT INTO sub_channels
-           (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, repository_id, project_id, slug, name, visibility, branch,
+            created_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         channel.id,
@@ -5095,10 +5190,296 @@ export class SqliteCoordinationStore implements CoordinationStore {
         channel.slug,
         channel.name,
         channel.visibility,
+        channel.branch ?? null,
         channel.createdAt,
         input.createdBy ?? null,
       );
     return channel;
+  }
+
+  public async mergeSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: MergeSubChannelInput,
+  ): Promise<SubChannel | undefined> {
+    // Conditional on still being open, so two callers racing produce one
+    // merge and one honest "already merged" rather than two claims on the
+    // same work.
+    const changed = this.db
+      .prepare(
+        `UPDATE sub_channels SET merged_at = ?, merged_by = ?
+          WHERE id = ? AND repository_id = ? AND branch IS NOT NULL
+            AND merged_at IS NULL`,
+      )
+      .run(input.mergedAt, input.mergedBy, channelId, repositoryId);
+    if (changed.changes === 0) {
+      return undefined;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM sub_channels WHERE id = ? AND repository_id = ?")
+      .get(channelId, repositoryId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubChannel(row);
+  }
+
+public async recordBranchClaim(
+    input: RecordBranchClaimInput,
+  ): Promise<BranchClaim> {
+    const claim: BranchClaim = {
+      id: createId("bclaim"),
+      repositoryId: input.repositoryId,
+      branch: input.branch,
+      taskId: input.taskId,
+      revision: input.revision,
+      symbols: [...(input.symbols ?? [])],
+      apis: [...(input.apis ?? [])],
+      schemas: [...(input.schemas ?? [])],
+      configKeys: [...(input.configKeys ?? [])],
+      services: [...(input.services ?? [])],
+      ranges: (input.ranges ?? []).map((range) => ({ ...range })),
+      shapes: (input.shapes ?? []).map((shape) => ({
+        ...shape,
+        consumers: [...shape.consumers],
+      })),
+      createdAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO branch_claims
+           (id, repository_id, branch, task_id, revision,
+            symbols, apis, schemas, config_keys, services, ranges,
+            shapes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        claim.id,
+        claim.repositoryId,
+        claim.branch,
+        claim.taskId,
+        claim.revision,
+        JSON.stringify(claim.symbols),
+        JSON.stringify(claim.apis),
+        JSON.stringify(claim.schemas),
+        JSON.stringify(claim.configKeys),
+        JSON.stringify(claim.services),
+        JSON.stringify(claim.ranges),
+        JSON.stringify(claim.shapes),
+        claim.createdAt,
+      );
+    return claim;
+  }
+
+  public async listBranchClaims(
+    repositoryId: string,
+    options: { exceptBranch?: string } = {},
+  ): Promise<BranchClaim[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM branch_claims
+          WHERE repository_id = ?
+            AND (? IS NULL OR branch <> ?)
+          ORDER BY created_at ASC, id ASC`,
+      )
+      .all(
+        repositoryId,
+        options.exceptBranch ?? null,
+        options.exceptBranch ?? null,
+      ) as Record<string, unknown>[];
+    return rows.map(sqliteBranchClaim);
+  }
+
+  public async holdEditorFile(
+    input: HoldEditorFileInput,
+  ): Promise<EditorHold> {
+    const now = new Date();
+    const branch = input.branch ?? "";
+    const hold: EditorHold = {
+      repositoryId: input.repositoryId,
+      branch,
+      userId: input.userId,
+      file: input.file,
+      ranges: (input.ranges ?? []).map((range) => ({ ...range })),
+      acquiredAt: now.toISOString(),
+      renewedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
+    };
+    // `acquired_at` is kept from the row that is already there. "Since when"
+    // is what a reader wants beside a name, and a renewal every few seconds
+    // would otherwise report every hold as brand new.
+    const row = this.db
+      .prepare(
+        `INSERT INTO editor_holds
+           (repository_id, branch, user_id, file, ranges,
+            acquired_at, renewed_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (repository_id, branch, user_id, file) DO UPDATE SET
+           ranges = excluded.ranges,
+           renewed_at = excluded.renewed_at,
+           expires_at = excluded.expires_at
+         RETURNING *`,
+      )
+      .get(
+        hold.repositoryId,
+        hold.branch,
+        hold.userId,
+        hold.file,
+        JSON.stringify(hold.ranges),
+        hold.acquiredAt,
+        hold.renewedAt,
+        hold.expiresAt,
+      ) as Record<string, unknown>;
+    return sqliteEditorHold(row);
+  }
+
+  public async listEditorHolds(
+    repositoryId: string,
+    options: { branch?: string; exceptUser?: UserId } = {},
+  ): Promise<EditorHold[]> {
+    const now = new Date().toISOString();
+    // Deleted on the way past rather than left to a sweeper. Nobody releases
+    // a hold deliberately — a closed tab is the ordinary end of one — so the
+    // expired rows are the common case and this is the only place that is
+    // guaranteed to run.
+    this.db
+      .prepare(`DELETE FROM editor_holds WHERE expires_at <= ?`)
+      .run(now);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM editor_holds
+          WHERE repository_id = ?
+            AND (? IS NULL OR branch = ?)
+            AND (? IS NULL OR user_id <> ?)
+          ORDER BY file ASC, user_id ASC`,
+      )
+      .all(
+        repositoryId,
+        options.branch ?? null,
+        options.branch ?? null,
+        options.exceptUser ?? null,
+        options.exceptUser ?? null,
+      ) as Record<string, unknown>[];
+    return rows.map(sqliteEditorHold);
+  }
+
+  public async releaseEditorHold(input: {
+    repositoryId: string;
+    branch?: string;
+    userId: UserId;
+    file: string;
+  }): Promise<void> {
+    this.db
+      .prepare(
+        `DELETE FROM editor_holds
+          WHERE repository_id = ? AND branch = ? AND user_id = ? AND file = ?`,
+      )
+      .run(input.repositoryId, input.branch ?? "", input.userId, input.file);
+  }
+
+  public async releaseBranchClaims(
+    repositoryId: string,
+    branch: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `DELETE FROM branch_claims WHERE repository_id = ? AND branch = ?`,
+      )
+      .run(repositoryId, branch);
+  }
+
+  public async listSubChannelReviews(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<SubChannelReview[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM sub_channel_reviews
+          WHERE repository_id = ? AND channel_id = ?
+          ORDER BY reviewed_at, user_id`,
+      )
+      .all(repositoryId, channelId) as Row[];
+    return rows.map((row) => this.toSubChannelReview(row));
+  }
+
+  public async saveSubChannelReview(
+    input: SaveSubChannelReviewInput,
+  ): Promise<SubChannelReview> {
+    // One row per person per channel, replaced. Changing your mind is the
+    // ordinary case; the room keeps the narrative and this keeps the answer
+    // that still stands.
+    this.db
+      .prepare(
+        `INSERT INTO sub_channel_reviews
+           (channel_id, repository_id, user_id, state, note, revision, reviewed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (channel_id, user_id) DO UPDATE SET
+           state = excluded.state,
+           note = excluded.note,
+           revision = excluded.revision,
+           reviewed_at = excluded.reviewed_at`,
+      )
+      .run(
+        input.channelId,
+        input.repositoryId,
+        input.userId,
+        input.state,
+        input.note ?? null,
+        input.revision ?? null,
+        input.reviewedAt,
+      );
+    const row = this.db
+      .prepare(
+        `SELECT * FROM sub_channel_reviews
+          WHERE channel_id = ? AND user_id = ?`,
+      )
+      .get(input.channelId, input.userId) as Row;
+    return this.toSubChannelReview(row);
+  }
+
+  public async clearSubChannelReview(
+    repositoryId: string,
+    channelId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const changed = this.db
+      .prepare(
+        `DELETE FROM sub_channel_reviews
+          WHERE repository_id = ? AND channel_id = ? AND user_id = ?`,
+      )
+      .run(repositoryId, channelId, userId);
+    return changed.changes > 0;
+  }
+
+  private toSubChannelReview(row: Row): SubChannelReview {
+    const note = optionalText(row, "note");
+    const revision = optionalText(row, "revision");
+    return {
+      channelId: text(row, "channel_id"),
+      repositoryId: text(row, "repository_id"),
+      userId: text(row, "user_id"),
+      state: text(row, "state") as SubChannelReview["state"],
+      ...(note === undefined || note === "" ? {} : { note }),
+      ...(revision === undefined || revision === "" ? {} : { revision }),
+      reviewedAt: text(row, "reviewed_at"),
+    };
+  }
+
+  public async shipSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: { pullRequestUrl: string; shippedAt: string },
+  ): Promise<SubChannel | undefined> {
+    // Unconditional, unlike the merge above: shipping twice reaches the same
+    // pull request, so the second write restates a fact rather than claiming
+    // work somebody else's write already claimed.
+    const changed = this.db
+      .prepare(
+        `UPDATE sub_channels SET pull_request_url = ?, shipped_at = ?
+          WHERE id = ? AND repository_id = ?`,
+      )
+      .run(input.pullRequestUrl, input.shippedAt, channelId, repositoryId);
+    if (changed.changes === 0) {
+      return undefined;
+    }
+    return await this.getSubChannel(repositoryId, channelId);
   }
 
   public async updateSubChannel(
@@ -5537,6 +5918,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
       ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
       taskId: optionalText(row, "task_id"),
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
+      // All three or none. A path without a line cannot be placed, and a line
+      // without the revision it was counted in is a guess — so a partial
+      // anchor is read as no anchor rather than as an anchor to be trusted.
+      ...channelAnchor(row),
       pinnedAt: optionalText(row, "pinned_at"),
       pinnedBy: optionalText(row, "pinned_by"),
       endedAt: optionalText(row, "ended_at"),
@@ -6009,4 +6394,117 @@ export class SqliteCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
     }));
   }
+}
+
+function sqliteBranchClaim(row: Record<string, unknown>): BranchClaim {
+  const list = (value: unknown): string[] => {
+    try {
+      const parsed = JSON.parse(String(value ?? "[]"));
+      return Array.isArray(parsed) ? parsed.map((entry) => String(entry)) : [];
+    } catch {
+      return [];
+    }
+  };
+  const ranges = (value: unknown): ClaimedRange[] => {
+    try {
+      const parsed = JSON.parse(String(value ?? "[]"));
+      return Array.isArray(parsed)
+        ? parsed
+            .filter(
+              (entry): entry is ClaimedRange =>
+                typeof entry === "object" &&
+                entry !== null &&
+                typeof (entry as ClaimedRange).file === "string" &&
+                Number.isFinite((entry as ClaimedRange).start) &&
+                Number.isFinite((entry as ClaimedRange).end),
+            )
+            .map((entry) => ({
+              file: entry.file,
+              start: Number(entry.start),
+              end: Number(entry.end),
+            }))
+        : [];
+    } catch {
+      return [];
+    }
+  };
+  const shapes = (value: unknown): ClaimedShape[] => {
+    try {
+      const parsed: unknown = JSON.parse(String(value ?? "[]"));
+      return Array.isArray(parsed)
+        ? parsed
+            .filter(
+              (entry): entry is ClaimedShape =>
+                typeof entry === "object" &&
+                entry !== null &&
+                typeof (entry as ClaimedShape).file === "string" &&
+                typeof (entry as ClaimedShape).symbol === "string" &&
+                typeof (entry as ClaimedShape).digest === "string",
+            )
+            .map((entry) => ({
+              file: entry.file,
+              symbol: entry.symbol,
+              shape: String(entry.shape ?? ""),
+              digest: entry.digest,
+              consumers: Array.isArray(entry.consumers)
+                ? entry.consumers.map((name) => String(name))
+                : [],
+              ...(entry.inferred === true ? { inferred: true } : {}),
+            }))
+        : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    id: String(row["id"]),
+    repositoryId: String(row["repository_id"]),
+    branch: String(row["branch"]),
+    taskId: String(row["task_id"]),
+    revision: String(row["revision"]),
+    symbols: list(row["symbols"]),
+    apis: list(row["apis"]),
+    schemas: list(row["schemas"]),
+    configKeys: list(row["config_keys"]),
+    services: list(row["services"]),
+    ranges: ranges(row["ranges"]),
+    shapes: shapes(row["shapes"]),
+    createdAt: String(row["created_at"]),
+  };
+}
+
+/** One editor hold, out of its row. */
+function sqliteEditorHold(row: Record<string, unknown>): EditorHold {
+  let ranges: ClaimedRange[] = [];
+  try {
+    const parsed: unknown = JSON.parse(String(row["ranges"] ?? "[]"));
+    ranges = Array.isArray(parsed)
+      ? parsed
+          .filter(
+            (entry): entry is ClaimedRange =>
+              typeof entry === "object" &&
+              entry !== null &&
+              typeof (entry as ClaimedRange).file === "string" &&
+              Number.isFinite((entry as ClaimedRange).start) &&
+              Number.isFinite((entry as ClaimedRange).end),
+          )
+          .map((entry) => ({
+            file: entry.file,
+            start: Number(entry.start),
+            end: Number(entry.end),
+          }))
+      : [];
+  } catch {
+    ranges = [];
+  }
+  return {
+    repositoryId: String(row["repository_id"]),
+    branch: String(row["branch"] ?? ""),
+    userId: String(row["user_id"]) as EditorHold["userId"],
+    file: String(row["file"]),
+    ranges,
+    acquiredAt: String(row["acquired_at"]),
+    renewedAt: String(row["renewed_at"]),
+    expiresAt: String(row["expires_at"]),
+  };
 }

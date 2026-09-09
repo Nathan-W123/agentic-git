@@ -13,7 +13,7 @@ import type {
   StartTaskInput,
 } from "@coord/agent-protocol";
 import { Coordinator } from "@coord/coordinator";
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -165,10 +165,10 @@ async function sharedRepository(): Promise<{
 }
 
 async function seed(repository: CanonicalRepository): Promise<{
-  store: InMemoryCoordinationStore;
+  store: SqliteCoordinationStore;
   worker: string;
 }> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: repository.id,
     path: repository.path,
@@ -194,7 +194,7 @@ async function seed(repository: CanonicalRepository): Promise<{
 }
 
 async function leaseFor(
-  store: InMemoryCoordinationStore,
+  store: SqliteCoordinationStore,
   worker: string,
   objective: string,
   base: CanonicalVersion,
@@ -531,7 +531,7 @@ async function holdingRun(options: {
   repository: CanonicalRepository;
   repositories: RepositoryService;
   version: CanonicalVersion;
-  store: InMemoryCoordinationStore;
+  store: SqliteCoordinationStore;
   worker: string;
   declaration: { files: string[]; symbols: string[] };
   replanDelayMs?: number;

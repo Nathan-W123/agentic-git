@@ -37,8 +37,40 @@ import {
   SIMPLIFY_TIMEOUT_MS,
   TASK_STATUSES,
 } from "../gateway-util.js";
+import {
+  holderBlocks,
+  holdersOfFile,
+  type FileHolder,
+} from "../editor-holds.js";
 import type { ApiGateway } from "../server.js";
 import type { AuthenticatedRouteRequest } from "./context.js";
+
+/**
+ * How long one person's hold on a file survives without a renewal.
+ *
+ * Short on purpose. The editor renews every third of it while the tab is
+ * open, so a live session never lapses, and a closed laptop gives the file
+ * back inside a minute rather than holding it until somebody notices.
+ */
+const EDITOR_HOLD_TTL_MS = 45_000;
+
+/** The lines an editor says it is in, defensively. */
+function claimedRanges(value: unknown): Array<{
+  file: string;
+  start: number;
+  end: number;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    const start = Number((entry as { start?: unknown } | null)?.start);
+    const end = Number((entry as { end?: unknown } | null)?.end);
+    return Number.isFinite(start) && Number.isFinite(end) && end > start
+      ? [{ file: "", start, end }]
+      : [];
+  });
+}
 
 export async function routeTasks(
   gw: ApiGateway,
@@ -702,18 +734,40 @@ export async function routeTasks(
         "This deployment cannot run previews",
       );
     }
+    // Which app. Resolved from the channel through `authorizeSubChannel` for
+    // the same reason the workspace is: that is where "may this person see
+    // this room" is decided, and a branch name on the query would let anybody
+    // with `run_task` start a private channel's app by guessing its name. A
+    // merged channel has no branch left, so it runs canonical.
+    const previewChannelId = url.searchParams.get("channelId") ?? undefined;
+    const previewChannel =
+      previewChannelId === undefined || previewChannelId === ""
+        ? undefined
+        : await gw.authorizeSubChannel({
+            projectId,
+            repositoryId,
+            channelId: previewChannelId,
+            principal,
+          });
+    const previewBranch =
+      previewChannel?.branch !== undefined &&
+      previewChannel.mergedAt === undefined
+        ? previewChannel.branch
+        : undefined;
+    const previewTarget = {
+      projectId,
+      repositoryId,
+      ...(previewBranch === undefined ? {} : { branch: previewBranch }),
+    };
     if (method === "POST") {
       const preview = await gw.performOperation("preview_failed", async () =>
-        await operations.previewStart!({ projectId, repositoryId }),
+        await operations.previewStart!(previewTarget),
       );
       gw.sendJson(response, 200, { preview });
       return true;
     }
     if (method === "GET") {
-      const preview = await operations.previewStatus({
-        projectId,
-        repositoryId,
-      });
+      const preview = await operations.previewStatus(previewTarget);
       // `null` rather than a 404: "no preview is running" is an answer about
       // this repository, not a missing route, and the caller renders a
       // start button either way.
@@ -721,7 +775,7 @@ export async function routeTasks(
       return true;
     }
     if (method === "DELETE") {
-      await operations.previewStop({ projectId, repositoryId });
+      await operations.previewStop(previewTarget);
       gw.sendJson(response, 200, { stopped: true });
       return true;
     }
@@ -904,7 +958,7 @@ export async function routeTasks(
           path,
           new RegExp(
             `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/workspace` +
-              `/(files|file|reset|exec|submit)$`,
+              `/(files|file|move|reset|exec|submit|hold|holds)$`,
             "u",
           ),
         )
@@ -928,10 +982,32 @@ export async function routeTasks(
       repositoryId,
       action === "exec" ? "run_task" : "submit_task",
     );
+    // Which room the workspace belongs to. Resolved from the channel rather
+    // than taken as a branch name from the caller: `authorizeSubChannel` is
+    // the one place that decides whether this person may see this room at
+    // all, and a branch string on the query would let anybody with
+    // `submit_task` cut a checkout of a private channel's work by guessing
+    // its name. A merged channel's branch is gone, so its workspace falls
+    // back to canonical rather than pointing at a ref that no longer exists.
+    const channelId = url.searchParams.get("channelId") ?? undefined;
+    const channel =
+      channelId === undefined || channelId === ""
+        ? undefined
+        : await gw.authorizeSubChannel({
+            projectId,
+            repositoryId,
+            channelId,
+            principal,
+          });
+    const branch =
+      channel?.branch !== undefined && channel.mergedAt === undefined
+        ? channel.branch
+        : undefined;
     const scope = {
       projectId,
       repositoryId,
       userId: principal.user.id,
+      ...(branch === undefined ? {} : { branch }),
     };
     // Overlay implementations throw errors carrying an HTTP status and
     // code; anything else stays an internal error.
@@ -950,6 +1026,54 @@ export async function routeTasks(
         }
         throw error;
       }
+    };
+
+    /**
+     * Everyone holding something here, people and agents together.
+     *
+     * Two sources because they are two different kinds of fact — a person's
+     * hold is a row they renew, an agent's is a side effect of an admitted
+     * plan sitting on its lease — and one answer because nobody asking has
+     * ever wanted only one of them.
+     */
+    const holdersHere = async (path?: string): Promise<FileHolder[]> => {
+      const humans = await gw.options.store
+        .listEditorHolds(repositoryId, {
+          branch: branch ?? "",
+          exceptUser: principal.user.id,
+        })
+        .catch((): [] => []);
+      const leases = await gw.options.store
+        .listWorkLeases({ status: "active", repositoryId })
+        .catch((): [] => []);
+      return holdersOfFile({
+        humans,
+        // And anybody sitting in a shell on this branch. Advisory: it is
+        // named in the editor and never refuses a save, because a terminal
+        // has no scope and a lock that broad would cover every file here.
+        shells: gw.terminals
+          .shellsOn(repositoryId, branch)
+          .filter((shell) => shell.userId !== principal.user.id)
+          .map((shell) => ({
+            userId: shell.userId,
+            machine: shell.workerName,
+            since: shell.since,
+          })),
+        agents: leases.flatMap((lease) => {
+          const grants = lease.plan?.admission.ownershipGrants ?? [];
+          return grants.length === 0
+            ? []
+            : [
+                {
+                  principalId: lease.plan?.plan.taskId ?? lease.workerId,
+                  taskId: lease.taskId,
+                  grants,
+                },
+              ];
+        }),
+        ...(path === undefined ? {} : { path }),
+        exceptUser: principal.user.id,
+      });
     };
 
     if (action === undefined) {
@@ -983,6 +1107,70 @@ export async function routeTasks(
       });
       return true;
     }
+    /**
+     * Who else is in this file — what the editor draws its blocks from.
+     *
+     * A read, on purpose: asking must never be what takes a hold, or opening
+     * a dozen files to look at them would lock a dozen files.
+     */
+    if (action === "holds" && method === "GET") {
+      const filePath = stringField(
+        url.searchParams.get("path") ?? undefined,
+        "path",
+        { max: 1_000, optional: true },
+      );
+      gw.sendJson(response, 200, {
+        holds: await holdersHere(filePath),
+      });
+      return true;
+    }
+    /**
+     * Take or renew this person's hold, on their first edit and every renewal
+     * after it. Answers with whoever else is here, so the editor learns about
+     * a collision at the keystroke rather than at the save.
+     */
+    if (action === "hold" && method === "POST") {
+      const body = objectBody(await gw.readJson(request));
+      const filePath =
+        stringField(body["path"], "path", { max: 1_000 }) ?? "";
+      if (filePath === "") {
+        throw new HttpError(400, "invalid_request", "path is required");
+      }
+      await gw.options.store.holdEditorFile({
+        repositoryId,
+        ...(branch === undefined ? {} : { branch }),
+        userId: principal.user.id,
+        file: filePath,
+        ...(claimedRanges(body["ranges"]).length === 0
+          ? {}
+          : { ranges: claimedRanges(body["ranges"]) }),
+        ttlMs: EDITOR_HOLD_TTL_MS,
+      });
+      gw.sendJson(response, 200, {
+        // Its own renewal interval rather than a number the browser picks:
+        // the two have to agree, and the side that owns the expiry is the
+        // side that should say.
+        renewAfterMs: Math.floor(EDITOR_HOLD_TTL_MS / 3),
+        holds: await holdersHere(filePath),
+      });
+      return true;
+    }
+    /** Gives one back, when somebody closes the file rather than walking off. */
+    if (action === "hold" && method === "DELETE") {
+      const filePath = stringField(
+        url.searchParams.get("path") ?? undefined,
+        "path",
+        { max: 1_000 },
+      );
+      await gw.options.store.releaseEditorHold({
+        repositoryId,
+        ...(branch === undefined ? {} : { branch }),
+        userId: principal.user.id,
+        file: filePath ?? "",
+      });
+      gw.sendJson(response, 200, { released: true });
+      return true;
+    }
     if (action === "file" && method === "GET") {
       const filePath = stringField(
         url.searchParams.get("path") ?? undefined,
@@ -1007,6 +1195,30 @@ export async function routeTasks(
           "content must be a string",
         );
       }
+      // Whoever else is in this file, asked before the write rather than at
+      // submit. Refused rather than merged: two people and an agent writing
+      // the same file through three different doors is the thing this whole
+      // layer exists to stop, and the one moment it can still be cheap to say
+      // so is before the bytes land.
+      //
+      // `override` is the escape hatch and it is deliberate. A hard refusal
+      // relocates the problem — somebody opens the terminal or their own
+      // clone and does it anyway, and the work becomes invisible instead of
+      // merely contended. On the record is better than out of sight.
+      const blocking = (await holdersHere(filePath ?? "")).filter((holder) =>
+        holderBlocks(holder, claimedRanges(body["ranges"])),
+      );
+      const override = body["override"] === true;
+      if (blocking.length > 0 && !override) {
+        gw.sendJson(response, 409, {
+          error: {
+            code: "file_held",
+            message: `${filePath} is being edited by somebody else`,
+            holds: blocking,
+          },
+        });
+        return true;
+      }
       await perform(() =>
         workspaceOperations.writeFile({
           ...scope,
@@ -1014,7 +1226,22 @@ export async function routeTasks(
           content,
         }),
       );
-      gw.sendJson(response, 200, { saved: true });
+      if (blocking.length > 0) {
+        // Recorded because it was overridden. An override nobody can find
+        // afterwards is the same as no gate at all.
+        await gw.options.store.appendAudit(undefined, {
+          type: "conflict_detected",
+          data: {
+            projectId,
+            repositoryId,
+            stage: "editor_save_override",
+            actorId: principal.user.id,
+            path: filePath ?? "",
+            holders: blocking.map((holder) => holder.principalId),
+          },
+        });
+      }
+      gw.sendJson(response, 200, { saved: true, overrode: blocking.length > 0 });
       return true;
     }
     if (action === "move" && method === "POST") {

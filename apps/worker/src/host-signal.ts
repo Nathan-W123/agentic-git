@@ -24,7 +24,9 @@
 /**
  * The message shapes the desktop app's supervisor understands.
  *
- * `busy` and `idle` are about the machine's power. `mcp-offered` is about its
+ * `busy` and `idle` are about the machine's power. `registration-refused` and
+ * `registered` are about whether this worker is allowed to exist at all.
+ * `mcp-offered` is about its
  * owner: the lease carried MCP servers this machine's allowlist does not
  * cover, and the worker ran without them. The worker itself cannot do
  * anything about that — its allowlist is read once at start, and the person
@@ -35,6 +37,24 @@
 export type HostSignal =
   | { readonly type: "busy" }
   | { readonly type: "idle" }
+  /**
+   * The control plane refused to register this worker, and it is waiting.
+   *
+   * Carried rather than left to stderr because the host reads stderr as
+   * evidence of life — every line it hears is reported as "running" — so the
+   * one message that means the opposite arrives labelled as its opposite.
+   * `detail` is the control plane's own sentence, which is the only text
+   * anywhere that names what is actually wrong.
+   */
+  | { readonly type: "registration-refused"; readonly detail: string }
+  /**
+   * Registration succeeded, so any refusal the host is still showing is over.
+   *
+   * Sent on every successful registration, not only the ones that follow a
+   * refusal: a host that has to work out for itself when to stop believing
+   * the last thing it was told is a host that gets it wrong.
+   */
+  | { readonly type: "registered" }
   | {
       readonly type: "mcp-offered";
       readonly servers: ReadonlyArray<{

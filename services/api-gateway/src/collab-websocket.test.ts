@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 
 import {
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   type CoordinationStore,
 } from "@coord/persistence";
 
@@ -367,7 +367,7 @@ async function startRuntime(
   t: TestContext,
   options: { collabTickIntervalMs?: number } = {},
 ): Promise<Runtime> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const workspace = new InMemoryWorkspace();
   const operations: ApiOperations = {
     async createRepository(input) {

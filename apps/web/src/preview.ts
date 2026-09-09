@@ -40,6 +40,33 @@ import {
 const LOG_LINES = 200;
 
 /**
+ * Which app to run: a repository, and optionally the work channel's branch.
+ *
+ * Absent means the repository's canonical branch, which is what every preview
+ * meant before work channels existed.
+ */
+export interface PreviewTarget {
+  repositoryId: string;
+  branch?: string;
+}
+
+/**
+ * The registry key for a target.
+ *
+ * A target with no branch keys to the bare repository id — not to
+ * `repositoryId + separator`, and not to a hash — so a preview started before
+ * branches existed is the same entry afterwards, and a log line naming a key
+ * still reads as a repository id. Two branches of one repository are two
+ * entries, which is the point: they are two apps, they get two ports from the
+ * OS on their own, and stopping one must not stop the other.
+ */
+function previewKey(target: PreviewTarget): string {
+  return target.branch === undefined || target.branch === ""
+    ? target.repositoryId
+    : `${target.repositoryId}\u0000${target.branch}`;
+}
+
+/**
  * How long a preview may run without being asked about before it is stopped.
  *
  * A preview is a thing somebody is looking at. Nobody looking at it for an
@@ -54,6 +81,15 @@ const START_READY_TIMEOUT_MS = 120_000;
 
 export interface PreviewStatus {
   repositoryId: string;
+  /**
+   * The branch this preview is running, when it is a work channel's.
+   *
+   * Reported rather than inferred: the panel has to be able to say *which*
+   * app is at that address, because two of them are a plausible state and
+   * "your app is running" about the wrong branch is the kind of wrong that
+   * costs somebody twenty minutes.
+   */
+  branch?: string;
   /** Where to look. Always loopback; see the class doc. */
   url: string;
   port: number;
@@ -1132,20 +1168,19 @@ export class PreviewService {
    * asked to cancel and reporting its death as the repository's fault. See
    * {@link previewsStarting}.
    */
-  public async start(input: {
-    repositoryId: string;
-  }): Promise<PreviewStatus> {
-    const already = this.previewsStarting.get(input.repositoryId);
+  public async start(input: PreviewTarget): Promise<PreviewStatus> {
+    const key = previewKey(input);
+    const already = this.previewsStarting.get(key);
     if (already !== undefined) {
       return await already;
     }
-    const attempt = this.startOnce(input.repositoryId);
-    this.previewsStarting.set(input.repositoryId, attempt);
+    const attempt = this.startOnce(input);
+    this.previewsStarting.set(key, attempt);
     try {
       return await attempt;
     } finally {
-      if (this.previewsStarting.get(input.repositoryId) === attempt) {
-        this.previewsStarting.delete(input.repositoryId);
+      if (this.previewsStarting.get(key) === attempt) {
+        this.previewsStarting.delete(key);
       }
     }
   }
@@ -1156,26 +1191,41 @@ export class PreviewService {
    * Separate from {@link start} only so that the guard around it has one
    * thing to hold: everything below runs once per press that reaches it.
    */
-  private async startOnce(repositoryId: string): Promise<PreviewStatus> {
+  private async startOnce(target: PreviewTarget): Promise<PreviewStatus> {
+    const { repositoryId } = target;
+    const key = previewKey(target);
     const stored = await this.store.getRepository(repositoryId);
     if (stored === undefined) {
       throw new Error(`Unknown repository: ${repositoryId}`);
     }
-    await this.stop(repositoryId);
+    await this.stop(target);
 
+    // The branch travels inside the repository descriptor, the same way the
+    // overlay workspace and a leased branch task carry it, so
+    // `getCanonicalVersion` and the worktree cut below are on the branch
+    // without either of them learning what a work channel is.
     const canonical = {
       id: stored.id,
       path: stored.path,
-      branch: stored.branch,
+      branch:
+        target.branch === undefined || target.branch === ""
+          ? stored.branch
+          : target.branch,
     };
     const version = await this.repositories.getCanonicalVersion(canonical);
     const root = path.join(this.project.workspaceRoot, "previews");
     await mkdir(root, { recursive: true });
-    // Its own checkout at canonical head. Not a task's workspace: those are
-    // created and destroyed around a run, and a preview has to outlive every
-    // run so it can be watched while the next task changes things.
+    // Its own checkout at the branch's head — canonical's, when there is no
+    // branch. Not a task's workspace: those are created and destroyed around
+    // a run, and a preview has to outlive every run so it can be watched
+    // while the next task changes things.
+    //
+    // The name carries the branch as a label rather than as a guarantee:
+    // `workspaceDirectoryName` appends a fresh workspace id to whatever it is
+    // handed, so two checkouts were never going to collide. What this buys is
+    // that `previews/` on disk says which branch is in each one.
     const workspace = await this.worktrees.create({
-      taskId: `preview-${repositoryId}`,
+      taskId: `preview-${key.replace("\u0000", "-").replaceAll("/", "-")}`,
       rootPath: root,
       repository: canonical,
       baseVersion: version,
@@ -1227,12 +1277,12 @@ export class PreviewService {
           at: new Date().toISOString(),
         };
       });
-      this.running.set(repositoryId, {
+      this.running.set(key, this.stampBranch({
         server,
         status,
         workspacePath: workspace.path,
         lastAskedAt: Date.now(),
-      });
+      }, target));
       return { ...status, recentOutput: [...status.recentOutput] };
     };
 
@@ -1270,7 +1320,7 @@ export class PreviewService {
         install,
         workspace.path,
         installOutput,
-        await this.previewEnvironment(repositoryId, await freePort()),
+        await this.previewEnvironment(key, await freePort()),
       );
       if (failure !== undefined) {
         await rm(workspace.path, { recursive: true, force: true });
@@ -1298,7 +1348,7 @@ export class PreviewService {
         build,
         workspace.path,
         installOutput,
-        await this.previewEnvironment(repositoryId, await freePort()),
+        await this.previewEnvironment(key, await freePort()),
       );
       if (buildFailure !== undefined) {
         // A configured build is an answer and is fatal; a detected one is a
@@ -1323,6 +1373,7 @@ export class PreviewService {
     for (const candidate of candidates) {
       const attempt = await this.attemptCommand({
         repositoryId,
+        previewId: key,
         command: candidate,
         workspacePath: workspace.path,
         revision: version.revision,
@@ -1343,7 +1394,7 @@ export class PreviewService {
       if (tried.length > 0) {
         attempt.entry.status.tried = [...tried];
       }
-      this.running.set(repositoryId, attempt.entry);
+      this.running.set(key, this.stampBranch(attempt.entry, target));
       return {
         ...attempt.entry.status,
         recentOutput: [...attempt.entry.status.recentOutput],
@@ -1396,6 +1447,8 @@ export class PreviewService {
    */
   private async attemptCommand(input: {
     repositoryId: string;
+    /** The registry key, so the project directory is this preview's own. */
+    previewId?: string;
     command: PreviewCandidate;
     workspacePath: string;
     revision: string;
@@ -1414,7 +1467,10 @@ export class PreviewService {
   }): Promise<{ entry: Running } | { failure: string }> {
     const { command } = input;
     const port = await freePort();
-    const environment = await this.previewEnvironment(input.repositoryId, port);
+    const environment = await this.previewEnvironment(
+      input.previewId ?? input.repositoryId,
+      port,
+    );
     const child = spawn(command.executable, withPort(command.args, port), {
       // A monorepo's app is started in its own directory: there is no root
       // script that runs it, and every package manager walks up from here for
@@ -1696,8 +1752,10 @@ export class PreviewService {
   }
 
   /** What this repository's preview is doing, if it has one. */
-  public async status(repositoryId: string): Promise<PreviewStatus | undefined> {
-    const entry = this.running.get(repositoryId);
+  public async status(
+    target: PreviewTarget,
+  ): Promise<PreviewStatus | undefined> {
+    const entry = this.running.get(previewKey(target));
     if (entry === undefined) {
       return undefined;
     }
@@ -1720,7 +1778,34 @@ export class PreviewService {
   }
 
   /** Stops the preview and removes its checkout. Safe to call when none runs. */
-  public async stop(repositoryId: string): Promise<void> {
+  public async stop(target: PreviewTarget): Promise<void> {
+    await this.stopByKey(previewKey(target));
+  }
+
+  /**
+   * Stops one entry by its registry key.
+   *
+   * The sweeper and shutdown iterate keys and have no target to rebuild — and
+   * reconstructing one by splitting the key would be a parser that exists
+   * only to undo a join.
+   */
+  /**
+   * Records on the entry which branch it is running.
+   *
+   * Applied where the entry is stored rather than at each of the four places
+   * a `PreviewStatus` is built, because those are the constructors that would
+   * have to remember and one of them forgetting is invisible — the field is
+   * optional, so a missing branch reads as canonical rather than as a bug.
+   */
+  private stampBranch(entry: Running, target: PreviewTarget): Running {
+    if (target.branch === undefined || target.branch === "") {
+      return entry;
+    }
+    entry.status.branch = target.branch;
+    return entry;
+  }
+
+  private async stopByKey(repositoryId: string): Promise<void> {
     const entry = this.running.get(repositoryId);
     if (entry === undefined) {
       return;
@@ -1751,7 +1836,7 @@ export class PreviewService {
     // everything had been stopped, leaving a process nobody is holding.
     await Promise.allSettled([...this.previewsStarting.values()]);
     await Promise.allSettled([
-      ...[...this.running.keys()].map((repositoryId) => this.stop(repositoryId)),
+      ...[...this.running.keys()].map((key) => this.stopByKey(key)),
       ...[...this.taskPreviews.keys()].map((taskId) => this.stopForTask(taskId)),
     ]);
   }
@@ -1773,7 +1858,8 @@ export class PreviewService {
    * you press play is one nobody presses twice.
    */
   private async previewEnvironment(
-    repositoryId: string,
+    /** The preview's registry key — a repository id, or one plus a branch. */
+    previewId: string,
     port: number,
   ): Promise<NodeJS.ProcessEnv> {
     // A preview is somebody else's app: it gets the allow-listed child
@@ -1784,10 +1870,13 @@ export class PreviewService {
     for (const name of CONTROL_PLANE_VARIABLES) {
       delete environment[name];
     }
+    // Per preview, not per repository: two branches are two checkouts with
+    // two dependency trees, and sharing this directory has the second start
+    // install over the first's `node_modules` while it is running.
     const projectRoot = path.join(
       this.project.workspaceRoot,
       "preview-projects",
-      repositoryId,
+      previewId.replace("\u0000", "-").replaceAll("/", "-"),
     );
     await mkdir(projectRoot, { recursive: true });
     // Idempotent, and never overwrites an existing config — so a preview keeps
@@ -1805,9 +1894,9 @@ export class PreviewService {
 
   private async sweepIdle(): Promise<void> {
     const now = Date.now();
-    for (const [repositoryId, entry] of [...this.running]) {
+    for (const [key, entry] of [...this.running]) {
       if (now - entry.lastAskedAt > IDLE_TIMEOUT_MS) {
-        await this.stop(repositoryId);
+        await this.stopByKey(key);
       }
     }
   }

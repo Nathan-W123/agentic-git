@@ -3,6 +3,7 @@ import type { CoordinatorProject } from "@coord/cli/project";
 import { createLocalSummariser } from "@coord/local-triage";
 import type { CoordinationStore } from "@coord/persistence";
 import {
+  normalizeGitHubRepository,
   PUSH_BRANCH_NAME_TIMEOUT_MS,
   SyncDivergedError,
   UpstreamChangedError,
@@ -55,6 +56,115 @@ export function defaultPushBranchNamer(): PushBranchNamer | undefined {
     branchNamer = async (prompt) => await local.write(prompt, 16);
   }
   return branchNamer;
+}
+
+/**
+ * The second gate: a merged work channel, on GitHub, as a pull request.
+ *
+ * Kumi has already reviewed this channel's branch into canonical. This puts
+ * canonical on GitHub under the channel's own name and asks for it to go into
+ * whatever the remote calls main, so the people who review there see one pull
+ * request per channel rather than one per push with a generated name.
+ *
+ * `allowExistingTarget` is on, unlike the ordinary `/push`. That one refuses
+ * to move a branch it did not create, because an agent asking to publish is
+ * asking for somewhere new and overwriting a stranger's branch is a different
+ * act. This branch is not a stranger's: it is named for a channel this
+ * deployment owns, only a channel that has merged reaches here, and shipping
+ * the same channel again is meant to update the pull request it already
+ * opened rather than fail.
+ *
+ * The credential is the caller's own stored GitHub connection, the same rule
+ * the push follows. A shared deployment token would open pull requests under
+ * one person's name from everybody's work.
+ */
+export async function shipChannelToGitHub(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  github: GitHubConnectionService,
+  request: {
+    repositoryId: string;
+    actorId: string;
+    branch: string;
+    title: string;
+    body: string;
+  },
+  repositories?: RepositoryService,
+): Promise<PushCanonicalResult & { detail?: { url?: string } }> {
+  const stored = await store.getRepository(request.repositoryId);
+  const remoteUrl = stored?.remoteUrl ?? "";
+  if (remoteUrl.length === 0) {
+    return {
+      outcome: "refused",
+      explanation:
+        `${request.repositoryId} has no remote recorded, so there is nowhere ` +
+        "to ship it. Connect it to a GitHub repository first — the merge " +
+        "itself already landed, and nothing was lost.",
+    };
+  }
+  const target = normalizeGitHubRepository(remoteUrl);
+  if (target === undefined) {
+    return {
+      outcome: "refused",
+      explanation:
+        `${request.repositoryId}'s remote is not a GitHub repository, so a ` +
+        "pull request cannot be opened for it. The merge already landed.",
+    };
+  }
+  const connection = await github.tokenFor(request.actorId);
+  if (connection === undefined) {
+    return {
+      outcome: "refused",
+      explanation:
+        "You haven't connected GitHub, so there is no account to ship as. " +
+        "Connect GitHub in Settings and ask again — the merge already " +
+        "landed, and nothing was lost.",
+    };
+  }
+  const credentials = { token: connection.token };
+  const base = stored?.branch ?? "main";
+  try {
+    // Synced first, for the reason `/push` syncs first: canonical has to
+    // contain whatever GitHub has, or the branch pushed from it asks to
+    // revert somebody else's work.
+    await repoSync(
+      project,
+      store,
+      { repositoryId: request.repositoryId, actorId: request.actorId, credentials },
+      repositories,
+    );
+    const pushed = await repoPush(
+      project,
+      store,
+      {
+        repositoryId: request.repositoryId,
+        credentials,
+        targetBranch: request.branch,
+        allowExistingTarget: true,
+      },
+      repositories,
+    );
+    const pull = await github.openPullRequest({
+      token: connection.token,
+      repository: target,
+      head: pushed.targetBranch,
+      base,
+      title: request.title,
+      body: request.body,
+    });
+    return {
+      outcome: "done",
+      detail: { url: pull.url },
+      explanation:
+        (pull.existing
+          ? `Updated the pull request for ${pushed.targetBranch}`
+          : `Opened a pull request from ${pushed.targetBranch} into ${base}`) +
+        (connection.login === undefined ? "" : ` as ${connection.login}`) +
+        `: ${pull.url}`,
+    };
+  } catch (error) {
+    return { outcome: "refused", explanation: describeError(error) };
+  }
 }
 
 async function pushCanonicalAs(

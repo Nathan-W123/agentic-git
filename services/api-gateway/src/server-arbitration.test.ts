@@ -1703,14 +1703,17 @@ test("a restart still finds and withdraws a hold it did not post", async (t) => 
   // The restart, as far as this line is concerned: everything the process
   // remembered about posting it is gone, and only the reply itself is left.
   const gateway = runtime.gateway as unknown as {
-    arbitrationNotices: Map<string, unknown>;
+    notices: { clear(): void };
     withdrawArbitrationNotice(watched: {
       projectId: string;
       repositoryId: string;
       taskId: string;
     }): Promise<void>;
   };
-  gateway.arbitrationNotices.clear();
+  // What shutdown does, which is the whole point: the board drops what it
+  // remembered and every standing line is left findable only from the thread
+  // it hangs in.
+  gateway.notices.clear();
 
   await gateway.withdrawArbitrationNotice({
     projectId: DEFAULT_PROJECT_ID,
@@ -2674,12 +2677,27 @@ test('approving a finding with "yes, do it" dispatches the fix', async (t) => {
       revision: "b".repeat(40),
     },
   });
+  // Waited on the *finding*, not on the thread it hangs off. The auditor
+  // posts a summary root first and each finding as a reply to it, so a wait
+  // for "any message" returns while there is still nothing to approve —
+  // "yes, do it" then lands on an empty thread and dispatches nothing. That
+  // was a one-in-three flake for as long as the gap stayed small enough to
+  // usually lose the race.
   await waitFor(
     async () =>
-      (await runtime.store.listChannelMessages(repo, ownerId)).length > 0,
+      (await runtime.store.listChannelMessages(repo, ownerId)).some((message) =>
+        message.replies.some((reply) =>
+          reply.content.includes("Retry loop runs one time too many"),
+        ),
+      ),
     "the auditor never posted its findings",
   );
-  const [audit] = await runtime.store.listChannelMessages(repo, ownerId);
+  const audit = (await runtime.store.listChannelMessages(repo, ownerId)).find(
+    (message) =>
+      message.replies.some((reply) =>
+        reply.content.includes("Retry loop runs one time too many"),
+      ),
+  );
   assert.notEqual(audit, undefined);
 
   const reply = await owner.request(

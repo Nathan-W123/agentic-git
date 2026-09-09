@@ -88,3 +88,114 @@ test("a lease request announces the worker's protocol version", async () => {
   });
   assert.equal(typeof WORKER_PROTOCOL_VERSION, "number");
 });
+
+test("an image is sent as its own bytes, under its own content type", async () => {
+  let seen: { url: string; contentType: string | null; body: unknown } | undefined;
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async (input, init) => {
+      seen = {
+        url: String(input),
+        contentType: new Headers(init?.headers).get("Content-Type"),
+        body: init?.body,
+      };
+      return new Response(JSON.stringify({ id: "abc.png" }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  assert.equal(await client.attachImage("lease_1", bytes, "image/png"), "abc.png");
+  assert.equal(
+    seen?.url,
+    "https://control.example/api/v1/workers/leases/lease_1/attachment",
+  );
+  // Not JSON: the store reads the format out of the bytes themselves, and
+  // base64 in a field would have made them something else on the way.
+  assert.equal(seen?.contentType, "image/png");
+  assert.deepEqual([...(seen?.body as Uint8Array)], [...bytes]);
+});
+
+test("a refused image is undefined rather than a failed run", async () => {
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async () =>
+      new Response(
+        JSON.stringify({ error: { code: "not_supported", message: "no store" } }),
+        { status: 501, headers: { "Content-Type": "application/json" } },
+      ),
+  });
+  assert.equal(
+    await client.attachImage("lease_1", Buffer.from([1]), "image/png"),
+    undefined,
+  );
+});
+
+test("a non-JSON error page becomes a control-plane error that quotes it", async () => {
+  // The failure this replaces killed a worker on somebody's laptop and left
+  // nothing behind: JSON.parse ran before the status was read, so a proxy's
+  // HTML page raised a SyntaxError, which is not retryable and not a
+  // ControlPlaneError, and it exited the process out of `register`.
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async () =>
+      new Response("<html><body>502 Bad Gateway</body></html>", {
+        status: 502,
+      }),
+  });
+
+  await assert.rejects(
+    client.register({
+      organizationId: "org_1",
+      name: "laptop",
+      adapters: ["codex"],
+      version: "1.0.0",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ControlPlaneError");
+      assert.match(error.message, /502 Bad Gateway/u);
+      return true;
+    },
+  );
+});
+
+test("registration that carries no worker id is refused by name", async () => {
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async () => new Response(null, { status: 204 }),
+  });
+
+  await assert.rejects(
+    client.register({
+      organizationId: "org_1",
+      name: "laptop",
+      adapters: ["codex"],
+      version: "1.0.0",
+    }),
+    /reply carried no worker id/u,
+  );
+});
+
+test("a successful reply that is not JSON is reported, not returned", async () => {
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    fetch: async () => new Response("not json at all", { status: 200 }),
+  });
+
+  await assert.rejects(
+    client.register({
+      organizationId: "org_1",
+      name: "laptop",
+      adapters: ["codex"],
+      version: "1.0.0",
+    }),
+    /not JSON: not json at all/u,
+  );
+});

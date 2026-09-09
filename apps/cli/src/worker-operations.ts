@@ -26,6 +26,7 @@ import {
   isDeferredScopeFollowUp,
   assessReplay,
   buildTaskHandoff,
+  filesOutsideClaim,
   recordTaskHandoff,
   splitChangeSet,
   withheldPatchRecord,
@@ -40,6 +41,11 @@ import {
   reportEditorWork,
   takeEditorWork,
 } from "./editor-work.js";
+import {
+  blockedAdmissionHistory,
+  wasPartiallyAdmitted,
+} from "./admission-history.js";
+import { LeasePlanAuthority } from "./lease-admission.js";
 import {
   CLAIM_HEARTBEAT_INTERVAL_MS,
   askToDeliver,
@@ -57,6 +63,7 @@ import type {
 } from "@coord/persistence";
 import {
   agentCommitIdentity,
+  canonicalOn,
   LEASE_REF_PREFIX,
   RepositoryService,
   type CanonicalRepository,
@@ -314,6 +321,12 @@ export interface WorkResultServices {
   /** Reads what a canonical advance changed, to decide whether it matters. */
   intelligence?: CodeIntelligenceService;
   integrationRoot?: string;
+  /**
+   * Arbitrates a frozen claim's widening, on the one result path that can
+   * produce one. Injected for the same reason the other three operations take
+   * it: a test needs to watch the decision, not only its consequence.
+   */
+  admissions?: PlanAdmissionController;
 }
 
 /**
@@ -371,11 +384,7 @@ function canonical(repository: {
   path: string;
   branch: string;
 }): CanonicalRepository {
-  return {
-    id: repository.id,
-    path: repository.path,
-    branch: repository.branch,
-  };
+  return canonicalOn(repository, undefined);
 }
 
 function errorMessage(error: unknown): string {
@@ -412,6 +421,114 @@ async function failClaimedTask(
   if (current?.status === "claimed") {
     await store.completeSubmittedTask(taskId, "failed", runId);
   }
+}
+
+/**
+ * Re-arbitrates work a frozen claim permits but no longer occupies.
+ *
+ * The in-process coordinator has done this since frozen claims existed
+ * (`widenFrozenClaim`); the remote path never has, and the gap is a real hole
+ * rather than a stylistic difference. A claim frozen from observation carries
+ * the *directories* its holder was working in, and `claimCoversPath` — which
+ * is what `assertChangeSetWithinPlan` consults — reads those directories as
+ * approval. But arbitration stopped treating them as a hold, so a path under
+ * one may since have been granted to somebody else, and the validator waves it
+ * through on the strength of a prefix.
+ *
+ * `claimOccupiesPath`, which `filesOutsideClaim` uses, is the stricter reading:
+ * a frozen claim occupies only the files it names. The difference between the
+ * two is exactly the set of files this has to ask about, and asking is the
+ * whole of the fix — a file still free is granted here and the run continues,
+ * a file somebody else holds ends the lease. Silence was the only wrong answer,
+ * because it puts two tasks in one file with nothing anywhere saying so.
+ *
+ * Returns the plan to enforce against: the widened one when a widening was
+ * granted, the original otherwise. Throws when it was refused, which the
+ * caller's existing catch turns into a failed lease — the same outcome the
+ * in-process path produces by throwing from the same decision.
+ */
+async function widenFrozenClaimForResult(input: {
+  store: CoordinationStore;
+  plan: AgentPlan;
+  granted: ChangeSet;
+  task: SubmittedTask;
+  lease: WorkLease;
+  planRevision: number;
+  baseVersion: CanonicalVersion;
+  repository: CanonicalRepository;
+  repositories: RepositoryService;
+  intelligence: CodeIntelligenceService;
+  admissions: PlanAdmissionController;
+}): Promise<AgentPlan> {
+  const kind = input.plan.claim?.kind;
+  if (kind !== "frozen" && kind !== "declared") {
+    return input.plan;
+  }
+  const escaped = filesOutsideClaim(
+    input.plan,
+    input.granted.patches.map((patch) => patch.path),
+  );
+  if (escaped.length === 0) {
+    return input.plan;
+  }
+  const revisedPlan: AgentPlan = {
+    ...input.plan,
+    expectedFiles: [...input.plan.expectedFiles, ...escaped].sort(),
+  };
+  // Told which lease this task holds, or the authority takes its "no durable
+  // lease, so nothing to arbitrate against" path and admits unconditionally —
+  // which would leave this function looking like it ran and deciding nothing.
+  const authority = new LeasePlanAuthority({
+    store: input.store,
+    leaseIdForTask: new Map([[input.task.id, input.lease.id]]),
+    repositories: input.repositories,
+    intelligence: input.intelligence,
+    admissions: input.admissions,
+  });
+  const answer = await authority.admit({
+    task: {
+      id: input.task.id,
+      objective: input.task.objective,
+      agentId: input.task.agentId,
+      validationCommands: input.task.validationCommands,
+      ...(input.task.projectId === undefined
+        ? {}
+        : { projectId: input.task.projectId }),
+      ...(input.task.context === undefined
+        ? {}
+        : { context: input.task.context }),
+    },
+    plan: revisedPlan,
+    planRevision: input.planRevision + 1,
+    baseVersion: input.baseVersion,
+    repository: input.repository,
+    ...(input.task.projectId === undefined
+      ? {}
+      : { projectId: input.task.projectId }),
+    revising: true,
+    // All or nothing, as every mid-run caller asks: a narrower grant would
+    // leave a file somebody else holds inside the plan the changeset is then
+    // validated against, which is the hole this closes wearing a second face.
+    partialAdmission: false,
+  });
+  if (answer.outcome !== "admitted" || answer.admission !== undefined) {
+    const explanation =
+      answer.outcome === "admitted"
+        ? (answer.admission?.explanation ?? "")
+        : answer.explanation;
+    throw new Error(
+      `Work outside the frozen claim could not be kept: ${escaped.join(", ")} ` +
+        `overlaps work running elsewhere in this repository: ${explanation}`,
+    );
+  }
+  // No run exists yet on this path — it is created after validation — so the
+  // audit is written against no run rather than deferred until one is.
+  await trace(input.store, undefined, "plan_revised", input.task.id, {
+    revision: input.planRevision + 1,
+    reason: "frozen_claim_widened",
+    expectedFiles: revisedPlan.expectedFiles,
+  });
+  return revisedPlan;
 }
 
 async function trace(
@@ -674,7 +791,19 @@ export async function leaseWork(
     if (stored === undefined) {
       throw new Error(`Unknown repository: ${next.repositoryId}`);
     }
-    const repository = canonical(stored);
+    // The task's branch, not the repository's, when it has one.
+    //
+    // This one substitution is the whole of "work happens on the channel's
+    // branch". Everything downstream reads `repository.branch`: the canonical
+    // version the lease pins its base to, the worktree the agent is given,
+    // and the compare-and-swap that decides whether the change may land. Set
+    // it here and all three follow; set it anywhere else and they disagree,
+    // which is a change written against one branch and integrated into
+    // another.
+    //
+    // Absent is the repository's own branch, which is what every task written
+    // before work channels existed meant and still means.
+    const repository = canonicalOn(stored, next.branch);
     const version = await repositories.getCanonicalVersion(repository);
     const leased = await store.leaseNextTask({
       workerId: input.workerId,
@@ -724,7 +853,11 @@ export async function leaseWork(
       task: leased.task,
       repository: {
         id: stored.id,
-        branch: stored.branch,
+        // What the lease was actually taken against, which is the channel's
+        // branch when the task named one. The worker checks this out, so a
+        // stored branch here would hand it a worktree from one branch and a
+        // base revision from another.
+        branch: repository.branch,
       },
       canonicalVersion: version,
       bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
@@ -762,7 +895,10 @@ export async function leaseBundle(
     return undefined;
   }
   return await repositories.createBundle(
-    canonical(repository),
+    // The lease's branch: this bundle is what the worker clones, and packing
+    // it from the repository's own branch would hand a worker on a channel
+    // branch a workspace built from somewhere its base revision is not.
+    canonicalOn(repository, lease.branch),
     lease.baseRevision,
     bundleRefFor(lease.id),
     have,
@@ -846,7 +982,11 @@ async function requeueForCanonicalChange(
     repository === undefined
       ? []
       : await repositories.listChangedFiles(
-          canonical(repository),
+          // The branch this lease is on: "what moved under me" is a question
+          // about the place this work is being written, and answering it from
+          // the repository's own branch would tell a worker on a channel
+          // branch about commits that never touched it.
+          canonicalOn(repository, lease.branch),
           previousVersion.revision,
           canonicalVersion.revision,
         );
@@ -1383,7 +1523,7 @@ export async function claimWorkRepository(
   const intelligence =
     services.intelligence ?? new CodeIntelligenceService(repositories);
   const admissions = services.admissions ?? new PlanAdmissionController();
-  const repository = canonical(storedRepository);
+  const repository = canonicalOn(storedRepository, lease.branch);
   let baseVersion: CanonicalVersion;
   try {
     baseVersion = await repositories.getVersionAtRevision(
@@ -1665,77 +1805,13 @@ export async function tasksWaitingOnActiveWork(
   return waiting;
 }
 
-/**
- * How often running this task has been refused outright: in an unbroken run
- * ending at the most recent admission, and over the task's whole life.
- *
- * Deliberately blind to *which* task did the blocking. An earlier version
- * counted only while the blocking set stayed identical, on the reasoning that
- * a task refused by two different holders is making progress through a queue.
- * That reasoning is wrong in exactly the case this mechanism exists for: three
- * tasks contending for one function block each other in a rotating order, so
- * the blocking set changes every turn, the run resets every turn, and the
- * escalation is never reached. The loop survives the fix meant to break it.
- *
- * Escalating on a genuine queue costs nothing anyway, which is what makes the
- * blunter rule safe. Sequencing behind whoever currently holds the resource is
- * the correct answer whether that holder is the same one as last time or not —
- * it grants no permission to execute either way.
- *
- * `total` is the backstop. A task that alternates between refusals and other
- * non-approving answers never builds a consecutive run, so the unbroken count
- * alone still has a hole; the lifetime count has none, because it only ever
- * rises.
- *
- * The admission record is the source because the count has to outlive the
- * lease. The loop this exists to break releases its lease on every turn, and
- * the next turn may be a different worker entirely, so anything held in memory
- * would reset exactly when it mattered.
- */
-export async function blockedAdmissionHistory(
-  store: CoordinationStore,
-  taskId: TaskId,
-): Promise<{ consecutive: number; total: number }> {
-  const events = await store.listAuditEvents({
-    taskId,
-    types: ["plan_admitted"],
-  });
-  let consecutive = 0;
-  let counting = true;
-  let total = 0;
-  for (const entry of [...events].reverse()) {
-    if (entry.event.data["status"] === "blocked") {
-      total += 1;
-      if (counting) {
-        consecutive += 1;
-      }
-      continue;
-    }
-    counting = false;
-  }
-  return { consecutive, total };
-}
-
-/**
- * Whether this task has already spent an execution on a partial admission.
- *
- * A task may prove that its nominally free files cannot be changed without
- * the withheld ones. That attempt is returned to the queue, and allowing the
- * next lease to split the same plan again would repeat the empty execution
- * forever. The audit trail survives that lease boundary, so it is the stable
- * signal that subsequent admissions must decide the plan as one unit.
- */
-export async function wasPartiallyAdmitted(
-  store: CoordinationStore,
-  taskId: TaskId,
-): Promise<boolean> {
-  return (
-    await store.listAuditEvents({
-      taskId,
-      types: ["plan_admitted"],
-    })
-  ).some((entry) => entry.event.data["partial"] === true);
-}
+// Re-exported rather than moved out of sight: these have callers, tests
+// among them, that name this module and have no reason to care that the
+// readers moved so the two admission paths could share one narrowing.
+export {
+  blockedAdmissionHistory,
+  wasPartiallyAdmitted,
+} from "./admission-history.js";
 
 /**
  * The plans currently executing in one repository, and the exact set of
@@ -1852,7 +1928,7 @@ export async function admitWorkPlan(
     await failLease(store, lease, reason, "remote_plan_validation");
     return { outcome: "rejected", reason };
   }
-  const repository = canonical(storedRepository);
+  const repository = canonicalOn(storedRepository, lease.branch);
   let baseVersion: CanonicalVersion;
   let current: CanonicalVersion;
   try {
@@ -2184,7 +2260,7 @@ export async function admitWorkPlan(
     // functions of plan and index, so computing them now yields exactly what
     // full admission would have stored, and the comparison loses nothing to
     // the fast path having skipped it.
-    const active = executing.active.map((entry) =>
+    let active = executing.active.map((entry) =>
       entry.plan.grounding === undefined
         ? {
             ...entry,
@@ -2195,6 +2271,58 @@ export async function admitWorkPlan(
           }
         : entry,
     );
+
+    // A repository-wide claim is narrowed here, on arrival, before anything is
+    // decided against it.
+    //
+    // Without this the answer was foregone: a blanket claim covers every path,
+    // so `claimBlocked` refused whatever this plan said and the holder was
+    // never asked anything. The pieces to ask it were all present and all
+    // unreachable — a remote holder publishes itself into the same registry a
+    // local one does, and its heartbeat beats faster while a claim is held
+    // precisely so it can carry an ask — but the ask is armed by asking, and
+    // the only caller that asks lives on the local coordinator's admission
+    // path. So the heartbeat delivered nothing, every time, and an arrival
+    // waited for a poll that had no reason to fire.
+    //
+    // The narrowing is the local path's own, called rather than copied: the
+    // ask, its bound, the freeze that covers a holder which will not answer,
+    // and the compare-and-swap that makes a lost race harmless all come with
+    // it. `leaseIdForTask` is empty deliberately — the holder is not a task
+    // this process is executing, which is the arrival's case the freeze
+    // already handles by finding the lease itself.
+    //
+    // Answering `undefined` leaves the claim whole and this plan sequenced,
+    // which is exactly today's behaviour and the right one: a holder that
+    // cannot be read or is still answering has not said anything that would
+    // make it safe to admit somebody into its files.
+    const blanket = active.find((entry) => isBlanketClaim(entry.plan));
+    if (blanket !== undefined && blanket.plan.expectedFiles.length > 0) {
+      const narrowed = await new LeasePlanAuthority({
+        store,
+        leaseIdForTask: new Map(),
+        repositories,
+        intelligence,
+        admissions,
+      })
+        .narrowBlanketHolder(
+          blanket,
+          baseVersion,
+          repository,
+          // What this arrival is asking for. A file the holder only guessed at
+          // and has never written to is released to it here rather than held
+          // for the rest of the holder's run.
+          uniqueRepositoryPaths(plan.expectedFiles),
+          task.projectId,
+        )
+        .catch(() => undefined);
+      if (narrowed !== undefined) {
+        active = active.map((entry) =>
+          entry.taskId === blanket.taskId ? narrowed : entry,
+        );
+      }
+    }
+
     const decided = admissions.admit({
       plan,
       agentId: task.agentId,
@@ -2507,7 +2635,7 @@ export async function arbitrateScopeChange(
     await failLease(store, lease, reason, "remote_scope_validation");
     return { outcome: "rejected", reason };
   }
-  const repository = canonical(storedRepository);
+  const repository = canonicalOn(storedRepository, lease.branch);
   let baseVersion: CanonicalVersion;
   try {
     baseVersion = await repositories.getVersionAtRevision(
@@ -2850,6 +2978,7 @@ export async function acceptWorkResult(
     services.integrations ?? new IntegrationService(repositories);
   const intelligence =
     services.intelligence ?? new CodeIntelligenceService(repositories);
+  const admissions = services.admissions ?? new PlanAdmissionController();
   const leaseAtStart = await store.getWorkLease(input.leaseId);
   if (leaseAtStart === undefined) {
     throw new Error(`Unknown lease: ${input.leaseId}`);
@@ -3047,14 +3176,19 @@ export async function acceptWorkResult(
       `Unknown repository: ${task.repositoryId}`,
     );
   }
-  const repository = canonical(storedRepository);
+  // From the lease as it was taken, not from the task: the task could have
+  // been edited since, and a result is integrated into the branch its base
+  // came from or into nothing at all.
+  const repository = canonicalOn(storedRepository, leaseAtStart.branch);
   let baseVersion: CanonicalVersion;
   // The enriched plan the coordinator admitted, not the one the worker chose
   // to report: ownership was granted against the former, so that is what the
   // changeset is held to. Under a partial admission this is already the
   // reduced plan, which is exactly the point — the contract is what was
   // granted, not what was asked for.
-  const plan = admitted.plan;
+  // Reassigned by the frozen-claim widening below, which is the one place the
+  // contract can legitimately grow between admission and enforcement.
+  let plan = admitted.plan;
   const deferred = deferredFilePaths(admitted.admission);
   // Only needed when the admission withheld something finer than a file, and
   // then it must be the *base* revision's index: a hunk's old side is measured
@@ -3112,6 +3246,22 @@ export async function acceptWorkResult(
     if (split.escaped.length > 0) {
       throw new ScopeExpansionError(split.escaped);
     }
+    // Before the validator, not after, and for the same reason the in-process
+    // path orders it this way: a granted widening puts the escaped files into
+    // the plan, which is what the next line then checks against.
+    plan = await widenFrozenClaimForResult({
+      store,
+      plan,
+      granted: split.granted,
+      task,
+      lease: leaseAtStart,
+      planRevision: admitted.admission.planRevision,
+      baseVersion,
+      repository,
+      repositories,
+      intelligence,
+      admissions,
+    });
     assertChangeSetWithinPlan(plan, split.granted);
   } catch (error) {
     return await rejectWorkerResult(
@@ -3164,10 +3314,16 @@ export async function acceptWorkResult(
   // through to integration, whose three-way apply merges disjoint hunks for
   // free and reports a real conflict otherwise. The paid replan becomes the
   // fallback instead of the default.
+  //
+  // `COORD_STRICT_PLAN_REBASE=1` restores the unconditional requeue, the same
+  // switch and the same spelling the plan path and the in-process coordinator
+  // already use. It was missing from this path alone, which is the one where
+  // an over-optimistic answer costs a promoted result rather than a replan.
   const currentBeforeRun = await repositories.getCanonicalVersion(repository);
   if (
     currentBeforeRun.revision !== baseVersion.revision &&
-    (await replay(currentBeforeRun)).semantic.length > 0
+    (process.env["COORD_STRICT_PLAN_REBASE"] === "1" ||
+      (await replay(currentBeforeRun)).semantic.length > 0)
   ) {
     return await requeueForCanonicalChange(
       store,

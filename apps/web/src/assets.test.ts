@@ -613,8 +613,48 @@ test("one play control beside the pin runs whatever the channel's app is", async
   // which reads the checkout. The one case detection cannot cover is asked
   // about and remembered, so a repository in any language starts from the
   // same button.
-  assert.match(data, /export async function startPreview\(repositoryId\)/u);
-  assert.match(data, /export async function stopPreview\(repositoryId\)/u);
+  // Every one of these takes the room as well as the repository. A work
+  // channel runs its own branch's app on its own port, so "which app" is two
+  // pieces of information and a call that carried only the first would start,
+  // stop and report on whichever one happened to be keyed first.
+  assert.match(
+    data,
+    /export async function startPreview\(\s*repositoryId,\s*channelId = activeSubChannelId\(repositoryId\),\s*\)/u,
+  );
+  assert.match(
+    data,
+    /export async function stopPreview\(\s*repositoryId,\s*channelId = activeSubChannelId\(repositoryId\),\s*\)/u,
+  );
+  assert.match(
+    data,
+    /export async function loadPreview\(repositoryId, channelId = activeSubChannelId\(repositoryId\)\)/u,
+  );
+  // And the room reaches the server, which resolves the branch from it rather
+  // than trusting a branch name off the query.
+  const channelQuery = data.slice(
+    data.indexOf("function channelQuery(repositoryId"),
+    data.indexOf("export async function loadPreview"),
+  );
+  assert.match(
+    channelQuery,
+    /channelId=\$\{encodeURIComponent\(channelId\)\}/u,
+    "the room has to reach the server, which resolves the branch from it",
+  );
+  // The browser caches by room too. One key per repository would have the
+  // second channel's answer overwrite the first, leaving whichever was opened
+  // last showing its address under every other channel's Run button.
+  assert.match(data, /export function previewKey\(/u);
+  for (const reader of ["previewRunning", "previewStopped"]) {
+    const body = chats.slice(
+      chats.indexOf(`function ${reader}(repositoryId)`),
+      chats.indexOf("\n}", chats.indexOf(`function ${reader}(repositoryId)`)),
+    );
+    assert.match(
+      body,
+      /state\.previews\[previewKey\(repositoryId\)\]/u,
+      `${reader} must read the room's entry, not the repository's`,
+    );
+  }
   assert.match(
     data,
     /export async function setPreviewCommand\(repositoryId, command\)[\s\S]{0,200}method: "PUT"/u,
@@ -637,18 +677,32 @@ test("one play control beside the pin runs whatever the channel's app is", async
   // reported as the repository exiting immediately. The second press is
   // refused, the control says it is busy, and the flag is cleared before the
   // question is asked so the answer can still be started.
-  assert.match(start, /previewsStarting\.has\(repositoryId\)/u);
-  assert.match(start, /previewsStarting\.add\(repositoryId\)/u);
-  assert.match(start, /previewsStarting\.delete\(repositoryId\)/u);
+  // Keyed by room for the same reason: two channels are two apps, and a guard
+  // shared between them reports starting the second as a second press on the
+  // first.
+  assert.match(start, /const key = previewKey\(repositoryId\)/u);
+  assert.match(start, /previewsStarting\.has\(key\)/u);
+  assert.match(start, /previewsStarting\.add\(key\)/u);
+  assert.match(start, /previewsStarting\.delete\(key\)/u);
   assert.ok(
-    app.indexOf("previewsStarting.delete(repositoryId)") <
+    app.indexOf("previewsStarting.delete(key)") <
       app.indexOf("askPreviewCommand(repositoryId, message)"),
     "the in-flight flag must be cleared before the question is asked",
   );
+  // The ready-watcher captures its room rather than re-reading it each pass.
+  // A cold start takes minutes and the reader does not sit still for them; a
+  // watcher that followed them would poll an unrelated channel's app and
+  // write the answer over that channel's entry, leaving the branch they were
+  // actually waiting on stuck on "starting…".
+  assert.match(
+    app,
+    /async function watchPreviewReady\(\s*repositoryId,\s*channelId = activeSubChannelId\(repositoryId\),\s*\)/u,
+  );
+
   // Shared through `state`, because the control is drawn in screen-chats.js
   // and that file cannot import app.js back.
   assert.match(app, /state\.previewsStarting = previewsStarting/u);
-  assert.match(control, /state\.previewsStarting\?\.has\(repositoryId\)/u);
+  assert.match(control, /state\.previewsStarting\?\.has\(previewKey\(repositoryId\)\)/u);
   assert.match(control, /ch-preview-toggle starting/u);
   assert.match(control, /disabled/u);
   assert.match(css, /\.ch-preview-toggle\.starting \{/u);
@@ -665,8 +719,8 @@ test("one play control beside the pin runs whatever the channel's app is", async
     app.indexOf("async function watchPreviewReady"),
     app.indexOf("async function askPreviewCommand"),
   );
-  assert.match(watch, /previewsWatched\.has\(repositoryId\)/u);
-  assert.match(watch, /await loadPreview\(repositoryId\)/u);
+  assert.match(watch, /previewsWatched\.has\(key\)/u);
+  assert.match(watch, /await loadPreview\(repositoryId, channelId\)/u);
   assert.match(watch, /preview\.ready !== false/u);
   assert.match(watch, /preview\.exited !== undefined/u);
   assert.match(app, /case "preview-start":\s*void startPreviewAction\(value\);/u);
@@ -708,10 +762,39 @@ test("serves the vendored Monaco build same-origin under /vendor", async () => {
 });
 
 test("a missing vendor directory degrades to dashboard-only assets", async () => {
-  const assets = await loadStaticAssets(undefined, false, false);
+  const assets = await loadStaticAssets(undefined, false, false, false);
   assert.equal(assets.get("/app.js") !== undefined, true);
   assert.equal(assets.get("/vendor/monaco/vs/loader.js"), undefined);
   assert.equal(assets.get("/vendor/collab/index.js"), undefined);
+  // The terminal emulator is vendored the same way and degrades the same
+  // way: no package, no asset, and a Terminal tab that says so rather than a
+  // page that fails to load.
+  assert.equal(assets.get("/vendor/xterm/xterm.js"), undefined);
+});
+
+test("the terminal emulator is served same-origin, and only its two files", async () => {
+  const assets = await loadStaticAssets();
+  // A terminal's output is not text — it is text interleaved with cursor and
+  // colour instructions — so the page needs an emulator, and the CSP allows
+  // no external scripts. Vendored exactly as Monaco is.
+  assert.equal(
+    assets.get("/vendor/xterm/xterm.js")?.contentType,
+    "text/javascript; charset=utf-8",
+  );
+  assert.equal(
+    assets.get("/vendor/xterm/xterm.css")?.contentType,
+    "text/css; charset=utf-8",
+  );
+  // Two files, named. The package also ships sources, maps and typings, and
+  // serving a directory because it happens to be there is how a deployment
+  // publishes things nobody meant to.
+  const vendored = [...assets.keys()].filter((url) =>
+    url.startsWith("/vendor/xterm/"),
+  );
+  assert.deepEqual(vendored.sort(), [
+    "/vendor/xterm/xterm.css",
+    "/vendor/xterm/xterm.js",
+  ]);
 });
 
 test("serves the collaboration engine the gateway itself runs", async () => {
@@ -4362,6 +4445,24 @@ test("a push sync collision asks which side wins and resumes the push", async ()
     repos,
     /repositories\/\$\{encodeURIComponent\(repositoryId\)\}\/push`/u,
   );
+});
+
+test("the sync question is asked once, never in a loop", async () => {
+  const repos = await publicFile("screen-repos.js");
+
+  // A refusal that arrives *after* an answer was given is that answer
+  // failing, not the same question again. Reopening the dialog on it is an
+  // infinite loop with no way out — which is exactly what it was: the same
+  // files, the same two buttons, forever, because `-X` cannot settle a file
+  // deleted on one side and edited on the other.
+  const sync = repos.slice(repos.indexOf("export async function syncRepositoryFromGitHub"));
+  const body = sync.slice(0, sync.indexOf("\n}"));
+  assert.match(body, /error\.code === "sync_conflict" && resolve === undefined/u);
+  // And the second time it says so, rather than going quiet.
+  const asked = body.indexOf("chooseSyncSide");
+  const told = body.indexOf("That did not settle it");
+  assert.notEqual(told, -1);
+  assert.ok(asked < told, "the ask must come before the give-up");
 });
 
 test("anything the interface can hide, it can also bring back", async () => {

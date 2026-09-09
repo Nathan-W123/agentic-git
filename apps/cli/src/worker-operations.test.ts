@@ -14,7 +14,7 @@ import "./blanket-claim.test.js";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   PostgresCoordinationStore,
   type CoordinationStore,
 } from "@coord/persistence";
@@ -77,7 +77,7 @@ interface Harness {
 }
 
 async function createHarness(
-  store: CoordinationStore = new InMemoryCoordinationStore(),
+  store: CoordinationStore = SqliteCoordinationStore.open(":memory:"),
   /** Extra seeded files, repository-relative, for multi-file scenarios. */
   extraFiles: Readonly<Record<string, string>> = {},
 ): Promise<Harness> {
@@ -2074,7 +2074,7 @@ const FREE_FILES = ["src/a.js", "src/b.js", "src/c.js", "src/d.js"];
 /** A repository with the contested file plus four uncontested ones. */
 async function splitHarness(): Promise<Harness> {
   return await createHarness(
-    new InMemoryCoordinationStore(),
+    SqliteCoordinationStore.open(":memory:"),
     Object.fromEntries(
       FREE_FILES.map((file, index) => [
         file,
@@ -2850,7 +2850,7 @@ const SHAPES = [
 ].join("\n");
 
 async function symbolHarness(): Promise<Harness> {
-  return await createHarness(new InMemoryCoordinationStore(), {
+  return await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "src/shapes.js": SHAPES,
     "src/free.js": "export const free = 1;\n",
   });
@@ -3255,7 +3255,7 @@ test("a solo plan is approved on the spot, without arbitration machinery", async
 });
 
 test("the second arrival is arbitrated against a fast-path plan's real footprint", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "src/pricing/total.js":
       "export function subtotal(lines) { return 1; }\n" +
       "export function orderTotal(customer, lines) { return 2; }\n",
@@ -3467,7 +3467,7 @@ async function externalAdvanceOnGuide(harness: Harness) {
 }
 
 test("a same-file loser with disjoint hunks is merged for free instead of replanned", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -3509,7 +3509,7 @@ test("a same-file loser with disjoint hunks is merged for free instead of replan
 });
 
 test("a same-file loser with overlapping hunks is requeued to replan, not failed", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -3559,7 +3559,7 @@ test("a same-file loser with overlapping hunks is requeued to replan, not failed
  * be worse than the refusal this replaces.
  */
 test("a conflict keeps the clean files and queues the contested one", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
     "docs/notes.md": "Notes line 1.\n",
   });
@@ -3677,7 +3677,7 @@ test("a result that both defers scope and salvages a conflict queues both", asyn
   // Both preconditions need contention, which is why this was invisible: at
   // parallelism 1 partial admission never fires. Making partial admission work
   // is what made this reachable.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
     "docs/notes.md": "Notes line 1.\n",
   });
@@ -3789,7 +3789,7 @@ test("a result that both defers scope and salvages a conflict queues both", asyn
 });
 
 test("a result its own validation rejects finishes the run as failed", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -3879,7 +3879,7 @@ function racingIntegrations(
 }
 
 test("a result that loses the integration race is assessed against the advance that beat it", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -3933,7 +3933,7 @@ test("a result that loses the integration race is assessed against the advance t
 });
 
 test("a result that loses the race to a semantically incompatible advance still replans", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4020,7 +4020,7 @@ function racingOnPromote(harness: Harness) {
 }
 
 test("a result overtaken during its own validation is merged for free rather than replanned", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4065,7 +4065,7 @@ test("a result overtaken during its own validation is merged for free rather tha
 });
 
 test("a race loser whose merged tree fails validation is requeued, never failed", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
     // The advance lands here instead, so re-assessment finds no blocker of any
     // kind — not even a textual one. Only the lost race can save this result
@@ -4127,7 +4127,7 @@ test("a race loser whose merged tree fails validation is requeued, never failed"
 });
 
 test("a result that keeps losing races gives up on the budget instead of retrying forever", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4203,7 +4203,7 @@ const SPACED_SHAPES = [
 ].join("\n");
 
 async function spacedHarness(): Promise<Harness> {
-  return await createHarness(new InMemoryCoordinationStore(), {
+  return await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "src/spaced.js": SPACED_SHAPES,
     "src/free.js": "export const free = 1;\n",
   });
@@ -4350,7 +4350,7 @@ test("a plan survives canonical moving somewhere it does not claim", async () =>
   // produced 16 to 26 replans a run at roughly 145k tokens each. A finished
   // result is never sent back for an advance like this, and an unexecuted plan
   // is worth less than a finished result.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4379,7 +4379,7 @@ test("a plan is still sent back when canonical moved under what it claims", asyn
   // on nothing: an advance that touches what the plan claims genuinely
   // invalidates it, and admitting it would let a task edit a file it has not
   // seen the current state of.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4412,7 +4412,7 @@ test("a plan is still sent back when canonical moved under what it claims", asyn
 test("the strict rebase switch restores the unconditional requeue", async () => {
   // The rollback, in the same shape as the other COORD_* switches: an operator
   // who decides the looser rule is wrong turns it off without a deploy.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   const previous = process.env["COORD_STRICT_PLAN_REBASE"];
@@ -4498,7 +4498,7 @@ test("a hosting process shares one repository index across admissions", async ()
   // long-lived control plane hands one shared service through, so an index
   // built for an admission is the same one its runs, overlays and rollbacks
   // read.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "src/other.js": "export const other = 1;\n",
   });
   try {
@@ -4605,4 +4605,196 @@ test("the admission retry budget grows with the contention it absorbs", () => {
   // Never fewer than it used to be, so nothing loses a retry it had.
   assert.equal(maxAdmissionAttemptsForTest(1), 4);
   assert.equal(maxAdmissionAttemptsForTest(2), 4);
+});
+
+/**
+ * Freezes an admitted lease's plan onto `src/`, keeping only the named files.
+ *
+ * A freeze is what an arrival does to a repository-wide holder, and it is the
+ * state this whole family of tests is about: a claim that *permits* writing
+ * anywhere under a directory while *occupying* only the files it names.
+ */
+async function freezeLeaseOnto(
+  harness: Harness,
+  assignment: WorkAssignment,
+  keep: readonly string[],
+): Promise<void> {
+  const lease = await harness.store.getWorkLease(assignment.lease.id);
+  assert.ok(lease?.plan);
+  const submission = {
+    ...lease.plan,
+    plan: {
+      ...lease.plan.plan,
+      expectedFiles: [...keep],
+      claim: {
+        kind: "frozen" as const,
+        directories: ["src/"],
+        frozenAt: new Date().toISOString(),
+      },
+    },
+  };
+  // The compare-and-swap is against whoever else is admitted right now, which
+  // in these tests is the rival holding the contested file. Re-reading the set
+  // it hands back is what the production callers do too.
+  let saved = await harness.store.saveWorkLeasePlan({
+    leaseId: assignment.lease.id,
+    submission,
+    observedApprovedLeaseIds: [],
+    replaceApproved: true,
+  });
+  if (saved.outcome === "stale") {
+    saved = await harness.store.saveWorkLeasePlan({
+      leaseId: assignment.lease.id,
+      submission,
+      observedApprovedLeaseIds: saved.approvedLeaseIds,
+      replaceApproved: true,
+    });
+  }
+  assert.equal(saved.outcome, "saved");
+}
+
+test("a frozen claim cannot write a file that was granted to somebody else", async () => {
+  // The hole this closes. `claimCoversPath` reads a frozen claim's directories
+  // as approval, so `src/value.js` passes the changeset validator on its
+  // prefix alone — while arbitration long since handed that file to the task
+  // holding it. Two tasks author one file and nothing anywhere says so.
+  const harness = await splitHarness();
+  try {
+    await holdTheContestedFile(harness);
+    const mine = await leaseTheSplitTask(harness);
+    const admitted = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: mine.lease.id,
+        actorId: "user",
+        plan: plan(mine.task.id, {
+          objective: mine.task.objective,
+          expectedFiles: ["src/a.js"],
+          expectedSymbols: [],
+        }),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.ok(admitted.outcome === "admitted");
+    await freezeLeaseOnto(harness, mine, ["src/a.js"]);
+
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: mine.task.id,
+      rootPath: path.join(harness.root, "frozen-workspace"),
+      repository: { id: stored.id, path: stored.path, branch: stored.branch },
+      baseVersion: mine.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "a.js"),
+      "export const free0 = 1;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 999;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "wrote inside the claim's directories",
+    });
+    await workspaces.destroy(workspace);
+
+    const outcome = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: mine.lease.id,
+        actorId: "user",
+        status: "completed",
+        plan: (await harness.store.getWorkLease(mine.lease.id))!.plan!.plan,
+        changeSet,
+      },
+      { repositories: harness.repositories },
+    );
+    assert.equal(outcome.accepted, false);
+    assert.match(outcome.reason ?? "", /outside the frozen claim/u);
+    assert.match(outcome.reason ?? "", /src\/value\.js/u);
+    assert.equal(
+      (await harness.store.getWorkLease(mine.lease.id))?.status,
+      "failed",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a frozen claim may still widen onto a file nobody holds", async () => {
+  // The other half, and the reason this is an arbitration rather than a ban:
+  // the directories are the holder's to work in. A file inside them that
+  // nobody else took is granted here, recorded as a revision, and the run
+  // carries on.
+  const harness = await splitHarness();
+  try {
+    await submit(harness);
+    const mine = await leaseAndAdmit(harness, {
+      expectedFiles: ["src/a.js"],
+      expectedSymbols: [],
+    });
+    await freezeLeaseOnto(harness, mine, ["src/a.js"]);
+
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: mine.task.id,
+      rootPath: path.join(harness.root, "widen-workspace"),
+      repository: { id: stored.id, path: stored.path, branch: stored.branch },
+      baseVersion: mine.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "a.js"),
+      "export const free0 = 1;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(workspace.path, "src", "b.js"),
+      "export const free1 = 2;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "one more file, nobody else in it",
+    });
+    await workspaces.destroy(workspace);
+
+    const outcome = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: mine.lease.id,
+        actorId: "user",
+        status: "completed",
+        plan: (await harness.store.getWorkLease(mine.lease.id))!.plan!.plan,
+        changeSet,
+      },
+      { repositories: harness.repositories },
+    );
+    assert.equal(outcome.accepted, true);
+    const audits = await harness.store.listAudit();
+    const widened = audits.find(
+      (event) =>
+        event.type === "plan_revised" &&
+        (event.data as { reason?: string }).reason === "frozen_claim_widened",
+    );
+    assert.ok(widened, "the widening should be on the record");
+    assert.deepEqual(
+      (widened.data as { expectedFiles?: string[] }).expectedFiles,
+      ["src/a.js", "src/b.js"],
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
 });

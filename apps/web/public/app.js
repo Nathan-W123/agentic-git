@@ -10,150 +10,163 @@
  */
 
 import {
+  activeChannelId,
+  activeSubChannelId,
+  addChannelAgent,
   api,
+  approveWaitlistEntry,
+  canDeleteRepository,
+  canLeaveRepository,
+  canManageOrganization,
+  canManageRepository,
+  CHANNEL_MESSAGE_MAX_CHARS,
+  channelAgentsFor,
+  channelAuthor,
+  channelMessagesFor,
+  closeChannelFile,
   closeSocket,
+  closeTerminal,
+  commentOnBranchLine,
   connectSocket,
-  ensureSocketAlive,
-  TYPING_SWEEP_MS,
-  noteAgentBusy,
-  noteDirectMessage,
-  noteDirectMessageEdited,
-  noteDirectMessageDeleted,
-  ensureDirectMessages,
-  loadChannelStats,
-  noteEventSequence,
-  loadDmThread,
-  sendDirectMessage,
-  noteTyping,
-  sendTyping,
+  createSubChannel,
   currentRepository,
   currentUserId,
   currentUserName,
+  decideApproval,
   DEFAULT_ACCENT,
   DEFAULT_ACCENT_SECONDARY,
   DEFAULT_AGENT_COLOR,
-  disconnectGitHub,
-  loadContext,
-  loadDeferredContext,
-  loadGitHub,
-  loadHealth,
-  loadProviders,
-  phoneLayout,
-  markRead,
-  myAccent,
-  myAccentSecondary,
-  myAgentColor,
-  myAvatar,
-  setMyAvatar,
-  setChannelPicture,
-  ensureChannelPictureShared,
-  myTheme,
-  myThemePreference,
-  setMyTheme,
-  myAgents,
-  notifications,
-  PROVIDER_VENDOR,
-  persist,
-  isFavourite,
-  flushChannelDrafts,
-  channelAgentsFor,
-  activeChannelId,
-  refreshChannelLiveness,
-  canLeaveRepository,
-  canManageRepository,
-  canDeleteRepository,
-  closeChannelFile,
-  loadChannelFile,
-  moveChannelFile,
-  saveChannelFile,
-  createSubChannel,
-  deleteSubChannel,
-  ensureChannelMessages,
-  ensureChannelRoster,
-  ensureSubChannels,
-  loadSubChannelMembers,
-  loadSubChannels,
-  activeSubChannelId,
-  archivedSubChannelsFor,
-  selectSubChannel,
-  setSubChannelArchived,
-  setSubChannelMember,
-  subChannelById,
-  subChannelsFor,
-  updateSubChannel,
-  ensureProviderUsage,
-  ensureRepositoryGrants,
-  markChannelRead,
-  isChannelMuted,
-  loadChannelMutes,
-  setChannelMuted,
-  refreshChannelMessages,
-  refreshProviderUsage,
-  takePromptedThread,
-  takeReadyPlan,
-  addChannelAgent,
-  removeChannelAgent,
-  renameAgent,
-  renameChannelAgent,
-  setChannelAgentSetting,
-  deleteRepository,
-  renameRepository,
-  repositoryLabel,
-  leaveRepository,
-  channelAuthor,
-  channelMessagesFor,
   deleteAllChannelThreads,
   deleteChannelMessageEntry,
   deleteChannelReplyEntry,
   deleteChannelThread,
   deleteDirectMessageEntry,
+  deleteRepository,
+  deleteSubChannel,
+  deleteWaitlistEntry,
+  DIRECT_MESSAGE_MAX_CHARS,
+  disconnectGitHub,
+  dmUnreadTotal,
   editChannelMessageEntry,
   editChannelReplyEntry,
   editDirectMessageEntry,
-  loadPreview,
-  rollbackTask,
-  setAuditorPaused,
-  setPreviewCommand,
-  simplifySummary,
-  startPreview,
-  uploadAttachment,
-  stopPreview,
-  setRepositoryGrant,
-  revokeRepositoryGrant,
-  updateMemberRole,
-  iAmSystemAdmin,
-  canManageOrganization,
-  resolveAttachmentImages,
-  openBillingPortal,
-  startCheckout,
   ensureBilling,
-  resetBilling,
-  joinWaitlist,
-  loadWaitlist,
-  approveWaitlistEntry,
-  deleteWaitlistEntry,
-  decideApproval,
+  ensureChangeSetForTask,
+  ensureChannelMessages,
+  ensureChannelPictureShared,
+  ensureChannelRoster,
   ensureDeployment,
+  ensureDirectMessages,
+  ensureProviderUsage,
+  ensureRepositoryGrants,
+  ensureSocketAlive,
+  ensureSubChannels,
+  flushChannelDrafts,
+  iAmSystemAdmin,
+  isChannelMuted,
+  isDirectMessagePerson,
+  isFavourite,
+  joinWaitlist,
+  leaveRepository,
   loadBilling,
-  setSystemAdmin,
+  loadBranchReview,
+  loadChannelFile,
+  releaseChannelFile,
+  loadFileHolds,
+  holdChannelFile,
+  loadChannelMessage,
+  loadChannelMutes,
+  loadChannelStats,
+  loadContext,
+  loadDeferredContext,
+  loadDmThread,
+  loadEarlierChannelMessages,
+  loadGitHub,
+  loadHealth,
+  loadPreview,
+  loadProviders,
+  loadSubChannelMembers,
+  loadSubChannels,
+  loadTerminalMachines,
+  loadWaitlist,
+  markChannelRead,
+  markRead,
+  memberName,
+  memberRole,
+  mergeBranchReview,
+  messageFoldOpen,
+  messageTooLong,
+  moveChannelFile,
+  myAccent,
+  myAccentSecondary,
+  myAgentColor,
+  myAgents,
+  myAvatar,
+  myTheme,
+  myThemePreference,
+  noteAgentBusy,
+  noteDirectMessage,
+  noteDirectMessageDeleted,
+  noteDirectMessageEdited,
+  noteEventSequence,
+  noteTyping,
+  notifications,
+  openBillingPortal,
+  openTerminalSession,
+  persist,
+  personOnline,
+  phoneLayout,
+  previewKey,
+  PROVIDER_VENDOR,
+  readTerminal,
+  refreshBranchReview,
+  refreshChannelLiveness,
+  refreshChannelMessages,
+  refreshProviderUsage,
+  removeChannelAgent,
   removeMember,
+  renameAgent,
+  renameChannelAgent,
+  renameRepository,
+  repositoryLabel,
+  resendChannelMessage,
+  resetBilling,
+  resizeTerminal,
+  resolveAttachmentImages,
+  reviewBranch,
+  revokeRepositoryGrant,
+  rollbackTask,
+  saveChannelFile,
+  selectSubChannel,
+  sendDirectMessage,
+  sendTerminalInput,
+  sendTyping,
+  setAuditorPaused,
+  setChannelAgentSetting,
+  setChannelMuted,
+  setChannelPicture,
+  setMyAvatar,
+  setMyTheme,
+  setPreviewCommand,
+  setRepositoryGrant,
+  setSubChannelMember,
+  setSystemAdmin,
+  shipBranchReview,
+  simplifySummary,
+  startCheckout,
+  startPreview,
   state,
+  stopPreview,
+  subChannelsFor,
+  takePromptedThread,
+  takeReadyPlan,
   toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
-  dmUnreadTotal,
-  isDirectMessagePerson,
-  memberName,
-  memberRole,
-  messageFoldOpen,
-  personOnline,
-  loadEarlierChannelMessages,
-  loadChannelMessage,
-  resendChannelMessage,
-  ensureChangeSetForTask,
-  CHANNEL_MESSAGE_MAX_CHARS,
-  DIRECT_MESSAGE_MAX_CHARS,
-  messageTooLong,
+  TYPING_SWEEP_MS,
+  updateMemberRole,
+  updateSubChannel,
+  uploadAttachment,
 } from "./data.js";
 import {
   $,
@@ -239,6 +252,7 @@ import {
   checkLocalCli,
   connectEditorToKumi,
   connectProviderSomehow,
+  desktopVersion,
   disconnectAgent,
   installVendorCli,
   connectGitHubAccount,
@@ -301,6 +315,8 @@ import {
   openChannel,
   paintComposerSuggestions,
   paintJumpToLatest,
+  paintFileHolds,
+  paintFileHolders,
   pickMention,
   pickSlashCommand,
   reactionPicker,
@@ -477,9 +493,20 @@ const AUTH_HASHES = new Map([
   // the marketing site can link straight at it, and so somebody can be sent
   // the form rather than "open the app and look for the link".
   ["waitlist", "waitlist"],
-  // `register` still maps, so an older bookmark opens the trial rather than
-  // a blank screen — the free form it used to open is gone.
-  ["register", "signup"],
+  // Where an invitation lands, carrying the approved address after the slash
+  // the way `#reset/<token>` carries its secret. It resolves to whichever
+  // door this deployment has open, so the mail does not have to know how the
+  // deployment is configured and turning payments on does not invalidate the
+  // invitations already sent.
+  //
+  // `register` is the address of the form that used to live here and the one
+  // older invitations point at, so it resolves the same way. It used to
+  // resolve to the paid sign-up unconditionally — which meant that on a
+  // deployment with payments off, the only kind that has a waitlist at all,
+  // an invitation landed the person back on the waitlist form they had
+  // already filled in.
+  ["register", "join"],
+  ["join", "join"],
   // Paid sign-up, and the screen somebody lands on coming back from Stripe.
   // `#welcome/<token>` carries its claim secret the way `#reset/<token>`
   // carries its own: in the fragment, which the browser never sends, so it
@@ -509,6 +536,35 @@ function authModeFromHash() {
   return AUTH_HASHES.get(
     window.location.hash.replace(/^#/u, "").split("/")[0] ?? "",
   );
+}
+
+/**
+ * The approved address out of a `#join/<email>` invitation, or "" if absent.
+ *
+ * Prefilled rather than retyped because the address is the credential here:
+ * an invitation admits one address, and somebody who signs up with their
+ * personal mail instead of the one that was let through is refused with no
+ * way to see why. The fragment is never sent, so this reaches no server and
+ * no access log, and it grants nothing on its own — the gate checks the
+ * address server-side, so a forwarded invitation still admits nobody new.
+ */
+function invitedEmailFromHash() {
+  const hash = window.location.hash.replace(/^#/u, "");
+  const separator = hash.indexOf("/");
+  if (separator === -1) {
+    return "";
+  }
+  const head = hash.slice(0, separator);
+  if (head !== "join" && head !== "register") {
+    return "";
+  }
+  try {
+    return decodeURIComponent(hash.slice(separator + 1));
+  } catch {
+    // A truncated or hand-edited link. An empty box somebody can fill in
+    // beats a thrown render, and the gate is server-side either way.
+    return "";
+  }
 }
 
 /** The secret out of a `#reset/<token>` link, or "" when there is none. */
@@ -724,27 +780,48 @@ function renderRegistrationConfirmation() {
 }
 
 function renderAuth() {
-  if (authMode === "forgot" || authMode === "reset") {
+  // An invitation says "join". Which form that means is the deployment's
+  // business and not the mail's: the trial and a card where payments are on,
+  // the free account the waitlist used to hand out where they are not.
+  //
+  // Waiting for health rather than guessing, and only here. Everywhere else
+  // an unknown answer reads as "payments off", because offering a waitlist
+  // to somebody who could have paid is recoverable. It is not recoverable
+  // here: this is somebody arriving on an invitation, and both wrong guesses
+  // put a dead form in front of them — a card form the checkout answers 501
+  // to, or a free form registration answers 410 to.
+  const mode =
+    authMode === "join"
+      ? state.health === undefined
+        ? "join"
+        : paymentsOn()
+          ? "signup"
+          : "register"
+      : authMode;
+  if (mode === "join") {
+    return renderInvitationLoading();
+  }
+  if (mode === "forgot" || mode === "reset") {
     return renderPasswordReset();
   }
-  if (authMode === "waitlist" || (authMode === "signup" && !paymentsOn())) {
+  if (mode === "waitlist" || (mode === "signup" && !paymentsOn())) {
     // `#signup` lands here too while payments are off: it is the address on
     // every link this product has ever sent, and a card form nobody can
     // complete is a worse answer than the thing that replaced it.
     return renderWaitlist();
   }
-  if (authMode === "signup") {
+  if (mode === "signup") {
     return renderSignup();
   }
-  if (authMode === "welcome") {
+  if (mode === "welcome") {
     return renderWelcome();
   }
-  if (authMode === "register" && pendingRegistration !== undefined) {
+  if (mode === "register" && pendingRegistration !== undefined) {
     return renderRegistrationConfirmation();
   }
   const setupRequired = state.health?.setupRequired === true;
-  const bootstrap = authMode === "bootstrap";
-  const register = authMode === "register";
+  const bootstrap = mode === "bootstrap";
+  const register = mode === "register";
 
   // Signing in is the common, repeat visit. Keep its card self-contained so
   // the task is obvious at a glance, rather than splitting the identity,
@@ -833,9 +910,8 @@ function renderAuth() {
                    placeholder="COORD_BOOTSTRAP_TOKEN"></label>`
               }
                <label class="field"><span>Your name</span>
-                 <input class="input" name="displayName" autocomplete="name" required></label>
-               <label class="field"><span>Team name</span>
-                 <input class="input" name="organizationName" value="Local team" required></label>`
+                 <input class="input" name="displayName" autocomplete="name"
+                   required></label>`
             : register
               ? `<label class="field"><span>Your name</span>
                    <input class="input" name="displayName" autocomplete="name" required></label>
@@ -954,6 +1030,28 @@ function paymentsOn() {
   return state.health?.billing?.payments === true;
 }
 
+/**
+ * The beat between opening an invitation and knowing which form it opens.
+ *
+ * Deliberately says nothing about a card or a queue, because at this point
+ * this browser does not know which it is, and a heading that has to be taken
+ * back reads worse than one that waits. Health is already in flight when the
+ * shell paints, so this is one frame in the ordinary case.
+ */
+function renderInvitationLoading() {
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandWordmark(120)}
+        <div>
+          <h1>You're through the waitlist</h1>
+          <p>One moment — getting your sign-up ready.</p>
+        </div>
+      </div>
+    </div>
+  </main>`;
+}
+
 /** Where everybody goes while nobody is being let in automatically. */
 function renderWaitlist() {
   return `<main class="auth-shell">
@@ -995,12 +1093,18 @@ function renderWaitlist() {
 
 /** Where a paid sign-up starts: an address, then Stripe takes the card. */
 function renderSignup() {
+  // Arriving on an invitation is a different moment from finding the pricing
+  // page: they have already asked, already waited, and already been told yes.
+  // Saying so is the difference between "start a trial" and "you're in".
+  const invited = invitedEmailFromHash();
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
         ${brandWordmark(120)}
         <div>
-          <h1>Start your free trial</h1>
+          <h1>${
+            invited === "" ? "Start your free trial" : "You're through the waitlist"
+          }</h1>
           <p>Fourteen days free. We take your card now and bill you on day
             fifteen — cancel any time before then and you pay nothing.</p>
         </div>
@@ -1009,8 +1113,14 @@ function renderSignup() {
         <label class="field">
           <span>Work email</span>
           <input class="input" name="email" type="email"
-            autocomplete="email" required placeholder="you@company.com">
-        </label>
+            autocomplete="email" required placeholder="you@company.com"
+            value="${esc(invited)}">
+        </label>${
+          invited === ""
+            ? ""
+            : `<p class="auth-foot">This is the address that was let through.
+                 Signing up with a different one will be turned away.</p>`
+        }
         <label class="field">
           <span>Team name <span class="muted">(optional)</span></span>
           <input class="input" name="organizationName"
@@ -1019,10 +1129,13 @@ function renderSignup() {
         <button class="btn btn-primary btn-wide" type="submit">
           Continue to payment
         </button>
-        <p class="auth-msg" id="auth-msg"></p>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
         <p class="auth-alt">Already have an account?
           <a href="#signin">Sign in</a></p>
       </form>
+      <p class="auth-foot">Kumi runs your agents on your own machine, so
+        you will want <a class="link-muted" href="/download">Kumi for
+        desktop</a> too.</p>
     </div>
   </main>`;
 }
@@ -1099,8 +1212,12 @@ function renderWelcome() {
         <button class="btn btn-primary btn-wide" type="submit">
           Create my account
         </button>
-        <p class="auth-msg" id="auth-msg"></p>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
       </form>
+      <p class="auth-foot">Next: <a class="link-muted"
+        href="/download">Kumi for desktop</a>. Agents run on your own machine
+        against your own Claude or Codex subscription, so nothing runs until
+        it does.</p>
     </div>
   </main>`;
 }
@@ -1227,7 +1344,7 @@ async function submitWaitlist(form) {
       note: String(data.get("note") ?? "").trim(),
       source: "app",
     });
-    form.innerHTML = `<p class="auth-msg" role="status">You are on the list.
+    form.innerHTML = `<p class="form-msg ok" role="status">You are on the list.
       We will email you when there is a place — nothing has been charged and
       there is nothing to pay.</p>`;
   } catch (error) {
@@ -1455,11 +1572,13 @@ async function submitBootstrap(form) {
       headers: { "X-Bootstrap-Token": String(data.get("token") ?? "").trim() },
       body: {
         displayName: String(data.get("displayName") ?? ""),
-        organizationName: String(data.get("organizationName") ?? ""),
         email: String(data.get("email") ?? ""),
         confirmEmail: String(data.get("confirmEmail") ?? ""),
         password: String(data.get("password") ?? ""),
         confirmPassword: String(data.get("confirmPassword") ?? ""),
+        // No team name is sent, because first-run setup no longer asks for
+        // one: the server names the deployment's organization after the owner
+        // creating it, and renaming a team is a settings screen away.
       },
     });
     authMode = "login";
@@ -2431,10 +2550,34 @@ function workspaceSection() {
         },
         {
           term: "People",
-          value: exactCountLabel(
-            (state.members ?? []).length,
-            (state.members ?? []).length === 1 ? "member" : "members",
-          ),
+          // The people who can reach the channel named directly above, not
+          // the organization's membership list.
+          //
+          // This panel names a project and a channel and then reported a
+          // count from a third scope, and the three do not agree: somebody
+          // invited to a repository holds a grant and no membership, so they
+          // are in the channel, in its roster, mentionable, running agents —
+          // and absent from this number. It read "1 member" for a workspace
+          // two people were working in, which is how an afternoon went by
+          // with nobody suspecting the invitation had only ever reached the
+          // innermost of the three things this screen calls a workspace.
+          //
+          // The channel roster is the honest list, and the one this screen is
+          // about: the server builds it from memberships and grants together.
+          // With no channel open there is no roster to count, and the
+          // organization's own membership is the right answer to a question
+          // about the organization.
+          value: (() => {
+            const roster =
+              repository === undefined
+                ? undefined
+                : state.channelPeople?.[repository.id];
+            const people = roster ?? state.members ?? [];
+            return exactCountLabel(
+              people.length,
+              people.length === 1 ? "person" : "people",
+            );
+          })(),
         },
       ])}</div>`,
   })}${invitationsCard()}${settingsSectionBlock({
@@ -2610,10 +2753,20 @@ function apiTokensCard() {
           aria-label="Token name">
         <button type="button" class="btn btn-sm btn-primary" data-act="token-create">Create</button>`,
     })}${settingRow({
+      row: "desktop-app",
       label: "Kumi for desktop",
+      // The version, where somebody can read it without having to make
+      // something fail first. There was nowhere at all to look: no About box,
+      // no menu item, and an app that cannot update itself — so "which build
+      // are you on" could not be answered by the person being asked, which is
+      // the question every report about a desktop behaviour starts with.
       description:
-        "Mac, Windows and Linux. It signs itself in through your browser, so it needs none of the tokens below.",
-      control: `<a class="btn btn-sm" href="/download" target="_blank" rel="noopener">Download</a>`,
+        desktopVersion() === undefined
+          ? "Mac, Windows and Linux. It signs itself in through your browser, so it needs none of the tokens below."
+          : `Version ${esc(desktopVersion())}, running now. It signs itself in through your browser, so it needs none of the tokens below.`,
+      control: `<a class="btn btn-sm" href="/download" target="_blank" rel="noopener">${
+        desktopVersion() === undefined ? "Download" : "Check for a newer one"
+      }</a>`,
     })}${
       tokens.length === 0
         ? `<div class="st-inline-empty">${icon("lock")}<span>No tokens yet.</span></div>`
@@ -3447,6 +3600,30 @@ const SUB_CHANNEL_VISIBILITIES = [
   },
 ];
 
+/**
+ * The one extra question a new channel can be asked: is it work, or talk?
+ *
+ * A channel with a branch is where agents commit; every task dispatched in it
+ * lands there instead of on the repository's own branch, and it ends by being
+ * merged rather than by going quiet. Off by default, because most rooms are
+ * conversations and a branch nothing ever commits to is a branch somebody
+ * later has to wonder about.
+ *
+ * Offered only when a channel is created. A branch cannot move afterwards
+ * without orphaning every commit on it, so this is not a setting — it is what
+ * the room is.
+ */
+function branchChoiceHtml() {
+  return `<label class="chan-branch-choice">
+    <input type="checkbox" name="branch" value="on">
+    <span class="chan-visibility-copy">
+      <strong>Work on a branch</strong>
+      <small>Agents commit here instead of to the repository, and the work is
+        reviewed and merged when the channel is done.</small>
+    </span>
+  </label>`;
+}
+
 /** The radio cards both channel dialogs offer, with one pre-selected. */
 function visibilityChoicesHtml(selected) {
   return `<div class="chan-visibility-choices" role="radiogroup"
@@ -3792,17 +3969,167 @@ state.providerConnecting = providerConnecting;
  * binds its port is a broken app, and a page that asks about it forever is a
  * second broken thing.
  */
-async function watchPreviewReady(repositoryId) {
-  if (previewsWatched.has(repositoryId)) {
+/* --------------------------------------------------------- terminal ---- */
+
+/**
+ * The live terminal, kept across renders.
+ *
+ * The page re-renders by replacing HTML, and a terminal cannot be redrawn
+ * from state: it *is* state — a scrollback, a cursor, a program mid-draw. So
+ * one emulator is made per session and re-attached to whatever container the
+ * latest render produced, rather than rebuilt with it.
+ */
+let liveTerminal;
+
+/** Loads the vendored emulator once, on the first terminal anybody opens. */
+async function loadXterm() {
+  if (window.Terminal !== undefined) {
+    return window.Terminal;
+  }
+  await new Promise((resolve, reject) => {
+    const style = document.createElement("link");
+    style.rel = "stylesheet";
+    style.href = "/vendor/xterm/xterm.css";
+    document.head.append(style);
+    const script = document.createElement("script");
+    script.src = "/vendor/xterm/xterm.js";
+    script.onload = resolve;
+    script.onerror = () =>
+      reject(new Error("The terminal emulator could not be loaded."));
+    document.head.append(script);
+  });
+  return window.Terminal;
+}
+
+/**
+ * Attaches the emulator to the container the last render drew, if any.
+ *
+ * Called after every render rather than once, because the container is a new
+ * element each time and xterm holds a reference to the old one.
+ */
+function syncTerminal() {
+  const host = document.querySelector(".terminal-screen");
+  if (host === null || liveTerminal === undefined) {
     return;
   }
-  previewsWatched.add(repositoryId);
+  if (host.dataset.terminal !== liveTerminal.sessionId) {
+    return;
+  }
+  if (host.childElementCount === 0) {
+    liveTerminal.term.open(host);
+    liveTerminal.term.focus();
+  }
+}
+
+/** Reads output until the shell ends or the reader closes the pane. */
+async function pumpTerminal(repositoryId, channelId, session) {
+  let after = 0;
+  while (liveTerminal !== undefined && liveTerminal.sessionId === session.id) {
+    let read;
+    try {
+      read = await readTerminal(repositoryId, channelId, session.id, after);
+    } catch {
+      // The session is gone — closed here, or its machine went away. Said in
+      // the terminal itself, which is where somebody is looking.
+      liveTerminal?.term.write(
+        "\r\n\u001b[2mThis terminal is no longer open.\u001b[0m\r\n",
+      );
+      break;
+    }
+    if (read?.truncated === true) {
+      liveTerminal?.term.write(
+        "\r\n\u001b[2m…earlier output was dropped\u001b[0m\r\n",
+      );
+    }
+    if (typeof read?.data === "string" && read.data !== "") {
+      liveTerminal?.term.write(read.data);
+    }
+    after = typeof read?.seq === "number" ? read.seq : after;
+    if (read?.exitCode !== undefined) {
+      liveTerminal?.term.write(
+        `\r\n\u001b[2mThe shell exited (${String(read.exitCode)}).\u001b[0m\r\n`,
+      );
+      const held = state.terminals[previewKey(repositoryId, channelId)];
+      if (held !== undefined) {
+        held.exitCode = read.exitCode;
+      }
+      scheduleRender();
+      break;
+    }
+    // A short wait between reads. The server answers at once, so this is what
+    // keeps a quiet terminal from being a request every millisecond.
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+  }
+}
+
+async function openTerminalAction(repositoryId, workerId, shell) {
+  const Terminal = await loadXterm().catch((error) => {
+    toast(error.message, "error");
+    return undefined;
+  });
+  if (Terminal === undefined) {
+    return;
+  }
+  const channelId = activeSubChannelId(repositoryId);
+  const term = new Terminal({
+    convertEol: false,
+    cursorBlink: true,
+    fontSize: 12,
+    fontFamily:
+      'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+    theme: { background: "#0f1115", foreground: "#d5d9e0" },
+  });
+  const session = await openTerminalSession(
+    repositoryId,
+    { workerId, shell, cols: term.cols, rows: term.rows },
+    channelId,
+  );
+  if (session === undefined) {
+    term.dispose();
+    render();
+    return;
+  }
+  liveTerminal = { term, sessionId: session.id, repositoryId, channelId };
+  term.onData((data) => {
+    void sendTerminalInput(repositoryId, session.id, data);
+  });
+  term.onResize(({ cols, rows }) => {
+    void resizeTerminal(repositoryId, session.id, cols, rows);
+  });
+  render();
+  syncTerminal();
+  void pumpTerminal(repositoryId, channelId, session);
+}
+
+async function closeTerminalAction(repositoryId, sessionId) {
+  const channelId = liveTerminal?.channelId ?? activeSubChannelId(repositoryId);
+  liveTerminal?.term.dispose();
+  liveTerminal = undefined;
+  await closeTerminal(repositoryId, channelId, sessionId);
+  render();
+}
+
+async function watchPreviewReady(
+  repositoryId,
+  channelId = activeSubChannelId(repositoryId),
+) {
+  // The room is captured, not re-read each pass. A cold start takes minutes
+  // and the reader does not sit still for them: without this the watcher
+  // follows whichever channel they wandered into, polls that one's app, and
+  // writes the answer over that one's cache entry — so the branch they were
+  // waiting on stays on "starting…" forever while an unrelated room's Run
+  // button flickers.
+  const key = previewKey(repositoryId, channelId);
+  if (previewsWatched.has(key)) {
+    return;
+  }
+  previewsWatched.add(key);
   try {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       await new Promise((resolve) => {
         window.setTimeout(resolve, 3000);
       });
-      const preview = await loadPreview(repositoryId);
+      const preview = await loadPreview(repositoryId, channelId);
       if (
         preview === null ||
         preview.ready !== false ||
@@ -3812,7 +4139,7 @@ async function watchPreviewReady(repositoryId) {
       }
     }
   } finally {
-    previewsWatched.delete(repositoryId);
+    previewsWatched.delete(key);
     render();
   }
 }
@@ -3855,7 +4182,11 @@ async function askPreviewCommand(repositoryId, why) {
 }
 
 async function startPreviewAction(repositoryId, asked = false) {
-  if (previewsStarting.has(repositoryId)) {
+  // Keyed by room, not by repository: two work channels are two apps on two
+  // ports, and a guard shared between them would report starting the second
+  // as a second press on the first.
+  const key = previewKey(repositoryId);
+  if (previewsStarting.has(key)) {
     toast(
       "Already starting — installing, building and, where a repository ships " +
         "one, building its image can take a few minutes.",
@@ -3863,7 +4194,7 @@ async function startPreviewAction(repositoryId, asked = false) {
     );
     return;
   }
-  previewsStarting.add(repositoryId);
+  previewsStarting.add(key);
   render();
   toast("Starting…", "ok");
   let preview;
@@ -3875,7 +4206,7 @@ async function startPreviewAction(repositoryId, asked = false) {
   }
   // Cleared before anything below, so the question this may ask can start the
   // answer it is given rather than refusing itself as a second press.
-  previewsStarting.delete(repositoryId);
+  previewsStarting.delete(key);
   render();
   if (failure === undefined) {
     // What it took to get here, when it took more than one attempt: the
@@ -3913,7 +4244,7 @@ async function startPreviewAction(repositoryId, asked = false) {
     // Up, but still building. The header says so, and this is what eventually
     // takes the word back.
     if (preview !== null && preview.ready === false) {
-      void watchPreviewReady(repositoryId);
+      void watchPreviewReady(repositoryId, activeSubChannelId(repositoryId));
     }
     return;
   }
@@ -7327,6 +7658,12 @@ export function render() {
     if (renderAgain) {
       renderAgain = false;
       render();
+    } else {
+      // The terminal is the one thing on the page that cannot be redrawn
+      // from state — it *is* state, a scrollback and a cursor and a program
+      // mid-draw — so it is re-attached to the container this render made
+      // rather than rebuilt with it.
+      syncTerminal();
     }
   }
 }
@@ -7536,6 +7873,10 @@ function renderNow() {
   // an empty surface for this to fill; painting on every route is also what
   // keeps an open list open across the render an arrow key causes.
   paintComposerSuggestions(activeChannelId());
+  // The editor's hold blocks are pixels over a textarea, so they cannot be
+  // markup: they are redrawn once the render has settled and the line height
+  // is a thing the browser has actually computed.
+  paintFileHolds();
   // Everything below answers on its own time, and opening a channel fires a
   // dozen of them at once. They redraw through `scheduleRender`, so the dozen
   // answers cost one redraw between them rather than one each — nobody is
@@ -7622,21 +7963,25 @@ function renderNow() {
     // to start a second. `undefined` is "not asked yet"; `null` is "asked,
     // there is none", which is why this tests for the former.
     // A workspace has to exist before it can have an app running in it.
+    // Asked per *room*, not per repository: a work channel runs its own
+    // branch's app on its own port, so two rooms of one repository are two
+    // questions with two answers.
     if (
       activeChannelId() !== "" &&
-      state.previews[activeChannelId()] === undefined
+      state.previews[previewKey(activeChannelId())] === undefined
     ) {
       const channel = activeChannelId();
+      const room = activeSubChannelId(channel);
       // Claimed before the request so a second render in the same tick does
       // not fire it again.
-      state.previews[channel] = null;
-      void loadPreview(channel).then((preview) => {
+      state.previews[previewKey(channel, room)] = null;
+      void loadPreview(channel, room).then((preview) => {
         // Found mid-build, which a reload during a slow first start is the
         // ordinary way to arrive at. The same follow-up a fresh start gets,
         // because the header is otherwise stuck on "starting…" for a channel
         // nobody is about to leave and come back to.
         if (preview !== null && preview.ready === false) {
-          void watchPreviewReady(channel);
+          void watchPreviewReady(channel, room);
         }
         if (state.route === "chats") {
           scheduleRender();
@@ -8588,7 +8933,10 @@ function applyHash() {
     const mode = authModeFromHash();
     if (mode !== undefined && mode !== authMode) {
       authMode = mode;
-      if (mode !== "register") {
+      // `join` is the mode an invitation arrives on and the one that hosts
+      // the free registration form, so leaving the confirmation screen means
+      // leaving both of them, not just the older name.
+      if (mode !== "register" && mode !== "join") {
         pendingRegistration = undefined;
       }
       // A different link means a different answer; the old one would otherwise
@@ -9212,7 +9560,7 @@ document.addEventListener("click", (event) => {
     case "auth-mode": {
       event.preventDefault();
       authMode = value;
-      if (value !== "register") {
+      if (value !== "register" && value !== "join") {
         pendingRegistration = undefined;
       }
       // Rendered here rather than left to the `hashchange` this triggers, so
@@ -10074,6 +10422,241 @@ document.addEventListener("click", (event) => {
       setChanDrawer(false);
       render();
       return;
+    /* --------------------------------------------- branch review ---- */
+    /**
+     * The pull request a work channel is, opened beside the transcript.
+     *
+     * Read on open rather than kept fresh in the background: it is a handful
+     * of Git commands per branch, and the answer only changes when work lands
+     * or somebody merges — both of which are re-reads this file already asks
+     * for by hand.
+     */
+    case "branch-review-open": {
+      const repositoryId = value || activeChannelId();
+      const channelId = activeSubChannelId(repositoryId);
+      // Cleared before the first paint, not inside the fetch: the panel draws
+      // once before `loadBranchReview` has run, and the error left over from
+      // a different channel's read would be what it drew.
+      state.branchReviewError = undefined;
+      openSecondaryContext("branch");
+      render();
+      if (channelId) {
+        void loadBranchReview(repositoryId, channelId).then(render);
+      }
+      return;
+    }
+    case "branch-review-reload": {
+      const repositoryId = activeChannelId();
+      void loadBranchReview(repositoryId, value).then(render);
+      render();
+      return;
+    }
+    /**
+     * Switching between the decision, the commits and the diff.
+     *
+     * Nothing is fetched: all three views are drawn from the review already
+     * in hand, which is what makes them tabs rather than pages.
+     */
+    case "branch-tab": {
+      state.branchTab = value;
+      render();
+      return;
+    }
+    /**
+     * Hand a conflict to an agent in the room.
+     *
+     * Writes the request — which branch, which base, which files — and leaves
+     * it in the composer with the picker open and the caret after the `@`.
+     * Addressed by a person on purpose: dispatching this at somebody would be
+     * the panel deciding whose afternoon this is, and the message is a task
+     * the moment it is sent.
+     */
+    case "branch-resolve-ask": {
+      const review = state.branchReview[value];
+      const conflicts = review?.conflicts ?? [];
+      if (conflicts.length === 0) {
+        return;
+      }
+      // The address on its own line, and the request under it. Not "@please
+      // resolve…" on one line: unaddressed, that reads as a mention of the
+      // word "please", and `pickMention` splices the name in where the "@"
+      // is, so the sentence has to start after it rather than around it.
+      const written =
+        `@\nPlease resolve the conflicts between \`${review?.branch ?? "this branch"}\`` +
+        ` and \`${review?.base ?? "the repository"}\` in ${conflicts.join(", ")}.` +
+        ` Keep both sides' behaviour, and say here what you had to drop.`;
+      state.chatDraft = written;
+      // Exactly the state typing "@" leaves behind — see `typeIntoComposer`.
+      state.composerAutocompleteTarget = "channel";
+      state.mentionActive = true;
+      state.mentionQuery = "";
+      state.mentionIndex = 0;
+      render();
+      const input = $("[data-act='channel-input']");
+      input?.focus({ preventScroll: true });
+      input?.setSelectionRange(1, 1);
+      return;
+    }
+    case "branch-review-refresh": {
+      const repositoryId = activeChannelId();
+      render();
+      void refreshBranchReview(repositoryId, value).then((outcome) => {
+        if (outcome?.merged === true) {
+          toast("Brought the repository's latest into this branch", "ok");
+        } else if (outcome !== undefined) {
+          toast(
+            `Still conflicting: ${(outcome.conflicts ?? []).join(", ")}`,
+            "error",
+          );
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      return;
+    }
+    /**
+     * Landing the branch. Confirmed first, because it is the one action here
+     * that changes what everybody else builds on — and it closes the channel,
+     * which nothing undoes.
+     */
+    case "branch-review-merge": {
+      const repositoryId = activeChannelId();
+      const review = state.branchReview[value];
+      void showModal({
+        title: "Merge into the repository",
+        subtitle:
+          `${review?.branch ?? "This branch"} lands on the repository's own ` +
+          "branch, and this channel closes. Follow-up work goes in a new one.",
+        confirm: "Merge",
+        body: "",
+      })
+        .then((values) => {
+          if (values === undefined) {
+            return undefined;
+          }
+          return mergeBranchReview(repositoryId, value).then((outcome) => {
+            if (outcome?.merged === true) {
+              toast("Merged into the repository", "ok");
+            }
+            render();
+            void ensureChannelMessages(repositoryId, render);
+            return outcome;
+          });
+        })
+        .catch((error) =>
+          toast(`Could not merge: ${error.message}`, "error"),
+        );
+      render();
+      return;
+    }
+    /**
+     * The second gate, on GitHub. Not confirmed the way the merge is: this
+     * opens a pull request for people to look at, which is reversible by
+     * closing it, and pressing it twice reaches the same one.
+     */
+    case "branch-review-ship": {
+      const repositoryId = activeChannelId();
+      render();
+      void shipBranchReview(repositoryId, value).then((outcome) => {
+        if (outcome?.outcome === "done") {
+          toast(outcome.explanation ?? "Opened a pull request", "ok");
+        } else if (outcome !== undefined) {
+          // A refusal is a real answer with a real reason — no remote, no
+          // connected account, a token without write access — and every one
+          // of them is something the person reading it can fix.
+          toast(outcome.explanation ?? "Could not ship this", "error");
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      return;
+    }
+    /**
+     * Comment on a line. One box at a time, drawn inside the diff at the line
+     * it is about — two of them would be two boxes in one scroll each
+     * claiming to be the comment you are writing.
+     */
+    case "branch-comment-open": {
+      const line = Number(node?.dataset?.line ?? "");
+      if (!Number.isSafeInteger(line)) {
+        return;
+      }
+      state.branchComment = {
+        channelId: value,
+        path: node?.dataset?.path ?? "",
+        line,
+      };
+      render();
+      // Focus after the render that draws it, not before: the textarea does
+      // not exist yet on this tick.
+      requestAnimationFrame(() => {
+        document.querySelector(".branch-comment-form textarea")?.focus();
+      });
+      return;
+    }
+    case "branch-comment-cancel":
+      state.branchComment = undefined;
+      render();
+      return;
+    case "branch-comment-submit": {
+      const repositoryId = activeChannelId();
+      // Read from the box this button belongs to, not from the document: two
+      // reviews can be open in the column at once and `querySelector` would
+      // find whichever came first in the DOM.
+      const box = node?.closest?.(".branch-comment-form");
+      const content = String(box?.querySelector("textarea")?.value ?? "").trim();
+      if (content === "") {
+        return;
+      }
+      const line = Number(node?.dataset?.line ?? "");
+      void commentOnBranchLine(repositoryId, value, {
+        path: node?.dataset?.path ?? "",
+        line,
+        revision: node?.dataset?.revision ?? "",
+        content,
+      }).then((posted) => {
+        if (posted === undefined) {
+          toast(state.branchReviewError ?? "Could not leave that comment", "error");
+        } else if ((posted.taskIds ?? []).length > 0) {
+          // The thing a pull request on GitHub cannot do: the comment
+          // mentioned an agent, so the fix is already running on this branch.
+          toast("Comment posted — an agent is on it", "ok");
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      render();
+      return;
+    }
+    /**
+     * Approve, or ask for changes. Pressing the one already pressed withdraws
+     * it, which is how a toggle behaves and saves a third button for the one
+     * answer nobody looks for.
+     */
+    case "branch-review-state": {
+      const repositoryId = activeChannelId();
+      const wanted = node?.dataset?.state ?? "";
+      const current = state.branchReview[value]?.myReview;
+      const next = current === wanted ? "withdrawn" : wanted;
+      void reviewBranch(repositoryId, value, next).then((saved) => {
+        if (saved === undefined) {
+          toast(state.branchReviewError ?? "Could not record that", "error");
+        } else {
+          toast(
+            next === "withdrawn"
+              ? "Review withdrawn"
+              : next === "approved"
+                ? "Approved"
+                : "Changes requested",
+            "ok",
+          );
+        }
+        render();
+        void ensureChannelMessages(repositoryId, render);
+      });
+      render();
+      return;
+    }
     case "secondary-context-close": {
       const closing = activeSecondaryContext();
       const closingValue =
@@ -10181,6 +10764,20 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
+    case "terminal-toggle":
+      selectPrimaryDestination({ kind: "terminal" }, activeChannelId());
+      void loadTerminalMachines(activeChannelId()).then(scheduleRender);
+      break;
+    case "terminal-open":
+      void openTerminalAction(
+        activeChannelId(),
+        value,
+        node.dataset.shell ?? "",
+      );
+      break;
+    case "terminal-close":
+      void closeTerminalAction(activeChannelId(), value);
+      break;
     case "preview-start":
       void startPreviewAction(value);
       return;
@@ -10292,6 +10889,10 @@ document.addEventListener("click", (event) => {
     // only toggles which paths are open, with no route change to lose the
     // reader's place in the conversation.
     case "chan-file-open":
+      // Asked, not taken. Opening a file to read it must not lock it, so this
+      // only learns who else is here — the hold comes on the first keystroke.
+      void loadFileHolds(value, render);
+
       // Beside the conversation, not inside it. Opening a file used to expand
       // it in the transcript, which pushed the messages explaining the change
       // off the screen.
@@ -10323,6 +10924,12 @@ document.addEventListener("click", (event) => {
     // reading the next — and the tree is opened explicitly rather than relying
     // on it happening to still be toggled on underneath.
     case "chan-file-back":
+      // Given back rather than left to lapse. It expires by itself; this only
+      // makes it prompt, which is the difference between an agent waiting
+      // forty seconds and not waiting at all.
+      releaseChannelFile();
+      state.chanFileHolds = [];
+      state.chanFileBlocked = false;
       if (!confirmDiscardEdit()) {
         return;
       }
@@ -10336,6 +10943,12 @@ document.addEventListener("click", (event) => {
     // conversation. Closing the file and landing on a file tree somebody did
     // not ask to see again is not "close".
     case "chan-file-close":
+      // Given back rather than left to lapse. It expires by itself; this only
+      // makes it prompt, which is the difference between an agent waiting
+      // forty seconds and not waiting at all.
+      releaseChannelFile();
+      state.chanFileHolds = [];
+      state.chanFileBlocked = false;
       if (!confirmDiscardEdit()) {
         return;
       }
@@ -10371,6 +10984,27 @@ document.addEventListener("click", (event) => {
     case "chan-file-revert":
       state.chanFileDraft = state.chanFileBase;
       render();
+      return;
+    case "chan-file-blocked-dismiss":
+      state.chanFileBlocked = false;
+      render();
+      return;
+    /**
+     * Save over somebody else's hold, deliberately and on the record.
+     *
+     * Offered rather than withheld because a hard refusal relocates the
+     * problem: the terminal and a local clone are both one step away, and
+     * work done there is invisible rather than merely contended. The server
+     * writes an audit naming who was held up.
+     */
+    case "chan-file-override":
+      state.chanFileBlocked = false;
+      void saveChannelFile(render, true).then((saved) => {
+        if (saved) {
+          invalidateCode();
+          render();
+        }
+      });
       return;
     case "chan-file-save":
       void saveChannelFile(render).then((saved) => {
@@ -10998,7 +11632,8 @@ document.addEventListener("click", (event) => {
             <input class="input" name="name" maxlength="60" required autofocus
               placeholder="frontend">
           </label>
-          ${visibilityChoicesHtml("read_only")}`,
+          ${visibilityChoicesHtml("read_only")}
+          ${branchChoiceHtml()}`,
       }).then((values) => {
         const name = String(values?.name ?? "").trim();
         if (values === undefined || name === "") {
@@ -11008,6 +11643,10 @@ document.addEventListener("click", (event) => {
           repositoryId,
           name,
           String(values.visibility ?? "read_only"),
+          // `showModal` resolves a checkbox to its `checked` boolean, not to
+          // its `value` string, so this is the box itself rather than a
+          // comparison against "on".
+          values.branch === true,
         ).then(() => {
           render();
           void ensureChannelMessages(repositoryId, render);
@@ -11937,6 +12576,11 @@ document.addEventListener("input", (event) => {
     // keystroke changes here is whether there is anything to save, so that is
     // the only thing touched.
     state.chanFileDraft = node.value;
+    // The first keystroke is when a hold is worth taking; opening the file to
+    // read it is not. Idempotent after that, and repainted narrowly — the
+    // whole point of this handler is that a source file is not rebuilt on
+    // every key, and the holders are two elements.
+    void holdChannelFile(state.chanFileView, paintFileHolders);
     const dirty = state.chanFileDraft !== state.chanFileBase;
     const panel = node.closest(".file-panel");
     panel?.classList.toggle("dirty", dirty);

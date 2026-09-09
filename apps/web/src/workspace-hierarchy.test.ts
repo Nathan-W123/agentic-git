@@ -199,75 +199,47 @@ test("settings name the workspace the way the rest of the shell names it", async
   assert.doesNotMatch(invitations, /invite\.repositoryId \?\? "every channel"/u);
 });
 
-/**
- * A room put away is still the workspace's, and still somewhere.
- *
- * The navigation column is where a workspace says what places are in it, so a
- * room that has been archived cannot simply stop being drawn — "where did
- * #design-review go?" has to have a visible answer at the level that owns the
- * list, not in a settings screen two rooms away. It gets its own heading under
- * the live rooms, rolled up, counted, and above the people in them.
- */
-test("archived rooms stay in the workspace's own navigation, folded under the live ones", async () => {
-  const [chats, data, css] = await Promise.all([
-    publicFile("screen-chats.js"),
-    publicFile("data.js"),
-    publicFile("styles.css"),
-  ]);
+test("the workspace panel counts the channel it names, not the organization", async () => {
+  // Three nested things share one word on this screen — an organization, a
+  // project, and a repository — and the People row reported the outermost
+  // while the two rows above it named the inner two.
+  //
+  // That is not a cosmetic mismatch. Somebody invited to a repository holds a
+  // grant and no organization membership, so they are in the channel, in its
+  // roster, mentionable and running agents, and absent from this number. It
+  // read "1 member" for a workspace two people were working in, and nobody
+  // suspected the invitation had only ever reached the innermost of the
+  // three.
+  const app = await publicFile("app.js");
+  const row = /\{\s*term: "People",([\s\S]*?)\n        \},/u.exec(app)?.[1] ?? "";
+  assert.notEqual(row, "", "the People row must exist to be checked");
 
-  // Between the channel list and the People heading: after what is in use,
-  // before who is in it.
   assert.match(
-    chats,
-    /chan-roster-channels[\s\S]*?\$\{archivedSubChannelsHtml\(activeRepositoryId\)\}[\s\S]*?\$\{section\("People"/u,
+    row,
+    /state\.channelPeople\?\.\[repository\.id\]/u,
+    "it must count the roster of the channel the row above names",
   );
-  // Nothing at all when there is nothing in it — a workspace that has never
-  // archived a room looks exactly as it did.
+  // The roster the server sends is built from memberships and grants
+  // together, so counting it is what makes a repository collaborator appear.
   assert.match(
-    chats,
-    /function archivedSubChannelsHtml[\s\S]{0,400}archived\.length === 0\)\s*\{\s*\n\s*return "";/u,
+    row,
+    /state\.members/u,
+    "falling back to the organization only when no channel is open",
   );
-  // A heading with a count and a fold, and no "+": nothing is created here.
-  assert.match(chats, /class="chan-sec-label">Archived</u);
+  // Precedence, not merely presence. A version that consults the membership
+  // list first and falls back to the roster reads almost identically and is
+  // the original bug with an extra branch: the organization has a member, so
+  // the roster is never reached.
   assert.match(
-    chats,
-    /chan-sec-archived[\s\S]{0,900}chan-sec-count[\s\S]{0,200}archived\.length/u,
+    row,
+    /roster \?\? state\.members/u,
+    "the roster is the answer and the membership list is the fallback, " +
+      "not the other way around",
   );
   assert.doesNotMatch(
-    chats.slice(
-      chats.indexOf("function archivedSubChannelsHtml"),
-      chats.indexOf("function pinsQuickLink"),
-    ),
-    /chan-sec-add/u,
-  );
-
-  // Closed on a first visit and remembered after that, like the other folds.
-  assert.match(data, /archived: saved\?\.archived === true/u);
-  assert.match(data, /\{ channels: true, people: true, agents: true, archived: false \}/u);
-
-  // The whole-column collapse takes it with the other sections rather than
-  // leaving one heading standing in a rail 60px wide.
-  assert.match(
-    css,
-    /\.chan-sec-channels,\s*\n\.chan-sec-people,\s*\n\.chan-sec-agents,\s*\n\.chan-sec-archived \{/u,
-  );
-  assert.match(
-    css,
-    /chan-collapsed :is\(\s*\n?\s*\.chan-sec-channels,[\s\S]{0,200}\.chan-sec-archived\s*\n?\s*\)/u,
-  );
-
-  // The live list is the live list. An archived room is not filtered out at
-  // the point of drawing — it is not in that list at all — so no future caller
-  // of `subChannelsFor` has to remember to exclude one.
-  assert.match(
-    data,
-    /export function subChannelsFor\(repositoryId\) \{[\s\S]{0,200}channel\.archived !== true/u,
-  );
-  // Except when one is open: reading an archived room back is the point of
-  // keeping it, so the room the reader chose is never swapped out from under
-  // them by the fallback.
-  assert.match(
-    data,
-    /export function activeSubChannelId\([\s\S]{0,900}subChannelsFor\(repositoryId\)\[0\] \?\? all\[0\]/u,
+    row,
+    /"members?"/u,
+    'and it counts people rather than "members", which is the word that made ' +
+      "an organization's membership sound like the channel",
   );
 });

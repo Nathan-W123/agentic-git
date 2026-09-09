@@ -439,3 +439,100 @@ test("an editor's own agent is never told its machine is offline", async () => {
   assert.doesNotMatch(String(said.content[0]?.text), /offline/u);
   assert.equal(posted.length, 1);
 });
+
+/**
+ * The editor is the thing at the keyboard, agent row or not.
+ *
+ * `takeEditorWork` builds the worker it leases with from the vendor alone, so
+ * the editor path never needed a CLI. What it needed was a task stamped with
+ * that vendor, and the only way `submit_task` could make one was to post an
+ * `@mention` — which meant an agent row had to exist to be the addressee. So
+ * somebody whose own Codex agent had never been created was asked to hand
+ * their own prompt to a colleague's Claude, from inside Codex.
+ */
+test("an editor with no agent of its own files the work for itself", async () => {
+  const filed: Array<{ vendor: string; objective: string }> = [];
+  const taken: string[] = [];
+  const { run } = tool("submit_task", {
+    callerEditor: () => "codex",
+    // Only somebody else's agents are in this room.
+    agentsIn: async () => [
+      { name: "Claude (Nathan)", online: true, owner: "Nathan", vendor: "claude", mine: false },
+    ],
+    fileForEditor: async (input) => {
+      filed.push({ vendor: input.vendor, objective: input.objective });
+      return { taskId: "task_9", channelSlug: "general" };
+    },
+    takeFiledTask: async (taskId) => {
+      taken.push(taskId);
+      return {
+        taskId,
+        objective: "fix the redirect",
+        repository: "payments",
+        branch: "main",
+        baseRevision: "abc123",
+        expiresAt: "2026-01-01T00:00:00.000Z",
+        bundleUrl: "https://kumi.example/bundle/t",
+        validationCommands: [],
+      };
+    },
+  });
+
+  const answer = await run({ repository: "payments", objective: "fix the redirect" });
+  const text = JSON.stringify(answer);
+  // Filed under the editor's own vendor, and handed straight back to it.
+  assert.deepEqual(filed, [{ vendor: "codex", objective: "fix the redirect" }]);
+  assert.deepEqual(taken, ["task_9"]);
+  assert.match(text, /taken by you/u);
+  // And emphatically not the roster question that sent people to a colleague.
+  assert.doesNotMatch(text, /Who should do this/u);
+});
+
+/**
+ * The same room, asked by something that is not an editor.
+ *
+ * An ordinary MCP token has nothing to fall back to, so the roster question is
+ * still the only honest answer and must not have been traded away.
+ */
+test("a caller that is not an editor is still asked who should do it", async () => {
+  const { run } = tool("submit_task", {
+    callerEditor: () => undefined,
+    agentsIn: async () => [
+      { name: "Claude (Nathan)", online: true, owner: "Nathan", vendor: "claude", mine: false },
+      { name: "Codex (Sam)", online: true, owner: "Sam", vendor: "codex", mine: false },
+    ],
+    fileForEditor: async () => {
+      throw new Error("must not file for a caller that is not an editor");
+    },
+    takeFiledTask: async () => undefined,
+  });
+  const text = JSON.stringify(
+    await run({ repository: "payments", objective: "fix the redirect" }),
+  );
+  assert.match(text, /Who should do this/u);
+});
+
+/**
+ * An editor that *does* have its own agent keeps the path it already had.
+ *
+ * That route posts the mention, so the room reads exactly as it did; only the
+ * case with nothing to address changed.
+ */
+test("an editor with its own agent still goes through the mention", async () => {
+  const filed: string[] = [];
+  const { run, posted } = tool("submit_task", {
+    callerEditor: () => "codex",
+    agentsIn: async () => [
+      { name: "Codex (Sam)", online: true, owner: "Sam", vendor: "codex", mine: true },
+    ],
+    fileForEditor: async (input) => {
+      filed.push(input.vendor);
+      return { taskId: "task_x", channelSlug: "general" };
+    },
+    takeFiledTask: async () => undefined,
+  });
+  await run({ repository: "payments", objective: "fix the redirect" });
+  assert.deepEqual(filed, [], "the mention path owns this case");
+  assert.equal(posted.length, 1);
+  assert.match(posted[0]?.content ?? "", /^@Codex \(Sam\) fix the redirect$/u);
+});

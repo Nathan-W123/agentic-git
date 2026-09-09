@@ -132,12 +132,184 @@ test("a private room is drawn as private, and a typing ping stays in its room", 
   const chats = await publicFile("screen-chats.js");
   const data = await publicFile("data.js");
 
-  assert.match(chats, /channel\.visibility === "private" \? icon\("lock"\)/u);
+  // A work channel's sigil is its branch, and a private one's is a lock. Both
+  // in one expression, in that order, because a work channel that is also
+  // private has to pick one and "this ships somewhere else" is the fact a
+  // reader cannot get from the name — the lock's meaning is still spelled out
+  // in words on the row and in the settings panel.
+  assert.match(
+    chats,
+    /channel\.branch\s*\?\s*icon\("branch"\)\s*:\s*channel\.visibility === "private"\s*\?\s*icon\("lock"\)/u,
+  );
   const noteTyping = data.slice(data.indexOf("export function noteTyping"));
   assert.match(
     noteTyping.slice(0, noteTyping.indexOf("\n}")),
     /frame\.channelId !== open/u,
   );
+});
+
+test("a channel can be opened as a branch, and says so everywhere it is shown", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const styles = await publicFile("styles.css");
+
+  // Asked once, when the room is created. A branch cannot move afterwards
+  // without orphaning every commit on it, so this is what the room is rather
+  // than a setting it carries.
+  assert.match(app, /function branchChoiceHtml\(\)/u);
+  const newChannel = app.slice(app.indexOf('case "sub-channel-new"'));
+  const dialog = newChannel.slice(0, newChannel.indexOf('case "sub-channel-menu"'));
+  assert.match(dialog, /\$\{branchChoiceHtml\(\)\}/u);
+  // The checkbox's `checked` boolean, not its `value` string — `showModal`
+  // resolves the two differently and comparing against "on" would send
+  // `false` for every ticked box.
+  assert.match(dialog, /values\.branch === true/u);
+  assert.match(styles, /\.chan-branch-choice \{/u);
+
+  // Only sent when it was asked for, so an ordinary channel's request is
+  // byte-for-byte what it was before work channels existed.
+  const create = data.slice(data.indexOf("export async function createSubChannel"));
+  assert.match(
+    create.slice(0, create.indexOf("\n}")),
+    /branch === true \? \{ branch: true \} : \{\}/u,
+  );
+
+  // And it is visible without opening anything: the row's own title says
+  // which branch, so the sigil is not the only place the fact lives.
+  assert.match(chats, /works on \$\{esc\(channel\.branch\)\}/u);
+  // A merged channel reads as merged rather than as read-only. Both mean
+  // "you cannot post here", and only one of them says why.
+  assert.match(
+    chats,
+    /channel\.mergedAt\s*\n?\s*\?\s*`<span class="chan-channel-note"[\s\S]{0,400}>merged<\/span>`/u,
+  );
+  // And so does the composer it replaces. The two refusals want opposite
+  // things of the reader: "not you" is answered by asking to be added, and a
+  // merged room is answered by nobody — sending somebody to ask an admin to
+  // add them to a room that has shipped asks for something nobody can give.
+  const locked = chats.slice(chats.indexOf("chan-composer-locked"));
+  const notice = locked.slice(0, locked.indexOf("</div>"));
+  assert.match(notice, /merged and is finished/u);
+  assert.match(notice, /not a member, so you cannot post here/u);
+  // The settings panel says it in a sentence, and withholds Rename — the
+  // server refuses that for a work channel, and an affordance whose only
+  // outcome is an error toast is worse than no affordance.
+  const manage = chats.slice(chats.indexOf("export function subChannelManagePopoverHtml"));
+  const panel = manage.slice(0, manage.indexOf("\nexport function", 1));
+  assert.match(panel, /Work in this\s+channel lands on/u);
+  // `icon()` emits a bare SVG with no intrinsic width, so one dropped into a
+  // paragraph fills it — the branch glyph came out about two hundred pixels
+  // tall. Every other inline use sizes it at the call site; this one is prose,
+  // so the stylesheet does it.
+  const inline = styles.slice(styles.indexOf(".channel-info-summary svg {"));
+  assert.match(inline.slice(0, inline.indexOf("}")), /width: 13px;/u);
+  // And inline, because the global `svg` rule is `display: block` — without
+  // this the glyph took its own line and the sentence started under it.
+  assert.match(inline.slice(0, inline.indexOf("}")), /display: inline-block;/u);
+  assert.match(panel, /channel\.branch\s*\?\s*""\s*:\s*`<button[^`]*sub-channel-rename/u);
+});
+
+test("a work channel's branch is reviewed and merged from the room itself", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const styles = await publicFile("styles.css");
+
+  // The way in sits with the room, not on a separate screen: the diff, the
+  // conversation and the tasks that produced it are one thing.
+  assert.match(chats, /act: "branch-review-open"/u);
+  // And only where there is a branch. A button that opened an empty panel
+  // would be worse than no button.
+  assert.match(
+    chats,
+    /main && openSubChannel\(repositoryId\)\?\.branch\s*\n?\s*\?\s*iconButton\("branch"/u,
+  );
+
+  // It draws in the secondary column, beside the transcript, the way threads
+  // and files already do — so reading the diff and reading what people said
+  // about it happen side by side.
+  assert.match(chats, /case "branch":\s*\n\s*return branchReviewPanel\(repositoryId\)/u);
+  assert.match(app, /openSecondaryContext\("branch"\)/u);
+
+  // The three states the panel has to tell apart, and does.
+  assert.match(chats, /review\.merged === true/u);
+  assert.match(chats, /\(review\.ahead \?\? 0\) === 0/u);
+  assert.match(chats, /conflicts\.length > 0/u);
+  // The merge button is drawn only for somebody the server would let merge,
+  // and disabled while anything conflicts.
+  assert.match(chats, /review\.canMerge === true/u);
+  // Two ways to be un-mergeable now: text git cannot reconcile, and text it
+  // reconciles into something that will not compile.
+  assert.match(
+    chats,
+    /const blocked = conflicts\.length > 0 \|\| stale\.length > 0;/u,
+  );
+  assert.match(chats, /busy \|\| blocked \? "disabled" : ""/u);
+  assert.match(styles, /\.branch-panel \.fp-stats/u);
+
+  // Merging closes the channel, so it is confirmed rather than a single
+  // click, and the transcript is re-read for the line the server posts.
+  const merge = app.slice(app.indexOf('case "branch-review-merge"'));
+  const handler = merge.slice(0, merge.indexOf('case "secondary-context-close"'));
+  assert.match(handler, /showModal\(/u);
+  assert.match(handler, /mergeBranchReview\(repositoryId, value\)/u);
+  assert.match(handler, /ensureChannelMessages\(repositoryId, render\)/u);
+
+  // The review is not patched in from the write's response: a refresh or a
+  // merge moves the branch, so every number in it is about a commit that no
+  // longer exists.
+  for (const name of ["refreshBranchReview", "mergeBranchReview"]) {
+    const fn = data.slice(data.indexOf(`export async function ${name}`));
+    assert.match(
+      fn.slice(0, fn.indexOf("\n}")),
+      /loadBranchReview\(repositoryId, channelId\)/u,
+      name,
+    );
+  }
+});
+
+test("a merged channel offers the second gate, on GitHub", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+
+  // Only after the merge. Kumi reviews the branch into the repository, GitHub
+  // reviews the repository into main — offering the second before the first
+  // would ask a second set of reviewers for work Kumi has not accepted.
+  const panel = chats.slice(chats.indexOf("function branchReviewBody"));
+  const merged = panel.slice(0, panel.indexOf("\nfunction branchReviewStates"));
+  // The slice has to actually cut something, or every assertion below is
+  // being made against the rest of the file rather than against this panel.
+  assert.ok(merged.length > 0 && merged.length < panel.length);
+  assert.match(merged, /review\.merged === true/u);
+  assert.match(merged, /act="branch-review-ship"/u);
+  // Once shipped it links to the pull request rather than offering to open a
+  // second one, and the button changes to what it now does.
+  assert.match(merged, /review\.pullRequestUrl/u);
+  assert.match(merged, /Update the pull request/u);
+  assert.match(merged, /Open a pull request on GitHub/u);
+  // And it is not drawn for somebody the server would refuse.
+  assert.match(merged, /review\.canShip === true/u);
+
+  // Not confirmed the way the merge is: this opens a pull request for people
+  // to look at, closing one is how it is undone, and pressing twice reaches
+  // the same one.
+  const ship = app.slice(app.indexOf('case "branch-review-ship"'));
+  const handler = ship.slice(0, ship.indexOf('case "secondary-context-close"'));
+  assert.doesNotMatch(handler, /showModal\(/u);
+  assert.match(handler, /shipBranchReview\(repositoryId, value\)/u);
+  // A refusal is a real answer with a fixable reason, not a thrown error, so
+  // its explanation is what reaches the person.
+  assert.match(handler, /outcome\?\.outcome === "done"/u);
+  assert.match(handler, /outcome\.explanation/u);
+
+  // The link lives on the channel, so the channel list is re-read rather than
+  // the response patched in.
+  const fn = data.slice(data.indexOf("export async function shipBranchReview"));
+  const body = fn.slice(0, fn.indexOf("\n}"));
+  assert.match(body, /loadSubChannels\(repositoryId\)/u);
+  assert.match(body, /loadBranchReview\(repositoryId, channelId\)/u);
 });
 
 test("switching rooms clears every cache it names, and cannot half-finish", async () => {
@@ -217,4 +389,65 @@ test("switching rooms clears every cache it names, and cannot half-finish", asyn
       `selectSubChannel clears ${key}, which state never declares`,
     );
   }
+});
+
+/* ---------------------------------------------------------- terminal ---- */
+
+test("the Terminal destination is one the router will actually keep", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+
+  // `normalPrimaryDestination` is an allow-list, and it rewrites anything it
+  // does not recognise to the main chat *silently*. That is right for a stale
+  // value out of localStorage and it is how a new destination ships broken:
+  // the rail entry highlights, the click is accepted, the pane never
+  // changes, and nothing anywhere says why. Found on a screenshot, not in a
+  // test, so it is pinned here.
+  const normal = data.slice(
+    data.indexOf("function normalPrimaryDestination"),
+    data.indexOf("/** The selected primary destination for one workspace. */"),
+  );
+  assert.match(normal, /"threads", "files", "terminal"/u);
+
+  // And the three halves that have to agree: something to press, a pane to
+  // draw, and an action joining them.
+  assert.match(chats, /data-act="terminal-toggle"/u);
+  assert.match(chats, /destination\.kind === "terminal"/u);
+  assert.match(chats, /function terminalConversation\(/u);
+  assert.match(app, /case "terminal-toggle":/u);
+  assert.match(app, /selectPrimaryDestination\(\{ kind: "terminal" \}/u);
+});
+
+test("a terminal says which of three things is wrong, not just 'unavailable'", async () => {
+  const chats = await publicFile("screen-chats.js");
+
+  // No machine at all, a machine that has not been allowed, and a machine
+  // ready to go are three different situations with three different next
+  // steps. Collapsing the middle one into "unavailable" is what leaves
+  // somebody guessing whether to open their laptop or change a setting.
+  assert.match(chats, /No machine of yours is connected/u);
+  assert.match(chats, /does not open terminals|None of\s*\n?\s*them opens terminals/u);
+  // Named, so it is a thing to do rather than a place to go looking.
+  assert.match(chats, /Agents → Allow Terminals on\s*\n?\s*This Machine/u);
+  // And the answer to the question this screen could not answer: a copy of
+  // the app older than the setting will never offer one however hard
+  // somebody looks for a switch that is not in it.
+  assert.match(chats, /older\s*\n?\s*than the setting/u);
+  // One row per machine, with the build and when it last spoke, because
+  // several machines can carry one name — a laptop running the app twice is
+  // two rows with the same word on them.
+  // The class exactly, not as a prefix: `terminal-machine-list-unused` reads
+  // as a match to a loose pattern and draws nothing.
+  assert.match(chats, /class="terminal-machine-list"/u);
+  assert.match(await publicFile("styles.css"), /\.terminal-machine-list \{/u);
+  assert.match(chats, /machine\.version/u);
+  assert.match(chats, /relativeTime\(machine\.lastSeen\)/u);
+  // And where the shell will actually run, because that is the whole reason
+  // it has the reader's files and keys.
+  assert.match(chats, /not on the control plane/u);
+  // A machine with no pseudo-terminal is said before somebody types `vim`,
+  // not after.
+  assert.match(chats, /terminal-degraded/u);
+  assert.match(chats, /full-screen programs/u);
 });

@@ -26,7 +26,7 @@ import {
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
 } from "@coord/persistence";
 
 test("an investigator says why a task failed, and retries when told to", async (t) => {
@@ -1662,7 +1662,7 @@ test("a bootstrap token survives the whitespace pasting adds to it", async (t) =
 test("a gateway configured with a padded token still starts and accepts it", async (t) => {
   // The other half: the padding is on the *server's* value, which is what a
   // pasted `COORD_BOOTSTRAP_TOKEN` actually looks like.
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const gateway = new ApiGateway({
     store,
     operations: { async createRepository() { throw new Error("unused"); } } as unknown as ApiOperations,

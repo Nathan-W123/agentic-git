@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { CanonicalRepository } from "@coord/repository-service";
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import { DEFERRED_SCOPE_MARKER } from "@coord/coordinator";
 import type { ChangeSetSplit, DeferredScopeRequest } from "@coord/coordinator";
 import type { PlanAdmission } from "@coord/shared-types";
@@ -17,7 +17,7 @@ import { LeasePlanAuthority } from "./lease-admission.js";
  * `submittedBy` cannot resolve credentials at all: queued, and then stuck.
  */
 test("the deferred remainder inherits who is paying and what it runs with", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({ id: "repo_a", path: "/tmp/repo_a", branch: "main" });
   const owner = await store.createUser({
     email: "nathan@example.com",
@@ -108,7 +108,7 @@ test("the deferred remainder inherits who is paying and what it runs with", asyn
 });
 
 test("nothing deferred queues nothing", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({ id: "repo_b", path: "/tmp/repo_b", branch: "main" });
   const original = await store.submitTask({
     repositoryId: "repo_b",

@@ -28,7 +28,7 @@
 import { app, powerMonitor, powerSaveBlocker, utilityProcess } from "electron";
 import { spawnSync } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdir, rename, stat } from "node:fs/promises";
+import { appendFile, mkdir, rename, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -42,6 +42,11 @@ import {
   missingMcpServers,
   readAllowedMcp,
 } from "./mcp-consent.mjs";
+import {
+  ensureTerminalConsent,
+  readTerminalConsent,
+  setTerminalConsent,
+} from "./terminal-consent.mjs";
 
 /**
  * Backoff between restarts, and the point at which restarting is pointless.
@@ -90,6 +95,16 @@ let busy = false;
 let stayAwake = false;
 let failures = 0;
 let restartTimer;
+/**
+ * The control plane's reason for refusing this worker, while it stands.
+ *
+ * Needed because `heard` below reports every line the child writes as
+ * evidence that it is running — which is right for the log it narrates and
+ * exactly wrong for a refusal, the one message that means the opposite. The
+ * refusal arrives as a signal rather than on stderr, and this holds it in
+ * front of the noise until the worker actually registers.
+ */
+let refusal;
 /**
  * The MCP servers this process has already asked about, and whether it is
  * asking right now.
@@ -176,9 +191,30 @@ export async function startWorker(here, session, onEvent) {
 
 async function startWorkerOnce(here, session, onEvent) {
   stopping = false;
+
+  /**
+   * A stop that happens before the worker exists, written down anyway.
+   *
+   * The log is opened further down, once there is a child whose output to
+   * keep — so every reason the worker never got that far reached only the
+   * menu, which holds one line and is replaced by the next. Somebody asked
+   * why their prompt did nothing, opened the log they were told to open, and
+   * found the last entry was from two days ago: the file was not quiet
+   * because the worker was fine, it was quiet because the worker never
+   * started, and those look identical when nothing writes.
+   *
+   * So the three stops below say so here, in the file people are sent to.
+   */
+  const stopped = async (event) => {
+    await appendWorkerLog(
+      `worker did not start: ${event.detail ?? event.reason ?? "no reason given"}`,
+    );
+    onEvent?.(event);
+  };
+
   const bundle = bundlePath(here);
   if (!(await exists(bundle))) {
-    onEvent?.({
+    await stopped({
       state: "stopped",
       detail: "This build shipped without a worker. Run `npm run bundle:worker`.",
     });
@@ -193,7 +229,7 @@ async function startWorkerOnce(here, session, onEvent) {
     // of text in a menu nobody opens. Somebody would install the app, connect
     // an agent, watch it accept work and never do any, and have no way at all
     // to find out that nothing on the machine could run it.
-    onEvent?.({
+    await stopped({
       state: "stopped",
       reason: "no-cli",
       detail:
@@ -206,7 +242,7 @@ async function startWorkerOnce(here, session, onEvent) {
   try {
     tenancy = await discoverTenancy(session.server, session.token, getJson);
   } catch (error) {
-    onEvent?.({ state: "stopped", detail: describe(error) });
+    await stopped({ state: "stopped", detail: describe(error) });
     return;
   }
 
@@ -220,12 +256,26 @@ async function startWorkerOnce(here, session, onEvent) {
     state: "running",
     detail:
       `Joined ${tenancy.projectName ?? tenancy.projectId ?? "the default project"} ` +
-      `(${tenancy.organizationId}).`,
+      `(${process.env.COORD_ORGANIZATION?.trim() || tenancy.organizationId})` +
+      `${process.env.COORD_ORGANIZATION?.trim() ? ", set by COORD_ORGANIZATION" : ""}.`,
   });
 
   const root = workerRoot();
   await mkdir(root, { recursive: true });
   await ensureProject(root, agents);
+  // Terminals are on unless this machine's owner has turned them off. Written
+  // before the worker starts rather than asked for on the first press: the
+  // control plane will not open a shell on anybody else's machine, so the
+  // only person this consent is between is the one who installed the app and
+  // signed it in here. See `terminal-consent.mjs` for why the MCP list next
+  // to it does ask.
+  const terminals = await ensureTerminalConsent(root).catch(() => undefined);
+  if (terminals?.wrote === true) {
+    onEvent?.({
+      state: "running",
+      detail: "Terminals are allowed on this machine (Agents → Allow Terminals).",
+    });
+  }
 
   const startedAt = Date.now();
   child = utilityProcess.fork(bundle, [], {
@@ -235,9 +285,23 @@ async function startWorkerOnce(here, session, onEvent) {
       ...process.env,
       COORD_SERVER: session.server,
       COORD_TOKEN: session.token,
-      COORD_ORGANIZATION: tenancy.organizationId,
+      // Discovery, unless somebody has overruled it. Set last it always won,
+      // so the documented way to point a worker at a particular tenant —
+      // `COORD_ORGANIZATION`, which the worker itself reads and
+      // `docs/deployment/desktop-worker.md` describes — did nothing at all
+      // through the app, silently. That is the wrong shape for an escape
+      // hatch: the moment discovery chooses wrong is the moment somebody
+      // needs one, and there was none short of running the bundle by hand.
+      COORD_ORGANIZATION:
+        process.env.COORD_ORGANIZATION?.trim() || tenancy.organizationId,
       COORD_PROJECT_ROOT: root,
       COORD_WORKER_NAME: deviceName(),
+      // The installed build, so the fleet can say which machine is on which.
+      // There is no auto-update, so an install stays where it was until
+      // somebody downloads another one, and the first question about an agent
+      // behaving like an older one is which version it actually is. Nothing
+      // could answer that before this line: every worker registered "0.0.0".
+      COORD_WORKER_VERSION: app.getVersion(),
       // What this machine actually has. The project config the worker reads
       // has a default agent backfilled for every vendor it lacks, so without
       // this the worker would register for Cursor and Kiro on a machine that
@@ -261,7 +325,31 @@ async function startWorkerOnce(here, session, onEvent) {
   const heard = (line) => {
     const text = String(line);
     log?.write(text);
-    onEvent?.({ state: "running", detail: text.trim() });
+    // Two ways the one status line gets taken away from the person reading
+    // it, and both are handled here.
+    //
+    // A refusal first, because it outranks everything: a worker being told it
+    // may not register is not running, and every line it prints while waiting
+    // out the retry would say that it is. Held until the worker actually
+    // registers.
+    if (refusal !== undefined) {
+      return;
+    }
+    // Then the noise. The status line is the one place a person is told why
+    // their machine is not working, and every worker prints Node's SQLite
+    // warning the moment it starts — so the answer to "why is nothing
+    // happening" was reliably replaced, within milliseconds, by a sentence
+    // about an experimental feature that is not the problem and never will
+    // be. Somebody read that line while the failure that mattered sat in the
+    // log underneath it.
+    const meaningful = text
+      .split("\n")
+      .map((part) => part.trim())
+      .filter((part) => part !== "" && !isRuntimeNoise(part));
+    const last = meaningful[meaningful.length - 1];
+    if (last !== undefined) {
+      onEvent?.({ state: "running", detail: last });
+    }
   };
   child.stdout?.on("data", heard);
   child.stderr?.on("data", heard);
@@ -277,6 +365,18 @@ async function startWorkerOnce(here, session, onEvent) {
     } else if (message?.type === "idle") {
       busy = false;
       reconsiderAwake();
+    } else if (message?.type === "registration-refused") {
+      // The child is alive and waiting, not dead, so this is deliberately not
+      // a restart: restarting a refused worker only refuses it again sooner.
+      // It heals when somebody with administrative access fixes the thing the
+      // sentence names, and the worker notices by itself.
+      refusal = String(message.detail ?? "").trim();
+      onEvent?.({
+        state: "stopped",
+        detail: refusal.length === 0 ? "Registration was refused." : refusal,
+      });
+    } else if (message?.type === "registered") {
+      refusal = undefined;
     } else if (message?.type === "mcp-offered") {
       // The child ran without these and has said so to the room; the one
       // thing it cannot do is ask the person whose machine this is.
@@ -286,6 +386,7 @@ async function startWorkerOnce(here, session, onEvent) {
 
   child.once("exit", (code) => {
     busy = false;
+    refusal = undefined;
     reconsiderAwake();
     const ranForMs = Date.now() - startedAt;
     child = undefined;
@@ -532,7 +633,52 @@ function describe(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Node talking about itself, rather than the worker talking about the work.
+ *
+ * Only the lines every run emits regardless of what happens, so a real
+ * message is never mistaken for one of these. The log keeps them either way;
+ * what this decides is whether a line is allowed to *be* the status.
+ */
+function isRuntimeNoise(line) {
+  return (
+    /^\(node:\d+\)/u.test(line) ||
+    /^\(Use `.*--trace-warnings/u.test(line) ||
+    /^ExperimentalWarning:/u.test(line)
+  );
+}
+
 /** Where the worker's own account of itself is kept. */
+/**
+ * Whether this machine currently opens terminals.
+ *
+ * Three answers, and the menu needs all three: `true`, `false`, and
+ * `undefined` for a machine whose worker has not started yet and so has not
+ * written the consent. Undefined is not "no" — it is "about to be yes" — and
+ * a menu that drew it as an unticked box would be telling somebody their
+ * terminals are off a second before they are on.
+ */
+export async function readTerminalsAllowed() {
+  const consent = await readTerminalConsent(workerRoot()).catch(() => undefined);
+  if (consent === undefined) {
+    return undefined;
+  }
+  return consent === "all" || consent.length > 0;
+}
+
+/**
+ * The menu's switch, written where the worker reads it.
+ *
+ * No restart. The terminal loop re-reads this file — each poll for what it
+ * advertises, and again at the moment of opening — so turning it off takes a
+ * shell away from a browser within one poll and refuses the next open
+ * immediately. Restarting the worker to flip a checkbox would kill whatever
+ * task this machine is in the middle of.
+ */
+export async function allowTerminals(allowed) {
+  await setTerminalConsent(workerRoot(), allowed === true);
+}
+
 export function workerLogPath() {
   return path.join(app.getPath("userData"), "worker.log");
 }
@@ -545,6 +691,30 @@ export function workerLogPath() {
  * that grows without bound on a machine running agents all day is a bug of its
  * own.
  */
+/**
+ * One line into the worker log, without a worker to hang it on.
+ *
+ * `openWorkerLog` exists to receive a child's output and stamps a "worker
+ * started" header, which is the wrong thing to write when the point is that
+ * one never did. This appends a timestamped line and nothing else.
+ *
+ * Failures are swallowed for the same reason they are there: a log that
+ * cannot be written must not be the thing that stops a worker starting, and
+ * this is called on the path that is already reporting a stop.
+ */
+async function appendWorkerLog(line) {
+  try {
+    await mkdir(path.dirname(workerLogPath()), { recursive: true });
+    await appendFile(
+      workerLogPath(),
+      `\n--- ${new Date().toISOString()} ${line} ---\n`,
+      "utf8",
+    );
+  } catch {
+    // Deliberately silent. See above.
+  }
+}
+
 async function openWorkerLog() {
   const file = workerLogPath();
   try {

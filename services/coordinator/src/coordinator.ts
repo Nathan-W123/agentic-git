@@ -1,3 +1,4 @@
+import { claimFromChangeSet } from "./branch-claims.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -4803,6 +4804,111 @@ export class Coordinator {
    * right answer for that — it is also what stops two agents trading repairs
    * for as long as they both keep losing.
    */
+  /**
+   * Records what this task left on the branch, so the branch goes on holding
+   * it after the lease is gone.
+   *
+   * The gap this closes: a claim lives for a lease, so two tasks an hour
+   * apart on two branches never see each other — and that is exactly the pair
+   * whose edits collide when the second branch tries to catch up after the
+   * first one merges.
+   *
+   * Nothing is recorded for work that lands on the repository's own branch.
+   * Canonical is what every branch merges *into*, so a claim against it would
+   * put every branch in the repository behind every task that ever ran.
+   *
+   * Failure here is swallowed on purpose. The work is in canonical; a claim
+   * that could not be written costs the next plan a warning it would have
+   * had, and losing the promotion over it would be the wrong trade by a wide
+   * margin.
+   */
+  private async holdOnBranch(
+    input: CoordinatorRunInput,
+    result: PreparedTask,
+    integration: { canonicalVersion: { revision: string } },
+  ): Promise<void> {
+    // Everything in here is inside the try, including reading the store.
+    // `this.store` is optional — a coordinator can be constructed without one
+    // — and the first version of this read a property off it before the
+    // guard, so every task in a store-less run ended `failed` instead of
+    // `integrated`. Forty-five tests said so at once, which is the only
+    // reason it did not ship.
+    try {
+      const branch = input.repository.branch;
+      const store = this.store as
+        | {
+            getRepository?: (
+              id: string,
+            ) => Promise<{ branch?: string } | undefined>;
+            recordBranchClaim?: (claim: unknown) => Promise<unknown>;
+          }
+        | undefined;
+      if (
+        branch === undefined ||
+        branch === "" ||
+        store?.recordBranchClaim === undefined
+      ) {
+        return;
+      }
+      const stored = await store.getRepository?.(input.repository.id);
+      // The repository's own branch is canonical, whatever it is called.
+      if (stored?.branch === branch) {
+        return;
+      }
+      // What the changed files actually hold, at the revision that just
+      // landed. This is the difference between a claim and a guess: the plan
+      // was written before the work, and `changeSet.symbolsChanged` is the
+      // agent's own account rather than anything computed. Indexed at the new
+      // revision rather than the base, because a route or a symbol this task
+      // *added* does not exist in the base index — and that is the case the
+      // whole feature is for.
+      //
+      // Best effort: an index that cannot be built falls back to the plan,
+      // which is what this did before and is still better than nothing.
+      const changedFiles = result.changeSet.patches.map((patch) => patch.path);
+      const observed = await this.intelligence
+        .index(input.repository, integration.canonicalVersion.revision)
+        .then((index) => {
+          // Names, and then shapes. The names say which contracts this branch
+          // touched; the shapes say what state it left them in, which is the
+          // half a clean merge destroys — `sign` is `sign` on both sides of a
+          // parameter that changed from `string` to `number`.
+          return {
+            resources: this.intelligence.changedResources(changedFiles, index),
+            contracts: {
+              // Each contract with what is built on it. Asked here because
+              // this is the only moment the index for this revision is in
+              // hand, and kept per contract because the warning has to name
+              // both — "login.ts consumes `sign`, which moved on #payments".
+              shapes: this.intelligence
+                .shapesIn(changedFiles, index)
+                .map((shape) => ({
+                  ...shape,
+                  consumers: this.intelligence.consumersOf(index, {
+                    file: shape.file,
+                    symbol: shape.symbol,
+                  }),
+                })),
+            },
+          };
+        })
+        .catch(() => undefined);
+      await store.recordBranchClaim(
+        claimFromChangeSet({
+          repositoryId: input.repository.id,
+          branch,
+          revision: integration.canonicalVersion.revision,
+          changeSet: result.changeSet,
+          ...(result.plan === undefined ? {} : { plan: result.plan }),
+          ...(observed === undefined ? {} : { resources: observed.resources }),
+          ...(observed === undefined ? {} : { contracts: observed.contracts }),
+        }),
+      );
+    } catch {
+      // Deliberately silent; see the note above.
+    }
+  }
+
   private async repairChangeSet(
     input: CoordinatorRunInput,
     result: PreparedTask,
@@ -5069,6 +5175,7 @@ export class Coordinator {
             files: result.changeSet.patches.map((patch) => patch.path),
           },
         );
+        await this.holdOnBranch(input, result, integration);
         // Only now, with the granted half durably in canonical, does the half
         // that was withheld become work of its own. Queued earlier it would
         // ask for the remainder of something that never landed; not queued at

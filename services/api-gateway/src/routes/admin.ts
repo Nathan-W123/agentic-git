@@ -14,6 +14,9 @@ import {
   describeError,
 } from "@coord/shared-types";
 import {
+  TRIAL_DAYS,
+} from "../billing.js";
+import {
   hashPassword,
 } from "../auth.js";
 import {
@@ -83,27 +86,58 @@ export async function routeAdmin(
       new Date().toISOString(),
     );
     if (first) {
-      try {
-        await gw.mailer({
-          to: entry.email,
-          subject: "Your Kumi invitation",
-          text:
-            `You are through the Kumi waitlist.\n\n` +
-            `Create your account here:\n\n${
-              gw.appBaseUrl === "" ? "/app#register" : `${gw.appBaseUrl}/app#register`
-            }\n\n` +
-            `Use this address — ${entry.email} — when you sign up; it is the ` +
-            `one that has been let through.\n`,
-        });
-      } catch (error) {
-        // Best effort, like every other message this sends. The approval is
-        // already durable and the address can be told by any other means;
-        // failing the request would only make an operator press approve
-        // again against a row that is already approved.
+      // `#join` rather than a form named in this message, because which
+      // form an invitation opens is the deployment's business and not the
+      // mail's: with payments on it is the trial and a card, with them off
+      // it is a free account. The address rides in the fragment, which the
+      // browser never sends, so it prefills the form without reaching a
+      // server or an access log — and the gate still checks it, so a
+      // forwarded invitation admits nobody new.
+      const joinUrl = `${gw.appBaseUrl}/app#join/${encodeURIComponent(
+        entry.email,
+      )}`;
+      if (gw.appBaseUrl === "") {
+        // No public address is configured, so every link in this message
+        // would be relative — and a relative link in an email is not a link.
+        // The approval is already durable and the address can be told by any
+        // other means, so this names the missing variable rather than sending
+        // something that reads like an invitation and opens nothing.
         console.error(
-          `[mail] Could not tell ${entry.email} they are through the ` +
-            `waitlist: ${describeError(error)}`,
+          `[mail] Not sending ${entry.email} their invitation: this ` +
+            "deployment has no public address configured (KUMI_APP_URL), so " +
+            "the sign-up link would be relative. They are approved — the " +
+            `link is <your-kumi>/app#join/${encodeURIComponent(entry.email)}`,
         );
+      } else {
+        try {
+          await gw.mailer({
+            to: entry.email,
+            subject: "Your Kumi invitation",
+            text:
+              `You are through the Kumi waitlist.\n\n` +
+              `Create your account here:\n\n${joinUrl}\n\n` +
+              `Use this address — ${entry.email} — when you sign up; it is ` +
+              `the one that has been let through.\n\n` +
+              (gw.payments
+                ? `You will be asked for a card. The first ${TRIAL_DAYS} ` +
+                  `days are free and nothing is charged until day ${
+                    TRIAL_DAYS + 1
+                  } — cancel before then and you pay nothing.\n\n`
+                : "") +
+              `Kumi runs your agents on your own machine, against your own ` +
+              `Claude or Codex subscription, so the last step is the desktop ` +
+              `app:\n\n${gw.appBaseUrl}/download\n`,
+          });
+        } catch (error) {
+          // Best effort, like every other message this sends. The approval is
+          // already durable and the address can be told by any other means;
+          // failing the request would only make an operator press approve
+          // again against a row that is already approved.
+          console.error(
+            `[mail] Could not tell ${entry.email} they are through the ` +
+              `waitlist: ${describeError(error)}`,
+          );
+        }
       }
     }
     gw.sendJson(response, 200, {

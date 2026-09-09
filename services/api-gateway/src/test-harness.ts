@@ -25,8 +25,9 @@ import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   type CoordinationStore,
+  type StoredRun,
 } from "@coord/persistence";
 
 import { AGENT_ACCOUNT_PREFIX, mcpServersForLease } from "@coord/shared-types";
@@ -155,6 +156,8 @@ export interface TestRuntime {
     /** What the channel picked for this agent, if it picked anything. */
     model?: string;
     effort?: string;
+    /** The branch this task lands on — a work channel's, or none. */
+    branch?: string;
   }>;
   /** Every direct canonical push requested through the channel command. */
   pushCalls: Array<{
@@ -197,6 +200,62 @@ export interface TestRuntime {
   }>;
   /** What `canonicalDiff` answers; mutated in place by tests. */
   canonicalDiff: { files: string[]; patch: string; truncated: boolean };
+  /**
+   * The branches the fixture believes exist, keyed `repositoryId\0branch`.
+   *
+   * A test that wants a merge to conflict sets `conflicts` on the entry the
+   * route created; everything else reads it.
+   */
+  branches: Map<string, { conflicts: string[]; merged: boolean }>;
+  /** Every branch a merge actually landed, in order. */
+  mergedBranches: string[];
+  /** Every channel handed to GitHub, in order. */
+  shippedChannels: Array<{ branch: string; title: string; body: string }>;
+  /**
+   * What `shipChannel` answers; mutated in place by tests.
+   *
+   * A refusal is what a deployment with no remote, no connected GitHub
+   * account or a token without write access produces — and the merge it
+   * follows has already landed, so the route has to say so without recording
+   * a pull request that does not exist.
+   */
+  shipOutcome: { outcome: "done" | "refused"; explanation?: string };
+  /** What `branchComparison` says changed; mutated in place by tests. */
+  branchFiles: string[];
+  /**
+   * How far behind canonical `branchComparison` says every branch is.
+   *
+   * Zero by default, because a fixture whose branches were permanently
+   * drifting would make the sweep post into every room in every test. The
+   * drift test sets it, and is the only thing that reads it.
+   */
+  branchDrift: { behind: number };
+  /**
+   * Contracts a branch is built on that canonical has changed under it;
+   * mutated in place. Empty by default, or the gate would refuse every merge
+   * in the suite.
+   */
+  staleContracts: Array<{
+    file: string;
+    symbol: string;
+    before: string;
+    after: string;
+    through: string;
+  }>;
+  /**
+   * What `branchComparison` calls the branch's head; mutated in place.
+   *
+   * A comment and a review are both stamped with the head they were about,
+   * and the only way to test that staleness is visible is to move it.
+   */
+  branchHead: { revision: string };
+  /** The commits `branchComparison` says the branch is made of. */
+  branchCommits: Array<{
+    revision: string;
+    subject: string;
+    author: string;
+    createdAt: string;
+  }>;
   /** Where `canonicalHead` says canonical stands; mutated in place. */
   canonicalState: { head: string | undefined };
   /** Set `reason` to make `runRepository` reject, as a run that cannot start does. */
@@ -458,6 +517,12 @@ export async function startRuntime(
     /** Drops direct push support, as an older or limited deployment may. */
     withoutPushRepository?: boolean;
     /**
+     * Drops every branch operation, as a deployment with no repository
+     * access has — the case where a work channel cannot be created at all
+     * and the route must say so rather than store one.
+     */
+    withoutBranches?: boolean;
+    /**
      * Writes the catch-up's prose, standing in for the local model.
      *
      * Defaults to one that answers nothing, which is both what a machine
@@ -495,7 +560,7 @@ export async function startRuntime(
     }>;
   } = {},
 ): Promise<TestRuntime> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   // Typed off `TestRuntime` rather than spelled out a second time, like every
   // fixture field below it. The shape was written twice, and adding
   // `callSign` to the interface left this copy behind: tests write through
@@ -558,6 +623,22 @@ export async function startRuntime(
     patch: "@@ -1 +1 @@\n-const ok = a && b;\n+const ok = a || b;",
     truncated: false,
   };
+  const branches: TestRuntime["branches"] = new Map();
+  const shippedChannels: TestRuntime["shippedChannels"] = [];
+  const shipOutcome: TestRuntime["shipOutcome"] = { outcome: "done" };
+  const mergedBranches: TestRuntime["mergedBranches"] = [];
+  const branchFiles: TestRuntime["branchFiles"] = ["src/login.ts"];
+  const branchDrift: TestRuntime["branchDrift"] = { behind: 0 };
+  const staleContracts: TestRuntime["staleContracts"] = [];
+  const branchHead: TestRuntime["branchHead"] = { revision: "c".repeat(40) };
+  const branchCommits: TestRuntime["branchCommits"] = [
+    {
+      revision: "1".repeat(40),
+      subject: "Clamp the login width from below as well",
+      author: "Claude (Nathan)",
+      createdAt: "2026-02-02T10:00:00.000Z",
+    },
+  ];
   const performChat = async (
     input: any,
     onEvent?: (event: Record<string, unknown>) => void,
@@ -895,6 +976,7 @@ export async function startRuntime(
           : { queueAfterCurrent: input.queueAfterCurrent }),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { effort: input.effort }),
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
       });
       return await store.submitTask({
         projectId: input.projectId,
@@ -910,6 +992,10 @@ export async function startRuntime(
         ...(input.planOnly === true ? { planOnly: true } : {}),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { effort: input.effort }),
+        // Where the work lands. Stored for the same reason: a fixture that
+        // dropped it would file every work channel's task against canonical
+        // and every branch test would pass while proving nothing.
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
@@ -1059,6 +1145,103 @@ export async function startRuntime(
       canonicalDiffs.push(input);
       return canonicalDiff;
     },
+    // Branches, modelled rather than stubbed. What the routes above depend on
+    // is not git — it is create-only semantics (two channels asking for one
+    // branch produce one branch and one refusal), that a merged branch stops
+    // existing, and that a conflicting merge refuses rather than lands. A
+    // stub that answered `{created:true}` unconditionally would let every one
+    // of those tests pass against a route that had lost the check.
+    async createBranch(input) {
+      const key = `${input.repositoryId}\u0000${input.branch}`;
+      if (branches.has(key)) {
+        return { created: false };
+      }
+      branches.set(key, { conflicts: [], merged: false });
+      return { created: true };
+    },
+    async shipChannel(input) {
+      shippedChannels.push(input);
+      // Faithful in the one respect the route acts on: a refusal is an
+      // outcome, not a throw, and it carries no URL — so a route that
+      // recorded a pull request on a refusal would be caught here rather than
+      // by somebody wondering later why a channel links to nothing.
+      if (shipOutcome.outcome === "refused") {
+        return {
+          outcome: "refused",
+          explanation:
+            shipOutcome.explanation ??
+            "You haven't connected GitHub, so there is no account to ship as.",
+        };
+      }
+      return {
+        outcome: "done",
+        detail: { url: `https://github.com/acme/app/pull/${shippedChannels.length}` },
+        explanation:
+          `Opened a pull request from ${input.branch} into main: ` +
+          `https://github.com/acme/app/pull/${shippedChannels.length}`,
+      };
+    },
+    async deleteBranch(input) {
+      branches.delete(`${input.repositoryId}\u0000${input.branch}`);
+    },
+    async branchComparison(input) {
+      const key = `${input.repositoryId}\u0000${input.branch}`;
+      const state = branches.get(key);
+      if (state === undefined) {
+        throw new Error(`No such branch: ${input.branch}`);
+      }
+      return {
+        mergeBase: "b".repeat(40),
+        head: branchHead.revision,
+        baseHead: "b".repeat(40),
+        base: "main",
+        ahead: state.conflicts.length > 0 ? 2 : 1,
+        behind: branchDrift.behind,
+        files: branchFiles,
+        patch: canonicalDiff.patch,
+        truncated: false,
+        conflicts: state.conflicts,
+        commits: branchCommits,
+      };
+    },
+    /**
+     * What the fixture says has moved under a branch.
+     *
+     * Empty unless a test sets it: the whole suite would otherwise have to
+     * know about a gate it is not testing, and a fixture that blocked merges
+     * by default would fail every test that merges one.
+     */
+    async branchContractDrift() {
+      return { stale: [...staleContracts] };
+    },
+    async mergeBranch(input) {
+      const key = `${input.repositoryId}\u0000${input.branch}`;
+      const state = branches.get(key);
+      if (state === undefined) {
+        throw new Error(`No such branch: ${input.branch}`);
+      }
+      if (state.conflicts.length > 0) {
+        return { merged: false, conflicts: state.conflicts };
+      }
+      // Gone once merged, exactly as the real one is: a route that merged
+      // twice would otherwise pass here and put two merge commits on
+      // canonical in production.
+      branches.delete(key);
+      mergedBranches.push(input.branch);
+      return { merged: true, revision: "d".repeat(40) };
+    },
+    async refreshBranch(input) {
+      const key = `${input.repositoryId}\u0000${input.branch}`;
+      const state = branches.get(key);
+      if (state === undefined) {
+        throw new Error(`No such branch: ${input.branch}`);
+      }
+      if (state.conflicts.length > 0) {
+        return { merged: false, conflicts: state.conflicts };
+      }
+      return { merged: true, revision: "e".repeat(40), behind: 0 };
+    },
+
     async canonicalHead() {
       return canonicalState.head;
     },
@@ -1293,6 +1476,18 @@ export async function startRuntime(
   if (options.withoutPushRepository === true) {
     delete operations.pushRepository;
   }
+  if (options.withoutBranches === true) {
+    // All five together, because that is how a deployment without repository
+    // access loses them: dropping only `createBranch` would model a
+    // deployment that cannot make a branch but can merge one, which is not a
+    // thing that exists.
+    delete operations.createBranch;
+    delete operations.deleteBranch;
+    delete operations.branchComparison;
+    delete operations.mergeBranch;
+    delete operations.refreshBranch;
+    delete operations.shipChannel;
+  }
   const gateway = new ApiGateway({
     store,
     operations,
@@ -1441,6 +1636,15 @@ export async function startRuntime(
     pauseCalls,
     resumeCalls,
     canonicalDiff,
+    branches,
+    mergedBranches,
+    shippedChannels,
+    shipOutcome,
+    branchFiles,
+    branchDrift,
+    staleContracts,
+    branchHead,
+    branchCommits,
     canonicalState,
     runFailure,
   };
@@ -1543,6 +1747,35 @@ export async function invitableRepository(
   );
   assert.equal(created.status, 201);
   return id;
+}
+
+/**
+ * A real run row for a repository, for tests that need something to point at.
+ *
+ * `approvals` and several other tables reference `runs(id)`, and a fabricated
+ * id used to be accepted because the in-memory store enforced nothing. SQLite
+ * refuses it, which is the better behaviour and is why this exists: a test
+ * that wants an approval should have a run it could plausibly belong to.
+ */
+export async function testRun(
+  store: CoordinationStore,
+  repositoryId: string,
+): Promise<StoredRun> {
+  const repository = await store.getRepository(repositoryId);
+  if (repository === undefined) {
+    throw new Error(`No such repository: ${repositoryId}`);
+  }
+  return await store.createRun({
+    repository,
+    projectId: DEFAULT_PROJECT_ID,
+    mode: "coordinated",
+    baseVersion: {
+      sequence: 1,
+      revision: "a".repeat(40),
+      branch: repository.branch,
+      createdAt: new Date().toISOString(),
+    },
+  });
 }
 
 /**
@@ -1826,7 +2059,7 @@ export async function startBareGateway(
   store: CoordinationStore;
   sent: MailMessage[];
 }> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const sent: MailMessage[] = [];
   const gateway = new ApiGateway({
     store,

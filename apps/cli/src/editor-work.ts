@@ -38,7 +38,10 @@ import type {
   WorkLease,
   WorkerRecord,
 } from "@coord/persistence";
-import { RepositoryService } from "@coord/repository-service";
+import {
+  canonicalOn,
+  RepositoryService,
+} from "@coord/repository-service";
 import {
   EDITOR_HOLD_MS,
   EDITOR_WORKER_VERSION,
@@ -187,10 +190,16 @@ export async function takeEditorWork(
     vendor: input.vendor,
     label: input.label,
   });
-  // One resolve per repository, not one per candidate. Reading canonical is a
-  // git call, and the queue is ordered by age rather than grouped by
-  // repository, so a run of five tasks in one repository used to cost five
-  // identical resolves before the first lease was even attempted.
+  // One resolve per repository *and branch*, not one per candidate. Reading
+  // canonical is a git call, and the queue is ordered by age rather than
+  // grouped by repository, so a run of five tasks in one repository used to
+  // cost five identical resolves before the first lease was even attempted.
+  //
+  // The branch is in the key because two tasks in one repository can be
+  // commissioned against different branches — one in a work channel, one in
+  // #general — and they have different heads. Keyed by repository alone, the
+  // first task's revision was handed to the second, so an editor taking work
+  // from a channel branch was told to start from canonical.
   const versions = new Map<string, CanonicalVersion | undefined>();
   const repositoryParallelism = configuredRepositoryParallelism();
   for (const next of pending) {
@@ -198,22 +207,25 @@ export async function takeEditorWork(
     if (required !== undefined && required !== input.vendor) {
       continue;
     }
-    if (!versions.has(next.repositoryId)) {
-      const stored = await store.getRepository(next.repositoryId);
+    // The task's branch when it has one, and the repository's when it does
+    // not — the same rule every other lease path follows, so the revision
+    // resolved here, the branch the editor checks out and the branch the
+    // result is integrated into are one branch rather than three answers.
+    const storedRepository = await store.getRepository(next.repositoryId);
+    const on =
+      storedRepository === undefined
+        ? undefined
+        : canonicalOn(storedRepository, next.branch);
+    const versionKey = `${next.repositoryId}\u0000${on?.branch ?? ""}`;
+    if (!versions.has(versionKey)) {
       versions.set(
-        next.repositoryId,
-        stored === undefined
+        versionKey,
+        on === undefined
           ? undefined
-          : await repositories
-              .getCanonicalVersion({
-                id: stored.id,
-                path: stored.path,
-                branch: stored.branch,
-              })
-              .catch(() => undefined),
+          : await repositories.getCanonicalVersion(on).catch(() => undefined),
       );
     }
-    const version = versions.get(next.repositoryId);
+    const version = versions.get(versionKey);
     if (version === undefined) {
       // A repository this control plane cannot read is not one an editor can
       // be told to check out. Skipped rather than thrown: the next candidate
@@ -234,7 +246,6 @@ export async function takeEditorWork(
     if (leased === undefined) {
       continue;
     }
-    const stored = await store.getRepository(next.repositoryId);
     await store.appendAudit(undefined, {
       type: "task_started",
       taskId: leased.task.id,
@@ -253,7 +264,10 @@ export async function takeEditorWork(
       task: leased.task,
       repository: {
         id: leased.task.repositoryId,
-        branch: stored?.branch ?? "main",
+        // The branch this work is on, which is what the editor checks out.
+        // `on` is never undefined here: a task whose repository could not be
+        // read was skipped above, before anything was leased.
+        branch: on?.branch ?? "main",
       },
       baseRevision: leased.lease.baseRevision,
       baseVersion: version.sequence,
@@ -533,12 +547,12 @@ export async function reportEditorWork(
     stored === undefined
       ? undefined
       : await (services.repositories ?? new RepositoryService())
+          // The lease's branch, not the repository's: the sequence number is
+          // this revision's depth in the history it belongs to, and measuring
+          // a channel branch's commit against canonical would answer about a
+          // history it is not on.
           .getVersionAtRevision(
-            {
-              id: stored.id,
-              path: stored.path,
-              branch: stored.branch,
-            },
+            canonicalOn(stored, lease.branch),
             lease.baseRevision,
           )
           .catch(() => undefined);

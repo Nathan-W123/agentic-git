@@ -27,7 +27,8 @@ import {
   type ScopeChangeRequest,
   type TaskDefinition,
 } from "@coord/shared-types";
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
+import type { CoordinationStore } from "@coord/persistence";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -259,13 +260,30 @@ class TestAgent implements AgentAdapter {
   }
 }
 
-class FailingScopeStore extends InMemoryCoordinationStore {
-  public override async saveScopeChange(
-    _runId: string,
-    _request: ScopeChangeRequest,
-  ): Promise<void> {
-    throw new Error("scope persistence unavailable");
-  }
+/**
+ * A real store with one write made to fail.
+ *
+ * A proxy rather than a subclass: `SqliteCoordinationStore` is reached
+ * through `open()` and keeps its handle private, so there is nothing to
+ * extend. Forwarding with `Reflect` keeps `this` the real store, which
+ * matters — the transaction depth and the database handle are its own state,
+ * and an override that shadowed either would break far more than the one
+ * method a test meant to fail.
+ */
+function storeRefusing(
+  method: keyof CoordinationStore,
+  reason: string,
+): CoordinationStore {
+  return new Proxy(SqliteCoordinationStore.open(":memory:"), {
+    get(target, property, receiver) {
+      if (property === method) {
+        return () => {
+          throw new Error(reason);
+        };
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
 }
 
 function task(id: string): TaskDefinition {
@@ -399,7 +417,7 @@ test("a planning failure fails that task alone; the wave runs on", async () => {
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const coordinator = new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
@@ -1093,7 +1111,7 @@ test("a task whose deliverable was a performed action ends done, not empty", asy
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       actionAuthority: {
         async perform() {
           return {
@@ -1149,7 +1167,7 @@ test("a refused action completes with the agent's explanation", async () => {
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       actionAuthority: {
         async perform() {
           return {
@@ -1447,7 +1465,7 @@ test("cancels execution promptly when a scope event cannot be persisted", async 
       false,
       "src/c.txt",
     );
-    const store = new FailingScopeStore();
+    const store = storeRefusing("saveScopeChange", "scope persistence unavailable");
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
@@ -1479,7 +1497,7 @@ test("a task's own context leads the handoffs it is seeded with", async () => {
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     await recordTaskHandoff(
       store,
       buildTaskHandoff({
@@ -1535,7 +1553,7 @@ test("a task with no context is seeded with the handoffs alone", async () => {
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const agent = new TestAgent(
       "agent_a",
       plan("task_a", ["src/a.txt"]),
@@ -1573,7 +1591,7 @@ test("a task asked to look finishes by reporting, not by failing", async () => {
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const findings = "Three things worth fixing: the retry bound is inclusive.";
     const agent = new TestAgent(
       "agent_a",
@@ -1625,7 +1643,7 @@ test("a completed task is not failed solely because it changed nothing", async (
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const agent = new TestAgent(
       "agent_a",
       plan("task_a", []),
@@ -1672,7 +1690,7 @@ test("an empty run carries the agent's account as its successful result", async 
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const account =
       "Diagnosis only — no files changed. The attachment route reads bytes " +
       "back out of the attachment store and never writes them into the " +
@@ -1723,7 +1741,7 @@ test("a role preamble does not turn an audit into a failure", async () => {
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const agent = new TestAgent(
       "agent_a",
       plan("task_a", []),
@@ -1774,7 +1792,7 @@ test("a promoted change carries the agent's own account of it", async () => {
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const account = "Repointed six test imports at their new modules.";
     const agent = new TestAgent(
       "agent_a",
@@ -1823,7 +1841,7 @@ test("a run reports what it is touching while it is still touching it", async ()
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const agent = new TestAgent(
       "agent_a",
       plan("task_a", ["src/a.txt"]),
@@ -1893,7 +1911,7 @@ test("an untracked file the agent creates is reported as added", async () => {
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       workingChangePollMs: 25,
     }).run({
       repository: fixture.repository,
@@ -1934,7 +1952,7 @@ test("an unanswered question cancels the task rather than guessing", async () =>
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       // Nobody ever answers.
       questions: {
         awaitAnswer: async (ask) => {
@@ -1979,7 +1997,7 @@ test("an answered question is handed back and the run continues", async () => {
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       questions: { awaitAnswer: async () => ({ chosen: 1 }) },
       questionDeadlineMs: 5_000,
     }).run({
@@ -2031,7 +2049,7 @@ test("a set of questions is put whole, and answered one for one", async () => {
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       questions: {
         awaitAnswer: async (ask) => {
           asked.push(ask.questions.map((entry) => ({ ...entry })));
@@ -2126,7 +2144,7 @@ test("a stop from outside aborts the live session and the task ends cancelled", 
     const running = new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       cancellations,
     }).run({
       repository: fixture.repository,
@@ -2166,14 +2184,6 @@ test("an event handler failure names its cause, not the cancel's echo", async ()
     // for any event handler failing mid-run. The handler's catch cancels the
     // session; the edit phase then rejects with that cancel's echo, and the
     // echo used to be the whole explanation the thread got.
-    class RefusingStore extends InMemoryCoordinationStore {
-      public override async saveScopeChange(
-        _runId: string,
-        _request: ScopeChangeRequest,
-      ): Promise<void> {
-        throw new Error("scope audit write refused");
-      }
-    }
     const agent = new TestAgent(
       "agent_a",
       plan("task_a", ["src/a.txt"]),
@@ -2186,7 +2196,7 @@ test("an event handler failure names its cause, not the cancel's echo", async ()
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new RefusingStore(),
+      store: storeRefusing("saveScopeChange", "scope audit write refused"),
     }).run({
       repository: fixture.repository,
       workspaceRoot: path.join(root, "workspaces"),
@@ -2224,7 +2234,7 @@ test("a stop recorded before the wave starts removes the task unrun", async () =
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       cancellations,
     }).run({
       repository: fixture.repository,
@@ -3176,7 +3186,7 @@ test("a deferred waiter plans against the holder's in-progress edits", async () 
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const version = await fixture.repositories.getCanonicalVersion(
       fixture.repository,
     );
@@ -3247,7 +3257,7 @@ test("a deferred waiter plans against the holder's in-progress edits", async () 
     assert.equal(revisingAdmits, 0);
     const speculative = agent.replanRequests.filter(
       (request) =>
-        request.canonicalChange.reason.includes("in progress") &&
+        request.canonicalChange?.reason.includes("in progress") === true &&
         (request.holderWorkingChanges ?? []).some(
           (change) => change.path === "src/a.txt",
         ),
@@ -3281,7 +3291,7 @@ test("a waiter speculates once against an unchanged holder, not once a wave", as
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const version = await fixture.repositories.getCanonicalVersion(
       fixture.repository,
     );
@@ -3349,8 +3359,9 @@ test("a waiter speculates once against an unchanged holder, not once a wave", as
 
     assert.equal(result.tasks[0]?.status, "integrated");
     assert.ok(admits > DEFERRALS, "the waiter did wait through every wave");
-    const speculative = agent.replanRequests.filter((request) =>
-      request.canonicalChange.reason.includes("in progress"),
+    const speculative = agent.replanRequests.filter(
+      (request) =>
+        request.canonicalChange?.reason.includes("in progress") === true,
     );
     // One. The first speculation is the one worth paying for; the repeats buy
     // nothing, because there is nothing new to plan against.
@@ -3374,7 +3385,7 @@ test("waiters speculate concurrently, not one agent call at a time", async () =>
 
   try {
     const fixture = await createFixture(root);
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const version = await fixture.repositories.getCanonicalVersion(
       fixture.repository,
     );
@@ -3517,7 +3528,7 @@ test("a waiter plans while the holder is still coding, not after it", async () =
         sessionId: string,
         request: ReplanRequest,
       ): Promise<AgentPlan> {
-        if (request.canonicalChange.reason.includes("in progress")) {
+        if (request.canonicalChange?.reason.includes("in progress") === true) {
           editing.seenByWaiter.push(editing.now);
         }
         return await super.requestReplan(sessionId, request);
@@ -3550,7 +3561,7 @@ test("a waiter plans while the holder is still coding, not after it", async () =
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
       planAuthority: {
         async admit(request) {
           admits += 1;
@@ -3622,7 +3633,7 @@ test("a planning agent is told where the repository says the work lives", async 
     await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new InMemoryCoordinationStore(),
+      store: SqliteCoordinationStore.open(":memory:"),
     }).run({
       repository: fixture.repository,
       workspaceRoot: path.join(root, "workspaces"),

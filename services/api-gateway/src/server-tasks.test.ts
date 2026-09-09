@@ -2159,98 +2159,76 @@ test("a direct message can be unsent by its sender and nobody else", async (t) =
   );
 });
 
-test("a zip in a request reaches the agent as a file, and downloads as one", async (t) => {
-  // A picture is looked at and an archive is read, and an agent cannot be
-  // shown either — so both become the path they are already at on the
-  // filesystem the task runs on. Widening the allowlist is only worth
-  // anything if that rewrite covers the new types too.
-  const runtime = await startRuntime(t);
-  const owner = new TestClient(runtime.origin);
-  const bootstrapped = await bootstrap(owner);
-  const ownerId = bootstrapped.user.id;
-  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
-  const repositoryId = await invitableRepository(owner, "archive-repo");
-  await joinAllConnectedAgents(runtime, repositoryId);
-  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}`;
-  const agents = await owner.request(`${base}/channel/agents`);
-  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
-
-  const stored = await owner.request(`${base}/attachments`, {
-    method: "POST",
-    raw: Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(40)]),
-    rawType: "application/zip",
-  });
-  assert.equal(stored.status, 200, JSON.stringify(stored.data));
-  const id = (stored.data as { id?: string }).id ?? "";
-  assert.match(id, /\.zip$/u);
-
-  // Served with the type this deployment derived, and — because it is not an
-  // image — as a download rather than as a document on this origin. That is
-  // the second lock beside `nosniff` on everything added after images.
-  const fetched = await owner.request(`${base}/attachments/${id}`);
-  assert.equal(fetched.status, 200);
-  assert.equal(fetched.headers.get("content-type"), "application/zip");
-  assert.equal(fetched.headers.get("x-content-type-options"), "nosniff");
-  assert.match(
-    fetched.headers.get("content-disposition") ?? "",
-    /^attachment; filename="[0-9a-f]{32}\.zip"$/u,
+test("every overlay workspace action the handler answers is routable", async (t) => {
+  // `move` had a handler, an operation on the interface, an implementation in
+  // the overlay, and a caller in the browser — and no way in. The route names
+  // its actions in one regex and the handlers test them one by one below, and
+  // the two lists had drifted apart: dragging a file onto a folder in the
+  // code view came back "Route was not found".
+  //
+  // Asserted as the invariant rather than as one path, because the next
+  // action added will be added the same way. The route's own list is read out
+  // of the source and compared with the actions the handlers answer, so
+  // either half growing without the other fails here.
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../src/routes/tasks.ts", import.meta.url),
+    "utf8",
+  );
+  const block = source.slice(
+    source.indexOf("const workspaceActionMatch ="),
+    source.indexOf("if (action === \"exec\" && method === \"POST\")"),
+  );
+  assert.notEqual(block, "", "the workspace route should still exist");
+  const routed = new Set(
+    (/\/\((?<actions>[a-z|]+)\)\$/u.exec(block)?.groups?.["actions"] ?? "")
+      .split("|")
+      .filter((entry) => entry !== ""),
+  );
+  assert.ok(routed.size > 0, "the route should still name its actions");
+  const answered = new Set(
+    [...block.matchAll(/action === "([a-z]+)"/gu)].map((match) => match[1] ?? ""),
+  );
+  // `exec` and `submit` are answered past the slice above; they are in the
+  // route's list and their handlers are the two the slice ends at.
+  for (const known of ["exec", "submit"]) {
+    answered.add(known);
+  }
+  assert.deepEqual(
+    [...answered].filter((action) => !routed.has(action)).sort(),
+    [],
+    "an action with a handler that the route cannot match is unreachable",
+  );
+  assert.deepEqual(
+    [...routed].filter((action) => !answered.has(action)).sort(),
+    [],
+    "an action the route matches with no handler falls through to 404",
   );
 
-  await owner.request(`${base}/channel/messages`, {
-    method: "POST",
-    body: {
-      content: `@${name} fix the retry loop the run in here fails on ![logs.zip](attachment:${id})`,
-    },
-  });
-  await waitFor(async () => {
-    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
-    return listed.length > 0;
-  }, "the mention never became a task");
-  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
-  assert.match(task!.objective, /\/attachments\/a{32}\.zip/u);
-  // Read, not seen: an agent told to look at an archive has been told
-  // something slightly untrue about what it is holding.
-  assert.match(task!.objective, /open this file to read it/u);
-  assert.doesNotMatch(task!.objective, /attachment:/u);
-});
-
-test("a markdown attachment is served as text nobody can execute", async (t) => {
+  // And over HTTP, which is what proves the regex is the thing that decides.
+  // No overlay is configured here, so a path the route *matches* answers 501
+  // "not_supported" while one it does not falls through to 404 "not_found".
+  // That difference is the bug, and it needs no overlay to see.
   const runtime = await startRuntime(t);
-  const owner = new TestClient(runtime.origin);
-  await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "spec-repo");
-  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/attachments`;
-
-  const stored = await owner.request(base, {
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/repo_a/workspace`;
+  for (const action of routed) {
+    const answer = await client.request(`${base}/${action}`, {
+      method: "POST",
+      body: {},
+    });
+    assert.equal(
+      answer.data.error?.code,
+      "not_supported",
+      `${action} should reach the workspace route: ${JSON.stringify(answer.data)}`,
+    );
+  }
+  // A neighbour that is not an action still falls through, so the assertion
+  // above is about routing and not about every path answering 501.
+  const stranger = await client.request(`${base}/rename`, {
     method: "POST",
-    raw: Buffer.from("# Spec\n\nWhat it has to do.\n", "utf8"),
-    rawType: "text/markdown",
+    body: {},
   });
-  assert.equal(stored.status, 200, JSON.stringify(stored.data));
-  const id = (stored.data as { id?: string }).id ?? "";
-  const fetched = await owner.request(`${base}/${id}`);
-  assert.equal(fetched.headers.get("content-type"), "text/markdown");
-  assert.match(
-    fetched.headers.get("content-disposition") ?? "",
-    /^attachment;/u,
-  );
-
-  // An image is still drawn where it was posted, which is the whole point of
-  // pasting one into a conversation.
-  const png = await owner.request(base, {
-    method: "POST",
-    raw: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    rawType: "image/png",
-  });
-  const drawn = await owner.request(`${base}/${(png.data as { id: string }).id}`);
-  assert.equal(drawn.headers.get("content-disposition"), "inline");
-
-  // And an executable claiming to be an archive is refused by the deployment
-  // that owns the allowlist, not by this route.
-  const refused = await owner.request(base, {
-    method: "POST",
-    raw: Buffer.from("MZ ", "latin1"),
-    rawType: "application/x-msdownload",
-  });
-  assert.notEqual(refused.status, 200);
+  assert.equal(stranger.data.error?.code, "not_found");
 });

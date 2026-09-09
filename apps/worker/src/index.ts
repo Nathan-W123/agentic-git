@@ -6,6 +6,7 @@ import { CoordinatorProject } from "@coord/cli/project";
 
 import { WorkerClient } from "./client.js";
 import { WorkNudge } from "./nudge.js";
+import { registerWhenAllowed } from "./registration.js";
 import { Worker } from "./worker.js";
 
 function required(name: string): string {
@@ -47,6 +48,19 @@ async function main(): Promise<void> {
     ...(process.env["COORD_WORKER_NAME"] === undefined
       ? {}
       : { name: process.env["COORD_WORKER_NAME"] }),
+    // What is actually installed on this machine, said out loud.
+    //
+    // `register` has always carried a version and nothing ever set one, so
+    // every worker in every fleet reported "0.0.0" — which made the column
+    // worse than absent: it looked like an answer. The desktop app has no
+    // auto-update, so an install stays on whatever build it was given until
+    // somebody downloads another one, and "which version is that machine on"
+    // is the first question when an agent behaves like an older one. Nothing
+    // could answer it, including the person sitting at the machine.
+    ...(process.env["COORD_WORKER_VERSION"]?.trim() === undefined ||
+    process.env["COORD_WORKER_VERSION"]?.trim() === ""
+      ? {}
+      : { version: process.env["COORD_WORKER_VERSION"].trim() }),
     ...((process.env["COORD_PROJECT_ID"] ?? process.env["COORD_PROJECT"]) ===
     undefined
       ? {}
@@ -65,7 +79,7 @@ async function main(): Promise<void> {
     ...(adapters === undefined ? {} : { adapters }),
   });
 
-  const id = await worker.register();
+  const id = await registerWhenAllowed(() => worker.register());
   const advertised = worker.advertisedAdapters;
   console.log(
     `Worker ${id} polling ${serverUrl} for ${

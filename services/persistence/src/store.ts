@@ -680,6 +680,18 @@ export interface WorkLease {
   status: WorkLeaseStatus;
   /** Canonical revision the worker must build its workspace from. */
   baseRevision: string;
+  /**
+   * The branch that revision is on, or absent for the repository's own.
+   *
+   * Beside `baseRevision` for the same reason: both say where the change is
+   * being written, and every later step — validating the plan, arbitrating a
+   * mid-run widening, integrating the result — has to answer against the same
+   * place the base came from. Reading the branch back from the task instead
+   * would work and would be one more store read on four hot paths, and would
+   * leave a window where a task edited underneath a running lease moved the
+   * branch its result integrates into.
+   */
+  branch: string | undefined;
   issuedAt: string;
   expiresAt: string;
   heartbeatAt: string;
@@ -852,6 +864,20 @@ export interface SubmitTaskInput {
   answerTo?: string;
   repositoryId: string;
   projectId?: ProjectId;
+  /**
+   * The branch this work lands on, or absent for the repository's own.
+   *
+   * Set from the channel the task was dispatched in, at submission, and
+   * carried on the row rather than looked up later: the channel could be
+   * renamed, merged or archived while the task is still queued, and the
+   * branch a change was written against is not a thing that may change
+   * underneath it.
+   *
+   * Absent is what every task written before this meant and still means —
+   * canonical — so a deployment that never makes a work channel behaves
+   * exactly as it did.
+   */
+  branch?: string;
   objective: string;
   agentId: string;
   validationCommands: ValidationCommand[];
@@ -922,6 +948,8 @@ export interface SubmittedTask {
   answerTo: string | undefined;
   repositoryId: string;
   projectId: ProjectId | undefined;
+  /** See {@link SubmitTaskInput.branch}. Absent means the repository's own. */
+  branch: string | undefined;
   objective: string;
   agentId: string;
   validationCommands: ValidationCommand[];
@@ -1310,6 +1338,14 @@ export interface ChannelMessage {
    * task changed nothing, which is a different statement.
    */
   changedFiles: ChannelChangedFile[] | undefined;
+  /**
+   * Where in a branch's diff this was said, when it was said in one.
+   *
+   * Absent for every ordinary message, which is almost all of them. See
+   * {@link ChannelAnchor}: the revision travels with the line because a line
+   * number without one is a guess.
+   */
+  anchor?: ChannelAnchor;
   /** When somebody pinned this message to the channel's banner, if anyone has. */
   pinnedAt: string | undefined;
   /**
@@ -1416,6 +1452,30 @@ export interface AppendChannelMessageInput {
    * the process that started it.
    */
   taskId?: TaskId;
+  /**
+   * Where in a branch's diff this was said, for a review comment.
+   *
+   * A review comment is a channel message and not a parallel comment system:
+   * the channel already *is* the pull request's conversation, so a second
+   * store of comments beside it would be two places to look and one of them
+   * would go stale. What a comment needs on top of a message is where it was
+   * pointed.
+   *
+   * The revision is part of the anchor, not decoration. A line number is only
+   * meaningful against a particular commit — the branch moves, and a comment
+   * left on line 42 of one revision is not about line 42 of the next — so a
+   * reader has to compare it against the revision it is drawing before
+   * placing the comment on a line.
+   */
+  anchor?: ChannelAnchor;
+}
+
+/** Where in a branch's diff a message was said. */
+export interface ChannelAnchor {
+  path: string;
+  /** 1-based, in the revision named here and no other. */
+  line: number;
+  revision: string;
 }
 
 /** One file a thread's task changed, for the summary hanging off the thread. */
@@ -1740,20 +1800,244 @@ export interface SubChannel {
   name: string;
   visibility: SubChannelVisibility;
   /**
-   * Put away rather than destroyed.
+   * The branch this channel's work lands on, or absent for a channel that is
+   * only a conversation.
    *
-   * Deleting a room takes its transcript with it and there is nothing to go
-   * back to. Archiving is the reversible half of the same intent: the room
-   * drops out of the working list, stops accepting new messages, and stays
-   * whole so it can be read back or restored. Nothing else about it changes —
-   * membership, visibility and history are exactly as they were left.
+   * Absent is the default and what every channel written before this had, so
+   * nothing changes for a deployment that never uses it: work lands on the
+   * repository's own branch exactly as it did. `#general` is always absent,
+   * because it *is* that branch — the thing everything else merges into.
    *
-   * `#general` is never archived, for the same reason it is never deleted:
-   * it is where every unaddressed message falls back to.
+   * Set, the channel is a unit of shippable work. Its agents are arbitrated
+   * against each other as they always were, and their changes land here
+   * rather than on canonical, so the channel can be reviewed and merged as
+   * one thing. See `docs/CHANNELS-AS-BRANCHES.md`, and in particular why a
+   * claim on anything at an interface still contends across every branch —
+   * without that, branches are isolation and this is a step backwards.
    */
-  archived: boolean;
+  branch?: string;
+  /**
+   * When this channel's work was merged, and by whom.
+   *
+   * Set once the pull request opened from it is merged. A merged channel is
+   * read-only for work: its branch is behind canonical from that moment on,
+   * and admitting new tasks onto it would produce a second review of work
+   * that has already shipped.
+   */
+  mergedAt?: string;
+  mergedBy?: string;
+  /**
+   * Where this channel's merged work went on GitHub, and when it went.
+   *
+   * The second of two gates. Kumi reviews the channel's branch into
+   * canonical; GitHub reviews canonical into whatever the remote calls main.
+   * Kept here because the pull request is *about* this room — the diff, the
+   * conversation and the tasks that produced it are all in it — and a link
+   * held anywhere else would have to be joined back to the room every time
+   * anybody wanted to see it.
+   *
+   * Absent for a channel that has not shipped. Shipping is deliberately
+   * separate from merging: a deployment with no GitHub remote merges
+   * perfectly well and never ships, and somebody may want to ship a channel
+   * that merged last week.
+   */
+  pullRequestUrl?: string;
+  shippedAt?: string;
   createdAt: string;
   createdBy?: string;
+}
+
+/**
+ * What somebody thinks of a work channel's branch.
+ *
+ * `approved` and `changes_requested` are the two answers that mean something
+ * about whether it should land. There is deliberately no third "commented"
+ * state: a comment is a message in the room, which is where comments live —
+ * a review state that says nothing about the decision would be a row whose
+ * only purpose is to appear in a list.
+ */
+export type SubChannelReviewState = "approved" | "changes_requested";
+
+export interface SubChannelReview {
+  channelId: string;
+  repositoryId: string;
+  userId: UserId;
+  state: SubChannelReviewState;
+  /** What they said when they left it, if they said anything. */
+  note?: string;
+  /**
+   * The branch head this was an answer to.
+   *
+   * An approval of a branch that has moved four commits since is not an
+   * approval of what is there now, and a reader has to be able to tell.
+   */
+  revision?: string;
+  reviewedAt: string;
+}
+
+export interface SaveSubChannelReviewInput {
+  repositoryId: string;
+  channelId: string;
+  userId: UserId;
+  state: SubChannelReviewState;
+  note?: string;
+  revision?: string;
+  reviewedAt: string;
+}
+
+/**
+ * A line range on the current side of a file, as it was actually changed.
+ *
+ * Half-open on the end so an empty range is expressible and adjacency does
+ * not read as overlap: [10, 12) and [12, 14) touch and do not collide.
+ */
+export interface ClaimedRange {
+  file: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * One exported contract as a branch left it.
+ *
+ * The tier above {@link BranchClaim.symbols}. A name says a branch touched
+ * `sign`; this says `sign` is now `(password: number): string`, which is what
+ * lets a consumer of the old shape be told, and is invisible to git — the
+ * name on both sides is the same, which is precisely why it merges.
+ */
+export interface ClaimedShape {
+  file: string;
+  symbol: string;
+  /** The readable form, for the sentence somebody is shown. */
+  shape: string;
+  /** What decides whether it moved; see `contract-shape.ts`. */
+  digest: string;
+  /** Part of this contract is inferred, so this claim cannot see all of it. */
+  inferred?: boolean;
+  /**
+   * The files that were built on this contract when the branch left it.
+   *
+   * Held per contract rather than as one list for the claim, because the
+   * sentence this exists to produce names both: "login.ts consumes `sign`,
+   * which #payments-v2 has already changed". A flat list could only manage
+   * "consumes something that moved", which is the kind of warning people
+   * learn to close.
+   */
+  consumers: string[];
+}
+
+/**
+ * What one task left behind on a branch, and therefore what that branch holds
+ * for as long as it is open.
+ *
+ * The point of this table is the gap the lease table cannot cover. A plan is
+ * arbitrated against tasks that are *executing*, so two tasks an hour apart
+ * on two branches never see each other — and that is exactly the pair whose
+ * edits collide when the second branch tries to catch up after the first one
+ * merges. A claim here outlives the lease and lasts as long as the branch.
+ *
+ * Recorded from the landed diff rather than from the plan's forecast. A
+ * forecast is a guess about what a task will touch; this is a fact about what
+ * it did, which is both narrower and always true.
+ */
+export interface BranchClaim {
+  id: string;
+  repositoryId: string;
+  branch: string;
+  taskId: string;
+  /** The revision this was read from, so a stale claim can be recognised. */
+  revision: string;
+  /**
+   * The semantic surface, which is the half that is enforced.
+   *
+   * These are the cases where a clean merge produces broken software — one
+   * branch renames an exported symbol, another adds a caller of the old name,
+   * git merges both without a murmur and the build fails. No textual conflict
+   * machinery catches that, and these change rarely enough that holding them
+   * for a branch's life costs almost nothing.
+   */
+  symbols: string[];
+  apis: string[];
+  schemas: string[];
+  configKeys: string[];
+  services: string[];
+  /**
+   * The lines actually changed, which is the half that only advises.
+   *
+   * Held separately because the trade is different: files churn, and making
+   * these binding would have a branch open for three days block its files for
+   * three days. Recorded so the real contention rate can be seen before
+   * anybody decides whether it should ever be more than a warning.
+   */
+  ranges: ClaimedRange[];
+  /**
+   * What the exported contracts this branch touched now look like.
+   *
+   * Enforced like the semantic surface above rather than advisory like the
+   * ranges, and for the same reason: a shape change is one of the cases where
+   * a clean merge produces broken software, and contracts move rarely enough
+   * that holding one for a branch's life costs almost nothing.
+   */
+  shapes: ClaimedShape[];
+  createdAt: string;
+}
+
+export interface RecordBranchClaimInput {
+  repositoryId: string;
+  branch: string;
+  taskId: string;
+  revision: string;
+  symbols?: readonly string[];
+  apis?: readonly string[];
+  schemas?: readonly string[];
+  configKeys?: readonly string[];
+  services?: readonly string[];
+  ranges?: readonly ClaimedRange[];
+  shapes?: readonly ClaimedShape[];
+}
+
+/**
+ * A file one person has open and is editing, right now.
+ *
+ * The human side of the lease an agent has always had. An agent's plan is
+ * arbitrated before it writes and its ownership expires if it stops
+ * heartbeating; a person editing in the browser used to be arbitrated only at
+ * submit and to hold nothing in between, so the same file could be handed to
+ * an agent while somebody was typing in it and both would find out afterwards.
+ *
+ * Expiry is the whole design. A person closes a laptop; an agent crashes.
+ * Neither releases anything deliberately, so a hold that did not lapse would
+ * be a lock nobody could account for and everybody would learn to route
+ * around — which is worse than no lock, because the routing around happens in
+ * a terminal where nothing can see it at all.
+ */
+export interface EditorHold {
+  repositoryId: string;
+  /** Empty string for the repository's own branch, as everywhere else. */
+  branch: string;
+  userId: UserId;
+  file: string;
+  /**
+   * The lines being edited, when the editor can say.
+   *
+   * Empty means the whole file, which is what a hold means before anything
+   * narrower is known. A person typing in one function should not hold the
+   * file the way naming it in a plan does.
+   */
+  ranges: ClaimedRange[];
+  acquiredAt: string;
+  renewedAt: string;
+  expiresAt: string;
+}
+
+export interface HoldEditorFileInput {
+  repositoryId: string;
+  branch?: string;
+  userId: UserId;
+  file: string;
+  ranges?: readonly ClaimedRange[];
+  /** How long the hold survives without a renewal. */
+  ttlMs: number;
 }
 
 /** One person's membership of one sub-channel. */
@@ -1769,7 +2053,29 @@ export interface CreateSubChannelInput {
   slug: string;
   name?: string;
   visibility?: SubChannelVisibility;
+  /**
+   * Make this a unit of shippable work rather than a place to talk.
+   *
+   * The caller supplies the branch name; the store only records it. Creating
+   * the branch in git is the gateway's job, because only it holds the
+   * repository service — and it must do that *before* asking for the channel,
+   * so a channel can never name a branch that does not exist.
+   */
+  branch?: string;
   createdBy?: string;
+}
+
+/**
+ * Recording that a channel's work has been merged.
+ *
+ * Separate from {@link UpdateSubChannelInput} because that one is a rename:
+ * it is reached from a settings form and every field on it is something an
+ * admin retypes. This is a fact about the work, written once by the merge
+ * itself, and no form should be able to assert it.
+ */
+export interface MergeSubChannelInput {
+  mergedAt: string;
+  mergedBy: string;
 }
 
 export interface UpdateSubChannelInput {
@@ -2512,6 +2818,58 @@ export interface CoordinationStore {
    * from somebody who is not in it is the gateway's job, because only it
    * knows who is asking.
    */
+/**
+   * Records what a task left on a branch, so the branch goes on holding it.
+   *
+   * Called when a changeset integrates onto a work channel's branch. Nothing
+   * is recorded for work that lands on canonical: canonical is the thing
+   * everybody merges into, and a claim against it would block every branch in
+   * the repository.
+   */
+  recordBranchClaim(input: RecordBranchClaimInput): Promise<BranchClaim>;
+  /**
+   * What the open branches of one repository are holding.
+   *
+   * `exceptBranch` is how a task avoids contending with its own branch's
+   * earlier work, which is not contention at all — it is the same line of
+   * work continuing, and git will fast-forward it.
+   */
+  listBranchClaims(
+    repositoryId: string,
+    options?: { exceptBranch?: string },
+  ): Promise<BranchClaim[]>;
+  /** Drops everything a branch held, once it has merged or gone. */
+  releaseBranchClaims(repositoryId: string, branch: string): Promise<void>;
+
+  /**
+   * Takes or renews one person's hold on a file they are editing.
+   *
+   * One call for both, because the editor cannot tell them apart and should
+   * not have to: the first keystroke acquires, every renewal after it is the
+   * same statement made again. Renewing is what keeps it alive, so an editor
+   * that stops — a closed tab, a slept machine — lets it lapse without having
+   * to say so.
+   */
+  holdEditorFile(input: HoldEditorFileInput): Promise<EditorHold>;
+  /**
+   * Which files people are editing in one repository, right now.
+   *
+   * Expired holds are never returned. They are the ordinary case rather than
+   * an error — nobody releases a hold on purpose — so a reader must not have
+   * to know that and filter for itself.
+   */
+  listEditorHolds(
+    repositoryId: string,
+    options?: { branch?: string; exceptUser?: UserId },
+  ): Promise<EditorHold[]>;
+  /** Gives one back, when somebody closes the file rather than walking away. */
+  releaseEditorHold(input: {
+    repositoryId: string;
+    branch?: string;
+    userId: UserId;
+    file: string;
+  }): Promise<void>;
+
   listSubChannels(repositoryId: string): Promise<SubChannel[]>;
   getSubChannel(
     repositoryId: string,
@@ -2530,6 +2888,66 @@ export interface CoordinationStore {
     projectId: ProjectId,
   ): Promise<SubChannel>;
   createSubChannel(input: CreateSubChannelInput): Promise<SubChannel>;
+  /**
+   * Marks a work channel merged, once and never again.
+   *
+   * Idempotent by refusal rather than by overwrite: a second merge of the
+   * same channel is a bug somewhere upstream — two people pressing the button
+   * at once, or a retry after a response was lost — and quietly rewriting who
+   * merged it would hide that. Returns undefined when the channel is already
+   * merged, so the caller can say so rather than claim it did the work.
+   */
+  mergeSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: MergeSubChannelInput,
+  ): Promise<SubChannel | undefined>;
+  /**
+   * Every review left on a work channel, one per person.
+   *
+   * Ordered oldest first, so "who has looked at this" reads in the order
+   * people looked.
+   */
+  listSubChannelReviews(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<SubChannelReview[]>;
+  /**
+   * Records one person's standing answer to a channel's work.
+   *
+   * Replaces rather than accumulates: changing your mind is the ordinary
+   * case, and a history of somebody approving and un-approving is noise
+   * nobody asked for. The room keeps the narrative — every review is said out
+   * loud there — and this keeps the answer that still stands.
+   *
+   * The revision is recorded with it so a reader can tell an approval of what
+   * is there now from an approval of what was there before somebody pushed
+   * four more commits.
+   */
+  saveSubChannelReview(
+    input: SaveSubChannelReviewInput,
+  ): Promise<SubChannelReview>;
+  /** Withdraws one person's review, leaving no standing answer from them. */
+  clearSubChannelReview(
+    repositoryId: string,
+    channelId: string,
+    userId: UserId,
+  ): Promise<boolean>;
+  /**
+   * Records where a channel's work went on GitHub.
+   *
+   * Overwrites rather than refusing a second call, unlike
+   * {@link mergeSubChannel}: shipping the same channel twice reaches the same
+   * pull request — GitHub answers an existing one rather than opening a
+   * second — so the second write is the same fact restated, not a conflict.
+   *
+   * Returns undefined for a channel this repository does not have.
+   */
+  shipSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: { pullRequestUrl: string; shippedAt: string },
+  ): Promise<SubChannel | undefined>;
   updateSubChannel(
     repositoryId: string,
     channelId: string,

@@ -50,9 +50,11 @@ import { OverlayWorkspaceService } from "./overlay.js";
 import { PreviewService } from "./preview.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
 import { pullCanonical } from "./pull-canonical.js";
+import { watchUpstreams } from "./upstream-watch.js";
 import {
   pushCanonical,
   pushCanonicalForActor,
+  shipChannelToGitHub,
 } from "./push-canonical.js";
 import {
   captureCredentialKey,
@@ -356,6 +358,20 @@ async function serve(
   }, 60_000);
   conversationSweep.unref?.();
 
+  // A stored repository as `RepositoryService` wants it. The gateway asks by
+  // id because it holds no paths; every git-touching operation below starts
+  // here, and doing the lookup once means one place decides what an unknown
+  // id does.
+  const canonicalRepository = async (
+    repositoryId: string,
+  ): Promise<{ id: string; path: string; branch: string }> => {
+    const stored = await store.getRepository(repositoryId);
+    if (stored === undefined) {
+      throw new Error(`Unknown repository: ${repositoryId}`);
+    }
+    return { id: stored.id, path: stored.path, branch: stored.branch };
+  };
+
   // Bound after construction: the gateway is built from these operations, and
   // one of them (a question put to a person) needs the gateway back. Only
   // read from inside a call, which cannot happen before it is serving.
@@ -576,6 +592,7 @@ async function serve(
         // place the absent case is decided.
         ...(input.kind === undefined ? {} : { kind: input.kind }),
         ...(input.answerTo === undefined ? {} : { answerTo: input.answerTo }),
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
       });
     },
     async cancelTasks(input) {
@@ -735,15 +752,7 @@ async function serve(
       });
     },
     async canonicalDiff(input) {
-      const stored = await store.getRepository(input.repositoryId);
-      if (stored === undefined) {
-        throw new Error(`Unknown repository: ${input.repositoryId}`);
-      }
-      const repository = {
-        id: stored.id,
-        path: stored.path,
-        branch: stored.branch,
-      };
+      const repository = await canonicalRepository(input.repositoryId);
       const [files, diff] = await Promise.all([
         repositories.listChangedFiles(
           repository,
@@ -764,24 +773,136 @@ async function serve(
       return { files, patch: diff.patch, truncated: diff.truncated };
     },
     async canonicalHead(input) {
-      const stored = await store.getRepository(input.repositoryId);
-      if (stored === undefined) {
-        throw new Error(`Unknown repository: ${input.repositoryId}`);
-      }
       const [newest] = await repositories.listCanonicalHistory(
-        { id: stored.id, path: stored.path, branch: stored.branch },
+        await canonicalRepository(input.repositoryId),
         1,
       );
       return newest?.revision;
     },
+    async createBranch(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      return {
+        created: await repositories.ensureBranch(repository, input.branch),
+      };
+    },
+    async shipChannel(input) {
+      return await shipChannelToGitHub(project, store, github, {
+        repositoryId: input.repositoryId,
+        actorId: input.actorId,
+        branch: input.branch,
+        title: input.title,
+        body: input.body,
+      });
+    },
+    async deleteBranch(input) {
+      await repositories.deleteBranch(
+        await canonicalRepository(input.repositoryId),
+        input.branch,
+      );
+    },
+    async branchComparison(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      const comparison = await repositories.compareBranches(
+        repository,
+        input.branch,
+      );
+      // The patch is a second call rather than something `compareBranches`
+      // returns, because it is the one part of a comparison that can be
+      // enormous and the only one with a truncation story. Taken from the
+      // merge base for the reason the comparison itself is: against the tip
+      // of canonical, every commit landed elsewhere since would read as
+      // something this branch deleted.
+      const diff = await repositories.diffBetween(
+        repository,
+        comparison.mergeBase,
+        comparison.head,
+      );
+      return {
+        ...comparison,
+        // What it would land on, by name. The comparison knows the base as a
+        // revision, which is the right thing to compare against and the wrong
+        // thing to say out loud: "5 commits ahead of b3f1a90" is not a
+        // sentence anybody reads, and every message about a conflict wants to
+        // name the branch the conflict is with.
+        base: repository.branch,
+        patch: diff.patch,
+        truncated: diff.truncated,
+      };
+    },
+    /**
+     * What moved under this branch while it was open, that it is built on.
+     *
+     * The comparison, and then `staleContracts`, which is where every
+     * decision worth testing lives — the two revisions it reads, and the
+     * filter to what this branch actually consumes. This function is a
+     * closure inside a server and nothing can reach it, so it holds no
+     * judgement of its own.
+     */
+    async branchContractDrift(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      const comparison = await repositories.compareBranches(
+        repository,
+        input.branch,
+      );
+      return {
+        stale: await intelligence.staleContracts(repository, comparison),
+      };
+    },
+    async mergeBranch(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      const merged = await repositories.mergeBranchInto(
+        repository,
+        input.branch,
+        { message: input.message },
+      );
+      if (!merged.merged) {
+        return merged;
+      }
+      // Deleted only once the merge is on canonical. Doing it the other way
+      // round loses the work if the ref moves under the compare-and-swap.
+      await repositories.deleteBranch(repository, input.branch);
+      return merged;
+    },
+    async refreshBranch(input) {
+      const repository = await canonicalRepository(input.repositoryId);
+      const merged = await repositories.mergeBranchInto(
+        repository,
+        repository.branch,
+        {
+          message: `Merge ${repository.branch} into ${input.branch}`,
+          into: input.branch,
+        },
+      );
+      if (!merged.merged) {
+        return merged;
+      }
+      // Asked after the merge, not before: what the channel wants to know is
+      // how far behind it still is, and after a clean merge that is zero.
+      // Reporting the pre-merge number would say "8 behind" about a branch
+      // that has just caught up.
+      const comparison = await repositories.compareBranches(
+        repository,
+        input.branch,
+      );
+      return { ...merged, behind: comparison.behind };
+    },
     async previewStart(input) {
-      return await previews.start({ repositoryId: input.repositoryId });
+      return await previews.start({
+        repositoryId: input.repositoryId,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      });
     },
     async previewStatus(input) {
-      return await previews.status(input.repositoryId);
+      return await previews.status({
+        repositoryId: input.repositoryId,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      });
     },
     async previewStop(input) {
-      await previews.stop(input.repositoryId);
+      await previews.stop({
+        repositoryId: input.repositoryId,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      });
     },
     async previewConfigure(input) {
       // One string rather than an executable and an argument list, because the
@@ -1105,6 +1226,44 @@ async function serve(
         });
     }
   };
+  /**
+   * Somebody pushing straight to the origin, noticed rather than discovered.
+   *
+   * The last unmodelled door. Every other way code reaches this system is
+   * arbitrated on the way in; a push to GitHub is not, and until this ran
+   * nothing here knew a push had happened until a sync, a refused push, or a
+   * merge that failed for a reason nobody could trace. This only reads — the
+   * one thing it must never do is move canonical underneath running agents —
+   * and what it finds is recorded as a branch claim, after which every
+   * warning path that already exists for two branches covers this too.
+   *
+   * The token is a real person's, never a deployment-wide one: whoever most
+   * recently submitted work here and has GitHub connected. A public origin
+   * needs none, and a private one with nobody to borrow from is simply not
+   * watched — which is a smaller failure than either alternative.
+   */
+  watchUpstreams({
+    store,
+    repositories,
+    intelligence,
+    credentialsFor: async (repositoryId) => {
+      const submitted = await store
+        .listSubmittedTasks({ repositoryId })
+        .catch((): [] => []);
+      for (const task of [...submitted].reverse()) {
+        const actorId = task.submittedBy;
+        if (actorId === undefined || actorId === "") {
+          continue;
+        }
+        const connection = await github.tokenFor(actorId).catch(() => undefined);
+        if (connection !== undefined) {
+          return { token: connection.token, actorId };
+        }
+      }
+      return undefined;
+    },
+  });
+
   const queueSweep = setInterval(() => {
     void resumeQueuedWork().catch((error: unknown) => {
       console.error(

@@ -54,8 +54,11 @@ import {
 // looked connected, and could run nothing.
 import { detectAgents, findAgentCommand } from "./agents.mjs";
 import { CONNECTABLE, connectEditor } from "./editor-mcp.mjs";
+import { menuTemplate } from "./menu.mjs";
 import {
+  allowTerminals,
   forgetMcpServers,
+  readTerminalsAllowed,
   setStayAwake,
   startWorker,
   stopWorker,
@@ -111,6 +114,16 @@ let session;
 let running = false;
 /** Mirrors the stored `keepAwake` choice so the menu can show it. */
 let awakeForWork = false;
+/**
+ * Whether this machine opens terminals, as the menu last read it.
+ *
+ * True before anything has been read, because that is what the worker writes
+ * on its first start — see `terminal-consent.mjs`. Starting at false would
+ * draw an unticked box for the second between the menu being built and the
+ * worker writing the yes, which reads as a setting somebody has to go and
+ * turn on.
+ */
+let terminalsAllowed = true;
 /** What the menu says about the worker. Replaced as soon as one reports. */
 let workerStatus = "Starting agents on this machine…";
 
@@ -286,75 +299,26 @@ async function changeServerAndRestart() {
 }
 
 function buildMenu() {
-  const help = [];
-  if (releasesUrl !== undefined) {
-    // Deliberately a link rather than an update that installs itself. These
-    // builds are unsigned, and an unsigned app replacing its own binary is
-    // something the operating system is right to refuse; pointing at the
-    // downloads is honest about what is actually on offer.
-    help.push({
-      label: "Check for Updates…",
-      click: () => void shell.openExternal(`${releasesUrl}/latest`),
-    });
-    help.push({ type: "separator" });
-  }
-  help.push(
-    { label: "Sign Out and Restart", click: () => void signOutAndRestart() },
-    { label: "Change Server…", click: () => void changeServerAndRestart() },
+  return Menu.buildFromTemplate(
+    menuTemplate({
+      platform: process.platform,
+      releasesUrl,
+      version: app.getVersion(),
+      workerStatus,
+      terminalsAllowed,
+      awakeForWork,
+      actions: {
+        checkForUpdates: () =>
+          void shell.openExternal(`${releasesUrl ?? ""}/latest`),
+        signOutAndRestart: () => void signOutAndRestart(),
+        changeServer: () => void changeServerAndRestart(),
+        openWorkerLog: () => void shell.openPath(workerLogPath()),
+        forgetAllowedMcp: () => void forgetAllowedMcp(),
+        allowTerminals: (checked) => void toggleTerminals(checked),
+        keepAwake: (checked) => void toggleKeepAwake(checked),
+      },
+    }),
   );
-  // Where a person volunteers this machine. Checkable rather than a dialog,
-  // because the honest state is binary and they should be able to see which
-  // one they are in without opening anything.
-  const agents = [
-    {
-      // Shown, not offered. Whether agents run here is not a setting — but
-      // whether they *are* running is a fact somebody needs, because the
-      // reasons it can fail (no CLI signed in on this machine, an expired
-      // credential) are all things only they can fix.
-      label: workerStatus,
-      enabled: false,
-    },
-    {
-      // The rest of what that one line came from. A machine running agents
-      // has no terminal open, so without this the worker's account of a task
-      // — which phase took the time, what a CLI said before it gave up —
-      // exists only until the next line replaces it.
-      label: "Open Worker Log",
-      click: () => void shell.openPath(workerLogPath()),
-    },
-    {
-      // The other half of the question the app asks when a project offers
-      // its agents a tool. A yes that could only be taken back by editing a
-      // JSON file would be a yes kept forever.
-      label: "Forget Allowed MCP Servers…",
-      click: () => void forgetAllowedMcp(),
-    },
-    { type: "separator" },
-    {
-      // Named for what it actually does. The platform call underneath is
-      // `SetThreadExecutionState`, and Microsoft is explicit that it "cannot
-      // be used to prevent the user from putting the computer to sleep" — a
-      // closed lid, the power button and Start > Sleep all go straight past
-      // it. It stops the machine idling out, and nothing more, so the label
-      // says idle rather than implying a promise it cannot keep.
-      label: "Don't Sleep While Idle (plugged in, lid open)",
-      type: "checkbox",
-      checked: awakeForWork,
-      click: (item) => void toggleKeepAwake(item.checked),
-    },
-  ];
-  return Menu.buildFromTemplate([
-    ...(process.platform === "darwin"
-      ? [{ role: "appMenu" }]
-      : [{ label: "File", submenu: [{ role: "quit" }] }]),
-    // Edit and View are not decoration: the page is a remote document, and
-    // without these there is no copy, no paste, and no way to reload it.
-    { role: "editMenu" },
-    { role: "viewMenu" },
-    { label: "Agents", submenu: agents },
-    { role: "windowMenu" },
-    { role: "help", submenu: help },
-  ]);
 }
 
 /**
@@ -407,6 +371,43 @@ async function forgetAllowedMcp() {
       buttons: ["Close"],
     });
   }
+}
+
+/**
+ * Reads the consent back and redraws the menu around it.
+ *
+ * Asynchronous because the file is on disk and the menu is not: the box is
+ * drawn from the cached answer, and this is what makes the cache true. Called
+ * once the worker has started — which is when the file exists — and after
+ * every toggle, so a write that failed shows as the state it actually left.
+ */
+async function refreshTerminalConsent() {
+  const allowed = await readTerminalsAllowed();
+  // Undefined is a worker that has not written it yet, which is the state the
+  // default already describes. Overwriting it with `false` would be the menu
+  // inventing a refusal nobody made.
+  if (allowed !== undefined) {
+    terminalsAllowed = allowed;
+  }
+  Menu.setApplicationMenu(buildMenu());
+}
+
+/** The switch itself. Takes effect where the worker reads it, without a restart. */
+async function toggleTerminals(wanted) {
+  try {
+    await allowTerminals(wanted === true);
+  } catch (error) {
+    await tellDialog({
+      kind: "error",
+      title: "Kumi",
+      heading: "Could not change the terminal setting.",
+      body: describe(error),
+      buttons: ["Close"],
+    });
+  }
+  // Read back rather than assumed: if the write failed, the box goes back to
+  // what is actually on disk instead of showing what was asked for.
+  await refreshTerminalConsent();
 }
 
 async function toggleKeepAwake(wanted) {
@@ -702,7 +703,14 @@ async function openDashboard() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      additionalArguments: [`--kumi-server=${session.server}`],
+      additionalArguments: [
+        `--kumi-server=${session.server}`,
+        // So the page can name the build it is running in. An app with
+        // no auto-update is an app somebody is on an old copy of, and
+        // "download the latest" is a much better sentence when it can
+        // say which one they have.
+        `--kumi-version=${app.getVersion()}`,
+      ],
     },
   });
   // Anything the dashboard wants to open elsewhere opens in the real browser
@@ -813,6 +821,10 @@ async function start() {
   // Unconditional. The app is the machine that runs the agents; there is no
   // arrangement in which it has signed in and should be sitting idle.
   void startWorker(here, session, noteWorkerState);
+  // After the worker, because the worker is what writes the consent on a
+  // first run. Not awaited: the dashboard should open whether or not a file
+  // read on a cold disk is quick.
+  void refreshTerminalConsent();
   await openDashboard();
 }
 
@@ -1033,6 +1045,15 @@ ipcMain.handle("kumi:connect-editor", async (_event, vendor, token) => {
  * equivalent that is not somebody's shell profile, so this answers false and
  * the caller hands the line over instead of editing a file it does not own.
  */
+/**
+ * Ten seconds, which `setx` beats by three orders of magnitude when it works.
+ *
+ * Long enough that a machine under load is never cut off mid-write, short
+ * enough that somebody who pressed Connect is still watching when the answer
+ * arrives.
+ */
+const SETX_TIMEOUT_MS = 10_000;
+
 async function setUserEnvironment(name, value) {
   if (process.platform !== "win32") {
     return false;
@@ -1047,8 +1068,32 @@ async function setUserEnvironment(name, value) {
       [name, value],
       { windowsHide: true, stdio: "ignore" },
     );
-    child.once("error", () => resolve(false));
-    child.once("exit", (code) => resolve(code === 0));
+    // Bounded, because this promise is the only thing between a button press
+    // and the dialog that says what happened — and it is on the Codex branch
+    // alone. Claude and Cursor answer before this is ever called, so a
+    // `setx.exe` that never exits took exactly one editor's Connect and left
+    // it hanging with no dialog, no toast and no error: the whole flow simply
+    // stopped, forever, on the one vendor that needs an environment variable.
+    //
+    // `setx` broadcasts `WM_SETTINGCHANGE` to every top-level window and waits
+    // for them to acknowledge it, so one unresponsive application on the
+    // machine is enough to hold it open. Antivirus interposing on the registry
+    // write does the same thing. Neither is rare, and neither is ours to fix.
+    //
+    // Timing out answers `false`, which is not a failure: the caller already
+    // has a path for a variable it could not set, and hands back the export
+    // line for the person to run. A instruction they can act on beats a
+    // spinner that never resolves.
+    const deadline = setTimeout(() => {
+      child.kill();
+      resolve(false);
+    }, SETX_TIMEOUT_MS);
+    const settle = (ok) => {
+      clearTimeout(deadline);
+      resolve(ok);
+    };
+    child.once("error", () => settle(false));
+    child.once("exit", (code) => settle(code === 0));
   });
 }
 

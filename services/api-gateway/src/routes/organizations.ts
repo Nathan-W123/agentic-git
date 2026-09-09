@@ -22,6 +22,7 @@ import {
   ALL_PERMISSIONS,
   assertTokenScope,
   authorizeOrganization,
+  authorizeOrganizationOrGrant,
   authorizeRepository,
   canAssignRole,
   isPermission,
@@ -250,9 +251,38 @@ export async function routeOrganizations(
   }
 
   if (method === "GET" && path === `${API_PREFIX}/organizations`) {
-    gw.sendJson(response, 200, {
-      organizations: await gw.reachableOrganizations(principal),
-    });
+    // `canRunWork` is here because a desktop app has to choose between these,
+    // and until now it chose by counting repositories. Signing up creates an
+    // organization, so everybody invited to a team belongs to at least two,
+    // and a machine that picked the personal one registered into a tenant
+    // with none of the team's repositories in it — or, where that tenant had
+    // never been paid for, was refused outright and said so about a workspace
+    // nobody was looking at. Its owner was promoted twice, to no effect.
+    //
+    // Answered by asking the same question registration asks, rather than by
+    // reporting a role: the role is not what decides it. An organization that
+    // cannot spend folds every role to `viewer`, so an owner of a lapsed one
+    // is as unable to run work as a stranger, and only this call knows that.
+    //
+    // Costs a subscription read and a grant scan per organization, on a route
+    // read once when an app starts. That is the price of the answer being the
+    // true one.
+    const organizations = await gw.reachableOrganizations(principal);
+    const answered = await Promise.all(
+      organizations.map(async (organization) => ({
+        ...organization,
+        canRunWork: await authorizeOrganizationOrGrant(
+          gw.options.store,
+          principal,
+          organization.id,
+          "run_task",
+        ).then(
+          () => true,
+          () => false,
+        ),
+      })),
+    );
+    gw.sendJson(response, 200, { organizations: answered });
     return true;
   }
   if (method === "POST" && path === `${API_PREFIX}/organizations`) {

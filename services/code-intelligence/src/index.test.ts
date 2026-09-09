@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 
 import { RepositoryService } from "@coord/repository-service";
-import type { AgentPlan } from "@coord/shared-types";
+import { crossesBranches, type AgentPlan } from "@coord/shared-types";
 
 import { CodeIntelligenceService, type RepositoryIndex } from "./index.js";
 
@@ -71,6 +71,84 @@ test("indexes symbols, imports, APIs, schemas, configuration, tests, and service
     const enriched = service.enrichPlan(plan, index);
     assert.ok(enriched.expectedSymbols.includes("UserService"));
     assert.ok(enriched.dependencies.includes("file:src/util.ts"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("records which declarations leave their file, and which do not", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "session.ts"),
+      [
+        // Every shape the `export` keyword takes, because they reach
+        // `getCombinedModifierFlags` through different amounts of TypeScript.
+        "export interface SessionToken { id: string }",
+        "export class SessionStore {}",
+        "export function issue() { return 1; }",
+        "export const TTL_MS = 60;",
+        "export default function boot() { return 2; }",
+        // And the ones that do not leave the file.
+        "interface Clock { now(): number }",
+        "function clampWidth(n: number) { return n; }",
+        "const scratch = 3;",
+        // Published without a modifier, from somewhere else in the file.
+        "function readCookie() { return \"\"; }",
+        "export { readCookie as cookie };",
+      ].join("\n"),
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "exports",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+    const file = index.files.find((entry) => entry.path === "src/session.ts");
+    assert.ok(file);
+
+    for (const published of [
+      "SessionToken",
+      "SessionStore",
+      "issue",
+      "TTL_MS",
+      "boot",
+      "readCookie",
+      "cookie",
+    ]) {
+      assert.ok(
+        file.exportedSymbols.includes(published),
+        `${published} should be exported`,
+      );
+    }
+    for (const kept of ["Clock", "clampWidth", "scratch"]) {
+      assert.ok(file.symbols.includes(kept), `${kept} should be indexed`);
+      assert.ok(
+        !file.exportedSymbols.includes(kept),
+        `${kept} should not be exported`,
+      );
+    }
+
+    // The whole point of recording it: a symbol nobody outside its file can
+    // name is local to the branch editing it, and an exported one belongs to
+    // every branch at once.
+    const symbols = service.symbolVisibility(index);
+    assert.equal(
+      crossesBranches({ resourceType: "symbol", resourceId: "SessionToken" }, symbols),
+      true,
+    );
+    assert.equal(
+      crossesBranches({ resourceType: "symbol", resourceId: "clampWidth" }, symbols),
+      false,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -566,6 +644,393 @@ test("parsing across threads produces exactly what one thread produces", async (
       across.files.map((entry) => entry.path),
       here.files.map((entry) => entry.path),
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an interface reached through an alias is still a recorded reference", async () => {
+  // The case that produced no relation at all. `implements AuditStore` used to
+  // contribute nothing to the index, and `resolveImport` gives up on any
+  // specifier that is not relative — so with a path alias the class and the
+  // interface it implements were two unconnected modules, which is what the
+  // decomposer splits and the conflict detector then scores at zero.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-heritage-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "store.ts"),
+      "export interface AuditStore { read(): void }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "postgres.ts"),
+      [
+        'import type { AuditStore } from "@app/store";',
+        "export class PostgresStore implements AuditStore {",
+        "  read() { return undefined; }",
+        "}",
+        "export function build() { return new PostgresStore(); }",
+      ].join("\n"),
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "aliased",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const index = await new CodeIntelligenceService(repositories).index(
+      repository,
+      version.revision,
+    );
+    const file = index.files.find((entry) => entry.path === "src/postgres.ts");
+    assert.ok(file);
+    assert.ok(
+      file.referencedSymbols.includes("AuditStore"),
+      "implements should be a reference",
+    );
+    assert.ok(
+      file.referencedSymbols.includes("PostgresStore"),
+      "new X() should be a reference",
+    );
+    // The alias really did fail to resolve — otherwise this test would be
+    // passing on the import edge rather than on the change it is pinning.
+    assert.equal(
+      index.edges.find(
+        (edge) =>
+          edge.fromFile === "src/postgres.ts" && edge.resource === "@app/store",
+      )?.toFile,
+      undefined,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a plan enrichment could not see through says so", async () => {
+  // Every source `dependencies` draws on hangs off the declared files being in
+  // the index. When none of them are, the result is indistinguishable from a
+  // plan that depends on nothing — and downstream that reads as independence.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-blind-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "util.ts"),
+      "export function helper() { return true; }\n",
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "blind",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+
+    const base = {
+      taskId: "task_1",
+      objective: "add a module",
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low" as const,
+    };
+    const blind = service.enrichPlan(
+      { ...base, expectedFiles: ["src/brand-new.ts"] },
+      index,
+    );
+    assert.equal(blind.dependenciesUnknown, true);
+
+    const seeing = service.enrichPlan(
+      { ...base, expectedFiles: ["src/util.ts"] },
+      index,
+    );
+    assert.equal(seeing.dependenciesUnknown, undefined);
+
+    // A plan declaring nothing is not blind — it asked for nothing, which is a
+    // different statement from asking for something unreadable.
+    const empty = service.enrichPlan({ ...base, expectedFiles: [] }, index);
+    assert.equal(empty.dependenciesUnknown, undefined);
+
+    // Nor is a plan over files that never had an import graph to miss. Prose
+    // has no dependencies, so an empty read set for it is the answer rather
+    // than the absence of one — and treating it as blind would put every
+    // documentation task on the pessimistic path for good.
+    const prose = service.enrichPlan(
+      { ...base, expectedFiles: ["docs/guide.md", "notes.txt"] },
+      index,
+    );
+    assert.equal(prose.dependenciesUnknown, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a contract change and who was consuming it, across two revisions", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-contract-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    // The shape of the whole problem in three files: one publishes a
+    // contract, one imports it, one merely says the name.
+    await writeFile(
+      path.join(source, "src", "auth.ts"),
+      "export function sign(password: string): string { return password; }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "login.ts"),
+      'import { sign } from "./auth.js";\nexport const go = () => sign("secret");\n',
+    );
+    // Calls it without importing it — the name path, on its own.
+    await writeFile(
+      path.join(source, "src", "report.ts"),
+      "export const summary = () => sign(1 as never);\n",
+    );
+    // Mentions the name and never calls it. Not a consumer, and this is the
+    // edge of what the name path can see: nothing records a bare value
+    // reference, so a file like this is caught only if it imported the file.
+    await writeFile(
+      path.join(source, "src", "docs.ts"),
+      "export const note = `call sign() first`;\n",
+    );
+    await writeFile(path.join(source, "src", "idle.ts"), "export const idle = 1;\n");
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "contracts",
+    );
+    const service = new CodeIntelligenceService(repositories);
+    const before = await service.index(
+      repository,
+      (await repositories.getCanonicalVersion(repository)).revision,
+    );
+
+    // A shape is read off the declaration, and it is the written one.
+    const auth = before.files.find((file) => file.path === "src/auth.ts");
+    assert.deepEqual(
+      auth?.exportedShapes.map((shape) => [shape.symbol, shape.kind]),
+      [["sign", "function"]],
+    );
+    // Readable, because this is what a warning shows somebody.
+    assert.equal(auth?.exportedShapes[0]?.shape, "(password: string): string");
+    assert.equal(auth?.exportedShapesUnknown, undefined);
+
+    // Who depends on it, both ways in: `login.ts` imports the file, `docs.ts`
+    // only mentions the name. Neither was reachable before — the edges were
+    // only ever walked from a plan outwards to what it depends on.
+    assert.deepEqual(
+      service.consumersOf(before, { file: "src/auth.ts", symbol: "sign" }),
+      ["src/login.ts", "src/report.ts"],
+    );
+    // The file itself is never its own consumer; an unrelated file is not
+    // one; and neither is a file that only says the name in prose.
+    for (const path_ of ["src/auth.ts", "src/idle.ts", "src/docs.ts"]) {
+      assert.equal(
+        service
+          .consumersOf(before, { file: "src/auth.ts", symbol: "sign" })
+          .includes(path_),
+        false,
+        path_,
+      );
+    }
+    // Without a symbol it is the import edge alone, which is the certain half.
+    assert.deepEqual(service.consumersOf(before, { file: "src/auth.ts" }), [
+      "src/login.ts",
+    ]);
+
+    // Now the change git will not report: the type moves, the name does not.
+    await writeFile(
+      path.join(source, "src", "auth.ts"),
+      "export function sign(password: number): string { return String(password); }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "idle.ts"),
+      "export const idle = 2;\nexport function added(): void {}\n",
+    );
+    await repositories.commitAll(source, "retype");
+    await advanceCanonical(source, repository);
+    const after = await service.index(
+      repository,
+      (await repositories.getCanonicalVersion(repository)).revision,
+    );
+
+    const drift = service.contractDrift(before, after);
+    assert.deepEqual(
+      drift.map((change) => [change.file, change.symbol, change.consumers]),
+      [["src/auth.ts", "sign", ["src/login.ts", "src/report.ts"]]],
+    );
+    assert.match(drift[0]?.before ?? "", /string/u);
+    assert.match(drift[0]?.after ?? "", /number/u);
+    // `added` arrived and `idle`'s value moved: neither is a contract change.
+    // A mechanism that reported new exports would fire on every branch.
+    assert.equal(drift.length, 1);
+
+    // And what a branch claim records when this lands on it.
+    assert.deepEqual(
+      service
+        .shapesIn(["src/auth.ts"], after)
+        .map((shape) => [shape.file, shape.symbol]),
+      [["src/auth.ts", "sign"]],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a language whose shapes cannot be read says so rather than reporting stability", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-unshaped-"));
+  try {
+    const source = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    // Scanned, not parsed. Its declarations can be located and its contracts
+    // cannot be read, and those are different facts: an empty shape list read
+    // as "no contracts here" would report this file as unchanging through
+    // every rewrite it ever gets.
+    await writeFile(
+      path.join(source, "service.py"),
+      "def sign(password: str) -> str:\n    return password\n",
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      "unshaped",
+    );
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(
+      repository,
+      (await repositories.getCanonicalVersion(repository)).revision,
+    );
+    const file = index.files.find((entry) => entry.path === "service.py");
+    assert.deepEqual(file?.exportedShapes, []);
+    assert.equal(file?.exportedShapesUnknown, true);
+
+    // And the drift comparison leaves it out entirely rather than treating
+    // "unknown" as "unchanged".
+    assert.deepEqual(service.contractDrift(index, index), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("what a branch is built on that canonical has moved under it", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-stale-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "auth.ts"),
+      "export function sign(password: string): string { return password; }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "login.ts"),
+      'import { sign } from "./auth.js";\nexport const go = () => sign("secret");\n',
+    );
+    await writeFile(
+      path.join(source, "src", "unrelated.ts"),
+      "export const spacing = 4;\n",
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "stale",
+    );
+    // Where the branch cut.
+    const mergeBase = (await repositories.getCanonicalVersion(repository))
+      .revision;
+
+    // Canonical moves: `sign` now takes a number. Nothing about the name
+    // changes, so nothing textual will disagree with anybody.
+    await writeFile(
+      path.join(source, "src", "auth.ts"),
+      "export function sign(password: number): string { return String(password); }\n",
+    );
+    await writeFile(
+      path.join(source, "src", "unrelated.ts"),
+      "export const spacing = 8;\n",
+    );
+    await repositories.commitAll(source, "retype sign");
+    await advanceCanonical(source, repository);
+    const baseHead = (await repositories.getCanonicalVersion(repository))
+      .revision;
+
+    const service = new CodeIntelligenceService(repositories);
+
+    // A branch that edited the consumer. This is the whole case: two clean
+    // diffs, no shared file, no shared symbol name, and a merge that
+    // compiles on neither side afterwards.
+    assert.deepEqual(
+      await service.staleContracts(repository, {
+        mergeBase,
+        baseHead,
+        files: ["src/login.ts"],
+      }),
+      [
+        {
+          file: "src/auth.ts",
+          symbol: "sign",
+          before: "(password: string): string",
+          after: "(password: number): string",
+          through: "src/login.ts",
+        },
+      ],
+    );
+
+    // A branch that touched something else is not held up by it. A contract
+    // moving on canonical is an ordinary landing; reporting it to everybody
+    // would make every merge wait on every other merge.
+    assert.deepEqual(
+      await service.staleContracts(repository, {
+        mergeBase,
+        baseHead,
+        files: ["src/unrelated.ts"],
+      }),
+      [],
+    );
+
+    // And the property that makes this a gate rather than a wall: once the
+    // branch has the change, the base is past it and the answer empties.
+    // Read as "the branch brought the latest in" — its merge base is now
+    // canonical's tip.
+    assert.deepEqual(
+      await service.staleContracts(repository, {
+        mergeBase: baseHead,
+        baseHead,
+        files: ["src/login.ts"],
+      }),
+      [],
+    );
+
+    // The revisions are not interchangeable, which is the thing most easily
+    // got backwards: comparing canonical against the base asks "what did
+    // this branch's base have that canonical lost", which is a different
+    // question with a different answer.
+    const backwards = await service.staleContracts(repository, {
+      mergeBase: baseHead,
+      baseHead: mergeBase,
+      files: ["src/login.ts"],
+    });
+    assert.equal(backwards[0]?.after, "(password: string): string");
+    assert.equal(backwards[0]?.before, "(password: number): string");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

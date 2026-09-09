@@ -11074,6 +11074,50 @@ dialog.modal[open]::backdrop {
   line-height: 1.45;
 }
 
+/*
+ * The work-channel toggle, in the new-channel dialog.
+ *
+ * The visibility cards' shape so the dialog reads as one set of choices, with
+ * a visible box rather than a hidden input: those are a radio group where the
+ * selected card is the affordance, and this is one independent question whose
+ * off state has nothing highlighted to say it was answered.
+ */
+.chan-branch-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  cursor: pointer;
+  transition:
+    background var(--motion-pop) ease,
+    border-color var(--motion-pop) ease;
+}
+
+.chan-branch-choice:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.chan-branch-choice:has(input:checked) {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+
+.chan-branch-choice:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chan-branch-choice input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
 .agent-provider-choice {
   position: relative;
   min-width: 0;
@@ -12920,10 +12964,94 @@ dialog.modal[open]::backdrop {
   cursor: default;
 }
 
+/* Who is in this file, above it. The blocks below say where; this says who,
+   because a colour with no name attached is a thing to wonder about rather
+   than a thing to act on — and a hold over the whole file has no block worth
+   hovering. */
+.fp-holders {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  /* The panel is a column and the editor is the part that grows. Without
+     this the banner stretches to fill it and the chips end up floating in the
+     middle of the file. */
+  flex: none;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+}
+
+.fp-holder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.fp-holder svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Four, cycled. Enough that two people in one file are told apart, few enough
+   that the fifth reusing the first is rarer than a file with five editors. */
+.fp-holder-0 { color: var(--orange); }
+.fp-holder-1 { color: var(--accent-bright); }
+.fp-holder-2 { color: var(--green); }
+.fp-holder-3 { color: var(--red); }
+
+/* The layer the blocks live on. Behind the textarea, which is transparent, and
+   never in the way of a click or a caret. */
+.fp-hold-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.fp-hold {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: currentColor;
+  /* Faint on purpose. This sits under the text somebody is reading, and a
+     block that made the code harder to read would be turned off. */
+  opacity: 0.14;
+  border-left: 2px solid currentColor;
+}
+
+/* The save the gate refused, and the two ways out of it. */
+.fp-blocked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: none;
+  /* The sentence takes the room and the two answers stay together on the
+     right. A spacer here put itself on its own line the moment the sentence
+     wrapped, and left the buttons stranded on two more. */
+  justify-content: flex-end;
+  padding: 10px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--orange) 40%, var(--border));
+  background: var(--orange-wash);
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.fp-blocked > span:first-child {
+  flex: 1;
+  min-width: 16ch;
+}
+
 .fp-editor-wrap {
   display: flex;
   min-height: 0;
   padding: 0;
+  /* So the hold layer can be positioned against it. */
+  position: relative;
 }
 
 .fp-editor {
@@ -13518,6 +13646,19 @@ dialog.modal[open]::backdrop {
 .thread-panel,
 .file-panel {
   padding-top: var(--safe-top);
+  /* A column rather than the panel's three named rows.
+     `grid-template-rows: auto 1fr auto` fills in order, so anything inserted
+     above the body takes the flexible row and the editor is squeezed into
+     `auto` — which is exactly what the holders banner did: chips floating in
+     the middle of an empty panel and two lines of source at the bottom.
+     Flex says which child grows instead of which position does. */
+  display: flex;
+  flex-direction: column;
+}
+
+.file-panel > .thread-body {
+  flex: 1;
+  min-height: 0;
 }
 
 /* One floor for every box you type into. A thread stands open beside the
@@ -14118,6 +14259,748 @@ dialog.modal[open]::backdrop {
   to { opacity: 0; transform: translateX(10px); }
 }
 
+/* -------------------------------------------------- branch review ---- */
+/*
+ * The pull request a work channel is, in the column beside the transcript.
+ *
+ * Built from the surfaces already here — the file panel's stats row, the
+ * empty state, the unified diff — so reading a branch and reading a file look
+ * like the same kind of thing, because they are.
+ */
+.branch-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Both, and the width one is load-bearing. A grid item defaults to
+     `min-width: auto`, which is "never smaller than my content" — so a wide
+     diff pushed this box out through the panel's rounded edge and took the
+     merge button off the screen with it. The diff scrolls inside
+     `.branch-diff` instead, which is what the file panel beside it does. */
+  min-width: 0;
+  overflow: auto;
+}
+
+/* The opening line: what state this is in, and between which two branches. */
+.branch-headline {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-headline-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.branch-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.branch-state svg {
+  width: 13px;
+  height: 13px;
+}
+
+.branch-state.open {
+  background: var(--green-wash);
+  color: var(--green);
+}
+
+.branch-state.merged {
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+}
+
+/* head → base, the way a pull request says it. Wraps rather than truncates:
+   at 340px the two names and the arrow do not fit on one line, and a branch
+   name cut in half is the one thing here that must stay readable. */
+.branch-flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.branch-flow svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+.branch-ref {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  padding: 1px 6px;
+  overflow-wrap: anywhere;
+}
+
+/* ---- the three views ---- */
+
+.branch-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+
+.branch-tab:hover {
+  color: var(--text-2);
+}
+
+.branch-tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent-bright);
+}
+
+.branch-tab-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.branch-tab.on .branch-tab-count {
+  color: var(--text-2);
+}
+
+/* The conflict, said on the tab that holds it. A reader on the Review tab
+   should not have to open Files to find out something is wrong there. */
+.branch-tab-warn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  background: var(--red-wash);
+  color: var(--red);
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+/* ---- whether it can land ---- */
+
+.merge-box {
+  margin: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* The whole box takes the colour of the thing stopping it, so "this cannot
+   merge" is legible before a word of it is read. */
+.merge-box.blocked {
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+}
+
+.merge-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.merge-mark {
+  display: flex;
+  align-items: flex-start;
+  padding-top: 1px;
+}
+
+.merge-mark svg {
+  width: 15px;
+  height: 15px;
+}
+
+.merge-row.good .merge-mark {
+  color: var(--green);
+}
+
+.merge-row.bad .merge-mark {
+  color: var(--red);
+}
+
+.merge-row.warn .merge-mark {
+  color: var(--orange);
+}
+
+.merge-row.idle .merge-mark {
+  color: var(--text-3);
+}
+
+.merge-row-body {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.merge-row-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.merge-row-detail {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.merge-row-detail code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.merge-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.merge-conflicts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Each conflicting file is a way into the diff, not a label. */
+.merge-conflict-file {
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--red);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.merge-conflict-file:hover {
+  text-decoration: underline;
+}
+
+/* A stale contract needs three things on one row: my file, the contract, and
+   where it moved to. Stacked rather than inline, because the shapes are long
+   and a 340px panel would cut the half that matters. */
+.merge-stale {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0;
+}
+
+.merge-stale-what,
+.merge-stale-move {
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.merge-stale-what code,
+.merge-stale-move code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.merge-stale-move svg {
+  width: 11px;
+  height: 11px;
+  vertical-align: -1px;
+}
+
+.merge-locally > summary {
+  font-size: 12px;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.merge-commands {
+  margin: 6px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  /* A long branch name is longer than 340px of panel, and the box scrolls
+     rather than pushing the panel wider. */
+  overflow-x: auto;
+}
+
+.merge-foot {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.merge-foot .branch-note {
+  padding: 0;
+}
+
+.btn-merge {
+  min-width: 150px;
+  justify-content: center;
+}
+
+.branch-counts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.branch-count {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.branch-count.behind {
+  color: var(--orange);
+  font-weight: 600;
+}
+
+.branch-note {
+  padding: 12px 16px;
+  font-size: 12.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.branch-note.err {
+  color: var(--red);
+}
+
+.branch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Two buttons in a column that starts at 340px, where they do not both
+     fit on one line. Wrapping is what keeps "Merge into the repository" whole
+     instead of half of it, and the action that lands the work stays at the
+     right-hand end whether it is sharing a line or has one to itself. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* The one that does not land anything keeps the left, and does the pushing —
+   a spacer element would take a whole line to itself the moment the row
+   wrapped, and leave the button it was meant to push sitting on the left of
+   the next one. */
+.branch-actions .branch-secondary {
+  margin-right: auto;
+}
+
+.branch-files {
+  list-style: none;
+  margin: 0;
+  min-width: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+}
+
+.branch-file-open {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  padding: 5px 0;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+  /* A path is read from its end: the file matters more than the directory it
+     is in, and a truncated head still identifies it. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+}
+
+.branch-file-open:hover {
+  color: var(--text-1);
+  text-decoration: underline;
+}
+
+.branch-file.conflicted .branch-file-open {
+  color: var(--red);
+}
+
+.branch-conflict {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--red);
+}
+
+.branch-diff {
+  min-height: 0;
+  /* The one place sideways scrolling is allowed, so a long line scrolls the
+     diff rather than the panel or the page. */
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Who has looked at this, and the two buttons for saying so. */
+/* Inside the merge box's first row: no frame of its own, because the row is
+   the frame. */
+.merge-row .branch-reviews {
+  display: grid;
+  gap: 6px;
+  border-bottom: 0;
+}
+
+.merge-row .branch-review-actions {
+  padding: 4px 0 0;
+  border-bottom: 0;
+  justify-content: flex-start;
+}
+
+/* The two answers sit together here. Pushed apart they read as an action and
+   its opposite at opposite ends of a bar, which is what the panel-wide row
+   wanted and this row does not. */
+.merge-row .branch-actions.branch-review-actions .branch-secondary {
+  margin-right: 0;
+}
+
+.merge-row .branch-review-list {
+  padding: 0;
+}
+
+.merge-row .branch-review-note {
+  margin: 0;
+  grid-column: auto;
+}
+
+.branch-reviews {
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 12px 16px 0;
+  display: grid;
+  gap: 8px;
+}
+
+.branch-review {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 2px 8px;
+  font-size: 12.5px;
+}
+
+.branch-review svg {
+  width: 13px;
+  height: 13px;
+  align-self: center;
+}
+
+.branch-review.approved svg {
+  color: var(--green);
+}
+
+.branch-review.changes_requested svg {
+  color: var(--orange);
+}
+
+/* A review of a branch that has moved since is not a review of this one, and
+   reads quieter so nobody counts it as one. */
+.branch-review.stale {
+  opacity: 0.62;
+}
+
+.branch-review-who {
+  font-weight: 600;
+}
+
+.branch-review-what,
+.branch-review-note {
+  grid-column: 2;
+  color: var(--text-3);
+}
+
+.branch-review-note {
+  font-style: italic;
+}
+
+.branch-review-actions {
+  border-bottom: 0;
+}
+
+/* The answer you have already given reads as given, so the pair is a state
+   rather than two offers. */
+.branch-actions .btn.on {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+  color: var(--text-1);
+}
+
+/* What the branch is made of. */
+.branch-commits {
+  border-bottom: 1px solid var(--border);
+}
+
+.branch-commits-head {
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.branch-commit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 16px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.branch-commit {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  font-size: 12.5px;
+}
+
+.branch-commit-sha {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.branch-commit-subject {
+  min-width: 0;
+}
+
+.branch-commit-who {
+  grid-column: 2;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+/* One file at a time, folded, with its own stats. */
+.branch-file-review {
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.branch-file-review > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  cursor: pointer;
+  /* `display: flex` on a summary drops the disclosure triangle in Chromium,
+     which left four rows that open on a click and gave no sign they did.
+     Drawn back below, and rotated on open, so a fold reads as a fold. */
+  list-style: none;
+}
+
+.branch-file-review > summary::-webkit-details-marker {
+  display: none;
+}
+
+.branch-file-review > summary::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid var(--text-4);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform var(--motion-press) var(--ease-motion);
+}
+
+.branch-file-review[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.branch-file-review > summary:hover {
+  background: var(--bg-hover);
+}
+
+.branch-file-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  /* Read from the end: the file matters more than the directory it is in. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.branch-file-review.conflicted .branch-file-path {
+  color: var(--red);
+}
+
+.branch-file-comments {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--bg-inset);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+/* The affordance for saying something about a line. Hidden until the row is
+   under the pointer, like the message bar in the transcript: a plus on every
+   line of every diff would be the loudest thing on the screen. */
+.dline.commentable {
+  position: relative;
+}
+
+.dline-comment {
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.dline-comment svg {
+  width: 10px;
+  height: 10px;
+}
+
+.dline.commentable:hover .dline-comment,
+.dline-comment:focus-visible {
+  opacity: 1;
+}
+
+.branch-comment {
+  display: grid;
+  gap: 2px;
+  margin: 4px 10px 6px 30px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent-line);
+  background: var(--bg-inset);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 12.5px;
+  white-space: normal;
+}
+
+.branch-comment.stale {
+  opacity: 0.62;
+  border-left-color: var(--border-strong);
+}
+
+.branch-comment-who {
+  font-weight: 600;
+}
+
+.branch-comment-note {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.branch-comment-form {
+  display: grid;
+  gap: 8px;
+  margin: 4px 10px 8px 30px;
+  padding: 8px;
+  border-left: 2px solid var(--accent-line);
+  background: var(--bg-inset);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.branch-comment-form textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+}
+
+.branch-comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.branch-panel .fp-stats {
+  display: inline-flex;
+  gap: 6px;
+  font-size: 0.78rem;
+  flex: none;
+}
+
 .secondary-info-body,
 .secondary-profile-body {
   padding: 16px;
@@ -14171,6 +15054,29 @@ dialog.modal[open]::backdrop {
   color: var(--text-2);
   font-size: 12.5px;
   line-height: 1.45;
+}
+
+/* An icon in the middle of a sentence takes the sentence's size.
+   `icon()` emits a bare SVG with no intrinsic width, so one dropped into a
+   block of prose fills the block — the branch glyph beside "Work in this
+   channel lands on…" came out about two hundred pixels tall. Every other
+   inline use in this file sizes it at its own call site; this is the one that
+   is a paragraph rather than a control, so it sizes it here. */
+.channel-info-summary svg {
+  /* `display: inline-block` as well as the size: the global `svg` rule sets
+     `display: block`, which is right for a glyph that is a control's whole
+     content and wrong for one at the head of a sentence — it took its own
+     line and left the sentence starting under it. */
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  vertical-align: -2px;
+  margin-right: 3px;
+}
+
+.channel-info-summary code {
+  font-family: var(--mono);
+  font-size: 11.5px;
 }
 
 .secondary-facts {
@@ -16817,4 +17723,131 @@ dialog.modal[open]::backdrop {
   background: var(--settings-surface);
   border: 1px solid var(--settings-border);
   border-radius: var(--settings-control-radius);
+}
+
+/* ---------------------------------------------------------- terminal ---- */
+
+.terminal-conversation {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  min-height: 0;
+  min-width: 0;
+}
+
+.terminal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.terminal-where {
+  font-size: 0.82rem;
+  color: var(--text-3);
+}
+
+.terminal-error {
+  margin: 10px 16px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--red-soft, rgba(220, 80, 80, 0.12));
+  color: var(--red);
+  font-size: 0.85rem;
+}
+
+.terminal-body {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  min-width: 0;
+  padding: 0 16px 16px;
+  gap: 8px;
+}
+
+.terminal-meta {
+  font-size: 0.78rem;
+  color: var(--text-3);
+}
+
+/* The one thing on this screen a reader must not mistake for a real
+   terminal. Coloured rather than italicised: it is a limitation, not an
+   aside, and somebody about to type `vim` should see it before they do. */
+/* One row per machine, because several can carry one name and the row is
+   what tells them apart. */
+.terminal-machine-list {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  text-align: left;
+}
+
+.terminal-machine-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.terminal-machine-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.terminal-degraded {
+  color: var(--amber, #d19a2f);
+}
+
+.terminal-ended {
+  color: var(--text-4);
+}
+
+/* xterm draws its own grid inside; this only gives it somewhere with a
+   known size and the inset background the rest of the code surfaces use. */
+.terminal-screen {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #0f1115;
+  padding: 8px;
+}
+
+.terminal-empty {
+  padding: 24px 16px;
+  color: var(--text-3);
+  max-width: 62ch;
+  display: grid;
+  gap: 8px;
+}
+
+.terminal-picker {
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.terminal-machine {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.terminal-machine-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.terminal-shells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }

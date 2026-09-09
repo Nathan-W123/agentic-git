@@ -9,6 +9,7 @@ import type {
 } from "@coord/persistence";
 import {
   agentCommitIdentity,
+  canonicalOn,
   RepositoryService,
 } from "@coord/repository-service";
 import type { ChangeSet } from "@coord/shared-types";
@@ -191,12 +192,6 @@ async function resumeStrandedResults(
     if (stored === undefined) {
       continue;
     }
-    const repository = {
-      id: stored.id,
-      path: stored.path,
-      branch: stored.branch,
-    };
-
     for (const task of detail.tasks) {
       if (TERMINAL_TASK_STATUSES.has(task.status)) {
         continue;
@@ -205,6 +200,15 @@ async function resumeStrandedResults(
       if (changeSet === undefined) {
         continue;
       }
+      // Per task rather than per run, because a run's tasks need not share a
+      // branch: what this promotes is one task's recorded changeset, and it
+      // has to go to the branch that task was commissioned against. Promoting
+      // a work channel's stranded changeset onto canonical would put code
+      // nobody reviewed into main under cover of a crash.
+      const repository = canonicalOn(
+        stored,
+        (await store.getSubmittedTask(task.id).catch(() => undefined))?.branch,
+      );
 
       try {
         await mkdir(project.integrationRoot, { recursive: true });

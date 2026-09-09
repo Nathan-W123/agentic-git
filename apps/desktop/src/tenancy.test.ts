@@ -156,3 +156,115 @@ test("an account in no organization says so rather than registering nowhere", as
     /not a member of any organization/u,
   );
 });
+
+/**
+ * The same server, but saying which organizations the account could actually
+ * work in — `canRunWork`, which is `authorizeOrganizationOrGrant(…,
+ * "run_task")` asked in advance. `undefined` is an older control plane that
+ * does not answer, which must behave exactly as it did before.
+ */
+function serverSaying(
+  organizations: ReadonlyArray<{ id: string; canRunWork?: boolean }>,
+  repositoriesByProject: Record<string, number>,
+): GetJson {
+  return async (_server, _token, route) => {
+    if (route === "/api/v1/organizations") {
+      return { organizations: organizations.map((entry) => ({ ...entry, name: entry.id })) };
+    }
+    const projects = /\/organizations\/([^/]+)\/projects$/u.exec(route);
+    if (projects !== null) {
+      const org = projects[1] ?? "";
+      return { projects: [{ id: `project_of_${org}`, name: `Project of ${org}` }] };
+    }
+    const repositories = /\/projects\/([^/]+)\/repositories$/u.exec(route);
+    if (repositories !== null) {
+      const count = repositoriesByProject[repositories[1] ?? ""] ?? 0;
+      return {
+        repositories: Array.from({ length: count }, (_value, index) => ({
+          id: `repo_${String(index)}`,
+        })),
+      };
+    }
+    throw new Error(`unexpected route ${route}`);
+  };
+}
+
+test("a machine will not join an organization it cannot work in", async () => {
+  // The afternoon this cost. Repositories were the only thing consulted, so a
+  // personal organization that happened to hold one won over the team's — and
+  // that organization had never been paid for, which folds every role in it to
+  // `viewer`, owners included. Its owner was promoted to developer and then to
+  // admin, and neither did anything, because a role was never what was
+  // missing. The refusal in the log named a workspace nobody was looking at.
+  const { discoverTenancy } = await load();
+
+  const chosen = await discoverTenancy(
+    "https://kumi.example",
+    "token",
+    serverSaying(
+      [
+        { id: "org_personal", canRunWork: false },
+        { id: "org_team", canRunWork: true },
+      ],
+      // The trap: the unworkable one looks better by the old measure.
+      { project_of_org_personal: 9, project_of_org_team: 1 },
+    ),
+  );
+  assert.equal(
+    chosen.organizationId,
+    "org_team",
+    "somewhere it can work beats somewhere with more to do",
+  );
+
+  // Order still does not decide it.
+  const reversed = await discoverTenancy(
+    "https://kumi.example",
+    "token",
+    serverSaying(
+      [
+        { id: "org_team", canRunWork: true },
+        { id: "org_personal", canRunWork: false },
+      ],
+      { project_of_org_personal: 9, project_of_org_team: 0 },
+    ),
+  );
+  assert.equal(
+    reversed.organizationId,
+    "org_team",
+    "even when the workable one has nothing in it yet",
+  );
+});
+
+test("an older control plane, and a wholly unworkable account, still resolve", async () => {
+  const { discoverTenancy } = await load();
+
+  // A control plane that does not answer the question omits the field. Every
+  // organization stays a candidate and the old rule decides, because turning
+  // an app upgrade into a machine that can find nowhere to work would be a
+  // worse bug than the one being fixed.
+  const older = await discoverTenancy(
+    "https://kumi.example",
+    "token",
+    serverSaying(
+      [{ id: "org_personal" }, { id: "org_team" }],
+      { project_of_org_personal: 0, project_of_org_team: 3 },
+    ),
+  );
+  assert.equal(older.organizationId, "org_team");
+
+  // Nowhere workable at all: still answers, so the worker still starts and is
+  // refused by the control plane, which is the one thing that can say why.
+  // Answering nothing here would strand it before anybody was told anything.
+  const none = await discoverTenancy(
+    "https://kumi.example",
+    "token",
+    serverSaying(
+      [
+        { id: "org_personal", canRunWork: false },
+        { id: "org_other", canRunWork: false },
+      ],
+      { project_of_org_personal: 0, project_of_org_other: 2 },
+    ),
+  );
+  assert.equal(none.organizationId, "org_other");
+});

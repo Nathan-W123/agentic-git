@@ -40,6 +40,165 @@ export interface ValidationCommand {
   executable: string;
   args: string[];
   label: string;
+  /**
+   * What passing this command establishes.
+   *
+   * `functionality` — the default, and what a test suite is — means a pass is
+   * evidence the code does something. `integrity` means the command checks the
+   * shape of the patch rather than the behaviour of the program: a whitespace
+   * check, a formatter, a linter. Both are worth running and only one of them
+   * is evidence that the task landed.
+   *
+   * The distinction exists because the default project config ships an
+   * integrity check and nothing else, so a project nobody has configured
+   * produced a green "Validation: patch integrity(exit 0)" trailer for free —
+   * a pass that had established nothing, recorded identically to a passing
+   * test suite.
+   */
+  proves?: "functionality" | "integrity";
+}
+
+/**
+ * A command that narrows validation to what a change actually affects.
+ *
+ * The full suite is the safe default precisely because selection needs a
+ * dependency graph, and a test skipped in error looks exactly like a test that
+ * passed. So the graph is not Kumi's to guess: the project supplies a command
+ * that already knows — `jest --findRelatedTests`, a `bazel query`, whatever
+ * its build system offers — and the changed paths are appended to it.
+ *
+ * Used for the baseline run and the fail-to-pass check, where the question is
+ * only ever about the changed code. The full `validationCommands` still gate
+ * the merge, so a selector that misses something costs a slower signal rather
+ * than a silent pass.
+ */
+export interface AffectedTestCommand {
+  executable: string;
+  /** Changed repository paths are appended to these. */
+  args: string[];
+  label: string;
+}
+
+/**
+ * How much a validation run actually established about a change.
+ *
+ * `IntegrationStatus` answers "may this land"; this answers "on what
+ * evidence". They were the same field, so a task that executed nothing and a
+ * task that passed a real suite were both recorded as integrated, and no
+ * query could separate them afterwards.
+ *
+ * Ordered by strength:
+ * - `none` — no validation commands were configured. Nothing ran.
+ * - `integrity` — commands ran, but every one of them checks the patch rather
+ *   than the program. The code was never executed.
+ * - `executed` — at least one functional command ran and passed. Whether it
+ *   exercised *this change* is a further question this tier does not answer.
+ * - `demonstrated` — a functional command that failed before the change
+ *   passes after it. The strongest thing integration can say on its own: the
+ *   change did something, and what it did was the point.
+ */
+export type ValidationEvidence =
+  | "none"
+  | "integrity"
+  | "executed"
+  | "demonstrated";
+
+/**
+ * A test the change nominates as proof it did what was asked.
+ *
+ * The strongest measured intervention in the literature: an independently
+ * supplied reproduction test, used as a filter on candidate patches, roughly
+ * doubles precision (SWT-Bench; replicated at Google across six languages).
+ * The contract is mechanical and needs no model and no oracle — the test must
+ * fail at canonical and pass with the change.
+ *
+ * Optional, and its absence is never a failure. Generating a valid
+ * fail-to-pass test succeeds a minority of the time even for systems built to
+ * do it, so requiring one would refuse most honest work. A task that supplies
+ * one gets a stronger claim recorded; a task that does not is unproven, which
+ * is what it always was.
+ */
+export interface ReproductionTest {
+  /** Repository path of the test, for the record. */
+  path: string;
+  executable: string;
+  args: string[];
+  label: string;
+}
+
+/**
+ * Whether a nominated reproduction test kept its side of the contract.
+ *
+ * `attested` only when it genuinely failed before and passes after. Anything
+ * else is reported as what it was, because a test that passes at canonical
+ * proves nothing about the change and a test that still fails is worse.
+ */
+export interface ReproductionAttestation {
+  path: string;
+  failedBefore: boolean;
+  passesAfter: boolean;
+  attested: boolean;
+  explanation: string;
+}
+
+/**
+ * The same validation commands, run against canonical before the patch.
+ *
+ * One measurement cannot tell "fixed it" from "broke nothing" from "was
+ * already broken". Two can. This is the before half, and the fields below are
+ * the comparison it makes possible — the reason to pay for a second run
+ * rather than the run itself.
+ */
+export interface ValidationBaseline {
+  /** The revision the baseline was taken at. */
+  revision: string;
+  /** Whether these results were reused from an earlier run at this revision. */
+  cached: boolean;
+  results: CommandResult[];
+  /**
+   * Commands that failed before the change and pass after it.
+   *
+   * The fail-to-pass signal. Empty is not a failure — plenty of good changes
+   * add code nothing was failing over — but a non-empty list is the only
+   * evidence integration can produce that the change did what was asked
+   * rather than merely not breaking anything.
+   */
+  nowPassing: string[];
+  /**
+   * Commands that failed before and still fail.
+   *
+   * Not this task's doing, and previously indistinguishable from a regression
+   * it caused.
+   */
+  alreadyFailing: string[];
+}
+
+/**
+ * What happened when the change's own edits to its graders were set aside.
+ *
+ * An agent that edits the tests that judge it is not necessarily cheating: the
+ * task may be to change behaviour, and the test may encode the old contract.
+ * But it must be visible, because "passes with the tests it rewrote" and
+ * "passes the tests as they were" are different claims and were being recorded
+ * as the same one.
+ */
+export interface GraderEditReport {
+  /** Test, fixture and validator-config paths this change touched. */
+  paths: string[];
+  /**
+   * Validation re-run with those paths reset to canonical.
+   *
+   * Absent when the second run could not be made — the change deletes a
+   * grader, say — which is itself reported rather than read as a pass.
+   */
+  withoutEdits?: CommandResult[];
+  /**
+   * True when validation passes with the change's grader edits and fails
+   * without them. The case worth a human's attention: legitimate when the
+   * contract genuinely moved, and exactly what moving the goalposts looks
+   * like.
+   */
+  passesOnlyWithEdits: boolean;
 }
 
 export interface TaskDefinition {
@@ -182,6 +341,22 @@ export interface AgentPlan {
    * coordinator-issued claim takes.
    */
   claim?: PlanClaim;
+  /**
+   * Set when the read set could not be computed, as opposed to being empty.
+   *
+   * Enrichment builds `dependencies` from the indexed form of the files a plan
+   * declares. A plan whose declared files are all new, or outside the indexed
+   * languages, matches nothing — so it comes back with whatever the agent
+   * typed and no way to tell that apart from a plan that genuinely reads
+   * nothing. Everything downstream that asks "did this advance touch anything
+   * I depend on" would then answer "no" out of ignorance and call it safety.
+   *
+   * Absent rather than `false` when the set is known, and deliberately outside
+   * {@link CompleteAgentPlan}'s `Required` for the same reason `declared` is:
+   * there is no honest default, because absent and false do not mean the same
+   * thing.
+   */
+  dependenciesUnknown?: boolean;
 }
 
 /**
@@ -669,10 +844,43 @@ export interface HolderWorkingChange {
   absolutePath?: string;
 }
 
+/**
+ * Why a plan was refused, in the words the arbitration already produced.
+ *
+ * The coordinator writes a refusal an agent could act on — which task holds
+ * what, on which resources, and an instruction to narrow — and until now it
+ * reached nobody. A blocked worker slept and resubmitted the same plan, which
+ * bought the same refusal, because the only thing it read off the answer was
+ * how long to wait. Asking the same question on a timer is not a retry.
+ *
+ * Carried rather than flattened to prose because the resource lists are the
+ * actionable part: "this file, held by that task" is what a narrower plan is
+ * built from, and a sentence about it is not.
+ */
+export interface PlanRefusal {
+  status: PlanAdmissionStatus;
+  explanation: string;
+  /** Tasks holding what this plan asked for. */
+  blockedBy: TaskId[];
+  /** What collided, and on which resources. Empty when nothing structural did. */
+  conflicts: ConflictAssessment[];
+}
+
 export interface ReplanRequest {
   taskId: TaskId;
   previousPlan: AgentPlan;
-  canonicalChange: CanonicalChangeNotice;
+  /**
+   * What moved underneath the previous plan, when something did.
+   *
+   * Optional because canonical moving is no longer the only reason to replan.
+   * A refusal is the other one, and there the base has not moved at all — so
+   * an adapter with no notice rebuilds its planning workspace at the version
+   * it already holds, and says nothing to the model about a change that did
+   * not happen.
+   */
+  canonicalChange?: CanonicalChangeNotice;
+  /** Set when the coordinator refused this task's plan. */
+  refusal?: PlanRefusal;
   constraints: string[];
   /**
    * In-progress edits from holders this task is deferred behind.
@@ -1012,6 +1220,20 @@ export interface IntegrationResult {
   salvagedDeferred?: FilePatch[];
   /** Files that landed in part, having been split at the conflicting hunks. */
   salvagedDividedFiles?: string[];
+  /**
+   * What the validation run established, as opposed to whether it passed.
+   *
+   * Always present on a result that reached validation. Absent on the early
+   * returns — a stale base, a conflict — where no validation was attempted and
+   * saying `none` would claim a measurement nobody took.
+   */
+  evidence?: ValidationEvidence;
+  /** The before half of the two-sided run, when one was taken. */
+  baseline?: ValidationBaseline;
+  /** Present only when the change touched files that grade it. */
+  graderEdits?: GraderEditReport;
+  /** Present only when the change nominated a reproduction test. */
+  reproduction?: ReproductionAttestation;
   explanation: string;
 }
 
@@ -1146,10 +1368,33 @@ export const KEEP_IT_SIMPLE_DIRECTIVE =
  * added at the dispatch site and not added here silently stops being
  * stripped, so both ends are declared together.
  */
+/**
+ * How to put a picture in front of somebody, rather than a path to one.
+ *
+ * An agent asked for a screenshot takes one and then says where it went —
+ * which is an absolute path on a machine the person asking is very often not
+ * sitting at, read on a phone. The bytes existed and the room could have
+ * shown them; nothing told the agent that was possible.
+ *
+ * Deliberately a path in the workspace, not an upload API. The agent already
+ * writes files there, the worker already knows where there is, and a marker
+ * in ordinary prose works identically across every vendor because it is only
+ * text. `liftLocalImages` in the worker turns the marker into a stored
+ * attachment on the way past; a marker whose file never appeared is left
+ * alone and reads as the filename it already was.
+ */
+export const SHOW_IMAGES_DIRECTIVE =
+  "To show someone an image — a screenshot, a chart, a diagram you rendered " +
+  "— write the file inside the workspace and reference it in your reply as " +
+  "![caption](relative/path.png). It is posted into the room as a picture. " +
+  "PNG, JPEG, GIF or WebP, under 8 MB, at most four per message. A path in " +
+  "prose is not an image: nobody reading this can open your filesystem.";
+
 export const COORDINATOR_DIRECTIVES: readonly string[] = [
   ANSWER_NOT_STATUS_DIRECTIVE,
   KEEP_IT_SIMPLE_DIRECTIVE,
   DO_NOT_CODE_DIRECTIVE,
+  SHOW_IMAGES_DIRECTIVE,
   FORCE_QUESTION_MARKER,
 ];
 
@@ -2311,13 +2556,20 @@ export function assertChangeSet(value: unknown): asserts value is ChangeSet {
  * than an agent describing it, which is untrue of every plan an agent wrote.
  */
 export type CompleteAgentPlan = Required<
-  Omit<AgentPlan, "grounding" | "claim" | "declared">
+  Omit<AgentPlan, "grounding" | "claim" | "declared" | "dependenciesUnknown">
 > &
   // `declared` keeps its optionality on purpose: absent is not the same as
   // empty. Absent says this plan was never enriched, so the `expected*` lists
   // are still the agent's own words; a list present but empty says the agent
   // named none of that kind. Filling it in here would erase that.
-  Pick<AgentPlan, "grounding" | "claim" | "declared">;
+  //
+  // `dependenciesUnknown` is here for the same reason and needs it more:
+  // defaulting it to `false` would assert that the read set is trustworthy on
+  // every plan that never went near enrichment.
+  Pick<
+    AgentPlan,
+    "grounding" | "claim" | "declared" | "dependenciesUnknown"
+  >;
 
 /** Returns a detached plan with every optional resource collection populated. */
 export function completeAgentPlan(plan: AgentPlan): CompleteAgentPlan {
@@ -2566,6 +2818,203 @@ export function scopeReleaseResources(
   add("test", request.releasedTests);
   add("service", request.releasedServices);
   return resources;
+}
+
+/**
+ * Paths that are an interface whatever is written inside them.
+ *
+ * A dependency manifest or lockfile is a statement about what the whole
+ * repository builds against, and two branches changing one merge cleanly and
+ * produce a tree that installs neither version. A migration is worse: two
+ * branches each add one, Git puts both in, and they run in an order neither
+ * branch was written for.
+ *
+ * Deliberately a small, named list rather than a guess. Everything not on it
+ * is local, and a local file two branches edit is a question Git is
+ * competent to answer — it conflicts, or the two edits were independent.
+ */
+export function isInterfaceFile(filePath: string): boolean {
+  const normalised = filePath.trim().toLowerCase().replaceAll("\\", "/");
+  const base = normalised.slice(normalised.lastIndexOf("/") + 1);
+  if (INTERFACE_MANIFESTS.has(base)) {
+    return true;
+  }
+  // A migration anywhere under a directory that says so, which is where every
+  // framework this deployment is likely to meet puts them.
+  if (/(?:^|\/)(?:migrations?|migrate|db\/migrate)\//u.test(normalised)) {
+    return true;
+  }
+  return /\.(?:csproj|vbproj|fsproj)$/u.test(base);
+}
+
+/**
+ * Manifests and lockfiles, by exact filename.
+ *
+ * By name rather than by pattern because these are proper nouns: `package.json`
+ * is an interface and `tsconfig.json` is not, and no regular expression over
+ * `.json` tells those apart.
+ */
+const INTERFACE_MANIFESTS = new Set([
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "yarn.lock",
+  "npm-shrinkwrap.json",
+  "cargo.toml",
+  "cargo.lock",
+  "go.mod",
+  "go.sum",
+  "requirements.txt",
+  "pyproject.toml",
+  "poetry.lock",
+  "pipfile",
+  "pipfile.lock",
+  "gemfile",
+  "gemfile.lock",
+  "composer.json",
+  "composer.lock",
+  "build.gradle",
+  "build.gradle.kts",
+  "pom.xml",
+  "mix.exs",
+  "pubspec.yaml",
+  "pubspec.lock",
+]);
+
+/**
+ * What this repository's exported names are, as far as anything knows.
+ *
+ * `exported` is what the index found declared with an `export`; `known` is
+ * every symbol it found at all. The difference matters: a symbol in neither
+ * set is one the index has never heard of, and that is not the same statement
+ * as "it is private" — see {@link interfaceScopeOf}, which contends on it.
+ *
+ * Both sets hold {@link symbolVisibilityKey} of each name, so a lookup agrees
+ * with {@link planResourceKey}: a plan that wrote `SessionToken` and an index
+ * that recorded `sessiontoken` are talking about one symbol, and everything
+ * else in this file already decided that.
+ */
+export interface SymbolVisibility {
+  exported: ReadonlySet<string>;
+  known: ReadonlySet<string>;
+}
+
+/** How a symbol name is spelled inside a {@link SymbolVisibility}. */
+export function symbolVisibilityKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** Both sets of a {@link SymbolVisibility}, spelled the way lookups expect. */
+export function symbolVisibility(input: {
+  exported: Iterable<string>;
+  known: Iterable<string>;
+}): SymbolVisibility {
+  return {
+    exported: new Set([...input.exported].map(symbolVisibilityKey)),
+    known: new Set([...input.known].map(symbolVisibilityKey)),
+  };
+}
+
+/**
+ * Whether one claimed resource crosses branches.
+ *
+ * The two tiers, in one predicate. An API, a schema and a configuration key
+ * are interfaces by what they are — the plan has separate fields for them
+ * precisely because they are the things other code consumes. A file is an
+ * interface only if it is one of the few whose contents are a statement about
+ * the whole repository. A symbol is an interface if it is exported.
+ *
+ * A symbol the index has never heard of is treated as an interface. That is
+ * the one place this leans, and it leans the safe way: "I could not find it"
+ * must not read as "it is private", or a plan naming a symbol in a language
+ * the indexer cannot parse would be handed cross-branch freedom on the
+ * strength of the indexer's ignorance.
+ */
+export function crossesBranches(
+  resource: PlanResourceRef,
+  symbols: SymbolVisibility,
+): boolean {
+  switch (resource.resourceType) {
+    case "api":
+    case "schema":
+    case "configuration":
+      return true;
+    case "file":
+      return isInterfaceFile(resource.resourceId);
+    case "symbol": {
+      const key = symbolVisibilityKey(resource.resourceId);
+      return symbols.exported.has(key) || !symbols.known.has(key);
+    }
+    // A test belongs to the branch that wrote it. A "service" is a naming
+    // convention — anything ending in Service, Client, Repository, Gateway or
+    // Worker — and an exported one is already caught as a symbol, so treating
+    // the convention itself as an interface would contend two branches on a
+    // suffix they happen to share.
+    case "test":
+    case "service":
+      return false;
+  }
+}
+
+/**
+ * One plan as another branch sees it: only what crosses between them.
+ *
+ * Two channels are two branches, and agents in different channels stop
+ * contending — which is isolation, and on its own strictly worse than not
+ * having branches at all. `#billing-v2` changes `SessionToken.userId`,
+ * `#login-redirect` changes `SessionToken.expiresAt`, both merge without a
+ * Git conflict, and the build breaks. Or it does not, and the bug ships.
+ *
+ * So a plan on another branch is not ignored and it is not taken whole: it is
+ * reduced to the resources whose meaning is shared, and the ordinary
+ * admission ladder decides against that. Same machinery, narrower scope on
+ * one tier.
+ *
+ * Returns `undefined` when nothing survives — a plan that claims only local
+ * work has nothing to say to another branch, and dropping it is what stops a
+ * branch from queueing behind work that cannot affect it.
+ */
+export function interfaceScopeOf(
+  plan: AgentPlan,
+  symbols: SymbolVisibility,
+): AgentPlan | undefined {
+  const local: PlanResourceRef[] = [];
+  const add = (
+    resourceType: ResourceType,
+    ids: readonly string[] | undefined,
+  ): void => {
+    for (const resourceId of ids ?? []) {
+      const resource = { resourceType, resourceId };
+      if (!crossesBranches(resource, symbols)) {
+        local.push(resource);
+      }
+    }
+  };
+  // The agent's own words as well as the widened lists, because a resource
+  // dropped from one and left in the other is a claim that survives its own
+  // reduction — the same trap `reducePlanScope` documents at length.
+  add("file", plan.expectedFiles);
+  add("symbol", plan.expectedSymbols);
+  add("api", plan.expectedApis);
+  add("schema", plan.expectedSchemas);
+  add("configuration", plan.expectedConfigKeys);
+  add("test", plan.expectedTests);
+  add("service", plan.expectedServices);
+  add("symbol", plan.declared?.symbols);
+  add("api", plan.declared?.apis);
+  add("schema", plan.declared?.schemas);
+  add("configuration", plan.declared?.configKeys);
+  add("test", plan.declared?.tests);
+  add("service", plan.declared?.services);
+  const reduced = reducePlanScope(plan, local);
+  const claims =
+    reduced.expectedFiles.length +
+    reduced.expectedSymbols.length +
+    (reduced.expectedApis?.length ?? 0) +
+    (reduced.expectedSchemas?.length ?? 0) +
+    (reduced.expectedConfigKeys?.length ?? 0);
+  return claims === 0 ? undefined : reduced;
 }
 
 /** Case-insensitive identity for a planned resource. */

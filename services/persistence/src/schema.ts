@@ -1681,21 +1681,163 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   {
     /**
-     * A room that is finished with, without throwing it away.
+     * A channel can be a branch.
      *
-     * The only way out of a channel was Delete, which takes every message in
-     * it with it and cannot be undone — so a room that had simply run its
-     * course was either kept forever in the sidebar or destroyed along with
-     * the reason anybody might want to look at it again. Archived is the
-     * middle state: out of the list, closed to new messages, still entirely
-     * readable, and one press from being back.
+     * Null for every channel that exists today and for every one created
+     * afterwards that is only a conversation — `#general` included, because
+     * `#general` *is* the repository's branch, the thing everything else
+     * merges into. Set, the channel is a unit of shippable work: its agents
+     * are arbitrated against each other exactly as before, and what they
+     * produce lands here rather than on canonical, so the whole channel can
+     * be reviewed and merged as one thing.
      *
-     * Default 0, so every room that already exists stays in use.
+     * Three columns rather than one because a merged channel is a different
+     * state from an open one and the difference has to survive a restart: its
+     * branch is behind canonical from the moment it merges, and admitting new
+     * work onto it would produce a second review of something already
+     * shipped.
+     *
+     * Unique per repository. Two channels naming one branch would each think
+     * they owned it, and the second to merge would ship the first one's work
+     * under its own review. Nullable columns do not collide in a UNIQUE index
+     * on either backend, so every conversation channel remains free.
      */
     version: 58,
-    name: "sub-channels-archived",
+    name: "channels-can-be-branches",
     statements: [
-      `ALTER TABLE sub_channels ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE sub_channels ADD COLUMN branch TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN merged_at TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN merged_by TEXT`,
+      `CREATE UNIQUE INDEX sub_channels_by_branch
+         ON sub_channels(repository_id, branch)`,
+      // And on the work itself, because the channel is not the authority
+      // once a task exists. A channel can be renamed, merged or archived
+      // while a task it dispatched is still queued, and the branch a change
+      // was written against is not a thing that may move underneath it.
+      // Null on every existing row, which reads as the repository's own.
+      `ALTER TABLE submitted_tasks ADD COLUMN branch TEXT`,
+      // And on the lease, beside the base revision it pins. Both say where a
+      // change is being written, and every later step — validating the plan,
+      // arbitrating a widening mid-run, integrating the result — has to
+      // answer against the same place the base came from.
+      `ALTER TABLE work_leases ADD COLUMN branch TEXT`,
+    ],
+  },
+  {
+    version: 59,
+    name: "channels-ship-to-github",
+    statements: [
+      // Where a merged channel's work went on GitHub.
+      //
+      // The second of the two gates: a channel's branch merges into canonical
+      // under Kumi's own review, and canonical goes to GitHub as a pull
+      // request somebody there reviews. Kept on the channel because that is
+      // what the pull request is *about* — a link stored anywhere else would
+      // have to be joined back to the room every time it was shown.
+      //
+      // Null for every channel that has not shipped, which is every channel
+      // that has not merged and most that have.
+      `ALTER TABLE sub_channels ADD COLUMN pull_request_url TEXT`,
+      `ALTER TABLE sub_channels ADD COLUMN shipped_at TEXT`,
+    ],
+  },
+  {
+    version: 60,
+    name: "review-a-branch-in-its-own-room",
+    statements: [
+      // Where in the diff a message was said.
+      //
+      // A review comment is a channel message, not a parallel comment
+      // system. The channel already *is* the pull request's conversation —
+      // the tasks that produced the work are threads in it — so a second
+      // store of comments beside it would be two places to look and one of
+      // them would go stale. What a comment needs on top of a message is
+      // where it was pointed, which is these three columns.
+      //
+      // The revision as well as the path and line, because a line number is
+      // only meaningful against a particular commit: the branch moves, and a
+      // comment left on line 42 of one revision is not about line 42 of the
+      // next. Anything reading these has to check the revision still matches
+      // before drawing the comment against a line.
+      `ALTER TABLE channel_messages ADD COLUMN anchor_path TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN anchor_line INTEGER`,
+      `ALTER TABLE channel_messages ADD COLUMN anchor_revision TEXT`,
+      // One review per person per channel, replaced rather than accumulated:
+      // changing your mind is the ordinary case, and a history of somebody
+      // approving and un-approving is noise nobody asked for. The room keeps
+      // the narrative; this keeps the standing answer.
+      `CREATE TABLE sub_channel_reviews (
+         channel_id TEXT NOT NULL,
+         repository_id TEXT NOT NULL,
+         user_id TEXT NOT NULL,
+         state TEXT NOT NULL,
+         note TEXT,
+         revision TEXT,
+         reviewed_at TEXT NOT NULL,
+         PRIMARY KEY (channel_id, user_id)
+       )`,
+      `CREATE INDEX sub_channel_reviews_by_repository
+         ON sub_channel_reviews(repository_id)`,
+    ],
+  },
+  {
+    version: 61,
+    name: "what-a-branch-holds-while-it-is-open",
+    statements: [
+      `CREATE TABLE branch_claims (
+         id TEXT PRIMARY KEY,
+         repository_id TEXT NOT NULL,
+         branch TEXT NOT NULL,
+         task_id TEXT NOT NULL,
+         revision TEXT NOT NULL,
+         symbols TEXT NOT NULL DEFAULT '[]',
+         apis TEXT NOT NULL DEFAULT '[]',
+         schemas TEXT NOT NULL DEFAULT '[]',
+         config_keys TEXT NOT NULL DEFAULT '[]',
+         services TEXT NOT NULL DEFAULT '[]',
+         ranges TEXT NOT NULL DEFAULT '[]',
+         created_at TEXT NOT NULL)`,
+      `CREATE INDEX branch_claims_by_repository
+         ON branch_claims(repository_id, branch)`,
+    ],
+  },
+  {
+    version: 62,
+    name: "what-shape-a-branch-left-the-contract-in",
+    statements: [
+      // The name of an exported symbol says a branch touched it; the shape
+      // says what it now is. Without this, a branch that changed a return
+      // type and a branch that goes on calling it hold nothing in common —
+      // the name is the same on both sides, which is exactly why git merges
+      // them without a word.
+      `ALTER TABLE branch_claims ADD COLUMN shapes TEXT NOT NULL DEFAULT '[]'`,
+    ],
+  },
+  {
+    version: 63,
+    name: "what-a-person-is-editing-right-now",
+    statements: [
+      // A human editing a file was arbitrated only at submit, and held
+      // nothing while they typed — so an agent could be handed the same file
+      // and both would find out afterwards. This is the person's side of the
+      // lease an agent has always had: taken on the first edit, renewed while
+      // the editor is open, and gone when it lapses.
+      //
+      // One row per person per file per branch: re-acquiring renews rather
+      // than accumulating, which is what makes an abandoned tab expire
+      // instead of leaving a pile of holds nobody can account for.
+      `CREATE TABLE editor_holds (
+         repository_id TEXT NOT NULL,
+         branch TEXT NOT NULL DEFAULT '',
+         user_id TEXT NOT NULL,
+         file TEXT NOT NULL,
+         ranges TEXT NOT NULL DEFAULT '[]',
+         acquired_at TEXT NOT NULL,
+         renewed_at TEXT NOT NULL,
+         expires_at TEXT NOT NULL,
+         PRIMARY KEY (repository_id, branch, user_id, file))`,
+      `CREATE INDEX editor_holds_by_repository
+         ON editor_holds(repository_id, branch, expires_at)`,
     ],
   },
 ];

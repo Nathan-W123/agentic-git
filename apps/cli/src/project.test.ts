@@ -13,6 +13,7 @@ import {
   describeMcpServer,
   mcpServerDigest,
   assertProjectConfig,
+  terminalAllowed,
   type ProjectConfig,
 } from "./project.js";
 
@@ -569,4 +570,86 @@ test("allowedMcpServers withholds everything until the machine owner says otherw
     allowed: [],
     withheld: [],
   });
+});
+
+test("a machine's answer about terminals survives a save, empty list and all", async (t) => {
+  // The bug this exists for: `assertProjectConfig` rebuilds the object `save`
+  // writes back, and it did not list `terminal`. So the desktop app wrote the
+  // consent, the next start saved the config for some unrelated reason, and
+  // the consent was gone — a machine that allowed terminals quietly refusing
+  // them, with nothing changed that anybody did on purpose.
+  const all: ProjectConfig = { ...VALID, terminal: { allow: "all" } };
+  assert.deepEqual(assertProjectConfig(all), all);
+
+  // An empty list is a decision — "none" — and must not come back as the key
+  // being absent, which means "never asked". The desktop app's switch is the
+  // difference between those two: absent is what it opts in on.
+  const none: ProjectConfig = { ...VALID, terminal: { allow: [] } };
+  assert.deepEqual(assertProjectConfig(none), none);
+
+  // And where sessions start travels with it, or turning the switch off and
+  // on again would move somebody's terminals.
+  const pinned: ProjectConfig = {
+    ...VALID,
+    terminal: { allow: ["demo-app"], cwd: "/Users/nathan/code" },
+  };
+  assert.deepEqual(assertProjectConfig(pinned), pinned);
+
+  for (const allow of [12, "some", {}, null, ["", 4]]) {
+    assert.throws(
+      () => assertProjectConfig({ ...VALID, terminal: { allow } }),
+      /"terminal.allow" must be "all" or an array of repository ids/u,
+      JSON.stringify(allow),
+    );
+  }
+  assert.throws(
+    () => assertProjectConfig({ ...VALID, terminal: "all" }),
+    /"terminal" must be an object/u,
+  );
+  assert.throws(
+    () => assertProjectConfig({ ...VALID, terminal: { allow: "all", cwd: "" } }),
+    /"terminal.cwd" must be a path/u,
+  );
+
+  // Through a real file, because that is where it was being lost: the whole
+  // failure lived between the object in memory and the JSON on disk.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-terminal-save-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const project = await CoordinatorProject.init(root);
+  project.config.terminal = { allow: "all" };
+  await project.save();
+  const reopened = await CoordinatorProject.open(root);
+  assert.deepEqual(reopened.config.terminal, { allow: "all" });
+  assert.equal(terminalAllowed(reopened.config, "anything"), true);
+
+  // Saved again by something with no interest in terminals — which is every
+  // other caller of `save` — and still there.
+  reopened.config.defaultAgent = "claude";
+  await reopened.save();
+  assert.deepEqual(
+    (await CoordinatorProject.open(root)).config.terminal,
+    { allow: "all" },
+  );
+});
+
+test("absent consent is a refusal, and a list is only what it names", () => {
+  // Three states, and the difference between the first two is what makes the
+  // desktop app's switch stay off: absent means nobody has decided, so the
+  // app writes a yes; an empty list means somebody decided no.
+  assert.equal(terminalAllowed(VALID, "demo-app"), false);
+  assert.equal(terminalAllowed({ ...VALID, terminal: { allow: [] } }, "demo-app"), false);
+  assert.equal(
+    terminalAllowed({ ...VALID, terminal: { allow: "all" } }, "demo-app"),
+    true,
+  );
+  assert.equal(
+    terminalAllowed({ ...VALID, terminal: { allow: ["demo-app"] } }, "demo-app"),
+    true,
+  );
+  // Named, not prefixed: a machine allowed for `demo` does not thereby open a
+  // shell against `demo-app`.
+  assert.equal(
+    terminalAllowed({ ...VALID, terminal: { allow: ["demo"] } }, "demo-app"),
+    false,
+  );
 });
