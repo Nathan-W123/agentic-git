@@ -1703,14 +1703,17 @@ test("a restart still finds and withdraws a hold it did not post", async (t) => 
   // The restart, as far as this line is concerned: everything the process
   // remembered about posting it is gone, and only the reply itself is left.
   const gateway = runtime.gateway as unknown as {
-    arbitrationNotices: Map<string, unknown>;
+    notices: { clear(): void };
     withdrawArbitrationNotice(watched: {
       projectId: string;
       repositoryId: string;
       taskId: string;
     }): Promise<void>;
   };
-  gateway.arbitrationNotices.clear();
+  // What shutdown does, which is the whole point: the board drops what it
+  // remembered and every standing line is left findable only from the thread
+  // it hangs in.
+  gateway.notices.clear();
 
   await gateway.withdrawArbitrationNotice({
     projectId: DEFAULT_PROJECT_ID,
