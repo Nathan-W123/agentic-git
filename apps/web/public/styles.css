@@ -7888,8 +7888,10 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
  *
  * The insets are left alone. The picker above the box and the row of staged
  * attachments are both indented to the composer's margin by the rules either
- * side of this one, and the safe-area rule at the foot of the file owns the
- * bottom, so this is shape and edge only. */
+ * side of this one, and the composer-floor rules at the foot of the file own
+ * the bottom — they are where the panel card's gutter is handed back, so this
+ * box ends on the same line of the window as the room's. Shape and edge
+ * only, here. */
 .thread-composer-wrap .composer {
   --composer-shape: 17px;
   border-color: var(--border);
@@ -13481,6 +13483,14 @@ dialog.modal[open]::backdrop {
   padding-top: var(--safe-top);
 }
 
+/* One floor for every box you type into. A thread stands open beside the
+   room it came out of, so the two boxes are read as a pair and the height
+   they end at is a number both of them ask for rather than one each of them
+   happens to have. */
+:root {
+  --composer-floor: 12px;
+}
+
 /* The home indicator, and on iOS Safari the floating address bar, overlap the
    bottom of the viewport — which is where the composer and its send button
    live.
@@ -13490,13 +13500,35 @@ dialog.modal[open]::backdrop {
    bare class is outranked and silently does nothing. The wrapper is the
    element that actually carries the gap. */
 .chan-composer-wrap {
-  margin-bottom: calc(12px + var(--safe-bottom));
+  margin-bottom: calc(var(--composer-floor) + var(--safe-bottom));
 }
 
 /* The one-on-one chat panel and any other composer that is not inside the
    channel wrapper. */
 .composer:not(.chan-composer-wrap .composer) {
-  margin-bottom: calc(12px + var(--safe-bottom));
+  margin-bottom: calc(var(--composer-floor) + var(--safe-bottom));
+}
+
+/* Except in a panel, where the floor is the window's and not the card's.
+ *
+ * The rule above is measured from whatever holds the composer, which for the
+ * room is the conversation column — and that column reaches the bottom of the
+ * window. A thread is held by a card instead: it is set down 8px inside the
+ * shell and edged with a hairline, so twelve pixels from *its* floor left the
+ * reply box nine pixels higher than the room's, and two boxes on one row
+ * ending on two different lines read as one of them having slipped.
+ *
+ * The card's own inset comes back off the margin here, which puts the bottom
+ * of the reply box on the same line of the window as the bottom of the room's
+ * — the card keeps its gutter, and what stands in it does not pay for it
+ * twice. Taken from a variable the card publishes rather than from a second
+ * literal 8px, because below 1180px the panel covers the conversation edge to
+ * edge and has no gutter to give back; it zeroes the variable there and this
+ * arithmetic quietly becomes the plain floor again. */
+.chats-shell > .thread-panel .thread-composer-wrap .composer {
+  margin-bottom: calc(
+    var(--composer-floor) - var(--panel-gutter, 0px) + var(--safe-bottom)
+  );
 }
 
 /* Landscape puts the cutout on a side instead, where it would clip the
@@ -14008,6 +14040,12 @@ dialog.modal[open]::backdrop {
    It may be resized only while the primary conversation can keep its usable
    floor; intermediate layouts overlay it instead. */
 .chats-shell > .thread-panel {
+  /* How far the card's floor stands above the window's: the eight pixels it
+     is set down by, and the one it is drawn with. Published because anything
+     inside that lines itself up with the conversation rather than with the
+     card has to give it back — the reply box, whose floor is set with the
+     other composer rules further up this file, is the one that does. */
+  --panel-gutter: 9px;
   margin: 8px;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-xl);
@@ -14141,6 +14179,8 @@ dialog.modal[open]::backdrop {
     width: min(var(--panel-w, 420px), calc(100% - 72px));
     max-width: calc(100% - 72px);
     z-index: 20;
+    /* Nothing to give back: the panel's floor is the window's here. */
+    --panel-gutter: 0px;
     margin: 0;
     border: 0;
     border-left: 1px solid var(--border-soft);
@@ -14275,6 +14315,7 @@ dialog.modal[open]::backdrop {
     max-width: 100vw;
     min-width: 0;
     z-index: 80;
+    --panel-gutter: 0px;
     margin: 0;
     border: 0;
     border-radius: 0;
