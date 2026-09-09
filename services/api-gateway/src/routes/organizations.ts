@@ -39,7 +39,6 @@ import {
   matchPath,
   publicInvitation,
   publicUser,
-  invitationIdForCode,
 } from "../gateway-util.js";
 import {
   API_PREFIX,
@@ -431,7 +430,7 @@ export async function routeOrganizations(
         throw new HttpError(
           400,
           "invalid_invitation_code",
-          "Invite names must become 6–48 characters using letters, numbers, spaces, or dashes",
+          "Invite names must use 1–48 letters, numbers, spaces, or dashes",
         );
       }
       const role = stringField(body["role"], "role", { max: 20 }) as
@@ -505,20 +504,7 @@ export async function routeOrganizations(
       // the organization-wide invitation, where a second one would have
       // added nothing; a repository grant is worth offering to someone who
       // is already in the organization but cannot reach this repository.
-      const id =
-        invitationCode === undefined
-          ? `inv_${randomBytes(9).toString("base64url")}`
-          : invitationIdForCode(invitationCode);
-      if (
-        invitationCode !== undefined &&
-        (await gw.options.store.getInvitation(id)) !== undefined
-      ) {
-        throw new HttpError(
-          409,
-          "invitation_code_unavailable",
-          "That invite name is already in use",
-        );
-      }
+      const id = `inv_${randomBytes(9).toString("base64url")}`;
       const secret =
         invitationCode ?? randomBytes(32).toString("base64url");
       const now = new Date();
@@ -566,7 +552,7 @@ export async function routeOrganizations(
       // recoverable form, so a lost link is reissued rather than looked up.
       gw.sendJson(response, 201, {
         invitation: publicInvitation(invitation),
-        token: invitationCode ?? `${id}.${secret}`,
+        token: `${id}.${secret}`,
       });
       return true;
     }

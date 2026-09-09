@@ -78,15 +78,15 @@ export const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * Turns the recipient label into the credential used in a readable link.
  *
- * Six characters keeps the shortest codes out of the especially easy-to-
- * guess range. Spaces become dashes, while everything else must already be a
- * URL-safe letter, digit or separator so the link says exactly what its
- * creator intended.
+ * Spaces become dashes, while everything else must already be a URL-safe
+ * letter, digit or separator so the link says exactly what its creator
+ * intended. The invitation itself has a random id, so a short label does not
+ * make the link easy to guess.
  */
 export function normalizeInvitationCode(value: string): string | undefined {
   const code = value.trim().toUpperCase().replace(/\s+/gu, "-");
   if (
-    code.length < 6 ||
+    code.length === 0 ||
     code.length > 48 ||
     !/^[A-Z0-9]+(?:-[A-Z0-9]+)*$/u.test(code)
   ) {

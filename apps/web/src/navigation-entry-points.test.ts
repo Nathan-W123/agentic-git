@@ -525,6 +525,7 @@ test("a NATHAN-style invite link enters the invitation flow in a running session
   );
   assert.match(invite, /name="recipientName"/u);
   assert.match(invite, /placeholder="Nathan"/u);
+  assert.doesNotMatch(invite, /minlength="6"/u);
   assert.match(
     invite,
     /createInvitation\(\s*values\.recipientName,\s*values\.role,\s*values\.repositoryId,/u,
@@ -555,5 +556,5 @@ test("a NATHAN-style invite link enters the invitation flow in a running session
     "async function showInviteLink(token, repositoryId) {",
     "\n/**\n * Removes one agent membership",
   );
-  assert.match(linkDialog, /anyone\s+who guesses it can use this invitation/u);
+  assert.match(linkDialog, /anyone with the link can use this invitation/u);
 });

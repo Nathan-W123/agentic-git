@@ -3127,7 +3127,7 @@ async function inviteSomebody(rerender, repositoryId) {
     body: `<label class="field">
         <span>Name for the invite link</span>
         <input class="input" name="recipientName" autocomplete="off"
-          autocapitalize="characters" spellcheck="false" minlength="6" maxlength="48"
+          autocapitalize="characters" spellcheck="false" maxlength="48"
           pattern="[A-Za-z0-9]+([ -][A-Za-z0-9]+)*" placeholder="Nathan" required autofocus>
       </label>${
         fixed
@@ -3189,9 +3189,8 @@ async function showInviteLink(token, repositoryId) {
     subtitle: `Anyone who opens it joins ${
       repositoryId ? `#${repositoryId}` : "this project"
     }, and as many people can as you send it to. It works for seven days
-      unless you revoke it. The readable name is the link's key, so anyone
-      who guesses it can use this invitation. The link is not stored — so
-      this is the only time it can be copied.`,
+      unless you revoke it. Anyone with the link can use this invitation. The
+      link is not stored — so this is the only time it can be copied.`,
     confirm: "Copy link",
     cancel: "Done",
     body: `<div class="invite-link"><code>${esc(link)}</code></div>`,
