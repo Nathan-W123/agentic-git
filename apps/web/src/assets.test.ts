@@ -4447,6 +4447,24 @@ test("a push sync collision asks which side wins and resumes the push", async ()
   );
 });
 
+test("the sync question is asked once, never in a loop", async () => {
+  const repos = await publicFile("screen-repos.js");
+
+  // A refusal that arrives *after* an answer was given is that answer
+  // failing, not the same question again. Reopening the dialog on it is an
+  // infinite loop with no way out — which is exactly what it was: the same
+  // files, the same two buttons, forever, because `-X` cannot settle a file
+  // deleted on one side and edited on the other.
+  const sync = repos.slice(repos.indexOf("export async function syncRepositoryFromGitHub"));
+  const body = sync.slice(0, sync.indexOf("\n}"));
+  assert.match(body, /error\.code === "sync_conflict" && resolve === undefined/u);
+  // And the second time it says so, rather than going quiet.
+  const asked = body.indexOf("chooseSyncSide");
+  const told = body.indexOf("That did not settle it");
+  assert.notEqual(told, -1);
+  assert.ok(asked < told, "the ask must come before the give-up");
+});
+
 test("anything the interface can hide, it can also bring back", async () => {
   const code = await publicFile("screen-code.js");
   const app = await browserSource();

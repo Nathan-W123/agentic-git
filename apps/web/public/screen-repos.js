@@ -286,12 +286,25 @@ export async function syncRepositoryFromGitHub(
     // both sides, and only a person can say which version survives. Asked
     // here rather than reported, because the alternative — the remedies the
     // refusal used to list — is not reachable from a phone at all.
-    if (error.code === "sync_conflict") {
+    //
+    // Asked once. A refusal that comes back *after* an answer was given is
+    // not the same question again, it is that answer failing, and reopening
+    // the dialog on it is an infinite loop with no way out — which is
+    // exactly what it was: the same files, the same two buttons, forever.
+    if (error.code === "sync_conflict" && resolve === undefined) {
       await chooseSyncSide(
         repositoryId,
         rerender,
         error.message,
         afterSync,
+      );
+      return;
+    }
+    if (error.code === "sync_conflict") {
+      toast(
+        `That did not settle it: ${error.message} Resolve these files in a ` +
+          "clone and push, then sync again.",
+        "error",
       );
       return;
     }
