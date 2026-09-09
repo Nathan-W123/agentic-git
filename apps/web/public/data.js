@@ -828,6 +828,20 @@ export const state = {
   chanFileDraft: undefined,
   chanFileLoading: false,
   chanFileSaving: false,
+  /**
+   * Who else is in the file on screen — people and agents, from the server.
+   *
+   * Empty until something asks. Drawn as blocks in the editor's margin and
+   * read again by the save, so a refusal names somebody the reader has
+   * already seen rather than arriving out of nowhere.
+   */
+  chanFileHolds: [],
+  /** The renewal timer for this reader's own hold, while the editor is open. */
+  chanFileHoldTimer: undefined,
+  /** The file that timer is renewing, so a switch cannot leave it running. */
+  chanFileHeld: undefined,
+  /** A save the gate refused, waiting for the reader to go ahead or back off. */
+  chanFileBlocked: false,
   chanFileError: undefined,
   /** Which repository `state.workspace` belongs to, so it is not reused wrongly. */
   workspaceRepo: undefined,
@@ -1166,6 +1180,11 @@ export async function api(path, options = {}) {
     );
     error.code = data?.error?.code;
     error.status = response.status;
+    // Everything else the server said about the refusal. Several routes
+    // answer with more than a sentence — which contracts went stale, who is
+    // holding a file — and a client that could read only the message would
+    // have to parse those back out of English.
+    error.details = data?.error;
     throw error;
   }
   return data;
@@ -7932,7 +7951,101 @@ export async function loadChannelFile(path, rerender) {
  * The saved text becomes the new baseline, so the panel stops calling itself
  * unsaved without having to re-read the file to find that out.
  */
-export async function saveChannelFile(rerender) {
+/**
+ * Who else is in this file, asked without taking anything.
+ *
+ * A read, deliberately: opening a dozen files to look at them must not lock a
+ * dozen files, so nothing here acquires. Failures are swallowed — an editor
+ * that refused to open because it could not list holders would be worse than
+ * one that opens without the blocks drawn.
+ */
+export async function loadFileHolds(path, rerender) {
+  if (path === undefined) {
+    return;
+  }
+  try {
+    const { project, repo } = await ensureChannelWorkspace();
+    const result = await api(
+      `/projects/${project}/repositories/${repo}/workspace/holds?path=${encodeURIComponent(
+        path,
+      )}`,
+    );
+    if (state.chanFileView === path) {
+      state.chanFileHolds = result.holds ?? [];
+      rerender?.();
+    }
+  } catch {
+    // Nothing. See above.
+  }
+}
+
+/**
+ * Takes this reader's hold and keeps renewing it while the editor is open.
+ *
+ * Called on the first keystroke rather than when the file opens, for the same
+ * reason `loadFileHolds` takes nothing: reading is not editing, and a reader
+ * who opened a file to look at it should not be holding it.
+ *
+ * The server says how often to renew. Two sides guessing the same interval is
+ * how a hold lapses under a live editor, and the side that owns the expiry is
+ * the side that should say.
+ */
+export async function holdChannelFile(path, rerender) {
+  if (path === undefined || state.chanFileHeld === path) {
+    return;
+  }
+  state.chanFileHeld = path;
+  const renew = async () => {
+    if (state.chanFileHeld !== path || state.chanFileView !== path) {
+      releaseChannelFile(path);
+      return;
+    }
+    try {
+      const { project, repo } = await ensureChannelWorkspace();
+      const answer = await api(
+        `/projects/${project}/repositories/${repo}/workspace/hold`,
+        { method: "POST", body: { path } },
+      );
+      state.chanFileHolds = answer.holds ?? [];
+      rerender?.();
+      window.clearTimeout(state.chanFileHoldTimer);
+      state.chanFileHoldTimer = window.setTimeout(
+        renew,
+        Math.max(5_000, Number(answer.renewAfterMs) || 15_000),
+      );
+    } catch {
+      // A renewal that cannot reach the control plane lets the hold lapse,
+      // which is the safe direction: a lock nobody can release is worse than
+      // no lock, and the next keystroke takes it again.
+      state.chanFileHeld = undefined;
+    }
+  };
+  await renew();
+}
+
+/** Gives the hold back, on close or on a switch to another file. */
+export function releaseChannelFile(path) {
+  window.clearTimeout(state.chanFileHoldTimer);
+  state.chanFileHoldTimer = undefined;
+  const held = path ?? state.chanFileHeld;
+  state.chanFileHeld = undefined;
+  if (held === undefined) {
+    return;
+  }
+  void ensureChannelWorkspace()
+    .then(({ project, repo }) =>
+      api(
+        `/projects/${project}/repositories/${repo}/workspace/hold?path=${encodeURIComponent(
+          held,
+        )}`,
+        { method: "DELETE" },
+      ),
+    )
+    // Best effort. It expires by itself; this only makes it prompt.
+    .catch(() => undefined);
+}
+
+export async function saveChannelFile(rerender, override = false) {
   const path = state.chanFileView;
   const content = state.chanFileDraft;
   if (path === undefined || content === undefined || state.chanFileSaving) {
@@ -7944,14 +8057,34 @@ export async function saveChannelFile(rerender) {
   rerender();
   try {
     const { project, repo } = await ensureChannelWorkspace();
-    await api(`/projects/${project}/repositories/${repo}/workspace/file`, {
-      method: "POST",
-      body: { path, content },
-    });
+    const answer = await api(
+      `/projects/${project}/repositories/${repo}/workspace/file`,
+      {
+        method: "POST",
+        // Sent only when the reader has already been shown who is here and
+        // said to go ahead anyway. The server records it either way.
+        body: { path, content, ...(override ? { override: true } : {}) },
+      },
+    );
     state.chanFileBase = content;
     saved = true;
-    toast(`Saved ${path}`, "ok");
+    toast(
+      answer.overrode === true
+        ? `Saved ${path} over somebody else's edit`
+        : `Saved ${path}`,
+      answer.overrode === true ? "warn" : "ok",
+    );
   } catch (error) {
+    // The gate, which is not a failure so much as an answer: somebody else is
+    // in this file. Their holds come back with it, so the editor can name
+    // them and offer to go ahead rather than leaving a message to reread.
+    if (error.code === "file_held") {
+      state.chanFileHolds = error.details?.holds ?? state.chanFileHolds;
+      state.chanFileBlocked = true;
+      state.chanFileError = undefined;
+      rerender();
+      return false;
+    }
     state.chanFileError = error.message;
     toast(error.message, "error");
   } finally {

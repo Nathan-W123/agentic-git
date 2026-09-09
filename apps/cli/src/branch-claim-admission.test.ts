@@ -311,7 +311,7 @@ test("a branch does not contend with its own earlier work", async () => {
   );
 });
 
-test("the blanket fast path does not hand over a repository another branch holds", async () => {
+test("the blanket fast path does not hand over a route another branch holds", async () => {
   const { store, userId, workerId, REPOSITORY } = await fixture();
   await store.recordBranchClaim({
     repositoryId: REPOSITORY.id,
@@ -356,5 +356,108 @@ test("the blanket fast path does not hand over a repository another branch holds
     granted,
     undefined,
     "no blanket claim while another branch is holding something",
+  );
+});
+
+test("a branch holding only its own internals does not cost the fast path", async () => {
+  // The regression this fixes. A claim lasts as long as its branch, and it
+  // records every symbol in every file its diff touched — exported or not. So
+  // one open work channel with a commit on it used to be enough to refuse a
+  // blanket claim to every later solo task, forever, and each of them paid a
+  // full planning round for a collision that could not happen.
+  const { store, userId, workerId, REPOSITORY } = await fixture();
+  await store.recordBranchClaim({
+    repositoryId: REPOSITORY.id,
+    branch: "kumi/payments-v2",
+    taskId: "task_earlier",
+    revision: "a".repeat(40),
+    // Everything in a file it touched, which is what the indexer reports.
+    // None of it crosses: no route, no schema, no config key, no service, and
+    // no exported contract beside it.
+    symbols: ["formatAmount", "roundHalfEven"],
+    ranges: [{ file: "src/money.ts", start: 10, end: 20 }],
+  });
+
+  const { leaseId, taskId } = await leaseFor(store, {
+    taskId: "task_now",
+    branch: "kumi/retry-backoff",
+    userId,
+    workerId,
+    repository: REPOSITORY,
+  });
+  const authority = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[taskId, leaseId]]),
+    allowBlanketClaims: true,
+  } as never);
+
+  const granted = await authority.claimRepository?.({
+    task: {
+      id: taskId,
+      agentId: "claude",
+      objective: "cap the retry backoff",
+      // Reached now that the guard lets this through, which is the point:
+      // `blanketPlan` copies the task's validation commands onto the claim.
+      validationCommands: [],
+    },
+    repository: REPOSITORY,
+    baseVersion: { revision: REPOSITORY.revision, sequence: 1 },
+    estimatedFiles: ["src/retry.ts"],
+  } as never);
+  assert.notEqual(
+    granted,
+    undefined,
+    "a claim that reaches nowhere should not refuse the whole repository",
+  );
+});
+
+test("an exported contract on another branch still refuses the fast path", async () => {
+  // The half that has to keep working. A shape is exported by construction,
+  // so a branch holding one is holding something a blanket claim could edit
+  // on the far side of a merge git will perform without a word.
+  const { store, userId, workerId, REPOSITORY } = await fixture();
+  await store.recordBranchClaim({
+    repositoryId: REPOSITORY.id,
+    branch: "kumi/payments-v2",
+    taskId: "task_earlier",
+    revision: "a".repeat(40),
+    symbols: ["sign"],
+    shapes: [
+      {
+        file: "src/auth.ts",
+        symbol: "sign",
+        shape: "(password: number): string",
+        digest: "bbbb",
+        consumers: ["src/login.ts"],
+      },
+    ],
+  });
+
+  const { leaseId, taskId } = await leaseFor(store, {
+    taskId: "task_now",
+    branch: "kumi/retry-backoff",
+    userId,
+    workerId,
+    repository: REPOSITORY,
+  });
+  const authority = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[taskId, leaseId]]),
+    allowBlanketClaims: true,
+  } as never);
+
+  assert.equal(
+    await authority.claimRepository?.({
+      task: {
+        id: taskId,
+        agentId: "claude",
+        objective: "change the session token",
+      },
+      repository: REPOSITORY,
+      baseVersion: { revision: REPOSITORY.revision, sequence: 1 },
+      estimatedFiles: ["src/retry.ts"],
+    } as never),
+    undefined,
+    "no blanket claim while another branch holds an exported contract",
   );
 });

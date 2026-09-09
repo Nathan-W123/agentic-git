@@ -12852,10 +12852,94 @@ dialog.modal[open]::backdrop {
   cursor: default;
 }
 
+/* Who is in this file, above it. The blocks below say where; this says who,
+   because a colour with no name attached is a thing to wonder about rather
+   than a thing to act on — and a hold over the whole file has no block worth
+   hovering. */
+.fp-holders {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  /* The panel is a column and the editor is the part that grows. Without
+     this the banner stretches to fill it and the chips end up floating in the
+     middle of the file. */
+  flex: none;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+}
+
+.fp-holder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.fp-holder svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Four, cycled. Enough that two people in one file are told apart, few enough
+   that the fifth reusing the first is rarer than a file with five editors. */
+.fp-holder-0 { color: var(--orange); }
+.fp-holder-1 { color: var(--accent-bright); }
+.fp-holder-2 { color: var(--green); }
+.fp-holder-3 { color: var(--red); }
+
+/* The layer the blocks live on. Behind the textarea, which is transparent, and
+   never in the way of a click or a caret. */
+.fp-hold-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.fp-hold {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: currentColor;
+  /* Faint on purpose. This sits under the text somebody is reading, and a
+     block that made the code harder to read would be turned off. */
+  opacity: 0.14;
+  border-left: 2px solid currentColor;
+}
+
+/* The save the gate refused, and the two ways out of it. */
+.fp-blocked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: none;
+  /* The sentence takes the room and the two answers stay together on the
+     right. A spacer here put itself on its own line the moment the sentence
+     wrapped, and left the buttons stranded on two more. */
+  justify-content: flex-end;
+  padding: 10px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--orange) 40%, var(--border));
+  background: var(--orange-wash);
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.fp-blocked > span:first-child {
+  flex: 1;
+  min-width: 16ch;
+}
+
 .fp-editor-wrap {
   display: flex;
   min-height: 0;
   padding: 0;
+  /* So the hold layer can be positioned against it. */
+  position: relative;
 }
 
 .fp-editor {
@@ -13450,6 +13534,19 @@ dialog.modal[open]::backdrop {
 .thread-panel,
 .file-panel {
   padding-top: var(--safe-top);
+  /* A column rather than the panel's three named rows.
+     `grid-template-rows: auto 1fr auto` fills in order, so anything inserted
+     above the body takes the flexible row and the editor is squeezed into
+     `auto` — which is exactly what the holders banner did: chips floating in
+     the middle of an empty panel and two lines of source at the bottom.
+     Flex says which child grows instead of which position does. */
+  display: flex;
+  flex-direction: column;
+}
+
+.file-panel > .thread-body {
+  flex: 1;
+  min-height: 0;
 }
 
 /* The home indicator, and on iOS Safari the floating address bar, overlap the

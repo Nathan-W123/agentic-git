@@ -37,6 +37,7 @@ interface MenuModule {
   menuTemplate: (input: {
     platform: string;
     releasesUrl: string | undefined;
+    version: string;
     workerStatus: string;
     terminalsAllowed: boolean;
     awakeForWork: boolean;
@@ -73,6 +74,7 @@ function build(
   overrides: Partial<{
     platform: string;
     releasesUrl: string | undefined;
+    version: string;
     workerStatus: string;
     terminalsAllowed: boolean;
     awakeForWork: boolean;
@@ -86,6 +88,7 @@ function build(
       return menuTemplate({
         platform: "darwin",
         releasesUrl: "https://github.com/example/releases",
+        version: "0.5.18",
         workerStatus: "Running agents on this machine",
         terminalsAllowed: true,
         awakeForWork: false,
@@ -122,8 +125,7 @@ test("the machine's own settings are all in the Agents menu, and all wired", asy
   item(agents, "Forget Allowed MCP Servers…");
   item(agents, "Don't Sleep While Idle (plugged in, lid open)");
 
-  // The status line is the one entry that is deliberately dead: it is a fact,
-  // not an offer.
+  // Two entries are deliberately dead: they are facts, not offers.
   const status = item(agents, "Running agents on this machine");
   assert.equal(status.enabled, false);
   assert.equal(status.click, undefined);
@@ -210,4 +212,22 @@ test("the page keeps its copy, paste and reload on either platform", async () =>
       assert.deepEqual(template[0]?.submenu, [{ role: "quit" }]);
     }
   }
+});
+
+test("the menu says which build this is, because nothing else does", async () => {
+  const harness = build({ version: "0.5.18" });
+  const agents = submenu(await harness.template(), "Agents");
+
+  // The recurring question this answers: every setting under it arrived in
+  // some version, there is no auto-update, and an install stays where it was
+  // until somebody downloads another one. Without this, "I turned that on and
+  // nothing happened" has no answer on the screen — the setting is simply
+  // absent, which looks identical to a setting that does not work.
+  const stamp = item(agents, "Kumi 0.5.18");
+  assert.equal(stamp.enabled, false);
+  assert.equal(stamp.click, undefined);
+  // First, above the worker line: which app this is comes before what it is
+  // doing, because it is the thing that decides whether the rest is even
+  // possible.
+  assert.equal(agents[0]?.label, "Kumi 0.5.18");
 });

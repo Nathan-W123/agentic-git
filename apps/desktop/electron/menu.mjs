@@ -19,6 +19,7 @@
  * @param {{
  *   platform: string,
  *   releasesUrl: string | undefined,
+ *   version: string,
  *   workerStatus: string,
  *   terminalsAllowed: boolean,
  *   awakeForWork: boolean,
@@ -53,6 +54,22 @@ export function menuTemplate(input) {
   // because the honest state is binary and they should be able to see which
   // one they are in without opening anything.
   const agents = [
+    {
+      // Which build this is, first, and shown for one reason: every setting
+      // below it arrived in some version, and the honest answer to "I turned
+      // that on and nothing happened" is usually "that copy does not have
+      // it". There is no auto-update here — an unsigned app replacing its own
+      // binary is something the operating system is right to refuse — so an
+      // install stays where it was until somebody downloads another one, and
+      // nothing on screen could say which one that was.
+      //
+      // Read against the machine's version in the terminal picker: they agree
+      // on a packaged build, and disagree when the app was rebuilt without
+      // its worker bundle, which is a trap `npm run desktop` sets and nothing
+      // else reports.
+      label: `Kumi ${input.version}`,
+      enabled: false,
+    },
     {
       // Shown, not offered. Whether agents run here is not a setting — but
       // whether they *are* running is a fact somebody needs, because the

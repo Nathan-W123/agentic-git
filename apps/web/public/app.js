@@ -71,6 +71,9 @@ import {
   loadBilling,
   loadBranchReview,
   loadChannelFile,
+  releaseChannelFile,
+  loadFileHolds,
+  holdChannelFile,
   loadChannelMessage,
   loadChannelMutes,
   loadChannelStats,
@@ -311,6 +314,8 @@ import {
   openChannel,
   paintComposerSuggestions,
   paintJumpToLatest,
+  paintFileHolds,
+  paintFileHolders,
   pickMention,
   pickSlashCommand,
   reactionPicker,
@@ -7836,6 +7841,10 @@ function renderNow() {
   // an empty surface for this to fill; painting on every route is also what
   // keeps an open list open across the render an arrow key causes.
   paintComposerSuggestions(activeChannelId());
+  // The editor's hold blocks are pixels over a textarea, so they cannot be
+  // markup: they are redrawn once the render has settled and the line height
+  // is a thing the browser has actually computed.
+  paintFileHolds();
   // Everything below answers on its own time, and opening a channel fires a
   // dozen of them at once. They redraw through `scheduleRender`, so the dozen
   // answers cost one redraw between them rather than one each — nobody is
@@ -10748,6 +10757,10 @@ document.addEventListener("click", (event) => {
     // only toggles which paths are open, with no route change to lose the
     // reader's place in the conversation.
     case "chan-file-open":
+      // Asked, not taken. Opening a file to read it must not lock it, so this
+      // only learns who else is here — the hold comes on the first keystroke.
+      void loadFileHolds(value, render);
+
       // Beside the conversation, not inside it. Opening a file used to expand
       // it in the transcript, which pushed the messages explaining the change
       // off the screen.
@@ -10779,6 +10792,12 @@ document.addEventListener("click", (event) => {
     // reading the next — and the tree is opened explicitly rather than relying
     // on it happening to still be toggled on underneath.
     case "chan-file-back":
+      // Given back rather than left to lapse. It expires by itself; this only
+      // makes it prompt, which is the difference between an agent waiting
+      // forty seconds and not waiting at all.
+      releaseChannelFile();
+      state.chanFileHolds = [];
+      state.chanFileBlocked = false;
       if (!confirmDiscardEdit()) {
         return;
       }
@@ -10792,6 +10811,12 @@ document.addEventListener("click", (event) => {
     // conversation. Closing the file and landing on a file tree somebody did
     // not ask to see again is not "close".
     case "chan-file-close":
+      // Given back rather than left to lapse. It expires by itself; this only
+      // makes it prompt, which is the difference between an agent waiting
+      // forty seconds and not waiting at all.
+      releaseChannelFile();
+      state.chanFileHolds = [];
+      state.chanFileBlocked = false;
       if (!confirmDiscardEdit()) {
         return;
       }
@@ -10827,6 +10852,27 @@ document.addEventListener("click", (event) => {
     case "chan-file-revert":
       state.chanFileDraft = state.chanFileBase;
       render();
+      return;
+    case "chan-file-blocked-dismiss":
+      state.chanFileBlocked = false;
+      render();
+      return;
+    /**
+     * Save over somebody else's hold, deliberately and on the record.
+     *
+     * Offered rather than withheld because a hard refusal relocates the
+     * problem: the terminal and a local clone are both one step away, and
+     * work done there is invisible rather than merely contended. The server
+     * writes an audit naming who was held up.
+     */
+    case "chan-file-override":
+      state.chanFileBlocked = false;
+      void saveChannelFile(render, true).then((saved) => {
+        if (saved) {
+          invalidateCode();
+          render();
+        }
+      });
       return;
     case "chan-file-save":
       void saveChannelFile(render).then((saved) => {
@@ -12410,6 +12456,11 @@ document.addEventListener("input", (event) => {
     // keystroke changes here is whether there is anything to save, so that is
     // the only thing touched.
     state.chanFileDraft = node.value;
+    // The first keystroke is when a hold is worth taking; opening the file to
+    // read it is not. Idempotent after that, and repainted narrowly — the
+    // whole point of this handler is that a source file is not rebuilt on
+    // every key, and the holders are two elements.
+    void holdChannelFile(state.chanFileView, paintFileHolders);
     const dirty = state.chanFileDraft !== state.chanFileBase;
     const panel = node.closest(".file-panel");
     panel?.classList.toggle("dirty", dirty);

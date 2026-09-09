@@ -7130,6 +7130,115 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a hold on a file is renewed, not accumulated, and lapses`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_holds",
+        path: "/canonical/holds.git",
+        branch: "main",
+      });
+
+      const first = await store.holdEditorFile({
+        repositoryId: "repo_holds",
+        branch: "kumi/payments-v2",
+        userId: "user_nathan" as never,
+        file: "src/login.ts",
+        ranges: [{ file: "src/login.ts", start: 10, end: 24 }],
+        ttlMs: 60_000,
+      });
+      assert.equal(first.file, "src/login.ts");
+      assert.deepEqual(first.ranges, [
+        { file: "src/login.ts", start: 10, end: 24 },
+      ]);
+
+      // Far enough apart to tell the two timestamps apart. Without this the
+      // acquire and the renewal land in the same millisecond, `acquiredAt`
+      // reads the same either way, and the assertion below passes against a
+      // store that resets it on every renewal.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // The second keystroke is the same statement made again, not a second
+      // hold. One row per person per file, or an editor renewing every few
+      // seconds would leave a pile nobody could account for.
+      const renewed = await store.holdEditorFile({
+        repositoryId: "repo_holds",
+        branch: "kumi/payments-v2",
+        userId: "user_nathan" as never,
+        file: "src/login.ts",
+        ranges: [{ file: "src/login.ts", start: 10, end: 30 }],
+        ttlMs: 60_000,
+      });
+      assert.equal(renewed.acquiredAt, first.acquiredAt, "since when it began");
+      assert.ok(renewed.renewedAt > first.renewedAt, "and when it last spoke");
+      assert.ok(renewed.expiresAt > first.expiresAt, "and how long it lasts");
+      const held = await store.listEditorHolds("repo_holds");
+      assert.equal(held.length, 1);
+      assert.deepEqual(held[0]?.ranges, [
+        { file: "src/login.ts", start: 10, end: 30 },
+      ]);
+
+      // Somebody else, on the same file, is a second hold — that is the
+      // contention this exists to make visible.
+      await store.holdEditorFile({
+        repositoryId: "repo_holds",
+        branch: "kumi/payments-v2",
+        userId: "user_ethan" as never,
+        file: "src/login.ts",
+        ttlMs: 60_000,
+      });
+      assert.equal((await store.listEditorHolds("repo_holds")).length, 2);
+      // And the reader can leave itself out, which is what an editor asking
+      // "who else is in this file" wants.
+      assert.deepEqual(
+        (
+          await store.listEditorHolds("repo_holds", {
+            exceptUser: "user_nathan" as never,
+          })
+        ).map((hold) => hold.userId),
+        ["user_ethan"],
+      );
+
+      // A different branch is a different place; the same file there is not
+      // the same file.
+      assert.deepEqual(
+        await store.listEditorHolds("repo_holds", { branch: "kumi/other" }),
+        [],
+      );
+
+      // Closing the file gives it back.
+      await store.releaseEditorHold({
+        repositoryId: "repo_holds",
+        branch: "kumi/payments-v2",
+        userId: "user_ethan" as never,
+        file: "src/login.ts",
+      });
+      assert.deepEqual(
+        (await store.listEditorHolds("repo_holds")).map((hold) => hold.userId),
+        ["user_nathan"],
+      );
+
+      // And walking away gives it back too, which is the case that actually
+      // happens. A hold that outlived its editor would be a lock nobody could
+      // account for and everybody would learn to route around.
+      await store.holdEditorFile({
+        repositoryId: "repo_holds",
+        branch: "kumi/payments-v2",
+        userId: "user_gone" as never,
+        file: "src/walked-away.ts",
+        ttlMs: 1_000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      assert.deepEqual(
+        (await store.listEditorHolds("repo_holds")).map((hold) => hold.file),
+        ["src/login.ts"],
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a branch holds what landed on it until it is released`, async () => {
     const { store, cleanup } = await backend.open();
     try {

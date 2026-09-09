@@ -272,6 +272,39 @@ export interface SyncFromRemoteResult {
   resolved?: { side: "remote" | "local"; files: string[] };
 }
 
+export interface PeekRemoteOptions {
+  remoteUrl: string;
+  /** Remote branch to look at. Defaults to the canonical branch. */
+  upstreamBranch?: string;
+  credentials?: RemoteRepositoryCredentials;
+}
+
+/** What the remote holds that this mirror does not, and nothing changed. */
+export interface PeekRemoteResult {
+  remoteUrl: string;
+  upstreamBranch: string;
+  upstreamRevision: string;
+  /** Canonical's tip, which this call leaves exactly where it was. */
+  previousRevision: string;
+  /**
+   * True when canonical already holds the remote tip.
+   *
+   * The equal case included. A mirror level with its remote is current, not
+   * behind by nothing.
+   */
+  current: boolean;
+  /**
+   * True when canonical has commits the remote does not.
+   *
+   * Both this and `!current` at once is a divergence, which is a sync's
+   * problem rather than this one's — said here only so a caller can tell
+   * "somebody pushed" from "we have not pushed yet".
+   */
+  ahead: boolean;
+  /** What changed between the two tips, empty when current. */
+  files: string[];
+}
+
 export interface PushToRemoteOptions {
   remoteUrl: string;
   /** Branch to create on the remote. Defaults to a short change-derived name. */
@@ -1036,6 +1069,122 @@ export class RepositoryService {
    * compare-and-swap on the old tip, so a promotion racing past it fails
    * this sync rather than losing its own update.
    */
+  /**
+   * What the remote has that this mirror does not — without taking any of it.
+   *
+   * The read-only half of {@link syncFromRemote}, and the answer to the one
+   * question a mirror cannot ask itself: somebody pushed to the origin an
+   * hour ago and nothing here knows. A sync would find out, but a sync also
+   * *moves canonical*, and moving canonical underneath running agents to
+   * answer a question is not a trade anybody would take. So this fetches the
+   * upstream ref and stops.
+   *
+   * It shares `refs/coord/upstream/<branch>` with the sync deliberately: the
+   * ref means "what this mirror has seen of the remote", the fetch is forced
+   * for the same reason there, and a peek therefore also warms the ref for a
+   * sync that follows.
+   *
+   * Canonical's own branch is never written. That is the whole promise of
+   * this method and the reason it can be run on a timer.
+   */
+  public async peekRemote(
+    repository: CanonicalRepository,
+    options: PeekRemoteOptions,
+  ): Promise<PeekRemoteResult> {
+    const remoteUrl = normalizeRemoteUrl(options.remoteUrl);
+    const upstreamBranch = options.upstreamBranch ?? repository.branch;
+    await this.assertBranchName(upstreamBranch);
+    await this.assertBranchName(repository.branch);
+    const upstreamRef = `refs/coord/upstream/${upstreamBranch}`;
+    await this.assertRefName(upstreamRef);
+
+    await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "fetch",
+        "--no-tags",
+        "--end-of-options",
+        remoteUrl,
+        `+refs/heads/${upstreamBranch}:${upstreamRef}`,
+      ],
+      {
+        env: remoteEnvironment(options.credentials),
+        timeoutMs: 10 * 60 * 1000,
+        maxOutputBytes: 1024 * 1024,
+      },
+    );
+
+    const [upstreamResolved, localResolved] = await Promise.all([
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${upstreamRef}^{commit}`,
+      ]),
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `refs/heads/${repository.branch}^{commit}`,
+      ]),
+    ]);
+    const upstreamRevision = upstreamResolved.stdout.trim();
+    const previousRevision = localResolved.stdout.trim();
+    const current = await this.isAncestor(
+      repository,
+      upstreamRevision,
+      previousRevision,
+    );
+    return {
+      remoteUrl,
+      upstreamBranch,
+      upstreamRevision,
+      previousRevision,
+      current,
+      // Canonical is ahead when it contains the remote tip and is not sitting
+      // on it. `isAncestor` is true of equal revisions, so a mirror that is
+      // level satisfies `current` too, and this has to exclude that itself.
+      ahead: current && upstreamRevision !== previousRevision,
+      // From the merge base rather than from canonical's tip. A diverged
+      // mirror diffed tip-to-tip reports canonical's own commits as though
+      // somebody upstream had reverted them, which is the opposite of what
+      // this is for: the question is what *they* pushed.
+      files: current
+        ? []
+        : await this.listChangedFiles(
+            repository,
+            await this.mergeBaseOf(repository, previousRevision, upstreamRevision),
+            upstreamRevision,
+          ),
+    };
+  }
+
+  /** The commit two revisions last shared, or the older one if they do not. */
+  private async mergeBaseOf(
+    repository: CanonicalRepository,
+    left: string,
+    right: string,
+  ): Promise<string> {
+    const result = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "merge-base",
+        "--end-of-options",
+        left,
+        right,
+      ],
+      { allowFailure: true },
+    );
+    // Unrelated histories have no base. Diffing from the older side is then
+    // the same as diffing the whole tree, which is the honest answer for two
+    // repositories that were never the same repository.
+    return result.exitCode === 0 && result.stdout.trim() !== ""
+      ? result.stdout.trim()
+      : left;
+  }
+
   public async syncFromRemote(
     repository: CanonicalRepository,
     options: SyncFromRemoteOptions,

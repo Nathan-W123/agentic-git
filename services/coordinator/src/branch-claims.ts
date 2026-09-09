@@ -273,6 +273,45 @@ export interface ContractWarning {
 }
 
 /**
+ * Whether what a branch holds could reach another branch at all.
+ *
+ * Asked by the blanket fast path, which grants a lone task the whole
+ * repository without planning and therefore without arbitrating against
+ * anything. That path used to refuse the moment *any* branch held *anything*,
+ * and the effect was that a solo task almost never got a blanket claim again:
+ * claims last as long as their branch, so one open work channel with a
+ * commit on it was enough to put every later task through a full planning
+ * round for nothing.
+ *
+ * The fields tested are the ones `interfaceScopeOf` says always cross —
+ * routes, schemas, config keys, services — plus the exported contracts, which
+ * are exported by construction. **`symbols` is deliberately not among them.**
+ * A claim's symbol list is every symbol in every file the diff touched,
+ * exported or not, and a branch that changed one private helper claims the
+ * whole file's worth. Treating that as "crosses branches" is the over-claim
+ * `interfaceScopeOf` exists to filter; excluding it here applies the same
+ * filter the planned path applies, without needing an index the fast path
+ * deliberately does not build.
+ *
+ * The gap that leaves, stated rather than hidden: in a language whose
+ * contracts this deployment cannot read, an exported symbol appears in
+ * `symbols` with no shape beside it, and reads here as quiet. The planned
+ * path is more careful — `interfaceScopeOf` keeps a symbol whose visibility
+ * is unknown — so the fast path is the less conservative of the two for
+ * exactly those repositories. What catches it afterwards is what caught it
+ * before any of this existed: a textual conflict at the merge.
+ */
+export function claimCrossesBranches(claim: BranchClaim): boolean {
+  return (
+    claim.apis.length > 0 ||
+    claim.schemas.length > 0 ||
+    claim.configKeys.length > 0 ||
+    claim.services.length > 0 ||
+    claim.shapes.length > 0
+  );
+}
+
+/**
  * How a contract is addressed in the map {@link contractWarnings} takes.
  *
  * Exported because the caller builds that map and this reads it: two

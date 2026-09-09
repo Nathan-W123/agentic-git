@@ -13,6 +13,7 @@ import {
   blanketHolderSession,
   blanketPlan,
   branchClaimsAsActivePlans,
+  claimCrossesBranches,
   contestedPlanResources,
   declaredPlanFromClaim,
   deferredScopeObjective,
@@ -650,16 +651,22 @@ export class LeasePlanAuthority implements PlanAuthority {
     }
     // Alone in the lease table is no longer the same as unopposed. A blanket
     // claim covers the whole repository and nothing can be admitted while it
-    // is held, so granting one while another branch is sitting on an exported
-    // symbol would hand this task the very thing the claim system exists to
-    // protect — and it would do it on the fast path, without planning, which
-    // is where nobody would look for it.
+    // is held, so granting one while another branch is sitting on a route or
+    // an exported contract would hand this task the very thing the claim
+    // system exists to protect — on the fast path, without planning, which is
+    // where nobody would look for it.
+    //
+    // But only for what actually reaches across a branch. This refused on any
+    // claim at all to begin with, and since a claim lasts as long as its
+    // branch, one open work channel with a commit on it was enough to send
+    // every later solo task through a full planning round for nothing. See
+    // `claimCrossesBranches` for which fields count and which does not.
     const held = await this.store
       .listBranchClaims?.(lease.repositoryId, {
         ...(lease.branch === undefined ? {} : { exceptBranch: lease.branch }),
       })
       .catch((): [] => []);
-    if ((held ?? []).length > 0) {
+    if ((held ?? []).some(claimCrossesBranches)) {
       return undefined;
     }
     // Recorded on the claim so the next arrival can narrow it on contact

@@ -131,6 +131,16 @@ export class TerminalSessions {
     shell: string;
     cols: number;
     rows: number;
+    /**
+     * Written into the session before the shell says anything.
+     *
+     * A terminal is the one surface here that arbitrates nothing: the shell
+     * runs on somebody's own machine and Kumi never sees a keystroke of what
+     * it edits. The least dishonest thing available is to say so, and to say
+     * who is already holding lines on this branch, before the first prompt
+     * rather than in a conflict an hour later.
+     */
+    banner?: string;
   }): TerminalSessionView {
     this.sweep();
     const capability = this.capabilities.get(input.workerId);
@@ -148,9 +158,9 @@ export class TerminalSessions {
       rows: input.rows,
       ...(capability === undefined ? {} : { backend: capability.backend }),
       createdAt: new Date().toISOString(),
-      chunks: [],
+      chunks: input.banner === undefined ? [] : [input.banner],
       firstSeq: 0,
-      bytes: 0,
+      bytes: input.banner?.length ?? 0,
       truncated: false,
       pendingInput: [],
       pendingBytes: 0,
@@ -187,6 +197,40 @@ export class TerminalSessions {
           (repositoryId === undefined || session.repositoryId === repositoryId),
       )
       .map(view);
+  }
+
+  /**
+   * Who has a live shell on a branch, whoever they are.
+   *
+   * Unlike {@link listFor} this is not scoped to one person: the question it
+   * answers is "is anybody in a shell here", which the editor and an agent's
+   * admission both want and neither can ask any other way. A shell is the
+   * only holder in the system with no scope — nothing can see which files it
+   * touches — so what comes back is a name and a machine, and every reader of
+   * it treats that as a warning rather than a lock.
+   *
+   * Sessions are memory, so this needs no expiry of its own: a machine that
+   * went quiet has its sessions ended, and an idle one is swept.
+   */
+  public shellsOn(
+    repositoryId: string,
+    branch?: string,
+  ): { userId: string; sessionId: string; workerName: string; since: string }[] {
+    this.sweep();
+    return [...this.sessions.values()]
+      .filter(
+        (session) =>
+          session.repositoryId === repositoryId &&
+          session.branch === branch &&
+          session.exitCode === undefined &&
+          !session.closing,
+      )
+      .map((session) => ({
+        userId: session.userId,
+        sessionId: session.id,
+        workerName: session.workerName,
+        since: session.createdAt,
+      }));
   }
 
   /** What the reader has not seen, from a sequence number they name. */

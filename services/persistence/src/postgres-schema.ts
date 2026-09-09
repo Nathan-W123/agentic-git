@@ -1394,4 +1394,23 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE branch_claims ADD COLUMN IF NOT EXISTS shapes TEXT NOT NULL DEFAULT '[]'`,
     ],
   },
+  {
+    version: 63,
+    name: "what-a-person-is-editing-right-now",
+    statements: [
+      // See the SQLite copy for why.
+      `CREATE TABLE IF NOT EXISTS editor_holds (
+         repository_id TEXT NOT NULL,
+         branch TEXT NOT NULL DEFAULT '',
+         user_id TEXT NOT NULL,
+         file TEXT NOT NULL,
+         ranges TEXT NOT NULL DEFAULT '[]',
+         acquired_at TEXT NOT NULL,
+         renewed_at TEXT NOT NULL,
+         expires_at TEXT NOT NULL,
+         PRIMARY KEY (repository_id, branch, user_id, file))`,
+      `CREATE INDEX IF NOT EXISTS editor_holds_by_repository
+         ON editor_holds(repository_id, branch, expires_at)`,
+    ],
+  },
 ];
