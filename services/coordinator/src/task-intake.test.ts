@@ -6,7 +6,7 @@ import test, { after } from "node:test";
 
 import { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   type CoordinationStore,
   type StoredRepository,
 } from "@coord/persistence";
@@ -149,7 +149,7 @@ async function withWorkspace(
   ) => Promise<void>,
 ): Promise<void> {
   const repository = await sharedRepository();
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository(repository);
   try {
     await body(store, repository);
@@ -344,7 +344,7 @@ test("decomposition can be turned off without touching the repository", async ()
 });
 
 test("a repository that cannot be indexed still accepts the task", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const repository: StoredRepository = {
     id: "missing",
     path: path.join(os.tmpdir(), "coord-intake-does-not-exist.git"),

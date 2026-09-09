@@ -36,7 +36,7 @@ import {
 } from "./test-harness.js";
 import {
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   type CoordinationStore,
 } from "@coord/persistence";
 
@@ -53,7 +53,7 @@ test("the marketing front page owns \"/\" exactly, and its absence falls back to
   const serve = async (
     staticAssets: ReadonlyMap<string, StaticAsset>,
   ): Promise<TestClient> => {
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const gateway = new ApiGateway({
       store,
       operations: {} as unknown as ApiOperations,
@@ -1224,7 +1224,7 @@ test("a configured token is still required, and still says so", async (t) => {
 
 test("a token short enough to guess is refused at startup", async (t) => {
   // Only when one is set. A short token reads as protection and is not.
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   t.after(async () => {
     await store.close();
   });

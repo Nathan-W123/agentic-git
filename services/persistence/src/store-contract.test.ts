@@ -17,7 +17,6 @@ import type {
 } from "@coord/shared-types";
 import { MAX_COMMAND_OUTPUT_CHARS } from "@coord/shared-types";
 
-import { InMemoryCoordinationStore } from "./memory-store.js";
 import { PostgresCoordinationStore } from "./postgres-store.js";
 import {
   createScratchDatabase,
@@ -226,13 +225,6 @@ interface Backend {
 }
 
 const backends: Backend[] = [
-  {
-    name: "in-memory",
-    open: async () => ({
-      store: new InMemoryCoordinationStore(),
-      cleanup: async () => undefined,
-    }),
-  },
   {
     name: "sqlite",
     open: async () => {

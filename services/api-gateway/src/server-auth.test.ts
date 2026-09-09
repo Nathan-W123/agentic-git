@@ -17,6 +17,7 @@ import {
   decodeCloseCode,
   decodeTextFrames,
   invitableRepository,
+  testRun,
   startRuntime,
   work,
 } from "./test-harness.js";
@@ -237,11 +238,16 @@ test("approval decisions are project-authorized and durably audited", async (t) 
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
   const setup = await bootstrap(client);
+  // A real repository and a real run. The ids used to be invented, which the
+  // old in-memory store accepted and SQLite refuses: `approvals` references
+  // both.
+  const repositoryId = await invitableRepository(client, "approval-repo");
+  const run = await testRun(runtime.store, repositoryId);
   const approval = await runtime.store.createApproval({
     organizationId: DEFAULT_ORGANIZATION_ID,
     projectId: DEFAULT_PROJECT_ID,
-    repositoryId: "repo_test",
-    runId: "run_test",
+    repositoryId,
+    runId: run.id,
     taskId: "task_test",
     kind: "changeset",
     requestedBy: setup.user.id,

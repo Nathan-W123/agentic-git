@@ -2674,12 +2674,27 @@ test('approving a finding with "yes, do it" dispatches the fix', async (t) => {
       revision: "b".repeat(40),
     },
   });
+  // Waited on the *finding*, not on the thread it hangs off. The auditor
+  // posts a summary root first and each finding as a reply to it, so a wait
+  // for "any message" returns while there is still nothing to approve —
+  // "yes, do it" then lands on an empty thread and dispatches nothing. That
+  // was a one-in-three flake for as long as the gap stayed small enough to
+  // usually lose the race.
   await waitFor(
     async () =>
-      (await runtime.store.listChannelMessages(repo, ownerId)).length > 0,
+      (await runtime.store.listChannelMessages(repo, ownerId)).some((message) =>
+        message.replies.some((reply) =>
+          reply.content.includes("Retry loop runs one time too many"),
+        ),
+      ),
     "the auditor never posted its findings",
   );
-  const [audit] = await runtime.store.listChannelMessages(repo, ownerId);
+  const audit = (await runtime.store.listChannelMessages(repo, ownerId)).find(
+    (message) =>
+      message.replies.some((reply) =>
+        reply.content.includes("Retry loop runs one time too many"),
+      ),
+  );
   assert.notEqual(audit, undefined);
 
   const reply = await owner.request(

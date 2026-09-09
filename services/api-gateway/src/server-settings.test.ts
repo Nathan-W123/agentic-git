@@ -1524,14 +1524,25 @@ test("a stranded task from a dead run ages out of the busy signal", async (t) =>
     submittedBy: ownerId,
   });
   await runtime.store.claimSubmittedTasks(repositoryId);
-  const rows = (
+  // Backdated in the database rather than through a private field. This used
+  // to reach into the in-memory store's own `submitted` map, which stopped
+  // existing the moment tests ran on SQLite — and the SQL is the better hack
+  // anyway: it is written against the real schema, so renaming the column
+  // breaks this loudly instead of silently doing nothing.
+  const backdated = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  (
     runtime.store as unknown as {
-      submitted: Map<string, { submittedAt: string }>;
+      db: { prepare: (sql: string) => { run: (...args: string[]) => unknown } };
     }
-  ).submitted;
-  const row = rows.get(corpse.id);
-  assert.notEqual(row, undefined);
-  row!.submittedAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  ).db
+    .prepare("UPDATE submitted_tasks SET submitted_at = ? WHERE id = ?")
+    .run(backdated, corpse.id);
+  assert.equal(
+    (
+      await runtime.store.listSubmittedTasks({ repositoryId })
+    ).find((task) => task.id === corpse.id)?.submittedAt,
+    backdated,
+  );
 
   runtime.setTaskClassification("ACT");
   assert.equal(

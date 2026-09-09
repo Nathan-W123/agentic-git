@@ -25,7 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -42,7 +42,7 @@ const BILLING = "kumi/billing";
 const LOGIN = "kumi/login";
 
 interface Fixture {
-  store: InMemoryCoordinationStore;
+  store: SqliteCoordinationStore;
   worker: string;
   repository: CanonicalRepository;
   base: CanonicalVersion;
@@ -89,7 +89,7 @@ async function seed(): Promise<Fixture> {
   );
   const base = await repositories.getCanonicalVersion(repository);
 
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: repository.id,
     path: repository.path,

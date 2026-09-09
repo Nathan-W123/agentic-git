@@ -14,7 +14,7 @@ import test from "node:test";
 import { CoordinatorProject } from "@coord/cli/project";
 import {
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 
@@ -34,7 +34,7 @@ import {
 
 interface Harness {
   root: string;
-  store: InMemoryCoordinationStore;
+  store: SqliteCoordinationStore;
   project: CoordinatorProject;
   repositories: RepositoryService;
   service: OverlayWorkspaceService;
@@ -69,7 +69,7 @@ async function createHarness(): Promise<Harness> {
   const firstRevision = (await repositories.getCanonicalVersion(canonical))
     .revision;
 
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: canonical.id,
     path: canonical.path,

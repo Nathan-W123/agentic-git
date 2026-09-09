@@ -14,6 +14,7 @@ import {
   addColleague,
   bootstrap,
   invitableRepository,
+  testRun,
   joinAllConnectedAgents,
   startRuntime,
   waitFor,
@@ -2856,10 +2857,13 @@ test('"go ahead" releases a review gate from the thread it was announced in', as
     content: "Waiting on a human review before this can land.",
   });
   await runtime.store.setChannelMessageTask(repositoryId, root.id, "task_gated");
+  // A real run: `approvals` references `runs(id)`, and the invented id only
+  // ever worked because the in-memory store checked nothing.
+  const run = await testRun(runtime.store, repositoryId);
   const approval = await runtime.store.createApproval({
     projectId: DEFAULT_PROJECT_ID,
     repositoryId,
-    runId: "run_gated",
+    runId: run.id,
     taskId: "task_gated",
     kind: "policy_override",
     requestedBy: "claude",

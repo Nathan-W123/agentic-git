@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import type { AuditEventType } from "@coord/shared-types";
 
 import { computeCoordinationMetrics } from "./metrics.js";
@@ -12,7 +12,7 @@ import { computeCoordinationMetrics } from "./metrics.js";
  */
 
 async function append(
-  store: InMemoryCoordinationStore,
+  store: SqliteCoordinationStore,
   type: AuditEventType,
   taskId: string | undefined,
   data: Record<string, unknown> = {},
@@ -25,7 +25,7 @@ async function append(
 }
 
 test("predictions are confirmed by contention and refuted by clean integration", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
 
   // Pair A/B: predicted, then B replans — a confirmed prediction.
   await append(store, "conflict_detected", undefined, {
@@ -72,7 +72,7 @@ test("predictions are confirmed by contention and refuted by clean integration",
 });
 
 test("stale integrations count as contention, other failures as rework", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await append(store, "validation_completed", "task_stale", {
     status: "stale",
   });
@@ -91,7 +91,7 @@ test("stale integrations count as contention, other failures as rework", async (
 });
 
 test("a deferred plan confirms nothing until its tasks settle, and then only itself", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   // Predicted, then the plan was stopped before any editing: no execution was
   // thrown away, and — the point of this test — no contention was observed
   // either. The hold is the scheduler's own answer to its own prediction.
@@ -133,7 +133,7 @@ test("a deferred plan confirms nothing until its tasks settle, and then only its
 });
 
 test("a hold that prevented something and one that prevented nothing are told apart", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
 
   // Pair A/B — the scheduler held B, and contention then materialised on its
   // own: canonical moved and B had to replan. The prediction earned its keep.
@@ -178,7 +178,7 @@ test("a hold that prevented something and one that prevented nothing are told ap
 });
 
 test("throughput, restarts, and approval latency come from event timestamps", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await append(store, "task_submitted", "task_1", {});
   await append(store, "task_started", "task_1", {});
   await append(store, "task_started", "task_1", {}); // one restart
@@ -205,7 +205,7 @@ test("throughput, restarts, and approval latency come from event timestamps", as
 });
 
 test("every submitted task lands in exactly one throughput bucket", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   // Five submissions and five different endings, including the two that used
   // to have nowhere to go. A task answered without editing anything is the
   // ordinary case in a chat, and it reached this function looking exactly
@@ -244,7 +244,7 @@ test("every submitted task lands in exactly one throughput bucket", async () => 
 });
 
 test("a prediction over tasks that only answered questions is not left open", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await append(store, "task_submitted", "task_1", {});
   await append(store, "task_submitted", "task_2", {});
   await append(store, "conflict_detected", "task_1", {
@@ -264,7 +264,7 @@ test("a prediction over tasks that only answered questions is not left open", as
 });
 
 test("a project filter keeps only events stamped with that project", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await append(store, "task_submitted", "task_here", {
     projectId: "project_here",
   });
@@ -283,7 +283,7 @@ test("a project filter keeps only events stamped with that project", async () =>
 });
 
 test("sharing counts what coordination allowed, not what it prevented", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
 
   // A whole-file partial: task_b keeps the file it asked for, minus one it
   // did not get. Any lease can do this, so it is counted but not as sharing.
@@ -346,7 +346,7 @@ test("sharing counts what coordination allowed, not what it prevented", async ()
 test("a task admitted before its blocker released is not counted as a pickup", async () => {
   // Order is the whole of the claim. Without it, any task that was ever held
   // and later ran would look like a pickup.
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await append(store, "plan_admitted", "task_b", {
     status: "sequenced",
     blockedBy: ["task_a"],
@@ -363,7 +363,7 @@ test("a task admitted before its blocker released is not counted as a pickup", a
 });
 
 test("a whole-file deferral is not a within-file split, whatever it drags along", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
 
   // The shape admission actually records when it defers a whole file: the
   // file, plus every symbol claimed only through it, each marked `implied`

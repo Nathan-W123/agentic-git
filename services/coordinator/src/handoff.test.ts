@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import type {
   ChangeSet,
   CoordinatorDecision,
@@ -279,7 +279,7 @@ test("the rendered context is checkable prose, and empty when there is nothing",
 });
 
 test("a handoff round-trips through the audit log and comes back typed", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const handoff = buildTaskHandoff(
     input({
       projectId: "project_local",
@@ -299,7 +299,7 @@ test("a handoff round-trips through the audit log and comes back typed", async (
 });
 
 test("handoffs are found by the resources they touched, newest first", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await recordTaskHandoff(
     store,
     buildTaskHandoff(
@@ -374,7 +374,7 @@ test("resources are extracted from what the task actually touched", () => {
 });
 
 test("a non-handoff audit payload is ignored rather than half-parsed", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.appendAudit(undefined, {
     type: "handoff_recorded",
     taskId: "task_a",
