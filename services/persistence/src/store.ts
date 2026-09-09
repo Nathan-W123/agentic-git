@@ -1800,6 +1800,19 @@ export interface SubChannel {
   name: string;
   visibility: SubChannelVisibility;
   /**
+   * Put away rather than destroyed.
+   *
+   * Deleting a room takes its transcript with it and there is nothing to go
+   * back to. Archiving is the reversible half of the same intent: the room
+   * drops out of the working list, stops accepting new messages, and stays
+   * whole so it can be read back or restored. Nothing else about it changes —
+   * membership, visibility and history are exactly as they were left.
+   *
+   * `#general` is never archived, for the same reason it is never deleted:
+   * it is where every unaddressed message falls back to.
+   */
+  archived: boolean;
+  /**
    * The branch this channel's work lands on, or absent for a channel that is
    * only a conversation.
    *

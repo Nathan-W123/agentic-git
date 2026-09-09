@@ -1413,4 +1413,12 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON editor_holds(repository_id, branch, expires_at)`,
     ],
   },
+  {
+    // See the SQLite copy for why.
+    version: 64,
+    name: "sub-channels-archived",
+    statements: [
+      `ALTER TABLE sub_channels ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE`,
+    ],
+  },
 ];

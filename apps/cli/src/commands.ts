@@ -36,6 +36,7 @@ import type {
 import { DEFAULT_ORGANIZATION_ID, DEFAULT_PROJECT_ID } from "@coord/persistence";
 import {
   canonicalOn,
+  extractZipArchive,
   normalizeGitHubRepository,
   readZipEntries,
   RepositoryService,

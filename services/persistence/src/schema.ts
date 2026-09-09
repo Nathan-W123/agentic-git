@@ -1840,6 +1840,29 @@ export const MIGRATIONS: readonly Migration[] = [
          ON editor_holds(repository_id, branch, expires_at)`,
     ],
   },
+  {
+    /**
+     * A room that is finished with, without throwing it away.
+     *
+     * The only way out of a channel was Delete, which takes every message in
+     * it with it and cannot be undone — so a room that had simply run its
+     * course was either kept forever in the sidebar or destroyed along with
+     * the reason anybody might want to look at it again. Archived is the
+     * middle state: out of the list, closed to new messages, still entirely
+     * readable, and one press from being back.
+     *
+     * Default 0, so every room that already exists stays in use.
+     *
+     * Numbered 64 rather than the 58 it was written as: a sync took the
+     * other side of this file, 58 was taken by `channels-can-be-branches`
+     * in the meantime, and a migration list cannot have two of them.
+     */
+    version: 64,
+    name: "sub-channels-archived",
+    statements: [
+      `ALTER TABLE sub_channels ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

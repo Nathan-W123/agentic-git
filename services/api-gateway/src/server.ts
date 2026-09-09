@@ -4050,6 +4050,13 @@ export class ApiGateway {
      */
     admin = false,
   ): Promise<boolean> {
+    // An archived room is readable and closed, for everybody including the
+    // administrator who put it away. First, ahead of every rule below it, so
+    // no membership or visibility can reopen one — and ahead of `#general`'s
+    // exemption too, which is safe because `#general` can never be archived.
+    if (channel.archived) {
+      return false;
+    }
     // A merged work channel is finished, and its branch is gone with it.
     // Anything said here now would be dispatched against a branch nothing can
     // check out, so the room closes rather than accepting work it cannot

@@ -5076,6 +5076,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       slug: text(row, "slug"),
       name: text(row, "name"),
       visibility: text(row, "visibility") as SubChannelVisibility,
+      archived: integer(row, "archived") === 1,
       // Absent, not empty. A channel with no branch is a conversation, and
       // `""` would be a channel claiming a branch nobody can check out.
       ...(branch === undefined || branch === "" ? {} : { branch }),
@@ -5152,6 +5153,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       slug,
       name: name === undefined || name === "" ? slug : name,
       visibility: input.visibility ?? "read_only",
+      // A room is made in use. The column defaults to 0 for the same reason.
+      archived: false,
       ...(input.branch === undefined || input.branch === ""
         ? {}
         : { branch: input.branch }),

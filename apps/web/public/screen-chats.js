@@ -20,6 +20,8 @@ import {
   activeChannelId,
   activeSecondaryContext,
   activeSubChannelId,
+  archivedSubChannelsFor,
+  subChannelById,
   activeTasks,
   agentForTask,
   agentOwnerOffline,
@@ -4973,19 +4975,28 @@ function composer(repositoryId) {
   // replaced rather than disabled, because a disabled composer says "not
   // right now" and this is "not you" — with the thing to do about it.
   if (!canPostInActiveSubChannel(repositoryId)) {
-    const label = subChannelLabel(repositoryId, activeSubChannelId(repositoryId));
-    // Two reasons a room refuses the composer, and they want opposite things
-    // of the reader. "Not you" is answered by asking to be added; a merged
-    // work channel is answered by nobody, because it is finished — its branch
-    // is gone, and anything said here would be dispatched against a branch
-    // nothing can check out. Telling somebody to ask an admin to add them to a
-    // room that has shipped sends them to ask for something nobody can give.
+    const channelId = activeSubChannelId(repositoryId);
+    const label = subChannelLabel(repositoryId, channelId);
+    // Three reasons a room refuses the composer, and they want different
+    // things of the reader. "Not you" is answered by asking to be added; a
+    // merged work channel is answered by nobody, because it is finished — its
+    // branch is gone, and anything said here would be dispatched against a
+    // branch nothing can check out; an archived room is answered by restoring
+    // it. Telling somebody to ask an admin to add them to a room that has
+    // shipped, or been put away, sends them after something that would change
+    // nothing.
+    //
+    // Archived leads, because it is closed to everybody, member or not.
+    const archived =
+      subChannelById(repositoryId, channelId)?.archived === true;
     const merged = openSubChannel(repositoryId)?.mergedAt;
     return `<div class="chan-composer-wrap">
       <div class="chan-composer-locked">
-        ${icon(merged ? "check" : "lock")}
+        ${icon(archived ? "archive" : merged ? "check" : "lock")}
         <span>${
-          merged
+          archived
+            ? `${esc(label)} is archived. Everything said in it is kept here to read; restore it from the channel settings to post again.`
+            : merged
             ? `${esc(label)} merged and is finished. Open a new channel for follow-up work.`
             : `You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.`
         }</span>
@@ -9553,7 +9564,19 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
     ${
       general
         ? `<div class="channel-info-summary">Everyone in this workspace can read and post in #general.</div>`
-        : `<div class="pop-row">
+        : channel.archived
+          ? // Nothing here renames a room nobody can post in, changes who may
+            // post in it, or edits a member list that gates nothing while it
+            // is away. What is left is the only two things still worth
+            // deciding: bring it back, or finally let it go.
+            `<div class="channel-info-summary">Archived. Everything said here is kept and readable; nobody can post until it is restored.</div>
+           <div class="pop-row">
+             <button type="button" class="btn-quiet" data-act="sub-channel-unarchive"
+               data-value="${esc(channelId)}">Restore this channel</button>
+             <button type="button" class="btn-quiet btn-danger" data-act="sub-channel-delete"
+               data-value="${esc(channelId)}">Delete permanently</button>
+           </div>`
+          : `<div class="pop-row">
              ${
                // A branch cannot move without orphaning every commit on it,
                // so a work channel's handle is fixed. The server refuses the

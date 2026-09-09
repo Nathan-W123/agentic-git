@@ -8921,9 +8921,9 @@ test("deleting a channel asks in the app's own dialog and offers archiving inste
   // lines that close the menu and hand over to the action above.
   assert.match(
     app,
-    /case "sub-channel-delete": \{\s*
-\s*closePopover\(\);\s*
-\s*void deleteSubChannelAction\(/u,
+    // One line: a regex literal cannot span them, and `\s*` already matches
+    // the newlines this was split across.
+    /case "sub-channel-delete": \{\s*closePopover\(\);\s*void deleteSubChannelAction\(/u,
   );
   assert.doesNotMatch(
     app,

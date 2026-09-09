@@ -132,6 +132,7 @@ export async function routeChannels(
           // the condition so no membership or visibility below it can reopen
           // one that has been put away.
           canPost:
+            !channel.archived &&
             // A merged work channel is finished and its branch is gone; the
             // write path refuses it, and a list that said otherwise would
             // draw a composer that 403s.
