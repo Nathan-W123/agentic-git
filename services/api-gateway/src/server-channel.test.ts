@@ -2512,3 +2512,122 @@ test("a task that reported rather than changed reads as an ending, not a failure
     "Finished without needing to change anything.",
   );
 });
+
+/**
+ * Archiving is the reversible half of Delete.
+ *
+ * The only way out of a room used to take every message in it with it, so a
+ * channel that had simply run its course was either kept in the sidebar
+ * forever or destroyed along with the reason anybody might want to read it
+ * back. This is the middle state, and what makes it worth having is that
+ * nothing about it is lossy: the transcript stays, the room stays addressable,
+ * and one press puts it back exactly as it was.
+ */
+test("a room can be put away and brought back without losing a word of it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "archive-rooms");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}`;
+
+  const created = await owner.request(`${base}/channels`, {
+    method: "POST",
+    body: { name: "Launch Week", visibility: "public" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const launch = created.data.channel.id as string;
+  assert.equal(created.data.channel.archived, false);
+
+  const said = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: launch, content: "Ship it on Thursday." },
+  });
+  assert.equal(said.status, 201, JSON.stringify(said.data));
+
+  const archived = await owner.request(`${base}/channels/${launch}`, {
+    method: "PATCH",
+    body: { archived: true },
+  });
+  assert.equal(archived.status, 200, JSON.stringify(archived.data));
+  assert.equal(archived.data.channel.archived, true);
+
+  // Still listed — putting a room away is not hiding it — and marked, so the
+  // sidebar can file it under Archived rather than among the live rooms.
+  const listed = await owner.request(`${base}/channels`);
+  assert.deepEqual(
+    listed.data.channels.map(
+      (channel: { slug: string; archived: boolean; canPost: boolean }) => [
+        channel.slug,
+        channel.archived,
+        channel.canPost,
+      ],
+    ),
+    [
+      ["general", false, true],
+      ["launch-week", true, false],
+    ],
+  );
+
+  // Readable, which is the whole point: this is what "pulled up later for
+  // review" means, and it is why the transcript is not deleted with the room.
+  const read = await owner.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(launch)}`,
+  );
+  assert.equal(read.status, 200);
+  assert.deepEqual(
+    read.data.messages.map((message: { content: string }) => message.content),
+    ["Ship it on Thursday."],
+  );
+  assert.equal(read.data.channel.canPost, false);
+
+  // Closed to writing for everybody, including the administrator who archived
+  // it — an admin with something to say brings the room back rather than
+  // quietly reopening it by writing in it.
+  const refused = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: launch, content: "One more thing." },
+  });
+  assert.equal(refused.status, 403, JSON.stringify(refused.data));
+
+  // #general is where every unaddressed message lands, so it can no more be
+  // put away than it can be deleted.
+  const general = listed.data.channels[0].id as string;
+  const refusedGeneral = await owner.request(`${base}/channels/${general}`, {
+    method: "PATCH",
+    body: { archived: true },
+  });
+  assert.equal(refusedGeneral.status, 409);
+  assert.equal(
+    refusedGeneral.data.error?.code ?? refusedGeneral.data.code,
+    "general_channel",
+  );
+
+  const restored = await owner.request(`${base}/channels/${launch}`, {
+    method: "PATCH",
+    body: { archived: false },
+  });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  assert.equal(restored.data.channel.archived, false);
+  const again = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: launch, content: "Back in business." },
+  });
+  assert.equal(again.status, 201, JSON.stringify(again.data));
+  const after = await owner.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(launch)}`,
+  );
+  assert.deepEqual(
+    after.data.messages.map((message: { content: string }) => message.content),
+    ["Ship it on Thursday.", "Back in business."],
+  );
+
+  // Archiving a room says so in the audit log, so "where did it go?" has an
+  // answer that names who put it there.
+  const events = (await runtime.store.listAudit()).filter(
+    (event) => event.type === "channel_updated",
+  );
+  assert.deepEqual(
+    events.map((event) => event.data["archived"]),
+    [true, false],
+  );
+});

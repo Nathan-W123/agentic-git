@@ -19,8 +19,10 @@
 import {
   activeChannelId,
   activeSubChannelId,
+  archivedSubChannelsFor,
   canManageSubChannels,
   canPostInActiveSubChannel,
+  subChannelById,
   subChannelLabel,
   subChannelsFor,
   activeTasks,
@@ -1906,6 +1908,84 @@ function subChannelRow(repositoryId, channel, active) {
 }
 
 /**
+ * One room that has been put away, in the pile it was put into.
+ *
+ * Still a button that opens it, because that is the whole point of archiving
+ * rather than deleting: the transcript is there to be read back. What it does
+ * not carry is the unread badge — a room nobody can post in accrues nothing
+ * anybody needs to be told about. The gear is the same gear the live rows
+ * have, and it opens the same menu; what that menu offers is what is still
+ * worth deciding about a room that is put away.
+ */
+function subChannelArchivedRow(repositoryId, channel, active) {
+  const manage = canManageSubChannels(repositoryId);
+  const label = `#${channel.slug}`;
+  return `<div class="chan-channel-row chan-channel-archived${active ? " on" : ""}">
+    <button type="button" class="chan-channel"
+      data-act="sub-channel-open" data-value="${esc(channel.id)}"
+      aria-current="${active ? "page" : "false"}"
+      title="Read ${esc(label)}">
+      <span class="chan-channel-sigil" aria-hidden="true">${icon("archive")}</span>
+      <span class="chan-channel-name">${esc(channel.slug)}</span>
+      <span class="chan-channel-note">archived</span>
+    </button>
+    ${
+      manage
+        ? `<button type="button" class="icon-btn chan-channel-menu"
+             data-act="sub-channel-menu" data-value="${esc(channel.id)}"
+             aria-haspopup="dialog"
+             aria-expanded="${state.subChannelMenu === channel.id}"
+             title="Channel settings" aria-label="Settings for ${esc(label)}">
+             ${icon("gear")}
+           </button>`
+        : ""
+    }
+  </div>`;
+}
+
+/**
+ * The rooms this workspace has finished with, folded away under the live ones.
+ *
+ * Drawn only when there is something in it, and rolled up by default: the
+ * point of archiving a room is that it stops taking up a line in the list
+ * somebody reads every day. It is a heading rather than a hidden setting
+ * because "where did #design-review go?" has to have a visible answer, and
+ * because restoring one should not require remembering it existed.
+ */
+function archivedSubChannelsHtml(repositoryId) {
+  const archived = archivedSubChannelsFor(repositoryId);
+  if (archived.length === 0) {
+    return "";
+  }
+  const openChannelId = activeSubChannelId(repositoryId);
+  const open = state.rosterSectionsOpen.archived === true;
+  // Worded exactly as `roster-section-toggle` rewords it on the press, so the
+  // control does not describe itself one way before it is touched and another
+  // way after.
+  const fold = open ? "Hide archived" : "Show archived";
+  return `<div class="chan-sec chan-sec-archived${open ? "" : " chan-sec-closed"}">
+    <button type="button" class="chan-sec-toggle"
+      data-act="roster-section-toggle" data-value="archived"
+      aria-expanded="${open}" title="${esc(fold)}" aria-label="${esc(fold)}">
+      ${icon("chevronDown")}
+      <span class="chan-sec-label">Archived</span>
+    </button>
+    <span class="chan-sec-count" title="${archived.length} archived"><span class="chan-sec-dot" aria-hidden="true">·</span>${archived.length}</span>
+  </div>
+  <div class="chan-roster chan-roster-archived${
+    open ? "" : " chan-roster-closed"
+  }">
+    <div class="chan-roster-inner">
+      ${archived
+        .map((entry) =>
+          subChannelArchivedRow(repositoryId, entry, entry.id === openChannelId),
+        )
+        .join("")}
+    </div>
+  </div>`;
+}
+
+/**
  * The pinned shelf, in the workspace's own list of destinations.
  *
  * It used to be a boxed icon on the conversation's header row, where it sat
@@ -2013,6 +2093,11 @@ function chanSidebar(activeRepositoryId) {
       </div>`
           : ""
       }
+      <!-- What has been put away, under what is in use. Its own heading
+           rather than a row inside the list above: an archived room is not a
+           channel you might post in, and mixing the two would put the rooms
+           somebody is finished with in the way of the ones they are not. -->
+      ${archivedSubChannelsHtml(activeRepositoryId)}
       ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people", "people", people.length)}
       <div class="chan-roster chan-roster-people${
         state.rosterSectionsOpen.people === false ? " chan-roster-closed" : ""
@@ -4836,11 +4921,21 @@ function composer(repositoryId) {
   // replaced rather than disabled, because a disabled composer says "not
   // right now" and this is "not you" — with the thing to do about it.
   if (!canPostInActiveSubChannel(repositoryId)) {
-    const label = subChannelLabel(repositoryId, activeSubChannelId(repositoryId));
+    const channelId = activeSubChannelId(repositoryId);
+    const label = subChannelLabel(repositoryId, channelId);
+    // An archived room is closed to everybody, member or not, so the sentence
+    // about asking an admin to add you would send the reader after a
+    // permission that would change nothing.
+    const archived =
+      subChannelById(repositoryId, channelId)?.archived === true;
     return `<div class="chan-composer-wrap">
       <div class="chan-composer-locked">
-        ${icon("lock")}
-        <span>You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.</span>
+        ${icon(archived ? "archive" : "lock")}
+        <span>${
+          archived
+            ? `${esc(label)} is archived. Everything said in it is kept here to read; restore it from the channel settings to post again.`
+            : `You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.`
+        }</span>
       </div>
     </div>`;
   }
@@ -8300,9 +8395,7 @@ export function subChannelMemberAddHtml(channelId, people) {
  * rather than split between a settings panel and an invite dialog.
  */
 export function subChannelManagePopoverHtml(repositoryId, channelId) {
-  const channel = subChannelsFor(repositoryId).find(
-    (candidate) => candidate.id === channelId,
-  );
+  const channel = subChannelById(repositoryId, channelId);
   if (channel === undefined) {
     return `<div class="pop-body"><div class="util-empty">This channel is gone.</div></div>`;
   }
@@ -8324,13 +8417,27 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
     <div class="pop-head">
       <b>#${esc(channel.slug)}</b>
       <span class="chan-channel-vis">${esc(
-        subChannelVisibilityLabel(channel.visibility),
+        channel.archived
+          ? "Archived"
+          : subChannelVisibilityLabel(channel.visibility),
       )}</span>
     </div>
     ${
       general
         ? `<div class="channel-info-summary">Everyone in this workspace can read and post in #general.</div>`
-        : `<div class="pop-row">
+        : channel.archived
+          ? // Nothing here renames a room nobody can post in, changes who may
+            // post in it, or edits a member list that gates nothing while it
+            // is away. What is left is the only two things still worth
+            // deciding: bring it back, or finally let it go.
+            `<div class="channel-info-summary">Archived. Everything said here is kept and readable; nobody can post until it is restored.</div>
+           <div class="pop-row">
+             <button type="button" class="btn-quiet" data-act="sub-channel-unarchive"
+               data-value="${esc(channelId)}">Restore this channel</button>
+             <button type="button" class="btn-quiet btn-danger" data-act="sub-channel-delete"
+               data-value="${esc(channelId)}">Delete permanently</button>
+           </div>`
+          : `<div class="pop-row">
              <button type="button" class="btn-quiet" data-act="sub-channel-rename"
                data-value="${esc(channelId)}">Rename</button>
              <!-- One entry into a picker rather than a toggle: with three
@@ -8343,6 +8450,11 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
                    ? "Unmute this channel"
                    : "Mute this channel"
                }</button>
+             <!-- Above Delete, because it is the one somebody usually
+                  wants: a room that has run its course is finished with, not
+                  a mistake to be erased. Archiving keeps every word in it. -->
+             <button type="button" class="btn-quiet" data-act="sub-channel-archive"
+               data-value="${esc(channelId)}">Archive this channel</button>
              <button type="button" class="btn-quiet btn-danger" data-act="sub-channel-delete"
                data-value="${esc(channelId)}">Delete</button>
            </div>
@@ -8370,11 +8482,14 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
 }
 
 export function channelInfoPopoverHtml(repositoryId) {
-  const channel = subChannelsFor(repositoryId).find(
-    (candidate) => candidate.id === activeSubChannelId(repositoryId),
+  const channel = subChannelById(
+    repositoryId,
+    activeSubChannelId(repositoryId),
   );
   const label = `#${channel?.slug ?? repositoryLabel(repositoryId)}`;
-  const summary = channel?.slug === "general"
+  const summary = channel?.archived === true
+    ? "This channel is archived. Everything said in it is kept and readable; nobody can post here until it is restored."
+    : channel?.slug === "general"
     ? `Everyone in ${repositoryLabel(repositoryId)} can read and post here.`
     : channel?.canPost === false
       ? "This channel is visible to you, but you cannot post in it."

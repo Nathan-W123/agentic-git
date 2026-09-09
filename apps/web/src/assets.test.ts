@@ -8787,3 +8787,102 @@ test("the settings module is a browser module built from the shared parts", asyn
   assert.doesNotMatch(settings, /from "\.\/data\.js"/u);
   assert.doesNotMatch(settings, /window.location/u);
 });
+
+/**
+ * Removing a room asks in Kumi's dialog, and offers the reversible answer.
+ *
+ * This was the last delete in the product still handled by `window.confirm`:
+ * the operating system's grey box, in the operating system's typeface, with an
+ * OK button that looks nothing like the red one every other irreversible press
+ * here is given. Worse than the paint, it can only ask yes or no — and "delete
+ * this channel" is usually somebody meaning "I am finished with this channel",
+ * which is a different sentence with a different outcome.
+ */
+test("deleting a channel asks in the app's own dialog and offers archiving instead", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+
+  const remove = app.slice(
+    app.indexOf("async function deleteSubChannelAction"),
+    app.indexOf("async function archiveSubChannelAction"),
+  );
+  assert.notEqual(remove, "", "the delete has an action of its own");
+  assert.match(remove, /await showModal\(\{/u);
+  assert.match(remove, /danger: true/u);
+  assert.match(remove, /alt: "Archive instead"/u);
+  // Not offered on a room already archived: there is nothing left to offer.
+  assert.match(remove, /current\?\.archived === true \? \{\} :/u);
+  assert.match(remove, /answer\.action === "alt"/u);
+  // The browser's dialog is gone from this path — the case is now the two
+  // lines that close the menu and hand over to the action above.
+  assert.match(
+    app,
+    /case "sub-channel-delete": \{\s*
+\s*closePopover\(\);\s*
+\s*void deleteSubChannelAction\(/u,
+  );
+  assert.doesNotMatch(
+    app,
+    /window\.confirm\([^)]*#\$\{[\s\S]{0,80}slug/u,
+    "no native confirm is left in the channel delete",
+  );
+
+  // The third button is a real option on the shared modal rather than a
+  // one-off form built beside it, so every dialog can offer one.
+  assert.match(ui, /alt = "",/u);
+  assert.match(ui, /value="alt" type="submit" formnovalidate/u);
+  assert.match(
+    ui,
+    /dialog\.returnValue !== "confirm" && dialog\.returnValue !== "alt"/u,
+  );
+  assert.match(ui, /const values = \{ action: dialog\.returnValue \}/u);
+  // Three pills can outgrow one line on a phone; none of them may fall off.
+  assert.match(css, /\.modal-actions \{[\s\S]{0,400}flex-wrap: wrap;/u);
+
+  // Archiving is reversible, so it does not ask at all — a dialog in front of
+  // a reversible action teaches people to dismiss dialogs.
+  const archive = app.slice(
+    app.indexOf("async function archiveSubChannelAction"),
+    app.indexOf("async function unarchiveSubChannelAction"),
+  );
+  assert.doesNotMatch(archive, /showModal|window\.confirm/u);
+  assert.match(archive, /setSubChannelArchived\(repositoryId, channelId, true\)/u);
+  assert.match(archive, /toast\(/u);
+
+  // Both directions are one PATCH, which is what makes the state reversible
+  // rather than a second kind of delete.
+  assert.match(data, /export async function setSubChannelArchived\(/u);
+  assert.match(data, /method: "PATCH",\s*\n\s*body: \{ archived \}/u);
+  // The two lists are split at the source, so nothing has to remember to
+  // filter an archived room out of the live one.
+  assert.match(data, /export function archivedSubChannelsFor\(/u);
+  assert.match(data, /channel\.archived !== true/u);
+  assert.match(data, /channel\.archived === true/u);
+
+  // The sidebar files them under their own heading, rolled up by default: the
+  // point of putting a room away is that it stops taking a line in the list
+  // somebody reads every day.
+  assert.match(chats, /function archivedSubChannelsHtml\(repositoryId\)/u);
+  assert.match(chats, /class="chan-sec chan-sec-archived/u);
+  assert.match(chats, /data-act="roster-section-toggle" data-value="archived"/u);
+  assert.match(chats, /saved\?\.archived === true|rosterSectionsOpen\.archived === true/u);
+  assert.match(data, /archived: saved\?\.archived === true/u);
+  assert.match(
+    chats,
+    /function chanSidebar[\s\S]*?\$\{archivedSubChannelsHtml\(activeRepositoryId\)\}/u,
+  );
+  // Still a button that opens it. Kept, not hidden — that is the difference
+  // between archiving and deleting.
+  assert.match(chats, /function subChannelArchivedRow\(/u);
+  assert.match(
+    chats,
+    /chan-channel-archived[\s\S]{0,400}data-act="sub-channel-open"/u,
+  );
+  assert.match(chats, /data-act="sub-channel-archive"/u);
+  assert.match(chats, /data-act="sub-channel-unarchive"/u);
+  // An archived room reads as readable rather than broken.
+  assert.match(css, /\.chan-channel-archived \.chan-channel \{[\s\S]{0,120}opacity:/u);
+});

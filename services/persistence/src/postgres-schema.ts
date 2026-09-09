@@ -1293,4 +1293,14 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS editor_vendor TEXT`,
     ],
   },
+  {
+    // A room that is finished with, without throwing it away. See the SQLite
+    // copy of this migration for why Delete on its own was not enough.
+    version: 58,
+    name: "sub-channels-archived",
+    statements: [
+      `ALTER TABLE sub_channels
+         ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE`,
+    ],
+  },
 ];

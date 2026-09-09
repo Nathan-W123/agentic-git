@@ -198,3 +198,76 @@ test("settings name the workspace the way the rest of the shell names it", async
   assert.match(invitations, /repositoryLabel\(invite\.repositoryId\)/u);
   assert.doesNotMatch(invitations, /invite\.repositoryId \?\? "every channel"/u);
 });
+
+/**
+ * A room put away is still the workspace's, and still somewhere.
+ *
+ * The navigation column is where a workspace says what places are in it, so a
+ * room that has been archived cannot simply stop being drawn — "where did
+ * #design-review go?" has to have a visible answer at the level that owns the
+ * list, not in a settings screen two rooms away. It gets its own heading under
+ * the live rooms, rolled up, counted, and above the people in them.
+ */
+test("archived rooms stay in the workspace's own navigation, folded under the live ones", async () => {
+  const [chats, data, css] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("data.js"),
+    publicFile("styles.css"),
+  ]);
+
+  // Between the channel list and the People heading: after what is in use,
+  // before who is in it.
+  assert.match(
+    chats,
+    /chan-roster-channels[\s\S]*?\$\{archivedSubChannelsHtml\(activeRepositoryId\)\}[\s\S]*?\$\{section\("People"/u,
+  );
+  // Nothing at all when there is nothing in it — a workspace that has never
+  // archived a room looks exactly as it did.
+  assert.match(
+    chats,
+    /function archivedSubChannelsHtml[\s\S]{0,400}archived\.length === 0\)\s*\{\s*\n\s*return "";/u,
+  );
+  // A heading with a count and a fold, and no "+": nothing is created here.
+  assert.match(chats, /class="chan-sec-label">Archived</u);
+  assert.match(
+    chats,
+    /chan-sec-archived[\s\S]{0,900}chan-sec-count[\s\S]{0,200}archived\.length/u,
+  );
+  assert.doesNotMatch(
+    chats.slice(
+      chats.indexOf("function archivedSubChannelsHtml"),
+      chats.indexOf("function pinsQuickLink"),
+    ),
+    /chan-sec-add/u,
+  );
+
+  // Closed on a first visit and remembered after that, like the other folds.
+  assert.match(data, /archived: saved\?\.archived === true/u);
+  assert.match(data, /\{ channels: true, people: true, agents: true, archived: false \}/u);
+
+  // The whole-column collapse takes it with the other sections rather than
+  // leaving one heading standing in a rail 60px wide.
+  assert.match(
+    css,
+    /\.chan-sec-channels,\s*\n\.chan-sec-people,\s*\n\.chan-sec-agents,\s*\n\.chan-sec-archived \{/u,
+  );
+  assert.match(
+    css,
+    /chan-collapsed :is\(\s*\n?\s*\.chan-sec-channels,[\s\S]{0,200}\.chan-sec-archived\s*\n?\s*\)/u,
+  );
+
+  // The live list is the live list. An archived room is not filtered out at
+  // the point of drawing — it is not in that list at all — so no future caller
+  // of `subChannelsFor` has to remember to exclude one.
+  assert.match(
+    data,
+    /export function subChannelsFor\(repositoryId\) \{[\s\S]{0,200}channel\.archived !== true/u,
+  );
+  // Except when one is open: reading an archived room back is the point of
+  // keeping it, so the room the reader chose is never swapped out from under
+  // them by the fallback.
+  assert.match(
+    data,
+    /export function activeSubChannelId\([\s\S]{0,900}subChannelsFor\(repositoryId\)\[0\] \?\? all\[0\]/u,
+  );
+});

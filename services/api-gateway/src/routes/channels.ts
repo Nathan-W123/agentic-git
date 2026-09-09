@@ -127,13 +127,17 @@ export async function routeChannels(
           // Derived here rather than asked per row: the answer is already in
           // hand, and a list that disagreed with the write would show a
           // composer that 403s.
+          // An archived room is readable and closed, for everybody: it leads
+          // the condition so no membership or visibility below it can reopen
+          // one that has been put away.
           canPost:
-            member ||
-            channel.visibility === "public" ||
-            // Redundant since #general is stored `public`, and kept because
-            // a database restored from before that migration would other-
-            // wise make the room every project has read-only for everybody.
-            channel.slug === GENERAL_SUB_CHANNEL_SLUG,
+            !channel.archived &&
+            (member ||
+              channel.visibility === "public" ||
+              // Redundant since #general is stored `public`, and kept because
+              // a database restored from before that migration would other-
+              // wise make the room every project has read-only for everybody.
+              channel.slug === GENERAL_SUB_CHANNEL_SLUG),
           // How much of this room the caller has not read. Zero rather than
           // absent, so the browser never has to tell "no badge" apart from
           // "the server did not say".
@@ -345,6 +349,7 @@ export async function routeChannels(
       slug?: string;
       name?: string;
       visibility?: SubChannelVisibility;
+      archived?: boolean;
     } = {};
     if (rawName !== undefined) {
       const slug = subChannelSlug(rawName);
@@ -384,6 +389,24 @@ export async function routeChannels(
       }
       update.visibility = subChannelVisibility(body["visibility"]);
     }
+    if (body["archived"] !== undefined) {
+      // The reversible half of Delete: the room leaves the working list and
+      // stops taking messages, and everything said in it is still there to be
+      // read back or restored. `#general` is refused for exactly the reason
+      // it cannot be deleted — it is where an unaddressed message lands, and
+      // a repository without one has nowhere to put the next thing anybody
+      // says. Unarchiving it is a no-op rather than an error, so a stale tab
+      // pressing Restore on a room somebody already restored is not punished.
+      const archived = body["archived"] === true;
+      if (archived && channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
+        throw new HttpError(
+          409,
+          "general_channel",
+          "The #general channel cannot be archived",
+        );
+      }
+      update.archived = archived;
+    }
     const updated = await gw.options.store.updateSubChannel(
       repositoryId,
       channel.id,
@@ -397,6 +420,7 @@ export async function routeChannels(
         channelId: channel.id,
         slug: updated.slug,
         visibility: updated.visibility,
+        archived: updated.archived,
         actorId: principal.user.id,
       },
     });

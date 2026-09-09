@@ -4806,6 +4806,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       slug: text(row, "slug"),
       name: text(row, "name"),
       visibility: text(row, "visibility") as SubChannelVisibility,
+      archived: flag(row, "archived"),
       createdAt: text(row, "created_at"),
       ...(createdBy === undefined ? {} : { createdBy }),
     };
@@ -4873,6 +4874,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       slug,
       name: trimmed === undefined || trimmed === "" ? slug : trimmed,
       visibility: input.visibility ?? "read_only",
+      archived: false,
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
@@ -4932,12 +4934,18 @@ export class PostgresCoordinationStore implements CoordinationStore {
           ? slug
           : trimmed;
     const visibility = input.visibility ?? current.visibility;
+    // `#general` is the room every unaddressed message falls back to, so it
+    // can no more be put away than it can be deleted.
+    if (input.archived === true && current.slug === GENERAL_SUB_CHANNEL_SLUG) {
+      throw new Error("The #general channel cannot be archived");
+    }
+    const archived = input.archived ?? current.archived;
     await this.query(
-      `UPDATE sub_channels SET slug = $1, name = $2, visibility = $3
-        WHERE id = $4 AND repository_id = $5`,
-      [slug, name, visibility, channelId, repositoryId],
+      `UPDATE sub_channels SET slug = $1, name = $2, visibility = $3, archived = $4
+        WHERE id = $5 AND repository_id = $6`,
+      [slug, name, visibility, archived, channelId, repositoryId],
     );
-    return { ...current, slug, name, visibility };
+    return { ...current, slug, name, visibility, archived };
   }
 
   public async deleteSubChannel(

@@ -3469,6 +3469,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       slug: GENERAL_SUB_CHANNEL_SLUG,
       name: GENERAL_SUB_CHANNEL_SLUG,
       visibility: "public",
+      archived: false,
       createdAt: new Date().toISOString(),
     };
     this.subChannels.set(id, channel);
@@ -3494,6 +3495,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       slug,
       name: input.name?.trim() === "" ? slug : (input.name?.trim() ?? slug),
       visibility: input.visibility ?? "read_only",
+      archived: false,
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
@@ -3531,6 +3533,14 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     }
     if (input.visibility !== undefined) {
       channel.visibility = input.visibility;
+    }
+    if (input.archived !== undefined) {
+      // `#general` is the room every unaddressed message falls back to, so it
+      // can no more be put away than it can be deleted.
+      if (input.archived && channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
+        throw new Error("The #general channel cannot be archived");
+      }
+      channel.archived = input.archived;
     }
     return { ...channel };
   }

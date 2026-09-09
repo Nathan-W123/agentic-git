@@ -74,8 +74,11 @@ import {
   loadSubChannelMembers,
   loadSubChannels,
   activeSubChannelId,
+  archivedSubChannelsFor,
   selectSubChannel,
+  setSubChannelArchived,
   setSubChannelMember,
+  subChannelById,
   subChannelsFor,
   updateSubChannel,
   ensureProviderUsage,
@@ -7814,8 +7817,9 @@ function repositoryMenuItems(repositoryId) {
 }
 
 function conversationMenuItems(repositoryId) {
-  const channel = subChannelsFor(repositoryId).find(
-    (candidate) => candidate.id === activeSubChannelId(repositoryId),
+  const channel = subChannelById(
+    repositoryId,
+    activeSubChannelId(repositoryId),
   );
   const channelLabel = `#${channel?.slug ?? repositoryLabel(repositoryId)}`;
   return [
@@ -7996,6 +8000,83 @@ async function confirmDestructive({
     danger: true,
   });
   return answer !== undefined;
+}
+
+/**
+ * Removing a room, asked in the interface's own dialog.
+ *
+ * This was the last delete in the product still handled by `window.confirm`
+ * — the operating system's grey box, in the operating system's typeface, with
+ * an OK button that looks nothing like the red one every other irreversible
+ * press in Kumi is given, and no room to offer anything but yes or no. It
+ * asks the way removing a token or an MCP server asks now.
+ *
+ * The third button is the point of the change beyond the paint. "Delete this
+ * channel" is usually somebody meaning "I am finished with this channel", and
+ * those are not the same sentence: one takes the transcript with it and one
+ * keeps it. Offering the gentler reading at the moment of the harder press is
+ * where it is actually useful, so the dialog carries it — except on a room
+ * that is already archived, where there is nothing left to offer.
+ */
+async function deleteSubChannelAction(repositoryId, channelId) {
+  const current = subChannelById(repositoryId, channelId);
+  const label = `#${current?.slug ?? "this channel"}`;
+  const answer = await showModal({
+    title: `Delete ${label}?`,
+    subtitle:
+      `Everything said in ${label} goes with it, for everyone in this ` +
+      `workspace. This cannot be undone.`,
+    confirm: "Delete channel",
+    cancel: "Keep it",
+    ...(current?.archived === true ? {} : { alt: "Archive instead" }),
+    danger: true,
+  });
+  if (answer === undefined) {
+    return;
+  }
+  if (answer.action === "alt") {
+    await archiveSubChannelAction(repositoryId, channelId);
+    return;
+  }
+  try {
+    await deleteSubChannel(repositoryId, channelId);
+    render();
+    await ensureChannelMessages(repositoryId, render);
+  } catch (error) {
+    toast(`Could not delete that channel: ${error.message}`, "error");
+  }
+}
+
+/**
+ * Putting a room away. Asked for nothing, because nothing is lost.
+ *
+ * No confirmation: a dialog in front of a reversible action teaches people to
+ * dismiss dialogs. The toast says where it went instead, which is the thing
+ * somebody actually needs to know the moment a room leaves their sidebar.
+ */
+async function archiveSubChannelAction(repositoryId, channelId) {
+  const label = `#${subChannelById(repositoryId, channelId)?.slug ?? "channel"}`;
+  try {
+    await setSubChannelArchived(repositoryId, channelId, true);
+    render();
+    await ensureChannelMessages(repositoryId, render);
+    toast(`${label} archived — it is under Archived, whole.`, "ok");
+  } catch (error) {
+    toast(`Could not archive that channel: ${error.message}`, "error");
+  }
+}
+
+/** Bringing an archived room back into use, and opening it. */
+async function unarchiveSubChannelAction(repositoryId, channelId) {
+  const label = `#${subChannelById(repositoryId, channelId)?.slug ?? "channel"}`;
+  try {
+    await setSubChannelArchived(repositoryId, channelId, false);
+    render();
+    await ensureChannelMessages(repositoryId, render);
+    toast(`${label} is back in your channels.`, "ok");
+  } catch (error) {
+    toast(`Could not restore that channel: ${error.message}`, "error");
+  }
 }
 
 /** Disconnecting an agent from its own row, after its own confirmation. */
@@ -8429,7 +8510,15 @@ function writeChatLocation() {
   // Only when there is more than one room to be in. A repository nobody has
   // divided keeps the exact URL it has always had.
   const channelId = activeSubChannelId(workspaceId);
-  if (channelId !== undefined && subChannelsFor(workspaceId).length > 1) {
+  // Archived rooms count towards "more than one": one of them can be the room
+  // the reader has open — that is what keeping them readable means — and a
+  // link back to it that dropped the room would land on #general.
+  if (
+    channelId !== undefined &&
+    subChannelsFor(workspaceId).length +
+      archivedSubChannelsFor(workspaceId).length >
+      1
+  ) {
     query.set("channel", channelId);
   }
   if (secondary !== undefined) {
@@ -10949,9 +11038,7 @@ document.addEventListener("click", (event) => {
     }
     case "sub-channel-rename": {
       const repositoryId = activeChannelId();
-      const current = subChannelsFor(repositoryId).find(
-        (channel) => channel.id === value,
-      );
+      const current = subChannelById(repositoryId, value);
       closePopover();
       void showModal({
         title: "Rename channel",
@@ -10975,9 +11062,7 @@ document.addEventListener("click", (event) => {
     }
     case "sub-channel-visibility": {
       const repositoryId = activeChannelId();
-      const current = subChannelsFor(repositoryId).find(
-        (channel) => channel.id === value,
-      );
+      const current = subChannelById(repositoryId, value);
       // A toggle could only flip between two of the three states, so the
       // third was unreachable from here however the server stored it.
       closePopover();
@@ -10999,26 +11084,18 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "sub-channel-delete": {
-      const repositoryId = activeChannelId();
-      const current = subChannelsFor(repositoryId).find(
-        (channel) => channel.id === value,
-      );
-      if (
-        !window.confirm(
-          `Delete #${current?.slug ?? "this channel"} and everything said in it? This cannot be undone.`,
-        )
-      ) {
-        return;
-      }
       closePopover();
-      void deleteSubChannel(repositoryId, value)
-        .then(() => {
-          render();
-          void ensureChannelMessages(repositoryId, render);
-        })
-        .catch((error) =>
-          toast(`Could not delete that channel: ${error.message}`, "error"),
-        );
+      void deleteSubChannelAction(activeChannelId(), value);
+      return;
+    }
+    case "sub-channel-archive": {
+      closePopover();
+      void archiveSubChannelAction(activeChannelId(), value);
+      return;
+    }
+    case "sub-channel-unarchive": {
+      closePopover();
+      void unarchiveSubChannelAction(activeChannelId(), value);
       return;
     }
     case "sub-channel-member-toggle": {

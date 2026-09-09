@@ -5083,7 +5083,8 @@ button.chip.lg:hover {
    height that the fold reads as immediate at either end. */
 .chan-sec-channels,
 .chan-sec-people,
-.chan-sec-agents {
+.chan-sec-agents,
+.chan-sec-archived {
   max-height: 60px;
   overflow: hidden;
   opacity: 1;
@@ -10859,6 +10860,11 @@ dialog.modal[open]::backdrop {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
+  /* A dialog may offer a third way out — "Archive instead" beside Keep it and
+     Delete channel — and three labelled pills do not always fit one line on a
+     phone. Wrapping keeps every answer reachable instead of pushing the red
+     one off the edge of the card. */
+  flex-wrap: wrap;
 }
 
 /* Posted images use the same native dialog as decisions, but without turning
@@ -11757,7 +11763,12 @@ dialog.modal[open]::backdrop {
     width: 256px;
   }
 
-  .chats-shell.chan-collapsed :is(.chan-sec-channels, .chan-sec-people, .chan-sec-agents),
+  .chats-shell.chan-collapsed :is(
+      .chan-sec-channels,
+      .chan-sec-people,
+      .chan-sec-agents,
+      .chan-sec-archived
+    ),
   .chats-shell.chan-collapsed .chan-roster {
     opacity: 0;
     visibility: hidden;
@@ -11765,7 +11776,12 @@ dialog.modal[open]::backdrop {
     transform: translateY(-10px);
   }
 
-  .chats-shell.chan-collapsed :is(.chan-sec-channels, .chan-sec-people, .chan-sec-agents) {
+  .chats-shell.chan-collapsed :is(
+      .chan-sec-channels,
+      .chan-sec-people,
+      .chan-sec-agents,
+      .chan-sec-archived
+    ) {
     max-height: 0;
     padding-top: 0;
     padding-bottom: 0;
@@ -11783,6 +11799,7 @@ dialog.modal[open]::backdrop {
       .chan-sec-channels,
       .chan-sec-people,
       .chan-sec-agents,
+      .chan-sec-archived,
       .chan-roster
     ) {
     transition: none;
@@ -15238,6 +15255,26 @@ dialog.modal[open]::backdrop {
   letter-spacing: 0.02em;
   text-transform: uppercase;
   opacity: 0.55;
+}
+
+/* A room that has been put away, in the fold it was put into.
+   Quieter than a live room and not otherwise different: it is still a name
+   you press to read what is in it, so making it look disabled would say the
+   wrong thing about a transcript that is entirely intact. The box in front of
+   the name carries the difference, and the row comes back to full strength on
+   hover and while it is the one open. */
+.chan-channel-archived .chan-channel {
+  opacity: 0.68;
+}
+
+.chan-channel-archived:hover .chan-channel,
+.chan-channel-archived.on .chan-channel,
+.chan-channel-archived .chan-channel:focus-visible {
+  opacity: 1;
+}
+
+.chan-channel-archived .chan-channel-sigil {
+  opacity: 0.5;
 }
 
 /* What is waiting in a room the reader is not in. Inline at the end of the

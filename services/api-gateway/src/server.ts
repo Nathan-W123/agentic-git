@@ -4137,6 +4137,14 @@ export class ApiGateway {
      */
     admin = false,
   ): Promise<boolean> {
+    // An archived room is kept for reading, not for adding to — that is the
+    // whole difference between putting it away and deleting it. Checked
+    // before every other rule, including the administrator's: archiving is
+    // reversible in one press, so an admin with something to say unarchives
+    // it rather than quietly reopening it by writing in it.
+    if (channel.archived) {
+      return false;
+    }
     if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
       return true;
     }
@@ -4971,10 +4979,16 @@ export class ApiGateway {
         await this.isRepositoryAdmin(principal, projectId, repositoryId),
       ))
     ) {
+      // Two different refusals wearing one sentence otherwise: an archived
+      // room turns everybody away, including its own members, and telling
+      // somebody they are "not a member" of a room they are plainly in sends
+      // them after a permission that would change nothing.
       throw new HttpError(
         403,
-        "not_a_member",
-        `You are not a member of #${channel.slug}`,
+        channel.archived ? "channel_archived" : "not_a_member",
+        channel.archived
+          ? `#${channel.slug} is archived and is not taking new messages`
+          : `You are not a member of #${channel.slug}`,
       );
     }
     const message = await this.options.store.appendChannelMessage({
