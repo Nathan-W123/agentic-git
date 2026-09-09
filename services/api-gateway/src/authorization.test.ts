@@ -6,7 +6,7 @@ import test from "node:test";
 // module under test reads it, so the gate is on for the whole file.
 process.env["KUMI_PAYMENTS_ENABLED"] = "1";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import type { CoordinationStore } from "@coord/persistence";
 
 import type { AuthenticatedPrincipal } from "./auth.js";
@@ -31,7 +31,7 @@ interface LapsedFixture {
 }
 
 async function lapsedOrganization(): Promise<LapsedFixture> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const organization = await store.createOrganization({
     slug: "lapsed",
     name: "Lapsed Team",

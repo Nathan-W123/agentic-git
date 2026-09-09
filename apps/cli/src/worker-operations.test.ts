@@ -14,7 +14,7 @@ import "./blanket-claim.test.js";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   PostgresCoordinationStore,
   type CoordinationStore,
 } from "@coord/persistence";
@@ -77,7 +77,7 @@ interface Harness {
 }
 
 async function createHarness(
-  store: CoordinationStore = new InMemoryCoordinationStore(),
+  store: CoordinationStore = SqliteCoordinationStore.open(":memory:"),
   /** Extra seeded files, repository-relative, for multi-file scenarios. */
   extraFiles: Readonly<Record<string, string>> = {},
 ): Promise<Harness> {
@@ -2074,7 +2074,7 @@ const FREE_FILES = ["src/a.js", "src/b.js", "src/c.js", "src/d.js"];
 /** A repository with the contested file plus four uncontested ones. */
 async function splitHarness(): Promise<Harness> {
   return await createHarness(
-    new InMemoryCoordinationStore(),
+    SqliteCoordinationStore.open(":memory:"),
     Object.fromEntries(
       FREE_FILES.map((file, index) => [
         file,
@@ -2850,7 +2850,7 @@ const SHAPES = [
 ].join("\n");
 
 async function symbolHarness(): Promise<Harness> {
-  return await createHarness(new InMemoryCoordinationStore(), {
+  return await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "src/shapes.js": SHAPES,
     "src/free.js": "export const free = 1;\n",
   });
@@ -3255,7 +3255,7 @@ test("a solo plan is approved on the spot, without arbitration machinery", async
 });
 
 test("the second arrival is arbitrated against a fast-path plan's real footprint", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "src/pricing/total.js":
       "export function subtotal(lines) { return 1; }\n" +
       "export function orderTotal(customer, lines) { return 2; }\n",
@@ -3467,7 +3467,7 @@ async function externalAdvanceOnGuide(harness: Harness) {
 }
 
 test("a same-file loser with disjoint hunks is merged for free instead of replanned", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -3509,7 +3509,7 @@ test("a same-file loser with disjoint hunks is merged for free instead of replan
 });
 
 test("a same-file loser with overlapping hunks is requeued to replan, not failed", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -3559,7 +3559,7 @@ test("a same-file loser with overlapping hunks is requeued to replan, not failed
  * be worse than the refusal this replaces.
  */
 test("a conflict keeps the clean files and queues the contested one", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
     "docs/notes.md": "Notes line 1.\n",
   });
@@ -3677,7 +3677,7 @@ test("a result that both defers scope and salvages a conflict queues both", asyn
   // Both preconditions need contention, which is why this was invisible: at
   // parallelism 1 partial admission never fires. Making partial admission work
   // is what made this reachable.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
     "docs/notes.md": "Notes line 1.\n",
   });
@@ -3789,7 +3789,7 @@ test("a result that both defers scope and salvages a conflict queues both", asyn
 });
 
 test("a result its own validation rejects finishes the run as failed", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -3879,7 +3879,7 @@ function racingIntegrations(
 }
 
 test("a result that loses the integration race is assessed against the advance that beat it", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -3933,7 +3933,7 @@ test("a result that loses the integration race is assessed against the advance t
 });
 
 test("a result that loses the race to a semantically incompatible advance still replans", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4020,7 +4020,7 @@ function racingOnPromote(harness: Harness) {
 }
 
 test("a result overtaken during its own validation is merged for free rather than replanned", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4065,7 +4065,7 @@ test("a result overtaken during its own validation is merged for free rather tha
 });
 
 test("a race loser whose merged tree fails validation is requeued, never failed", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
     // The advance lands here instead, so re-assessment finds no blocker of any
     // kind — not even a textual one. Only the lost race can save this result
@@ -4127,7 +4127,7 @@ test("a race loser whose merged tree fails validation is requeued, never failed"
 });
 
 test("a result that keeps losing races gives up on the budget instead of retrying forever", async () => {
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4203,7 +4203,7 @@ const SPACED_SHAPES = [
 ].join("\n");
 
 async function spacedHarness(): Promise<Harness> {
-  return await createHarness(new InMemoryCoordinationStore(), {
+  return await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "src/spaced.js": SPACED_SHAPES,
     "src/free.js": "export const free = 1;\n",
   });
@@ -4350,7 +4350,7 @@ test("a plan survives canonical moving somewhere it does not claim", async () =>
   // produced 16 to 26 replans a run at roughly 145k tokens each. A finished
   // result is never sent back for an advance like this, and an unexecuted plan
   // is worth less than a finished result.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4379,7 +4379,7 @@ test("a plan is still sent back when canonical moved under what it claims", asyn
   // on nothing: an advance that touches what the plan claims genuinely
   // invalidates it, and admitting it would let a task edit a file it has not
   // seen the current state of.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   try {
@@ -4412,7 +4412,7 @@ test("a plan is still sent back when canonical moved under what it claims", asyn
 test("the strict rebase switch restores the unconditional requeue", async () => {
   // The rollback, in the same shape as the other COORD_* switches: an operator
   // who decides the looser rule is wrong turns it off without a deploy.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "docs/guide.md": GUIDE,
   });
   const previous = process.env["COORD_STRICT_PLAN_REBASE"];
@@ -4498,7 +4498,7 @@ test("a hosting process shares one repository index across admissions", async ()
   // long-lived control plane hands one shared service through, so an index
   // built for an admission is the same one its runs, overlays and rollbacks
   // read.
-  const harness = await createHarness(new InMemoryCoordinationStore(), {
+  const harness = await createHarness(SqliteCoordinationStore.open(":memory:"), {
     "src/other.js": "export const other = 1;\n",
   });
   try {

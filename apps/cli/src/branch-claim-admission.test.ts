@@ -23,7 +23,7 @@ import { RepositoryService } from "@coord/repository-service";
 
 import {
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
 } from "@coord/persistence";
 import type { AgentPlan } from "@coord/shared-types";
 
@@ -73,7 +73,7 @@ async function canonicalRepository(): Promise<{
 
 async function fixture(options: { blanket?: boolean } = {}) {
   const REPOSITORY = await canonicalRepository();
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   // A real submitter: `submitTask` verifies the user exists, and a fabricated
   // id fails before any of this is exercised.
   const user = await store.createUser({
@@ -97,7 +97,7 @@ async function fixture(options: { blanket?: boolean } = {}) {
 
 /** Submits a task and takes a lease on it, on the branch named. */
 async function leaseFor(
-  store: InMemoryCoordinationStore,
+  store: SqliteCoordinationStore,
   input: {
     taskId: string;
     branch?: string;
@@ -114,8 +114,11 @@ async function leaseFor(
     agentId: "claude",
     objective: "change the session token",
     submittedBy: input.userId,
+    // Required, and it was a cast away from being forgotten: the old
+    // in-memory store took `undefined` here and SQLite refuses to bind it.
+    validationCommands: [],
     ...(input.branch === undefined ? {} : { branch: input.branch }),
-  } as never);
+  });
   // The real lease path: claim and lease are one transaction, so there is no
   // way to fabricate a lease that the admission code would not also see.
   const taskId = (task as { id: string }).id;

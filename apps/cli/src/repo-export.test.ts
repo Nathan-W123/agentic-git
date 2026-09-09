@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import {
   GitClient,
   RepositoryService,
@@ -49,7 +49,7 @@ class LoopbackGitClient extends GitClient {
 interface Harness {
   root: string;
   project: CoordinatorProject;
-  store: InMemoryCoordinationStore;
+  store: SqliteCoordinationStore;
   repositories: RepositoryService;
   remotePath: string;
 }
@@ -72,7 +72,7 @@ async function createHarness(): Promise<Harness> {
   return {
     root,
     project,
-    store: new InMemoryCoordinationStore(),
+    store: SqliteCoordinationStore.open(":memory:"),
     repositories: new RepositoryService(new LoopbackGitClient(remotePath)),
     remotePath,
   };

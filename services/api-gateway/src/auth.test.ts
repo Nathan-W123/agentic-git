@@ -25,7 +25,7 @@ test("malformed or hostile password digests fail closed", async () => {
   }
 });
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 
 import {
   API_TOKEN_PREFIX,
@@ -41,7 +41,7 @@ function confirmationCode(message: MailMessage | undefined): string {
 }
 
 test("registration retains digests and creates the account only after the mailed code", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const sent: MailMessage[] = [];
   const auth = new AuthService(store, {
     mailer: async (message) => {
@@ -107,7 +107,7 @@ test("an operator can name system administrators when nobody is one", async (t) 
   // needs the flag you are trying to get. A deployment whose first account
   // arrived some other way had no administrator and no way to appoint one,
   // and its owner met that as being refused on their own deployment.
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const auth = new AuthService(store);
   const password = "OperatorPassword123!";
   const user = await auth.registerUnconfirmed({
@@ -157,7 +157,7 @@ test("an operator can name system administrators when nobody is one", async (t) 
 });
 
 test("unconfirmed registration creates the account, its team and its project at once", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const sent: MailMessage[] = [];
   const auth = new AuthService(store, {
     mailer: async (message) => {
@@ -223,7 +223,7 @@ test("a sign-up that fails partway leaves no account behind", async () => {
   // ordering is the only defence: everything that does not need a user comes
   // first, and the user is written second to last. A failure before then must
   // leave the address free.
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const auth = new AuthService(store, { mailer: async () => undefined });
 
   // Fail the last write that precedes the account. Whatever went wrong in
@@ -289,7 +289,7 @@ test("switching payments on puts the trial back", async () => {
   const previous = process.env["KUMI_PAYMENTS_ENABLED"];
   process.env["KUMI_PAYMENTS_ENABLED"] = "1";
   try {
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     const auth = new AuthService(store, {});
     const user = await auth.registerUnconfirmed({
       email: "paying@example.com",
@@ -314,7 +314,7 @@ test("switching payments on puts the trial back", async () => {
 
 test("registration rejects wrong, expired, exhausted, reused, and unknown challenges", async () => {
   let clock = new Date("2026-01-01T00:00:00.000Z");
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const sent: MailMessage[] = [];
   const auth = new AuthService(store, {
     now: () => clock,
@@ -387,7 +387,7 @@ test("registration rejects wrong, expired, exhausted, reused, and unknown challe
 });
 
 test("mail delivery failure leaves no account or pending registration", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const auth = new AuthService(store, {
     mailer: async () => {
       throw new Error("relay unavailable");
@@ -415,7 +415,7 @@ test("mail delivery failure leaves no account or pending registration", async ()
 });
 
 async function serviceWithUser(now?: () => Date) {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const user = await store.createUser({
     email: "worker@example.com",
     displayName: "Worker",
@@ -788,7 +788,7 @@ test("resetting a password revokes the sessions somebody else may be holding", a
 });
 
 test("starting registration says whether the code was mailed or only logged", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const logged: string[] = [];
   const logOnly = new AuthService(store, {
     mailer: createMailer({ log: (line) => logged.push(line) }),
@@ -805,7 +805,7 @@ test("starting registration says whether the code was mailed or only logged", as
   assert.equal(unmailed.delivery, "log");
   assert.equal(logged.length, 1);
 
-  const delivering = new AuthService(new InMemoryCoordinationStore(), {
+  const delivering = new AuthService(SqliteCoordinationStore.open(":memory:"), {
     mailer: async () => {},
   });
   const mailed = await delivering.startRegistration({

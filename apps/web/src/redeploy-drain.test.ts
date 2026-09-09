@@ -5,7 +5,7 @@ import { drainInFlightWork } from "@coord/cli/recovery";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
 } from "@coord/persistence";
 
 /**
@@ -23,7 +23,7 @@ import {
 const LOCAL_RUNNER = "in-process-runner";
 
 async function storeWithWorker(name: string) {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: "repo_drain",
     path: "/tmp/repo_drain.git",

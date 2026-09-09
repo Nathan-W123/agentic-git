@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
 } from "@coord/persistence";
 import type { CoordinationStore, SubmittedTask } from "@coord/persistence";
 
@@ -37,7 +37,7 @@ interface Harness {
 }
 
 async function createHarness(): Promise<Harness> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: REPOSITORY_ID,
     path: "/tmp/queue-ordering",

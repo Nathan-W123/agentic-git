@@ -428,6 +428,24 @@ export {
 // importer - the package surface in index.ts included - keeps its one path.
 export { API_PREFIX } from "./http-util.js";
 export { textOverlap } from "./text.js";
+import {
+  ADDRESSED_RE,
+  EVERYONE_RE,
+  PLAN_MAX_CHARS,
+  PLAN_SECTION_HEADING,
+  THREAD_MERGE_MAX_AGE_MS,
+  THREAD_MERGE_MIN_OVERLAP,
+  THREAD_NAME_MIN_OVERLAP,
+  agentIdentity,
+  normaliseThreadTitle,
+  summariseObjective,
+  summariseThreadTitle,
+  threadNameIn,
+  withAnswerDirective,
+  withRoleContext,
+} from "./thread-text.js";
+import { ArbitrationNoticeBoard } from "./arbitration-notices.js";
+import { AuditorWatch } from "./auditor-watch.js";
 export type { AgentVendor } from "./vendors.js";
 export {
   elidedHistoryNotice,
@@ -484,33 +502,6 @@ interface OpenAgentQuestion {
 }
 
 /**
- * One arbitration line standing somewhere, and what it takes to take it back.
- *
- * A hold is normally the held agent's own reply inside its thread, so removing
- * it needs the root as well as the reply. The room-level line the coordinator
- * posts when no agent account resolves — and every notice older deployments
- * left behind — is a root of its own, and has no `replyId`.
- */
-interface StandingArbitrationNotice {
-  projectId: string;
-  repositoryId: string;
-  /** The thread root, when this is a reply; the notice itself otherwise. */
-  messageId: string;
-  /** Set only when the notice is a reply inside a thread. */
-  replyId?: string;
-  /** The task the line is about — the held one, for a hold. */
-  taskId: string;
-  content: string;
-  kind: "hold" | "advisory";
-  /**
-   * The other tasks the line names, when this process is the one that posted
-   * it. Empty after a restart, which is exactly what it means: the line is
-   * still findable, but who it was about is no longer known.
-   */
-  alsoNamed: readonly string[];
-}
-
-/**
  * A task whose progress is being narrated into a channel thread.
  *
  * The channel shows the request itself, and everything the task does is a
@@ -518,7 +509,7 @@ interface StandingArbitrationNotice {
  * then nothing until somebody went looking at the run, which reads as the
  * agent having stopped.
  */
-interface WatchedChannelTask {
+export interface WatchedChannelTask {
   taskId: string;
   projectId: string;
   repositoryId: string;
@@ -698,7 +689,6 @@ export function freshUsageTokens(entry: TokenUsageRecord): number {
  * Names containing spaces are still caught: this only has to notice that
  * somebody was addressed, not capture who.
  */
-const ADDRESSED_RE = /(?:^|\s)@[A-Za-z][^\s/]*(?=\s|$)/u;
 /**
  * The broadcast address for the room's people.
  *
@@ -713,7 +703,6 @@ const ADDRESSED_RE = /(?:^|\s)@[A-Za-z][^\s/]*(?=\s|$)/u;
  * Written like `@agents` above it — no leading boundary, a trailing `\b` so
  * `@everyoneelse` is somebody's unusual call sign rather than a broadcast.
  */
-const EVERYONE_RE = /@everyone\b/iu;
 /**
  * How often the auditor looks for new canonical promotions.
  *
@@ -722,14 +711,11 @@ const EVERYONE_RE = /@everyone\b/iu;
  * nobody asked for — so latency costs nothing and the query is a scan of a
  * shared log.
  */
-const AUDITOR_POLL_INTERVAL_MS = 15_000;
 /** Promotions consumed per poll, so a long backlog drains over several. */
-const AUDITOR_EVENT_BATCH = 25;
 /**
  * How long an audit may take. Generous: it is reading a whole diff and
  * nothing downstream is blocked on it.
  */
-const AUDIT_TIMEOUT_MS = 180_000;
 /**
  * How stale a worker's last heartbeat may be and still count as listening.
  *
@@ -787,13 +773,10 @@ const DEEP_PLAN_TIMEOUT_MS = 1_000_000;
  * scrolling rather than reading, and the plan still has to fit in the context
  * of the run it is about to authorise.
  */
-const PLAN_MAX_CHARS = 12_000;
 /**
  * The headings `/plan` asks for, so a plan that opens on one is not mistaken
  * for a plan whose first line is its title.
  */
-const PLAN_SECTION_HEADING =
-  /^(what this means|approach|files to change|steps|risks|how it gets checked)\b/iu;
 
 /**
  * The command word's directive, behind the one every reply carries.
@@ -801,10 +784,6 @@ const PLAN_SECTION_HEADING =
  * `/simple` reads last on purpose: brevity is the outer instruction, and the
  * shortest true answer still satisfies everything above it.
  */
-const withAnswerDirective = (directive?: string): string =>
-  directive === undefined
-    ? ANSWER_NOT_STATUS_DIRECTIVE
-    : `${ANSWER_NOT_STATUS_DIRECTIVE}\n\n${directive}`;
 
 /**
  * Re-exported from the shared package that now owns it.
@@ -824,102 +803,25 @@ export { requestFromObjective };
  * repeated back. Somebody who has just typed a sentence does not need it
  * quoted at them; they need to see that the part that matters was understood.
  */
-const REQUEST_PREAMBLE_RE =
-  /^(hi|hey|hello|ok|okay|so|and|also|please|pls|can you|could you|would you|will you|can we|could we|i want you to|i'd like you to|i would like you to|lets|let's|we should|we need to|do you think you can|are you able to)\b[\s,:-]*/iu;
 
 /** A request, short enough to read back in a chat line. */
-export function summariseObjective(objective: string): string {
-  let text = objective.replace(/\s+/gu, " ").trim();
-  // Context sentences come before the ask often enough to be worth dropping:
-  // "this is a greenfield project, the end goal is X. can you get started"
-  // is a request to get started, and the first clause is background.
-  const sentences = text.split(/(?<=[.!?])\s+/u).filter((part) => part.trim().length > 0);
-  const asking = sentences.find((part) => REQUEST_PREAMBLE_RE.test(part.trim()));
-  text = (asking ?? sentences.at(-1) ?? text).trim();
-  // Peel politeness repeatedly: "so please can you fix…" is three layers.
-  for (let round = 0; round < 4; round += 1) {
-    const stripped = text.replace(REQUEST_PREAMBLE_RE, "").trim();
-    if (stripped === text || stripped.length === 0) {
-      break;
-    }
-    text = stripped;
-  }
-  if (text.length <= 90) {
-    return text;
-  }
-  // Cut on a word boundary; a summary that ends mid-word reads as breakage.
-  const clipped = text.slice(0, 90);
-  const lastSpace = clipped.lastIndexOf(" ");
-  return `${(lastSpace > 40 ? clipped.slice(0, lastSpace) : clipped).trim()}…`;
-}
+
 
 /** The most a generated thread name may contain. */
-const THREAD_TITLE_MAX_WORDS = 6;
-const THREAD_TITLE_MAX_CHARS = 64;
 
 /**
  * Turns a model's first line into the compact noun phrase the thread library
  * needs, falling back to a bounded reading of the request when it did not
  * follow the format.
  */
-export function normaliseThreadTitle(
-  written: string | null | undefined,
-  fallback: string,
-): string {
-  const clean = (value: string): string =>
-    (value.split(/\r?\n/u).find((line) => line.trim().length > 0) ?? "")
-      .replace(/^\s*(?:[-*#]+|\d+[.)])\s*/u, "")
-      .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/gu, "")
-      .replace(/^\s*(?:task|thread|title)\s*:\s*/iu, "")
-      .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/gu, "")
-      .replace(/[.!?:;,\s]+$/gu, "")
-      .replace(/\s+/gu, " ")
-      .trim();
-  const fallbackWords = clean(fallback)
-    .split(" ")
-    .filter((word) => word.length > 0)
-    .slice(0, THREAD_TITLE_MAX_WORDS);
-  const boundedFallback: string[] = [];
-  for (const word of fallbackWords) {
-    const next = [...boundedFallback, word].join(" ");
-    if (next.length > THREAD_TITLE_MAX_CHARS) {
-      break;
-    }
-    boundedFallback.push(word);
-  }
-  const candidate = clean(written ?? "");
-  const words = candidate === "" ? [] : candidate.split(" ");
-  return candidate !== "" &&
-    words.length <= THREAD_TITLE_MAX_WORDS &&
-    candidate.length <= THREAD_TITLE_MAX_CHARS
-    ? candidate
-    : boundedFallback.join(" ") || "Software task";
-}
+
 
 /**
  * Names a thread with the small in-process text model. This is presentation,
  * so every model failure falls back to deterministic, bounded text rather
  * than delaying or failing the task that the thread follows.
  */
-export async function summariseThreadTitle(
-  objective: string,
-  summariser: CatchUpSummariser | undefined,
-): Promise<string> {
-  const fallback = summariseObjective(objective);
-  if (summariser === undefined) {
-    return normaliseThreadTitle(undefined, fallback);
-  }
-  const prompt =
-    "Name this software-work thread. Reply with only a three-to-six-word " +
-    "noun phrase describing its topic, not a quote or restatement of the " +
-    "request. Use no label, bullets, quotation marks, or ending punctuation." +
-    `\n\nRequest:\n${objective}`;
-  try {
-    return normaliseThreadTitle(await summariser(prompt), fallback);
-  } catch {
-    return normaliseThreadTitle(undefined, fallback);
-  }
-}
+
 
 /**
  * Prefixes an objective with the role the mentioned agent currently holds in
@@ -957,33 +859,9 @@ export { AUDITOR_ROLE, isAuditorRole } from "./auditor.js";
  * agents, and "you belong to Nathan" is what makes "what are you working on"
  * answerable about the right person's work.
  */
-export function agentIdentity(candidate: {
-  name: string;
-  role: string;
-  userName: string;
-}): string {
-  const role = candidate.role.trim();
-  return (
-    `You are "${candidate.name}", an AI agent in a team chat for a software ` +
-    `project. People address you by that name — a message beginning ` +
-    `"@${candidate.name}" is addressed to you, and is not a reference to some ` +
-    `product or integration of that name. You belong to ${candidate.userName}.` +
-    (role === "" ? "" : ` Your role in this channel is: ${role}.`)
-  );
-}
 
-export function withRoleContext(role: string, objective: string): string {
-  const trimmedRole = role.trim();
-  if (trimmedRole === "") {
-    return objective;
-  }
-  // `ROLE_CONTEXT_PREFIX` rather than the literal, because
-  // `readsAsReportRequest` takes this preamble back off before deciding
-  // whether an empty changeset is a report or a failure. If the two spellings
-  // drifted the reader would silently stop recognising what this writes, and
-  // every read-only task would go back to being recorded as failed.
-  return `${ROLE_CONTEXT_PREFIX} ${trimmedRole}.\n\n${objective}`;
-}
+
+
 
 /**
  * How well a spoken thread name must match before it is believed.
@@ -992,17 +870,7 @@ export function withRoleContext(role: string, objective: string): string {
  * attaching the wrong one to a deliberate reference is worse than attaching
  * none — the agent would answer confidently about work nobody asked about.
  */
-const THREAD_NAME_MIN_OVERLAP = 0.55;
 
-/* The words that carry no subject: an address, a verb, an article. Stripped
-   from the front of a spoken thread name so "look at the codebase improvement
-   review thread" is scored on "codebase improvement review" rather than on a
-   phrase three quarters of which is instruction. */
-const THREAD_NAME_FILLER = new Set([
-  "a", "about", "an", "and", "at", "check", "explore", "for", "from", "go",
-  "in", "inspect", "into", "look", "on", "open", "please", "read", "review",
-  "see", "the", "then", "to", "up",
-]);
 
 /**
  * The thread a sentence names, if it names one.
@@ -1014,32 +882,8 @@ const THREAD_NAME_FILLER = new Set([
  * improvement review" keeps it, "review the X thread" does not — which is why
  * stripping runs from the left and stops at the first real word.
  */
-function threadNameIn(content: string): string | undefined {
-  const text = withoutMentions(content);
-  const trailing = /([\w'-]+(?:\s+[\w'-]+){0,5})\s+thread/iu.exec(text);
-  const leading = /thread\s+(?:about|on|for|called|named)\s+([\w][\w\s'-]{2,60})/iu.exec(
-    text,
-  );
-  for (const candidate of [trailing?.[1], leading?.[1]]) {
-    if (candidate === undefined) {
-      continue;
-    }
-    const words = candidate.trim().split(/\s+/u);
-    while (
-      words.length > 0 &&
-      THREAD_NAME_FILLER.has((words[0] ?? "").toLowerCase())
-    ) {
-      words.shift();
-    }
-    const phrase = words.join(" ");
-    if (phrase.length >= 3) {
-      return phrase;
-    }
-  }
-  return undefined;
-}
 
-const AUDIT_THREAD_TITLE = "Audit log";
+
 
 const THREAD_RECONCILE_INTERVAL_MS = 60_000;
 
@@ -1096,7 +940,7 @@ const SYSTEM_PACKAGE_INSTALL_RE =
   /\b(?:apt(?:-get)?|apk|yum|dnf|pacman|brew|choco)\s+(?:-\w+\s+)*install\b|\bsudo\s+(?:apt|apt-get|yum|dnf|apk)\b/iu;
 
 /** One connected agent an @mention (or an auto-claim) could resolve to. */
-type ChannelMentionCandidate = {
+export type ChannelMentionCandidate = {
   userId: string;
   userName: string;
   provider: string;
@@ -1157,9 +1001,7 @@ type ChannelMessageMention =
  * about the same file, in the same words, clear it; two requests that merely
  * mention the repository do not.
  */
-const THREAD_MERGE_MIN_OVERLAP = 0.42;
 /** Threads older than this are finished business, however well they match. */
-const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /**
  * How long an offer stays answerable by a bare "yes".
@@ -1458,7 +1300,7 @@ export class ApiGateway {
     }
   }
   /** Tasks whose progress is being narrated into a channel thread. */
-  private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
+  public readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
   /**
    * Pushes waiting for a repository to go quiet, by repository id.
    *
@@ -1555,7 +1397,6 @@ export class ApiGateway {
     { optionCount: number; lapsedAtMs: number }
   >();
   private channelProgressTimer: NodeJS.Timeout | undefined;
-  private auditorTimer: NodeJS.Timeout | undefined;
   private threadReconcileTimer: NodeJS.Timeout | undefined;
 
   private billingReconcileTimer: NodeJS.Timeout | undefined;
@@ -1578,10 +1419,6 @@ export class ApiGateway {
    * found from the thread it hangs in and `reconcileArbitrationNotices` can
    * finish the job without this map.
    */
-  private readonly arbitrationNotices = new Map<
-    string,
-    StandingArbitrationNotice
-  >();
   /**
    * The audit-log position the auditor has consumed, in memory.
    *
@@ -1592,11 +1429,8 @@ export class ApiGateway {
    * revision rather than from the event it was woken by — a promotion missed
    * during downtime is folded into the next audit instead of vanishing.
    */
-  private auditorSequence: number | undefined;
   /** When this process started, and so the oldest promotion it treats as news. */
-  private readonly auditorSince = new Date().toISOString();
   /** Repositories with an audit in flight, so a slow one is not started twice. */
-  private readonly auditsRunning = new Set<string>();
   private readonly bodyLimit: number;
   private readonly allowedOrigins: ReadonlySet<string>;
   /** Compressed representations of static assets, computed on first ask. */
@@ -1654,6 +1488,14 @@ export class ApiGateway {
    * that polls: it would read as dead three minutes into every session, and
    * would mint a dead row per session besides. See `editor-sessions.ts`.
    */
+  /**
+   * The arbitration lines standing in rooms. See `arbitration-notices.ts`:
+   * one promise, one map, and a declared dependency on this gateway.
+   */
+  private readonly notices = new ArbitrationNoticeBoard(this);
+  /** The auditor's poll and what it remembers. See `auditor-watch.ts`. */
+  private readonly auditor = new AuditorWatch(this);
+
   private readonly editors = new EditorPresence();
   /** One-shot permission to fetch one lease's bundle. Same file, same reason. */
   readonly bundleTickets = new BundleTickets();
@@ -2175,10 +2017,7 @@ export class ApiGateway {
       clearInterval(this.channelProgressTimer);
       this.channelProgressTimer = undefined;
     }
-    if (this.auditorTimer !== undefined) {
-      clearInterval(this.auditorTimer);
-      this.auditorTimer = undefined;
-    }
+    this.auditor.stop();
     if (this.billingReconcileTimer !== undefined) {
       clearInterval(this.billingReconcileTimer);
       this.billingReconcileTimer = undefined;
@@ -2196,7 +2035,7 @@ export class ApiGateway {
     // The lines themselves stay in the store; what is forgotten is which
     // process posted them. `reconcileArbitrationNotices` is what picks them up
     // again, on this deployment or the next one.
-    this.arbitrationNotices.clear();
+    this.notices.clear();
     this.webSockets.close();
     this.collaboration.close();
     if (!this.server.listening) {
@@ -5791,7 +5630,7 @@ export class ApiGateway {
     return channel?.branch;
   }
 
-  private async dispatchOneMention(input: {
+  public async dispatchOneMention(input: {
     projectId: string;
     repositoryId: string;
     content: string;
@@ -8077,7 +7916,7 @@ export class ApiGateway {
    * arrives after they have given up is worse than no reply at all.
    * `undefined` means the caller should say something fixed instead.
    */
-  async askAgent(
+  public async askAgent(
     candidate: ChannelMentionCandidate,
     prompt: string,
     timeoutMs: number,
@@ -8156,191 +7995,10 @@ export class ApiGateway {
   }
 
   /**
-   * Starts the auditor's watch on canonical.
-   *
-   * A poller and not a scheduler, and the distinction is the whole design.
-   * There is no cron anywhere in this system, and an auditor on a clock
-   * would wake on a repository nobody had touched, re-read it, and bill
-   * somebody for confirming that nothing changed. Waking on `canonical_
-   * promoted` instead means the trigger is a real change by construction:
-   * no change, no event, no spend, and no code needed to arrange that.
-   *
-   * Inert unless the deployment can actually read a diff. A gateway with no
-   * `canonicalDiff` operation has no repository access, and an auditor that
-   * cannot see a change must not run and quietly report the repository
-   * clean.
+   * The auditor — see `auditor-watch.ts`. Forwarded rather than called
+   * through `this.auditor` at every site, because the call sites are
+   * scattered and the names are what the rest of this file already says.
    */
-  private startAuditorWatch(): void {
-    if (
-      this.auditorTimer !== undefined ||
-      this.options.operations.canonicalDiff === undefined
-    ) {
-      return;
-    }
-    this.auditorTimer = setInterval(
-      () => {
-        void this.pumpAuditor();
-      },
-      this.options.auditorPollIntervalMs ?? AUDITOR_POLL_INTERVAL_MS,
-    );
-    // Never a reason to hold the process open for an audit.
-    this.auditorTimer.unref?.();
-  }
-
-  /**
-   * Consumes new canonical promotions and audits the repositories they
-   * touched.
-   *
-   * Deliberately quiet about everything it decides not to do: most
-   * promotions are in repositories with no auditor, and saying so anywhere
-   * would be noise proportional to how much the team ships.
-   */
-  private async pumpAuditor(): Promise<void> {
-    try {
-      // Until the first new promotion anchors a sequence, the window is
-      // "since this process started" rather than "after sequence N". There is
-      // no cheap way to ask this log for its head — the filter pages forward
-      // from the oldest match, so an unanchored `limit` query would return
-      // the *first* promotions the repository ever made and audit its whole
-      // history. A timestamp asks the question actually being asked.
-      const events = await this.options.store.listAuditEvents({
-        types: ["canonical_promoted"],
-        ...(this.auditorSequence === undefined
-          ? { occurredAfter: this.auditorSince }
-          : { afterSequence: this.auditorSequence }),
-        limit: AUDITOR_EVENT_BATCH,
-      });
-      for (const record of events) {
-        this.auditorSequence = Math.max(
-          this.auditorSequence ?? 0,
-          record.sequence,
-        );
-        const data = (record.event.data ?? {}) as Record<string, unknown>;
-        const repositoryId = data["repositoryId"];
-        const projectId = data["projectId"];
-        const revision = data["revision"];
-        const previousRevision = data["previousRevision"];
-        if (
-          typeof repositoryId !== "string" ||
-          typeof projectId !== "string" ||
-          typeof revision !== "string" ||
-          typeof previousRevision !== "string"
-        ) {
-          // Written before this event carried a repository, or by something
-          // that does not fill it in. Nothing to audit against.
-          //
-          // Said out loud, on stderr, because this skip is indistinguishable
-          // from "no auditor here" and from "the auditor found nothing" to
-          // anyone watching the room — and one writer omitting the stamp took
-          // hours to find precisely because all three look like silence.
-          process.stderr.write(
-            `[auditor] skipped promotion at sequence ${String(record.sequence)}: ` +
-              `event carries no repositoryId/projectId to audit against\n`,
-          );
-          continue;
-        }
-        await this.auditCanonicalAdvance({
-          projectId,
-          repositoryId,
-          previousRevision,
-          revision,
-          sequence: record.sequence,
-        });
-      }
-    } catch (error) {
-      // A failed poll must never take the gateway down or stop the next one.
-      process.stderr.write(
-        `[auditor] poll failed: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
-      );
-    }
-  }
-
-  /**
-   * One repository's audit of one canonical advance.
-   *
-   * The diff base is the last revision this repository's auditor actually
-   * finished looking at — not the `previousRevision` of the event that woke
-   * it. That is what makes a missed event harmless: a promotion that landed
-   * while the process was down, or while an earlier audit was still running,
-   * is inside the next audit's range instead of being skipped. The first
-   * audit in a repository has no such base and uses the event's own.
-   */
-  private async auditCanonicalAdvance(input: {
-    projectId: string;
-    repositoryId: string;
-    previousRevision: string;
-    revision: string;
-    sequence: number;
-  }): Promise<void> {
-    const { projectId, repositoryId, revision, sequence } = input;
-    if (this.auditsRunning.has(repositoryId)) {
-      // An audit outlives the poll that started it. Skipping here rather than
-      // queueing is deliberate: the next promotion's audit will diff from the
-      // running one's base and cover this change too, so nothing is lost and
-      // a busy repository cannot stack audits on top of each other.
-      return;
-    }
-    const auditor = await this.auditorFor(projectId, repositoryId);
-    if (auditor === undefined) {
-      return;
-    }
-    const cursor = await this.options.store.getAuditorCursor(repositoryId);
-    if (cursor?.paused === true) {
-      // Switched off. The cursor is deliberately left where it is, so
-      // resuming audits everything that landed in the meantime rather than
-      // skipping it — which is the difference between pausing and demoting.
-      return;
-    }
-    if (cursor !== undefined && cursor.sequence >= sequence) {
-      // Already handled by a previous process. Not an error.
-      return;
-    }
-    // `""` is a row that exists without an audit behind it — written by
-    // pausing before anything had run — and is not a revision to diff from.
-    const fromRevision =
-      cursor?.revision === undefined || cursor.revision === ""
-        ? input.previousRevision
-        : cursor.revision;
-    if (fromRevision === revision) {
-      return;
-    }
-    if (await this.projectOverTokenBudget(projectId)) {
-      // The budget exists to stop unwatched spend, and this is the least
-      // watched spend in the product. `leaseWork` would refuse the *fix*
-      // tasks later, but it would not refuse this — the audit is a chat
-      // completion, not a leased task — so the check has to be here.
-      return;
-    }
-    this.auditsRunning.add(repositoryId);
-    try {
-      await this.runAudit({
-        projectId,
-        repositoryId,
-        auditor,
-        fromRevision,
-        toRevision: revision,
-      });
-      await this.options.store.saveAuditorCursor({
-        repositoryId,
-        revision,
-        sequence,
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      // The cursor is deliberately not advanced: an audit that failed has not
-      // examined this range, and the next promotion should still cover it.
-      process.stderr.write(
-        `[auditor] audit failed for ${repositoryId}: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
-      );
-    } finally {
-      this.auditsRunning.delete(repositoryId);
-    }
-  }
-
   /**
    * Audits everything that landed while auditing was switched off.
    *
@@ -8353,73 +8011,33 @@ export class ApiGateway {
    * Returns what happened, so the route can say so rather than making the
    * caller guess from a bare 200.
    */
-  async resumeAuditing(input: {
+  /**
+   * Audits the head on demand, for a room asking why nothing was said.
+   *
+   * Forwarded: the work and the state it needs are the watch's.
+   */
+  public async resumeAuditing(input: {
     projectId: string;
     repositoryId: string;
   }): Promise<"audited" | "nothing_to_audit" | "unavailable"> {
-    const { projectId, repositoryId } = input;
-    const auditor = await this.auditorFor(projectId, repositoryId);
-    if (auditor === undefined || this.options.operations.canonicalHead === undefined) {
-      return "unavailable";
-    }
-    if (this.auditsRunning.has(repositoryId)) {
-      return "audited";
-    }
-    const head = await this.options.operations.canonicalHead({
-      projectId,
-      repositoryId,
-    });
-    const cursor = await this.options.store.getAuditorCursor(repositoryId);
-    if (head === undefined || cursor?.revision === head) {
-      return "nothing_to_audit";
-    }
-    if (cursor === undefined || cursor.revision === "") {
-      // Never audited anything, so there is no "since" to audit from and
-      // nothing has changed on this auditor's watch. Anchoring here rather
-      // than reading the whole repository: an audit of an entire codebase is
-      // an unbounded cost nobody asked for by flicking a switch.
-      await this.options.store.saveAuditorCursor({
-        repositoryId,
-        revision: head,
-        sequence: cursor?.sequence ?? 0,
-        updatedAt: new Date().toISOString(),
-      });
-      return "nothing_to_audit";
-    }
-    if (await this.projectOverTokenBudget(projectId)) {
-      return "unavailable";
-    }
-    this.auditsRunning.add(repositoryId);
-    // Not awaited: an audit is a whole model call and the person who flicked
-    // the switch should not be watching a spinner for it. Failures land in
-    // the log, and the next promotion re-covers the range because the cursor
-    // only moves on success.
-    void (async () => {
-      try {
-        await this.runAudit({
-          projectId,
-          repositoryId,
-          auditor,
-          fromRevision: cursor.revision,
-          toRevision: head,
-        });
-        await this.options.store.saveAuditorCursor({
-          repositoryId,
-          revision: head,
-          sequence: cursor.sequence,
-          updatedAt: new Date().toISOString(),
-        });
-      } catch (error) {
-        process.stderr.write(
-          `[auditor] resume audit failed for ${repositoryId}: ${
-            error instanceof Error ? error.message : String(error)
-          }\n`,
-        );
-      } finally {
-        this.auditsRunning.delete(repositoryId);
-      }
-    })();
-    return "audited";
+    return await this.auditor.resumeAuditing(input);
+  }
+
+  private startAuditorWatch(): void {
+    this.auditor.startAuditorWatch();
+  }
+
+  private async dispatchApprovedFindings(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    viewerId: string;
+    reply: string;
+    auditor: ChannelMentionCandidate;
+    named: ChannelMentionCandidate[];
+    candidates: ChannelMentionCandidate[];
+  }): Promise<boolean> {
+    return await this.auditor.dispatchApprovedFindings(input);
   }
 
   /** This repository's auditor, if it has one that can still be reached. */
@@ -9417,7 +9035,7 @@ export class ApiGateway {
     return true;
   }
 
-  async auditorFor(
+  public async auditorFor(
     projectId: string,
     repositoryId: string,
   ): Promise<ChannelMentionCandidate | undefined> {
@@ -9473,7 +9091,7 @@ export class ApiGateway {
    * work with, read the same way, so a project has one budget rather than
    * one per feature that happens to spend.
    */
-  private async projectOverTokenBudget(projectId: string): Promise<boolean> {
+  public async projectOverTokenBudget(projectId: string): Promise<boolean> {
     const project = await this.options.store.getProject(projectId);
     const budget = projectBudgets(project?.policy).maxProjectTokensPerDay;
     if (budget === undefined) {
@@ -9487,346 +9105,6 @@ export class ApiGateway {
       })
     ).reduce((sum, entry) => sum + entry.totalTokens, 0);
     return spent >= budget;
-  }
-
-  /**
-   * Reads the change, asks the auditor about it, and writes what it says.
-   *
-   * The audit itself is a chat completion rather than a submitted task,
-   * because auditing is read-only and the task pipeline exists to land
-   * changes: a task that deliberately writes nothing comes back `empty`,
-   * which the pipeline records as a *failed* task. A clean audit is the
-   * commonest outcome there is, and it must not look like a failure.
-   *
-   * The consequence is that the diff has to be carried in the prompt — the
-   * provider CLIs run in an empty scratch directory and cannot read the
-   * repository — which is also why the diff is bounded before it gets here.
-   */
-  private async runAudit(input: {
-    projectId: string;
-    repositoryId: string;
-    auditor: ChannelMentionCandidate;
-    fromRevision: string;
-    toRevision: string;
-  }): Promise<void> {
-    // Fires on every canonical promotion, which is to say on every merge this
-    // project makes, and nobody asked for it. Refused before the diff is even
-    // read: a deployment that will not spend agents on its own initiative
-    // should not spend the repository work either.
-    if (localAgentsOnly()) {
-      return;
-    }
-    const { projectId, repositoryId, auditor } = input;
-    const diff = await this.options.operations.canonicalDiff?.({
-      projectId,
-      repositoryId,
-      fromRevision: input.fromRevision,
-      toRevision: input.toRevision,
-    });
-    if (diff === undefined || diff.patch.trim().length === 0) {
-      // A promotion with no textual change — a revert to an identical tree, a
-      // merge that moved the branch pointer only. Nothing to read.
-      return;
-    }
-    const objectives = await this.objectivesBehind(
-      repositoryId,
-      input.fromRevision,
-      input.toRevision,
-    );
-    const answer = await this.askAgent(
-      auditor,
-      buildAuditPrompt({
-        repositoryId,
-        fromRevision: input.fromRevision,
-        toRevision: input.toRevision,
-        files: diff.files,
-        patch: diff.patch,
-        truncated: diff.truncated,
-        ...(objectives.length === 0 ? {} : { objectives }),
-      }),
-      AUDIT_TIMEOUT_MS,
-    );
-    if (answer.text === undefined) {
-      throw new Error(answer.error ?? "the auditor did not answer");
-    }
-    const findings = parseAuditFindings(answer.text);
-    const authorId = `${auditor.userId}:${auditor.provider}`;
-    // One thread for the life of the repository, not one per audit.
-    //
-    // A thread per merge buried the channel and, worse, gave each audit no
-    // memory of the last: the point of an auditor is that it is reading the
-    // same codebase repeatedly, and every finding it has already raised is
-    // context for the next one. One thread is where that accumulates.
-    const root = await this.auditThreadRoot({
-      projectId,
-      repositoryId,
-      authorId,
-    });
-    // Said even when there is nothing to say, for now.
-    //
-    // The argument against is real — an auditor that posts "all clear" after
-    // every merge is one everybody mutes, and a muted auditor is worse than
-    // none. But it is inside a thread rather than in the room, and until
-    // somebody has watched it work at least once, silence and "not running"
-    // look exactly alike. Worth revisiting once it has earned trust.
-    await this.appendChannelThreadReply({
-      projectId,
-      repositoryId,
-      messageId: root.id,
-      authorId,
-      content:
-        findings.length === 0
-          ? `Audited ${String(diff.files.length)} file${
-              diff.files.length === 1 ? "" : "s"
-            } at ${input.toRevision.slice(0, 8)} — nothing to report` +
-            // An all-clear over a diff that was cut short is a different
-            // claim from an all-clear over the whole change, and the two read
-            // identically unless this says so. The findings path has carried
-            // the caveat since it was written; the clean path, where it
-            // matters more, did not.
-            (diff.truncated
-              ? ", though the change was too large to read in full."
-              : ".")
-          : formatAuditSummary({
-              findings,
-              fromRevision: input.fromRevision,
-              toRevision: input.toRevision,
-              fileCount: diff.files.length,
-              truncated: diff.truncated,
-            }),
-      // Same reasoning as the findings below: an audit's report of itself is
-      // what the thread is for, not the run thinking aloud.
-      kind: "outcome",
-    });
-    for (const finding of findings) {
-      await this.appendChannelThreadReply({
-        projectId,
-        repositoryId,
-        messageId: root.id,
-        authorId,
-        content: formatFinding(finding),
-        // A finding is the thing the audit exists to produce, so it is an
-        // outcome and not commentary. Left unmarked it defaulted to `agent`,
-        // which the thread reads as the run talking to itself and folds away
-        // into the thinking block — burying the one part anybody opened the
-        // thread for, and denying it the fold and the simplify control every
-        // other summary gets.
-        kind: "outcome",
-      });
-    }
-    // Findings get a line in the room; a clean audit does not.
-    //
-    // The mute argument above holds for "all clear after every merge" and
-    // fails for a defect nobody has seen yet. Bumping the thread moves it to
-    // the foot of the channel but says nothing about what is in it, so a high
-    // finding looked exactly like a routine all-clear until somebody thought
-    // to open it — which is the same silence problem one layer up.
-    if (findings.length > 0) {
-      const high = findings.filter(
-        (finding) => finding.severity === "high",
-      ).length;
-      const worst = findings[0];
-      await this.appendChannelEntry({
-        projectId,
-        repositoryId,
-        // From the auditor, not from the coordinator. A system line is the
-        // deployment speaking in its own name, which is right for "a run could
-        // not start" and wrong for this: an audit is an agent's own reading of
-        // a change, and attributing it to the machinery made the one agent
-        // that works unprompted the only one with no face in the room.
-        kind: "agent",
-        authorId,
-        content:
-          `Audit of ${String(diff.files.length)} file` +
-          `${diff.files.length === 1 ? "" : "s"} found ` +
-          `${String(findings.length)} issue` +
-          `${findings.length === 1 ? "" : "s"}` +
-          `${high > 0 ? ` (${String(high)} high)` : ""}` +
-          `${worst === undefined ? "" : ` — ${worst.title}`}` +
-          `. Open the audit thread to approve a fix.`,
-      });
-    }
-    // Back to the foot of the channel, which is also what keeps it findable:
-    // `auditThreadRoot` looks through recent messages, and a thread bumped on
-    // every audit never falls out of that window.
-    await this.options.store
-      .bumpChannelMessage(repositoryId, root.id, new Date().toISOString())
-      .catch(() => undefined);
-  }
-
-  /**
-   * The one thread this repository's audits are written into.
-   *
-   * Found by looking rather than remembered, because anything remembered here
-   * is remembered in this process and lost on the next deploy — which is the
-   * fault that has already cost this channel a summary, an ending and a file
-   * list. The root carries a fixed opening line, and that line is the marker.
-   */
-  private async auditThreadRoot(input: {
-    projectId: string;
-    repositoryId: string;
-    authorId: string;
-  }): Promise<{ id: string }> {
-    const recent = await this.options.store.listChannelMessages(
-      input.repositoryId,
-      input.authorId,
-      { limit: 60 },
-    );
-    const existing = recent.find(
-      (message) =>
-        message.authorId === input.authorId &&
-        message.content.startsWith(AUDIT_THREAD_TITLE),
-    );
-    if (existing !== undefined) {
-      return existing;
-    }
-    return await this.appendChannelEntry({
-      projectId: input.projectId,
-      repositoryId: input.repositoryId,
-      kind: "agent",
-      authorId: input.authorId,
-      content: `${AUDIT_THREAD_TITLE} — every audit of this repository lands here.`,
-    });
-  }
-
-  /**
-   * Turns an approval in an auditor's thread into real work.
-   *
-   * This is the gate the whole feature hangs on. The auditor finds things
-   * unprompted, but nothing it finds becomes work until a person says so —
-   * so an approval is the only thing here that can spend anything, and a
-   * reply that is not clearly an approval must fall through untouched to the
-   * ordinary thread behaviour rather than being guessed at.
-   *
-   * Returns whether it handled the reply.
-   */
-  private async dispatchApprovedFindings(input: {
-    projectId: string;
-    repositoryId: string;
-    messageId: string;
-    viewerId: string;
-    reply: string;
-    auditor: ChannelMentionCandidate;
-    named: ChannelMentionCandidate[];
-    candidates: ChannelMentionCandidate[];
-  }): Promise<boolean> {
-    const { projectId, repositoryId, messageId, auditor, reply } = input;
-    if (!readsAsApproval(reply)) {
-      return false;
-    }
-    const root = await this.options.store.getChannelMessage(
-      repositoryId,
-      messageId,
-      input.viewerId,
-    );
-    // Findings are numbered per audit, and every audit of this repository now
-    // lands in one thread — so the replies hold 1, 2, 3, then 1, 2 again, and
-    // reading them as one list makes "fix 3" match two different findings and
-    // dispatch both. Numbering is only unique inside an audit, so that is the
-    // unit this reads.
-    const replies = root?.replies ?? [];
-    // Each audit opens with its summary; findings follow it. The last summary
-    // is therefore where the newest audit's findings begin.
-    const latestStart = replies.reduce(
-      (found, entry, index) =>
-        parseFindingReply(entry.content) === undefined &&
-        /^Audited\b/u.test(entry.content.trim())
-          ? index
-          : found,
-      -1,
-    );
-    const parse = (entries: typeof replies): AuditFinding[] =>
-      entries
-        .map((entry) => parseFindingReply(entry.content))
-        .filter((finding): finding is AuditFinding => finding !== undefined);
-    const latest = parse(
-      latestStart === -1 ? replies : replies.slice(latestStart),
-    );
-    const everything = parse(replies);
-    if (everything.length === 0) {
-      return false;
-    }
-    // The newest audit first, because that is what somebody replying to it
-    // means. Older findings stay reachable — scrolling up and approving one is
-    // a real thing to do — but only once the newest audit has had its say.
-    const fromLatest = findingsReferencedBy(reply, latest);
-    const widened =
-      fromLatest.length > 0 ? fromLatest : findingsReferencedBy(reply, everything);
-    // A number that means two different findings from two different audits.
-    // Neither is more likely than the other, and dispatching both would spend
-    // somebody's account twice on a request that named one thing.
-    const ambiguous =
-      fromLatest.length === 0 &&
-      new Set(widened.map((finding) => finding.index)).size < widened.length;
-    const approved = ambiguous ? [] : widened;
-    if (approved.length === 0) {
-      // An approval that could mean any of several findings. Asking is the
-      // only honest response: picking one would be a guess that spends
-      // somebody's account, and doing nothing silently is the failure this
-      // whole path exists to remove.
-      await this.appendChannelThreadReply({
-        projectId,
-        repositoryId,
-        messageId,
-        authorId: `${auditor.userId}:${auditor.provider}`,
-        content: ambiguous
-          ? `That number matches findings from more than one audit in this ` +
-            `thread. Quote a few words from the one you mean, or say "all" ` +
-            `for every finding in the latest audit.`
-          : `Which one? Reply with its number — "yes, fix 2" — or "all" for ` +
-            `every finding above.`,
-      });
-      return true;
-    }
-    for (const finding of approved) {
-      // Who does the work, in the order the evidence is strongest. Somebody
-      // named in the reply is unambiguous and wins. Otherwise a finding the
-      // auditor said it could fix itself goes back to the auditor — that is
-      // the "handle the small ones yourself" case, and it is the auditor's
-      // own claim, made before anybody approved anything, so it cannot be
-      // shaped to grab work. Anything else goes to whichever agent's role
-      // and recent work best matches the finding.
-      const assignee =
-        input.named[0] ??
-        (finding.selfFixable
-          ? auditor
-          : ((await this.bestFitFor({
-              repositoryId,
-              text: `${finding.title} ${finding.detail} ${finding.files.join(" ")}`,
-              candidates: input.candidates.filter(
-                (candidate) =>
-                  candidate.visibility === "org" ||
-                  candidate.userId === input.viewerId,
-              ),
-            })) ?? auditor));
-      // The same refusal every other dispatch path gives. An approval is not
-      // consent to spend a stranger's subscription.
-      if (
-        assignee.visibility === "personal" &&
-        assignee.userId !== input.viewerId
-      ) {
-        await this.appendChannelThreadReply({
-          projectId,
-          repositoryId,
-          messageId,
-          authorId: `${auditor.userId}:${auditor.provider}`,
-          content:
-            `@${assignee.name} is personal to ${assignee.userName} — only ` +
-            `they can task it here. Name an org-wide agent instead.`,
-        });
-        continue;
-      }
-      await this.dispatchOneMention({
-        projectId,
-        repositoryId,
-        content: fixObjectiveFor(finding),
-        senderId: input.viewerId,
-        candidate: assignee,
-        threadMessageId: messageId,
-        trigger: "audit_fix",
-      });
-    }
-    return true;
   }
 
   /** Resolves a persisted task back to the channel agent that owns it. */
@@ -10002,7 +9280,7 @@ export class ApiGateway {
    * so the only open question is who, and the fallback is the auditor rather
    * than silence.
    */
-  private async bestFitFor(input: {
+  public async bestFitFor(input: {
     repositoryId: string;
     text: string;
     candidates: ChannelMentionCandidate[];
@@ -10091,7 +9369,7 @@ export class ApiGateway {
    * than a placeholder: an objective the auditor cannot trust is worse than
    * none, because it would be judged against.
    */
-  private async objectivesBehind(
+  public async objectivesBehind(
     repositoryId: string,
     fromRevision: string,
     toRevision: string,
@@ -10899,7 +10177,7 @@ export class ApiGateway {
    * coordinator arguing with itself. There the two tasks are told apart by
    * what they were asked to do.
    */
-  private async channelAgentNamer(
+  public async channelAgentNamer(
     projectId: string,
     repositoryId: string,
   ): Promise<{
@@ -10980,239 +10258,62 @@ export class ApiGateway {
   }
 
   /**
-   * The held agent's own account of one admission decision, in its thread.
+   * The arbitration lines standing in rooms — see `arbitration-notices.ts`.
    *
-   * It used to be a line in the room under the coordinator's name, on the
-   * argument that the coordinator made the decision and putting it in an
-   * agent's mouth would suggest agents negotiate with each other. What that
-   * produced was a referee's announcement floating in the channel beside the
-   * threads it was about, and a person following one agent's work watched it
-   * go quiet with the explanation somewhere else entirely. Whether the
-   * coordinator or the agent decided is not the reader's question; "why has
-   * this stopped" is, and the thread is where it is asked.
-   *
-   * So the agent says it, in the first person, where its other lines are: "I'll
-   * start once they're done". It is still one sentence — the other agent, and
-   * what happens next. Every earlier version spent a second and third clause
-   * justifying the decision, which read as the coordinator explaining itself
-   * to a room that only wanted to know the order. The blocker may have
-   * finished between the event and this lookup — the line still stands, it
-   * just reads as history.
-   *
-   * Two agents is the ordinary case, not the only one. One agent given two
-   * tasks that collide is arbitrated exactly like two agents that do, and the
-   * sentence came out "@Hades and @Hades have conflicting files — @Hades will
-   * wait for @Hades to go first": a true decision phrased as a stranger's
-   * quarrel, naming the one thing the reader already knew and none of what
-   * they needed. So when both sides resolve to one agent it is said as what it
-   * is — two tasks, and the order they will be taken in — with the tasks told
-   * apart by what each was asked to do.
-   *
-   * Answers whether the thread has now been told, so the caller can leave the
-   * generic narration of the same event unsaid: a thread does not need to be
-   * handed "waiting my turn" and "looks like @Codex has the same files open"
-   * one after the other about a single admission.
+   * These four forward rather than being called through `this.notices`
+   * directly because the call sites are scattered across a dozen places in
+   * this file, and a rename here is a smaller change than a rename in all of
+   * them. The behaviour and the state moved; the names did not.
    */
   private async announceArbitration(
     watched: { projectId: string; repositoryId: string; taskId: string },
     data: Record<string, unknown>,
   ): Promise<boolean> {
-    const describe = await this.channelAgentNamer(
-      watched.projectId,
-      watched.repositoryId,
-    );
-    const held = describe.name(watched.taskId);
-    const blockedBy = (
-      Array.isArray(data["blockedBy"]) ? data["blockedBy"] : []
-    ).filter((entry): entry is string => typeof entry === "string");
-    // Deduplicated by the name that will be printed, not by task id. Two of
-    // one agent's tasks blocking a third resolve to the same name, and
-    // "@Hades and @Hades" is not a list of two blockers.
-    const blockers = [
-      ...new Set(blockedBy.slice(0, 2).map((entry) => describe.name(entry))),
-    ];
-    const blocker =
-      blockers.length > 0 ? blockers.join(" and ") : "work in flight";
-    // Only a resolved agent name can be shared by two tasks and still mean one
-    // agent. The objective fallback is per task, so two of them matching would
-    // be two tasks asked for the same thing, which is a different sentence.
-    const oneAgent =
-      held.startsWith("@") && blockers.length === 1 && blockers[0] === held;
-    const heldWork = describe.objective(watched.taskId);
-    const blockerWork =
-      blockedBy.length > 0
-        ? [...new Set(blockedBy.slice(0, 2).map(describe.objective))].join(
-            " and ",
-          )
-        : "the work already in flight";
-    const fileList = (value: unknown): string[] =>
-      (Array.isArray(value) ? value : []).filter(
-        (entry): entry is string => typeof entry === "string",
-      );
-    const deferred: DeferredRef[] = (
-      Array.isArray(data["deferredResources"]) ? data["deferredResources"] : []
-    ).flatMap((entry) => {
-      if (typeof entry !== "object" || entry === null) {
-        return [];
-      }
-      const resource = entry as {
-        resourceType?: unknown;
-        resourceId?: unknown;
-        heldBy?: unknown;
-        implied?: unknown;
-      };
-      return typeof resource.resourceId === "string"
-        ? [
-            {
-              resourceType:
-                typeof resource.resourceType === "string"
-                  ? resource.resourceType
-                  : "file",
-              resourceId: resource.resourceId,
-              implied: resource.implied === true,
-            },
-          ]
-        : [];
-    });
-    // Who holds the withheld half, for the case `blockedBy` is empty by
-    // design. Taken from the resources the room is about to be told about, so
-    // the name in the sentence is the name behind the loss it describes.
-    const holders = [
-      ...new Set(
-        (Array.isArray(data["deferredResources"])
-          ? data["deferredResources"]
-          : []
-        )
-          .flatMap((entry) =>
-            typeof entry === "object" && entry !== null
-              ? ((entry as { heldBy?: unknown }).heldBy ?? [])
-              : [],
-          )
-          .filter((entry): entry is string => typeof entry === "string")
-          .slice(0, 2)
-          .map((entry) => describe.name(entry)),
-      ),
-    ];
-    const status = String(data["status"] ?? "");
-    const approved =
-      status === "approved" || status === "approved_with_constraints";
-    // Whose voice this is decides the sentence, so it is settled before the
-    // sentence is written rather than after.
-    const speaker = await this.arbitrationNoticeThread(watched);
-    const announcement = {
-      held,
-      blockedByNames: blockers,
-      holderNames: holders,
-      heldWork,
-      blockerWork,
-      status,
-      firstPerson: speaker !== undefined,
-      partial: data["partial"] === true,
-      grantedFiles: fileList(data["grantedFiles"]),
-      deferred,
-    };
-    if (approved && data["partial"] !== true) {
-      // The hold described a temporary condition, and the condition is over.
-      // In a thread that is worth a sentence — the agent said it was waiting,
-      // so it says what it is doing now, and the stale line goes rather than
-      // standing above its own contradiction. In the room the line is only
-      // ever removed: nobody there is following this particular run, and a
-      // second announcement about it starting is the noise that moving these
-      // into threads was meant to end.
-      let spoken = false;
-      await this.replaceArbitrationNotice(
-        watched,
-        (prior) => {
-          // Nothing standing, or nothing standing in a thread, or nobody left
-          // to say it: all three are simply a withdrawal, because a release
-          // only means anything as the same voice that said it was waiting.
-          if (prior?.replyId === undefined || speaker === undefined) {
-            return undefined;
-          }
-          spoken = true;
-          // Named from what the hold recorded, not from this event: an
-          // approval carries no `blockedBy`, because from its own point of
-          // view there is nothing left to be blocked by.
-          const cleared = prior.alsoNamed.slice(0, 2);
-          return {
-            content: arbitrationReleaseLine({
-              ...announcement,
-              blockedByNames: [...new Set(cleared.map(describe.name))],
-              blockerWork:
-                cleared.length > 0
-                  ? [...new Set(cleared.map(describe.objective))].join(" and ")
-                  : blockerWork,
-            }),
-            alsoNamed: [],
-          };
-        },
-        speaker,
-      );
-      return spoken;
-    }
-    const content = arbitrationLine(announcement);
-    await this.replaceArbitrationNotice(
-      watched,
-      () => ({ content, alsoNamed: blockedBy }),
-      speaker,
-    );
-    return speaker !== undefined;
+    return await this.notices.announceArbitration(watched, data);
   }
 
-  /**
-   * The thread an arbitration line belongs in, and the agent that speaks it.
-   *
-   * Both halves have to resolve or there is nothing to say in an agent's name:
-   * a thread with no agent behind it would put first-person words under
-   * whoever last posted, and an agent with no thread has nowhere to say them.
-   * Either failure falls back to the room-level coordinator line, which is
-   * what this used to be for everybody.
-   *
-   * The account is resolved from the task rather than taken from the watcher's
-   * `authorId`, because that field is whoever caused the watch to exist — for
-   * a run resumed from the dashboard it is the person who pressed play, and
-   * putting an agent's sentence under their name is worse than saying it in
-   * the room.
-   */
   private async arbitrationNoticeThread(watched: {
     projectId: string;
     repositoryId: string;
     taskId: string;
   }): Promise<{ messageId: string; authorId: string } | undefined> {
-    const task = (
-      await this.options.store
-        .listSubmittedTasks({ repositoryId: watched.repositoryId })
-        .catch((): SubmittedTask[] => [])
-    ).find((entry) => entry.id === watched.taskId);
-    if (task === undefined) {
-      return undefined;
-    }
-    const agent = await this.watchedTaskAgent(task).catch(() => undefined);
-    if (agent === undefined) {
-      return undefined;
-    }
-    // The live watch first: it holds the root this run is already narrating
-    // into, which is the thread the reader has open. `conversationId` is the
-    // same fact on the row for a run this process is not following, and the
-    // scan is what is left for a task whose thread predates that column.
-    let messageId =
-      this.watchedChannelTasks.get(watched.taskId)?.messageId ??
-      task.conversationId;
-    if (messageId === undefined) {
-      messageId = (
-        await this.options.store
-          .listChannelMessages(watched.repositoryId, "", { limit: 50 })
-          .catch((): ChannelMessage[] => [])
-      ).find((message) => message.taskId === watched.taskId)?.id;
-    }
-    return messageId === undefined
-      ? undefined
-      : {
-          messageId,
-          authorId: `${agent.ownerId}:${agent.provider}`,
-        };
+    return await this.notices.arbitrationNoticeThread(watched);
   }
 
+  private async withdrawArbitrationNotice(watched: {
+    projectId: string;
+    repositoryId: string;
+    taskId: string;
+  }): Promise<void> {
+    await this.notices.withdrawArbitrationNotice(watched);
+  }
+
+  private async reconcileArbitrationNotices(): Promise<void> {
+    await this.notices.reconcileArbitrationNotices();
+  }
+
+  /**
+   * The agent's own account of a canonical-moved replan.
+   *
+   * Names the winner by looking up which task's promotion produced the
+   * revision this one is now replanning against — the event itself only
+   * knows the revision, and "another task landed first" is a worse sentence
+   * than the objective of the task that did.
+   *
+   * Said in the replanning agent's thread, in its own voice, for the same
+   * reason the holds are: starting over is the sort of thing the person
+   * waiting on this work needs explained where they are already looking, and
+   * a referee's summary in the channel was reaching everybody except them.
+   * The room-level line under the coordinator's name is what is left when no
+   * agent account resolves.
+   *
+   * Unmarked, and so never withdrawn: this is the past tense about something
+   * that happened, and it stays as the record of why an agent started again.
+   *
+   * Answers whether the thread has been told, so the caller can leave the
+   * generic "something moved underneath me" unsaid beside the version that
+   * says what moved.
+   */
   /**
    * Stops the work a deleted message asked for, if it is still running.
    *
@@ -11228,7 +10329,7 @@ export class ApiGateway {
    * takes. Returns whether anything was actually stopped, which is what the
    * caller reports back so the UI can say so.
    */
-  async stopTaskBehindMessage(input: {
+  public async stopTaskBehindMessage(input: {
     projectId: string;
     repositoryId: string;
     taskId: string | undefined;
@@ -11283,347 +10384,6 @@ export class ApiGateway {
     return true;
   }
 
-  /**
-   * Keeps at most one temporary sequencing line standing for a held task.
-   *
-   * The prior line is looked for in the thread as well as in memory. A hold
-   * routinely outlives the process that announced it — this deployment
-   * restarts on every deploy, and being held is precisely a state that waits —
-   * so trusting the Map alone meant a restart both stranded the old line and
-   * posted a second one beside it the next time the same task was arbitrated.
-   *
-   * What replaces it is asked for rather than passed in, because the answer
-   * depends on what was standing: a release only has anything to say if there
-   * was a hold to release, and it names the work it was waiting on from what
-   * that hold recorded. Answering nothing withdraws and leaves the thread
-   * quiet, which is what every ending does.
-   */
-  private async replaceArbitrationNotice(
-    watched: { projectId: string; repositoryId: string; taskId: string },
-    next?: (prior: StandingArbitrationNotice | undefined) =>
-      | { content: string; alsoNamed: readonly string[] }
-      | undefined,
-    speaker?: { messageId: string; authorId: string },
-  ): Promise<void> {
-    const prior = await this.findArbitrationNotice(watched);
-    const replacement = next?.(prior);
-    if (replacement !== undefined && prior?.content === replacement.content) {
-      return;
-    }
-    if (prior !== undefined) {
-      await this.dropArbitrationNotice(prior);
-      this.arbitrationNotices.delete(prior.replyId ?? prior.messageId);
-    }
-    if (replacement === undefined) {
-      return;
-    }
-    const { content, alsoNamed } = replacement;
-    const posted: { messageId: string; replyId?: string } =
-      speaker === undefined
-        ? // No agent account resolved, so the room says it in its own name and
-          // carries the task on the message — the shape every notice had
-          // before these moved into threads, and the only one a line with
-          // nobody to attribute it to can take.
-          {
-            messageId: (
-              await this.appendChannelEntry({
-                projectId: watched.projectId,
-                repositoryId: watched.repositoryId,
-                kind: "system",
-                authorId: "coordinator",
-                content,
-                taskId: watched.taskId,
-              })
-            ).id,
-          }
-        : {
-            messageId: speaker.messageId,
-            // The agent's own kind, so the bubble is the agent's: this is the
-            // same account it gives of everything else it does, and the reader
-            // already knows who is speaking from the name on it.
-            replyId: (
-              await this.appendChannelThreadReply({
-                projectId: watched.projectId,
-                repositoryId: watched.repositoryId,
-                messageId: speaker.messageId,
-                kind: "agent",
-                authorId: speaker.authorId,
-                content,
-              })
-            ).id,
-          };
-    // Only a marked line is remembered, because the marker is the whole of
-    // what makes one findable again — an unmarked one (the release) is a
-    // statement about something that happened, and is never taken back.
-    if (content.startsWith(CHANNEL_ARBITRATION_PREFIX)) {
-      this.arbitrationNotices.set(posted.replyId ?? posted.messageId, {
-        projectId: watched.projectId,
-        repositoryId: watched.repositoryId,
-        messageId: posted.messageId,
-        ...(posted.replyId === undefined ? {} : { replyId: posted.replyId }),
-        taskId: watched.taskId,
-        content,
-        kind: "hold",
-        alsoNamed,
-      });
-    }
-  }
-
-  /**
-   * Takes back a notice because the condition it describes is over.
-   *
-   * Called from every path a held task can leave by — it finished, it failed,
-   * it was cancelled from its thread, it never started, the watchdog gave up
-   * on it. Each of those used to drop the watcher and leave "starts once the
-   * other one is done" standing in the room as a promise about a run that no
-   * longer exists.
-   *
-   * Silent and best-effort: an ending has already been said, and a sequencing
-   * notice ceasing to be true is not itself news.
-   */
-  private async withdrawArbitrationNotice(watched: {
-    projectId: string;
-    repositoryId: string;
-    taskId: string;
-  }): Promise<void> {
-    await this.replaceArbitrationNotice(watched).catch(() => undefined);
-  }
-
-  /**
-   * The hold standing for this task, whether or not this process posted it.
-   *
-   * Memory first, because it is exact and free. Failing that the thread and
-   * the room are read, which is the case that matters: a hold routinely
-   * outlives the process that announced it, and after a restart the only
-   * record left is the line itself.
-   *
-   * Newest first in both, because what is being replaced is whatever was last
-   * said about this task's collision, and an older line about the same one is
-   * exactly what a second announcement would otherwise sit beside.
-   */
-  private async findArbitrationNotice(watched: {
-    projectId: string;
-    repositoryId: string;
-    taskId: string;
-  }): Promise<StandingArbitrationNotice | undefined> {
-    const remembered = [...this.arbitrationNotices.values()]
-      .reverse()
-      .find(
-        (notice) =>
-          notice.kind === "hold" && notice.taskId === watched.taskId,
-      );
-    if (remembered !== undefined) {
-      return remembered;
-    }
-    const messages =
-      (await this.options.store
-        .listChannelMessages(watched.repositoryId, "", { limit: 50 })
-        .catch(() => undefined)) ?? [];
-    // Only a hold is replaced by a hold. An advisory line about the same task
-    // is a different statement with a different end condition, and silently
-    // swapping one for the other would lose the record that two agents were
-    // allowed to overlap.
-    const isHold = (entry: {
-      kind: string;
-      authorId: string;
-      content: string;
-    }): boolean =>
-      isCoordinatorNotice(entry) &&
-      arbitrationNoticeKind(entry.content) === "hold";
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message === undefined || message.taskId !== watched.taskId) {
-        continue;
-      }
-      // The thread's own replies before the root, because that is where a
-      // hold is written now. The root form is the room-level fallback, and
-      // every notice a deployment before this one left behind.
-      const replies = message.replies ?? [];
-      for (let at = replies.length - 1; at >= 0; at -= 1) {
-        const reply = replies[at];
-        if (reply !== undefined && isHold(reply)) {
-          return {
-            projectId: watched.projectId,
-            repositoryId: watched.repositoryId,
-            messageId: message.id,
-            replyId: reply.id,
-            taskId: watched.taskId,
-            content: reply.content,
-            kind: "hold",
-            alsoNamed: [],
-          };
-        }
-      }
-      if (isHold(message)) {
-        return {
-          projectId: watched.projectId,
-          repositoryId: watched.repositoryId,
-          messageId: message.id,
-          taskId: watched.taskId,
-          content: message.content,
-          kind: "hold",
-          alsoNamed: [],
-        };
-      }
-    }
-    return undefined;
-  }
-
-  /** One notice removed, and the removal broadcast. */
-  private async dropArbitrationNotice(notice: {
-    projectId: string;
-    repositoryId: string;
-    messageId: string;
-    replyId?: string;
-  }): Promise<void> {
-    if (notice.replyId !== undefined) {
-      await this.options.store.deleteChannelReply(
-        notice.repositoryId,
-        notice.messageId,
-        notice.replyId,
-      );
-      await this.options.store.appendAudit(undefined, {
-        type: "channel_reply_deleted",
-        data: {
-          projectId: notice.projectId,
-          repositoryId: notice.repositoryId,
-          messageId: notice.messageId,
-          replyId: notice.replyId,
-        },
-      });
-      return;
-    }
-    await this.options.store.deleteChannelMessage(
-      notice.repositoryId,
-      notice.messageId,
-    );
-    await this.options.store.appendAudit(undefined, {
-      type: "channel_message_deleted",
-      data: {
-        projectId: notice.projectId,
-        repositoryId: notice.repositoryId,
-        messageId: notice.messageId,
-      },
-    });
-  }
-
-  /**
-   * Sweeps up arbitration notices whose collision is over.
-   *
-   * The live paths withdraw their own — this is for the ones no live path can
-   * reach. Three shapes, all of which left a permanent line in the room:
-   *
-   *   - a restart between the hold and its release, after which nothing in
-   *     memory knew the message existed;
-   *   - the blocker finishing while the held task carries on without ever
-   *     being re-admitted, so the sentence "starts once that one is done"
-   *     describes something that already happened;
-   *   - the advisory "can run together" line, which is about two runs that
-   *     are running, long after both of them stopped.
-   *
-   * A notice whose tasks the store cannot find at all counts as over too: the
-   * work is gone, and the line about it is the only thing left claiming it is
-   * in flight.
-   */
-  private async reconcileArbitrationNotices(): Promise<void> {
-    const repositories = await this.options.store.listRepositories();
-    for (const repository of repositories) {
-      const [messages, tasks] = await Promise.all([
-        this.options.store.listChannelMessages(repository.id, "", {
-          limit: 40,
-        }),
-        this.options.store.listSubmittedTasks({ repositoryId: repository.id }),
-      ]);
-      const byId = new Map(tasks.map((task) => [task.id, task]));
-      const settled = (taskId: string | undefined): boolean => {
-        if (taskId === undefined) {
-          return false;
-        }
-        const status = byId.get(taskId)?.status;
-        return status === undefined || TASK_STATUSES_PAST_STOPPING.has(status);
-      };
-      for (const message of messages) {
-        const subject = message.taskId;
-        if (subject === undefined) {
-          // Written before notices carried their task, or a thread that has
-          // none. Nothing to decide it against, and guessing from the words is
-          // how a line that is still true ends up lost.
-          continue;
-        }
-        // A hold hangs in the held task's own thread now, so both places are
-        // read: the replies for what this deployment writes, the root itself
-        // for the room-level fallback and for every notice an older
-        // deployment left standing.
-        const candidates: {
-          id: string;
-          entry: { kind: string; authorId: string; content: string };
-          replyId?: string;
-        }[] = [
-          ...(message.replies ?? []).map((reply) => ({
-            id: reply.id,
-            entry: reply,
-            replyId: reply.id,
-          })),
-          { id: message.id, entry: message },
-        ];
-        const notices = candidates.filter((candidate) =>
-          isCoordinatorNotice(candidate.entry),
-        );
-        for (const notice of notices) {
-          const tracked = this.arbitrationNotices.get(notice.id);
-          const others = tracked?.alsoNamed ?? [];
-          const kind =
-            tracked?.kind ?? arbitrationNoticeKind(notice.entry.content);
-          // A hold is over as soon as either end of it is: the held task has
-          // stopped needing to be told when it starts, or the work it was
-          // waiting on has finished. An advisory line describes two runs being
-          // in flight together, so it waits for both of them to stop. A notice
-          // this process did not post — the restart case — knows only its own
-          // subject, which is what the thread it hangs in records.
-          const over =
-            kind === "advisory"
-              ? [subject, ...others].every((id) => settled(id))
-              : settled(subject) ||
-                (others.length > 0 && others.every((id) => settled(id)));
-          if (!over) {
-            continue;
-          }
-          await this.dropArbitrationNotice({
-            projectId: message.projectId,
-            repositoryId: repository.id,
-            messageId: message.id,
-            ...(notice.replyId === undefined
-              ? {}
-              : { replyId: notice.replyId }),
-          }).catch(() => undefined);
-          this.arbitrationNotices.delete(notice.id);
-        }
-      }
-    }
-  }
-
-  /**
-   * The agent's own account of a canonical-moved replan.
-   *
-   * Names the winner by looking up which task's promotion produced the
-   * revision this one is now replanning against — the event itself only
-   * knows the revision, and "another task landed first" is a worse sentence
-   * than the objective of the task that did.
-   *
-   * Said in the replanning agent's thread, in its own voice, for the same
-   * reason the holds are: starting over is the sort of thing the person
-   * waiting on this work needs explained where they are already looking, and
-   * a referee's summary in the channel was reaching everybody except them.
-   * The room-level line under the coordinator's name is what is left when no
-   * agent account resolves.
-   *
-   * Unmarked, and so never withdrawn: this is the past tense about something
-   * that happened, and it stays as the record of why an agent started again.
-   *
-   * Answers whether the thread has been told, so the caller can leave the
-   * generic "something moved underneath me" unsaid beside the version that
-   * says what moved.
-   */
   private async announceReplay(
     watched: { projectId: string; repositoryId: string; taskId: string },
     data: Record<string, unknown>,
@@ -12211,7 +10971,7 @@ export class ApiGateway {
   }
 
   /** One channel entry, stored and announced on the event stream. */
-  private async appendChannelEntry(input: {
+  public async appendChannelEntry(input: {
     projectId: string;
     repositoryId: string;
     // "user" is here because a task dispatched with no posted request has to
@@ -12671,7 +11431,7 @@ export class ApiGateway {
    * back. The vendor then picks between that person's own agents, exactly as
    * `channelTaskAuthorId` picks.
    */
-  private async watchedTaskAgent(
+  public async watchedTaskAgent(
     task: SubmittedTask,
   ): Promise<{ ownerId: string; provider: string } | undefined> {
     if (task.projectId === undefined || task.submittedBy === undefined) {
@@ -12806,7 +11566,7 @@ export class ApiGateway {
    * so the same reconcile that shows a new message also shows a new reply —
    * a thread that only updated on reload would be no better than silence.
    */
-  private async appendChannelThreadReply(input: {
+  public async appendChannelThreadReply(input: {
     projectId: string;
     repositoryId: string;
     messageId: string;
@@ -15484,3 +14244,15 @@ export class ApiGateway {
     });
   }
 }
+
+// Re-exported because these were always part of this module's surface and
+// several callers — routes, `apps/web`, the test suites — import them from
+// here. The implementations live in `thread-text.ts` now; the names did not
+// move, so nothing outside had to change.
+export {
+  agentIdentity,
+  normaliseThreadTitle,
+  summariseObjective,
+  summariseThreadTitle,
+  withRoleContext,
+} from "./thread-text.js";

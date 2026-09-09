@@ -4,7 +4,7 @@ import test from "node:test";
 import { TaskCancellationRegistry } from "@coord/coordinator";
 import {
   DEFAULT_ORGANIZATION_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
 } from "@coord/persistence";
 
 import { cancelTasks, pauseTasks, resumeTasks } from "./commands.js";
@@ -21,7 +21,7 @@ import { cancelTasks, pauseTasks, resumeTasks } from "./commands.js";
 const BASE_REVISION = "c".repeat(40);
 
 async function harness() {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: "repo",
     path: "/nowhere/canonical.git",

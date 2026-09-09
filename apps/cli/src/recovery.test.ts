@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
@@ -28,7 +28,7 @@ import {
 async function createFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "crecover-"));
   const project = await CoordinatorProject.init(root);
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const repositories = new RepositoryService();
 
   const sourcePath = path.join(root, "src-repo");
@@ -440,7 +440,7 @@ test("an imported mirror keeps a reflog of its canonical branch", async () => {
 });
 
 test("the stranded sweep spares a fresh claim and requeues an abandoned one", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: "repo_sweep",
     path: "/tmp/repo_sweep.git",
@@ -497,7 +497,7 @@ test("the stranded sweep spares a fresh claim and requeues an abandoned one", as
 });
 
 test("the stranded sweep leaves a claim with a live lease behind it alone", async () => {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: "repo_live",
     path: "/tmp/repo_live.git",
@@ -549,13 +549,13 @@ test("a restart only promises a restart to work it actually requeued", async () 
     ["claimed", async () => {}, "submitted"],
     [
       "open",
-      async (store: InMemoryCoordinationStore, taskId: string) => {
+      async (store: SqliteCoordinationStore, taskId: string) => {
         await store.openSubmittedTask(taskId);
       },
       "open",
     ],
   ] as const) {
-    const store = new InMemoryCoordinationStore();
+    const store = SqliteCoordinationStore.open(":memory:");
     await store.saveRepository({
       id: "repo_drain",
       path: "/tmp/repo_drain.git",

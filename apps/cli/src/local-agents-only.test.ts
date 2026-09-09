@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 
 import { leaseQueuedWork, runPendingTasks } from "./commands.js";
 import { CoordinatorProject } from "./project.js";
@@ -19,7 +19,7 @@ import { CoordinatorProject } from "./project.js";
  * does not go looking.
  */
 function forbiddenStore() {
-  return new Proxy(new InMemoryCoordinationStore(), {
+  return new Proxy(SqliteCoordinationStore.open(":memory:"), {
     get(target, property, receiver) {
       if (property === "leaseNextTask" || property === "listSubmittedTasks") {
         return () => {
@@ -49,12 +49,12 @@ const request = {
  */
 async function projectWithUnreachableGit(): Promise<{
   project: CoordinatorProject;
-  store: InMemoryCoordinationStore;
+  store: SqliteCoordinationStore;
   cleanup(): Promise<void>;
 }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "clocal-"));
   const project = await CoordinatorProject.init(path.join(root, "proj"));
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: "repo_1",
     path: path.join(root, "absent-canonical.git"),

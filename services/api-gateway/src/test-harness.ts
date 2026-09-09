@@ -25,8 +25,9 @@ import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
-  InMemoryCoordinationStore,
+  SqliteCoordinationStore,
   type CoordinationStore,
+  type StoredRun,
 } from "@coord/persistence";
 
 import { AGENT_ACCOUNT_PREFIX, mcpServersForLease } from "@coord/shared-types";
@@ -559,7 +560,7 @@ export async function startRuntime(
     }>;
   } = {},
 ): Promise<TestRuntime> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   // Typed off `TestRuntime` rather than spelled out a second time, like every
   // fixture field below it. The shape was written twice, and adding
   // `callSign` to the interface left this copy behind: tests write through
@@ -1725,6 +1726,35 @@ export async function invitableRepository(
 }
 
 /**
+ * A real run row for a repository, for tests that need something to point at.
+ *
+ * `approvals` and several other tables reference `runs(id)`, and a fabricated
+ * id used to be accepted because the in-memory store enforced nothing. SQLite
+ * refuses it, which is the better behaviour and is why this exists: a test
+ * that wants an approval should have a run it could plausibly belong to.
+ */
+export async function testRun(
+  store: CoordinationStore,
+  repositoryId: string,
+): Promise<StoredRun> {
+  const repository = await store.getRepository(repositoryId);
+  if (repository === undefined) {
+    throw new Error(`No such repository: ${repositoryId}`);
+  }
+  return await store.createRun({
+    repository,
+    projectId: DEFAULT_PROJECT_ID,
+    mode: "coordinated",
+    baseVersion: {
+      sequence: 1,
+      revision: "a".repeat(40),
+      branch: repository.branch,
+      createdAt: new Date().toISOString(),
+    },
+  });
+}
+
+/**
  * Puts every connected agent into a channel, the way the roster UI does.
  *
  * A repository created through the API now starts with nobody in its channel
@@ -2005,7 +2035,7 @@ export async function startBareGateway(
   store: CoordinationStore;
   sent: MailMessage[];
 }> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   const sent: MailMessage[] = [];
   const gateway = new ApiGateway({
     store,

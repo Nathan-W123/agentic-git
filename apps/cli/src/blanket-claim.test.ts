@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import { SqliteCoordinationStore } from "@coord/persistence";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -50,10 +50,10 @@ async function seed(
    */
   repository: CanonicalRepository = REPOSITORY,
 ): Promise<{
-  store: InMemoryCoordinationStore;
+  store: SqliteCoordinationStore;
   worker: string;
 }> {
-  const store = new InMemoryCoordinationStore();
+  const store = SqliteCoordinationStore.open(":memory:");
   await store.saveRepository({
     id: repository.id,
     path: repository.path,
@@ -79,7 +79,7 @@ async function seed(
 }
 
 async function leaseFor(
-  store: InMemoryCoordinationStore,
+  store: SqliteCoordinationStore,
   worker: string,
   objective: string,
   base: CanonicalVersion = BASE,
@@ -594,7 +594,7 @@ function arrivingPlan(taskId: string, files: string[]): AgentPlan {
 }
 
 async function holderWithWorktree(
-  store: InMemoryCoordinationStore,
+  store: SqliteCoordinationStore,
   worker: string,
   estimatedFiles: string[],
   repository: CanonicalRepository = REPOSITORY,
@@ -988,7 +988,7 @@ async function sharedRepository(): Promise<{
 
 /** A holder alone in the repository, holding all of it, with no estimate. */
 async function soloHolder(
-  store: InMemoryCoordinationStore,
+  store: SqliteCoordinationStore,
   worker: string,
   repository: CanonicalRepository,
   version: CanonicalVersion,
