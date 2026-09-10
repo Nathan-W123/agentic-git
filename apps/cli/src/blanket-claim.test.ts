@@ -1408,3 +1408,205 @@ test("three tasks arriving behind one holder ask it once, not three times", asyn
     await real.cleanup();
   }
 });
+
+/* ----------------------------------------------- why it was refused ------ */
+
+/** Every `blanket_claim_refused` this store holds, newest last. */
+async function refusals(
+  store: SqliteCoordinationStore,
+): Promise<Record<string, unknown>[]> {
+  return (await store.listAuditEvents({ types: ["blanket_claim_refused"] })).map(
+    (entry) => (entry.event.data ?? {}) as Record<string, unknown>,
+  );
+}
+
+test("a refused blanket claim says which of the eight reasons it was", async () => {
+  // The grant has left a trail since the day it was written. The refusal left
+  // nothing at all, so "it was the only agent working and it still planned"
+  // was a question with no answer anywhere — not in the thread, not in the
+  // log, not in the lease table.
+  const { store, worker } = await seed();
+  const first = await leaseFor(store, worker, "rename the widget");
+  const second = await leaseFor(store, worker, "retitle the button");
+  const authority = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([
+      [first.task.id, first.leaseId],
+      [second.task.id, second.leaseId],
+    ]),
+  });
+
+  const refused = await authority.claimRepository({
+    task: first.task,
+    repository: REPOSITORY,
+    projectId: "project_local",
+    estimatedFiles: [],
+    baseVersion: BASE,
+  });
+  assert.equal(refused, undefined);
+
+  const written = await refusals(store);
+  assert.equal(written.length, 1);
+  assert.equal(written[0]?.["reason"], "other_work_is_executing");
+  assert.equal(written[0]?.["others"], 1);
+  // Named, because "somebody else is in the repository" is only actionable
+  // if you can find out who.
+  assert.deepEqual(written[0]?.["otherTaskIds"], [second.task.id]);
+  // Stamped with both, so the read is scopeable to what a caller may see.
+  assert.equal(written[0]?.["repositoryId"], "repo_a");
+  assert.equal(written[0]?.["projectId"], "project_local");
+});
+
+test("a task with no lease in this run says so rather than nothing", async () => {
+  const { store, worker } = await seed();
+  const orphan = await leaseFor(store, worker, "rename the widget");
+  const authority = new LeasePlanAuthority({
+    store,
+    // Deliberately empty: this is the shape a task takes when the run that
+    // holds its lease is not this one.
+    leaseIdForTask: new Map(),
+  });
+  assert.equal(
+    await authority.claimRepository({
+      task: orphan.task,
+      repository: REPOSITORY,
+      estimatedFiles: [],
+      baseVersion: BASE,
+    }),
+    undefined,
+  );
+  assert.equal((await refusals(store))[0]?.["reason"], "no_lease_in_this_run");
+});
+
+test("a task that already holds a plan says which one", async () => {
+  const { store, worker } = await seed();
+  const held = await leaseFor(store, worker, "rename the widget");
+  const authority = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[held.task.id, held.leaseId]]),
+  });
+  // Granted once, which writes the plan onto the lease.
+  assert.notEqual(
+    await authority.claimRepository({
+      task: held.task,
+      repository: REPOSITORY,
+      estimatedFiles: [],
+      baseVersion: BASE,
+    }),
+    undefined,
+  );
+  // Asked again — a resumed turn, or a retry after a deferral. Widening an
+  // approved admission is what the immutability rule forbids.
+  assert.equal(
+    await authority.claimRepository({
+      task: held.task,
+      repository: REPOSITORY,
+      estimatedFiles: [],
+      baseVersion: BASE,
+    }),
+    undefined,
+  );
+  const written = await refusals(store);
+  assert.equal(written.length, 1);
+  assert.equal(written[0]?.["reason"], "already_holds_a_plan");
+});
+
+test("a branch holding the interface is named, and an upstream one is flagged", async () => {
+  // The refusal with no other symptom anywhere, and the reason this exists.
+  //
+  // A branch claim outlives the agent that wrote it — released on channel
+  // merge or delete and at no other time — so "nobody else is working" and
+  // "no branch holds anything" are different sentences. The `origin/*` case
+  // is worse still: those are written by the upstream watcher when somebody
+  // pushes straight to the remote and this mirror has not caught up, under a
+  // branch belonging to no channel. There is no channel to merge and none to
+  // delete; the claim holds until canonical pulls, and nothing anywhere said
+  // so.
+  const { store, worker } = await seed();
+  const solo = await leaseFor(store, worker, "rename the widget");
+  await store.recordBranchClaim({
+    repositoryId: "repo_a",
+    branch: "origin/main",
+    taskId: "external-push",
+    revision: "b".repeat(40),
+    apis: ["POST /charges"],
+    ranges: [],
+  });
+  const authority = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[solo.task.id, solo.leaseId]]),
+  });
+  assert.equal(
+    await authority.claimRepository({
+      task: solo.task,
+      repository: REPOSITORY,
+      estimatedFiles: [],
+      baseVersion: BASE,
+    }),
+    undefined,
+  );
+  const written = await refusals(store);
+  assert.equal(written[0]?.["reason"], "another_branch_holds_a_crossing_claim");
+  assert.deepEqual(written[0]?.["branches"], ["origin/main"]);
+  // The flag that separates the two remedies, which are not guessable from
+  // each other: a sync for this one, a merge for an ordinary branch.
+  assert.equal(written[0]?.["upstream"], true);
+});
+
+test("a granted claim writes no refusal", async () => {
+  // The other half of the assertion, and the one that stops this becoming
+  // noise: the log has to stay readable, so a happy path must be silent.
+  const { store, worker } = await seed();
+  const solo = await leaseFor(store, worker, "rename the widget");
+  const authority = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[solo.task.id, solo.leaseId]]),
+  });
+  assert.notEqual(
+    await authority.claimRepository({
+      task: solo.task,
+      repository: REPOSITORY,
+      estimatedFiles: [],
+      baseVersion: BASE,
+    }),
+    undefined,
+  );
+  assert.deepEqual(await refusals(store), []);
+});
+
+test("a refusal that cannot be written still refuses, and does not fail the task", async () => {
+  // The one that matters most, and the reason the write is wrapped.
+  //
+  // This runs on the path a task takes to its first edit, and the caller
+  // does not guard it. A rejected audit write here would cancel the agent's
+  // session, destroy its workspace and fail the task — over a diagnostic.
+  // Losing the reason is a bad morning; losing the work is a worse one.
+  const { store, worker } = await seed();
+  const first = await leaseFor(store, worker, "rename the widget");
+  await leaseFor(store, worker, "retitle the button");
+  const authority = new LeasePlanAuthority({
+    store: new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === "appendAudit") {
+          return async () => {
+            throw new Error("the audit log is unavailable");
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
+    leaseIdForTask: new Map([[first.task.id, first.leaseId]]),
+  });
+
+  // Refused, quietly, exactly as it was before any of this existed.
+  assert.equal(
+    await authority.claimRepository({
+      task: first.task,
+      repository: REPOSITORY,
+      estimatedFiles: [],
+      baseVersion: BASE,
+    }),
+    undefined,
+  );
+});

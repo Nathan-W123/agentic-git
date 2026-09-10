@@ -620,25 +620,62 @@ export class LeasePlanAuthority implements PlanAuthority {
   public async claimRepository(
     request: BlanketClaimRequest,
   ): Promise<AgentPlan | undefined> {
+    /**
+     * Says no, says why, and never fails the task for saying it.
+     *
+     * The `.catch` is the load-bearing part. This runs on the path a task
+     * takes to its first edit, and the caller does not guard it — a rejected
+     * audit write here would cancel the agent's session and fail the task
+     * over a diagnostic. Losing the reason is a bad morning; losing the work
+     * is a worse one.
+     */
+    const refuse = async (
+      reason: string,
+      detail: Record<string, unknown> = {},
+    ): Promise<undefined> => {
+      await this.store
+        .appendAudit(undefined, {
+          type: "blanket_claim_refused",
+          taskId: request.task.id,
+          data: {
+            ...(request.projectId === undefined
+              ? {}
+              : { projectId: request.projectId }),
+            repositoryId: request.repository.id,
+            reason,
+            ...detail,
+          },
+        })
+        .catch(() => undefined);
+      return undefined;
+    };
+
     if (!this.blanketClaims) {
+      // Not recorded. This is a deployment-wide setting rather than anything
+      // about this task, it is the same answer every time, and a row per task
+      // saying "the feature is off" is noise in the one log somebody reads
+      // when something is wrong.
       return undefined;
     }
     const leaseId = this.leaseIdForTask.get(request.task.id);
     if (leaseId === undefined) {
       // Nothing durable to publish the claim on, so nothing would stop a
       // second task being admitted straight into it.
-      return undefined;
+      return await refuse("no_lease_in_this_run");
     }
     await this.store.expireWorkLeases(new Date().toISOString());
     const lease = await this.store.getWorkLease(leaseId);
     if (lease === undefined || lease.status !== "active") {
-      return undefined;
+      return await refuse("lease_not_active", {
+        leaseId,
+        leaseStatus: lease?.status ?? "missing",
+      });
     }
     if (lease.plan !== undefined) {
       // A contract already exists for this task — a resumed turn, or a retry
       // after a deferral. Replacing it with a wider one is precisely what the
       // immutability rule on approved admissions forbids.
-      return undefined;
+      return await refuse("already_holds_a_plan", { leaseId: lease.id });
     }
     const others = (
       await this.store.listWorkLeases({
@@ -647,7 +684,13 @@ export class LeasePlanAuthority implements PlanAuthority {
       })
     ).filter((candidate) => candidate.id !== lease.id);
     if (others.length > 0) {
-      return undefined;
+      return await refuse("other_work_is_executing", {
+        leaseId: lease.id,
+        others: others.length,
+        // Named, because "somebody else is in the repository" is only
+        // actionable if you can find out who.
+        otherTaskIds: others.slice(0, 10).map((candidate) => candidate.taskId),
+      });
     }
     // Alone in the lease table is no longer the same as unopposed. A blanket
     // claim covers the whole repository and nothing can be admitted while it
@@ -666,8 +709,26 @@ export class LeasePlanAuthority implements PlanAuthority {
         ...(lease.branch === undefined ? {} : { exceptBranch: lease.branch }),
       })
       .catch((): [] => []);
-    if ((held ?? []).some(claimCrossesBranches)) {
-      return undefined;
+    const crossing = (held ?? []).filter(claimCrossesBranches);
+    if (crossing.length > 0) {
+      // The refusal this whole thing exists for, and the one with no other
+      // symptom anywhere. A branch claim outlives the agent that wrote it —
+      // released on channel merge or delete and at no other time — so
+      // "nobody else is working" and "no branch holds anything" are
+      // different sentences, and it was the first that people had in mind
+      // when they asked why a task alone in a repository still planned.
+      //
+      // Worse for the `origin/*` ones. Those are written by the upstream
+      // watcher when somebody pushes straight to the remote and this mirror
+      // has not caught up, under a branch name belonging to no channel — so
+      // there is no channel to merge and none to delete, and the claim holds
+      // until canonical pulls. Naming the branches is what makes the remedy
+      // findable at all, because the remedy for those is a sync and for the
+      // others is a merge, and neither is guessable from the other.
+      return await refuse("another_branch_holds_a_crossing_claim", {
+        branches: crossing.slice(0, 10).map((claim) => claim.branch),
+        upstream: crossing.some((claim) => claim.branch.startsWith("origin/")),
+      });
     }
     // Recorded on the claim so the next arrival can narrow it on contact
     // instead of waiting out the holder's poll and its own retry.
@@ -685,7 +746,13 @@ export class LeasePlanAuthority implements PlanAuthority {
       planRevision: 1,
     });
     if (!planAdmissionApproved(admission)) {
-      return undefined;
+      return await refuse("admission_refused", {
+        admission: admission.status,
+        blockedBy: admission.blockedBy,
+        // The ladder's own sentence, which is written for a reader and is
+        // the only part of this that says anything a person can act on.
+        explanation: admission.explanation,
+      });
     }
     const saved = await this.store.saveWorkLeasePlan({
       leaseId: lease.id,
@@ -695,7 +762,11 @@ export class LeasePlanAuthority implements PlanAuthority {
       observedApprovedLeaseIds: [],
     });
     if (saved.outcome !== "saved") {
-      return undefined;
+      // Somebody arrived between the read above and this write. Not a
+      // failure — the caller plans as it always did — but it is the one
+      // refusal that is a race, so it reads as random from outside and is
+      // worth being able to tell apart from the rest.
+      return await refuse("lost_the_write", { outcome: saved.outcome });
     }
     await this.store.appendAudit(undefined, {
       type: "blanket_claim_granted",

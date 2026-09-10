@@ -1662,6 +1662,28 @@ export type AuditEventType =
    * claim was narrowed to, read from its worktree at that moment.
    */
   | "blanket_claim_granted"
+  /**
+   * A task that asked for the whole repository and did not get it, and the
+   * reason in a word.
+   *
+   * The counterpart to `blanket_claim_granted`, and it was missing. A grant
+   * left a trail; a refusal left nothing at all, so "the only agent working
+   * and it still planned" was a question with no answer anywhere — not in
+   * the thread, not in the log, not in the lease table. There are eight ways
+   * `claimRepository` says no and the interesting ones are invisible from
+   * outside: another branch holding a claim over an interface, an upstream
+   * push nobody has pulled, a compare-and-swap lost to an arrival in the
+   * same instant.
+   *
+   * Written only where the claim was actually attempted — which has already
+   * paid for an index build by that point, so the row is free beside it. The
+   * conditions upstream of that (a wave with two tasks in it, a replan, an
+   * adapter that cannot be told its scope) are ordinary and constant and are
+   * deliberately not recorded: an event per task per turn would put every
+   * multi-task wave through the audit log's single writer lock for a fact
+   * nobody was going to read.
+   */
+  | "blanket_claim_refused"
   | "blanket_claim_frozen"
   /**
    * A repository-wide holder was paused, asked what the rest of its work
