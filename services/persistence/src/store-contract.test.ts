@@ -7442,4 +7442,48 @@ for (const backend of backends) {
       await cleanup();
     }
   });
+
+  test(`${backend.name}: an open store answers a probe, and a closed one does not`, async () => {
+    // The readiness question, asked of both backends because a readiness
+    // answer that is only true on the one nobody deploys is worse than none.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.ping();
+      // Twice. A probe is asked on a timer forever, so one that works once
+      // and then holds a connection open, or caches its own answer, would
+      // pass a single call and fail in the only setting it is used in.
+      await store.ping();
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: closing twice is closing`, async () => {
+    // A shutdown reaches `close` from more than one direction — a signal
+    // handler, a `finally`, an error path that tidies up before rethrowing —
+    // and both backends used to throw on the second: SQLite with
+    // `ERR_INVALID_STATE: database is not open`, `pg` with "Called end on
+    // pool more than once". That throw arrives during shutdown and replaces
+    // whatever the first error was, which is the one anybody was going to
+    // read.
+    const { store, cleanup } = await backend.open();
+    await store.close();
+    await store.close();
+    await cleanup();
+  });
+
+  test(`${backend.name}: a probe that cannot fail is not a probe`, async () => {
+    // The half that matters. A readiness endpoint built on a probe that
+    // always succeeds reports ready straight through an outage — which is
+    // the one moment anybody reads it — so the store being gone has to be
+    // something `ping` actually notices.
+    const { store, cleanup } = await backend.open();
+    await store.close();
+    await assert.rejects(async () => {
+      await store.ping();
+    });
+    await cleanup();
+  });
+
 }

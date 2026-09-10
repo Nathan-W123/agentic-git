@@ -129,10 +129,37 @@ export async function routePublic(
         explanation: error instanceof Error ? error.message : String(error),
       };
     }
+    // `database` used to be the string "ready", written down rather than
+    // found out: it said "ready" on every deployment in every state, which
+    // made it worse than absent — something that reads like an answer and
+    // is not one.
+    //
+    // And the line under it, which is a real query, had no guard. So a
+    // control plane whose store was briefly away did not degrade here, it
+    // threw: `countUsers()` rejected, the route answered 500, and the
+    // desktop app — whose whole contract with this route is "200 and
+    // status ok" — told the person at the keyboard "That does not look
+    // like a Kumi deployment." A database restart was reported to the user
+    // as having typed their own server address wrong.
+    //
+    // Now the query answers both fields. `status` stays "ok" through it,
+    // because the question that route is asked is "is this a Kumi", and it
+    // is; what changed is that `database` finally says whether this Kumi
+    // can currently reach its store. `setupRequired` is omitted rather than
+    // guessed when the store could not be asked — every reader tests it
+    // with `=== true`, so an absent field behaves as today's `false` did
+    // without asserting something nobody checked.
+    let database = "ready";
+    let setupRequired: boolean | undefined;
+    try {
+      setupRequired = (await gw.options.store.countUsers()) === 0;
+    } catch {
+      database = "unavailable";
+    }
     gw.sendJson(response, 200, {
       status: "ok",
-      database: "ready",
-      setupRequired: (await gw.options.store.countUsers()) === 0,
+      database,
+      ...(setupRequired === undefined ? {} : { setupRequired }),
       // So the setup form knows whether to ask for a token at all, rather
       // than showing a required field that this deployment does not want
       // and cannot be filled in correctly. Says whether a secret is needed,

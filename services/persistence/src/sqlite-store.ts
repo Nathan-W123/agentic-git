@@ -269,6 +269,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
   private readonly db: DatabaseSync;
   /** Depth of open transactions; SQLite cannot nest a real one. */
   private transactionDepth = 0;
+  /** So a second `close` is a no-op rather than a throw. */
+  private closed = false;
 
   private constructor(db: DatabaseSync) {
     this.db = db;
@@ -6089,7 +6091,34 @@ public async recordBranchClaim(
     }
   }
 
+  /**
+   * See {@link CoordinationStore.ping}.
+   *
+   * A statement rather than a stat of the file, because the two answer
+   * different questions and only one of them is the right one. SQLite holds
+   * the database open by descriptor, so a file deleted or moved out from
+   * under a running process still reads and writes perfectly well through
+   * the handle it already has — a path check would report a disaster that is
+   * not happening. What this catches is the handle itself being unusable: a
+   * closed database, a corrupt page, a disk that has stopped answering.
+   *
+   * `async` only to keep the shape of the contract; there is nothing here to
+   * wait for.
+   */
+  public async ping(): Promise<void> {
+    this.db.prepare("SELECT 1").get();
+  }
+
   public async close(): Promise<void> {
+    // Idempotent, because closing twice is a normal thing for a shutdown to
+    // do and a throw there is the worst possible time for one. A `finally`
+    // that closes, reached after an error handler already closed, would take
+    // the process out with `ERR_INVALID_STATE` — losing whatever the first
+    // error was, which is the thing anybody was going to read.
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
     this.db.close();
   }
 

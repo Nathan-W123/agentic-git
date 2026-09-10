@@ -246,6 +246,7 @@ import type {
   AuthenticatedRouteRequest,
   RouteRequest,
 } from "./routes/context.js";
+import { isProbePath, liveness, readiness } from "./probes.js";
 import { routePublic } from "./routes/public.js";
 import { routeSession } from "./routes/session.js";
 import { routeWorkers } from "./routes/workers.js";
@@ -2094,6 +2095,28 @@ export class ApiGateway {
       requestId,
       secure,
     };
+
+    // Ahead of everything, and see `probes.ts` for why both of the things it
+    // is ahead of matter. In short: a per-IP limiter would eventually 429 a
+    // liveness probe and restart a healthy container on a timer, and every
+    // path outside the API prefix falls through to the static asset table —
+    // so `GET /healthz` used to return the dashboard's HTML with a 200,
+    // which would satisfy any check made of it by a control plane that could
+    // not reach its database at all.
+    if (
+      (request.method === "GET" || request.method === "HEAD") &&
+      isProbePath(url.pathname)
+    ) {
+      const answer =
+        url.pathname === "/healthz"
+          ? liveness()
+          : await readiness({
+              store: this.options.store,
+              staticAssets: this.options.staticAssets,
+            });
+      this.sendJson(response, answer.status, answer.body);
+      return;
+    }
 
     try {
       const ip = this.remoteAddress(request);

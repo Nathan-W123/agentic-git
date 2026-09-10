@@ -74,6 +74,26 @@ services:
       - "${COORD_PORT:-4317}:4317"
     volumes:
       - coordinator-data:/data
+    # `/readyz` rather than `/healthz`, because this is the answer `docker
+    # compose ps` shows and the one a `depends_on: service_healthy` on any
+    # future service would wait for — and both of those want "can this serve
+    # traffic", which is readiness. `/healthz` is the other question, "is
+    # this process worth keeping", and belongs to whatever restarts
+    # containers rather than to this.
+    #
+    # `start_period` is generous on purpose: the first boot of a fresh
+    # database runs every migration before the store will answer, and a
+    # container marked unhealthy while doing exactly what it should be doing
+    # is how somebody concludes the deployment is broken and stops it.
+    #
+    # curl is in the image already — see the Dockerfile's note on why the
+    # runtime carries one.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4317/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
 
 volumes:
   coordinator-db:

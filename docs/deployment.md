@@ -350,6 +350,68 @@ evaluate it; a project without a policy uses the built-in defaults.
   its `done` message; an agent that reports nothing cannot be capped this way,
   and is recorded as having reported nothing rather than as having spent zero.
 
+## Liveness and readiness
+
+Two probes, at the root, unauthenticated, answered ahead of everything else
+on the server:
+
+| Route | Question | Answers |
+| --- | --- | --- |
+| `GET /healthz` | Is this process worth keeping? | `200 {"status":"ok"}`, always, if it is running at all. Consults nothing. |
+| `GET /readyz` | Should traffic go here yet? | `200 {"status":"ready",...}` or `503 {"status":"unready","checks":{...}}` |
+
+They are not interchangeable, and wiring the wrong one into the wrong setting
+is worse than wiring neither. **Liveness failing kills the container**, so it
+must depend on nothing that can be slow or briefly away — a liveness check
+that touched the database would turn every database blip into a rolling
+restart of a control plane that was working, taking the deployment from
+degraded to down with the probe as the cause. **Readiness failing only takes
+the instance out of rotation**, so it is allowed to ask real questions and
+does: whether the coordination store answers a query right now, and whether
+the dashboard's assets are in memory. That second one has no other symptom —
+a process holding no assets serves the API perfectly and a blank page to
+every browser.
+
+`/readyz` names *which* check failed and never why. A database driver's own
+message can carry a host, a port, a user, sometimes a fragment of a
+connection string with a password in it, and this is a route anybody can
+read. It also reports `lastConnectionLoss` when the store has lost a
+connection at some point in this process's life — advisory, and deliberately
+not a reason to be unready, because it says the database went away once, not
+that it is away now.
+
+Neither is rate limited. A probe arrives from one address every few seconds
+forever, which is exactly the shape a per-IP limiter refuses, and a 429 to a
+liveness probe is a killed container — the limiter would have restarted a
+healthy deployment on a timer.
+
+Where to wire them:
+
+- **Docker / Compose** — `HEALTHCHECK CMD curl -fsS localhost:4317/healthz`,
+  or a `healthcheck:` block on the `control-plane` service. Use `/readyz` for
+  a `depends_on: condition: service_healthy` gate; use `/healthz` for restart.
+- **Railway** — set the service's health check path to `/readyz`. Railway
+  holds a new deployment out of rotation until it answers, which is exactly
+  what readiness is for; pointing it at `/healthz` would cut traffic over to
+  an instance whose store it has not confirmed.
+- **Kubernetes** — `livenessProbe` on `/healthz`, `readinessProbe` on
+  `/readyz`. Give the readiness probe a generous `failureThreshold`: the
+  store answering slowly during a migration is not a reason to drop the
+  instance.
+
+`GET /api/v1/health` is a third thing and stays as it is. It is not a probe:
+the desktop app reads it to tell a typo from a deployment before anybody is
+signed in, the first-run form reads it to know whether to ask for a bootstrap
+token, and its `build.commit` is how a deploy is confirmed from outside. It
+answers unauthenticated, and what it reports — the deployed commit, whether
+billing variables reached the process, the live WebSocket count, and the
+host's Docker version and error text where a Docker CLI is present — is
+information about the deployment rather than about any account in it. On a
+deployment reachable from the open internet, decide deliberately whether that
+is acceptable; `build.commit` in particular is already on every response as
+the `X-Kumi-Build` header, so removing it from this body alone would hide
+nothing.
+
 ## What checks a commit before it deploys
 
 `.github/workflows/ci.yml` builds, typechecks and tests the whole tree on

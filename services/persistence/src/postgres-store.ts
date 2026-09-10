@@ -308,6 +308,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
   private readonly ready: Promise<void>;
   /** See {@link lastConnectionLoss}. */
   private lastPoolError: { at: string; message: string } | undefined;
+  /** So a second `close` is a no-op rather than a rejection. */
+  private ended = false;
 
   private constructor(pool: pg.Pool) {
     this.pool = pool;
@@ -5896,6 +5898,15 @@ public async recordBranchClaim(
     // Settle the migration first so an in-flight failure cannot race the
     // pool shutdown; its error, if any, was already delivered to callers.
     await this.ready.catch(() => undefined);
+    // Idempotent, because `pg` is not: a second `pool.end()` rejects with
+    // "Called end on pool more than once". Closing twice is a normal thing
+    // for a shutdown to do — a `finally` reached after an error handler
+    // already closed — and a throw there would replace whatever the first
+    // error was with a complaint about the cleanup.
+    if (this.ended) {
+      return;
+    }
+    this.ended = true;
     await this.pool.end();
   }
 

@@ -3406,5 +3406,32 @@ export interface CoordinationStore {
    */
   setAuditorPaused(repositoryId: string, paused: boolean): Promise<void>;
 
+  /**
+   * Whether this store can answer a query right now.
+   *
+   * The question a readiness probe asks, and deliberately not one that can be
+   * answered from anything remembered: it opens a connection where a
+   * connection is needed and runs a statement, so a deployment whose database
+   * has gone away finds out here rather than on the next real request. Any
+   * migration this store runs lazily is awaited first, so "still migrating"
+   * and "cannot connect" are not reported as each other.
+   *
+   * Rejects rather than returning a verdict. The reason belongs to the
+   * backend and is the backend's to describe; whoever asked decides what a
+   * rejection means.
+   */
+  ping(): Promise<void>;
+
+  /**
+   * The last connection this store lost while nobody was using it, if any.
+   *
+   * A backend with no connections to lose does not implement it. Never
+   * cleared where it exists: it records that the database went away at some
+   * point, which is the most useful thing a still-responding control plane
+   * can say about itself, and it makes no claim about right now — that is
+   * {@link ping}, which finds out instead of remembering.
+   */
+  lastConnectionLoss?(): { at: string; message: string } | undefined;
+
   close(): Promise<void>;
 }
