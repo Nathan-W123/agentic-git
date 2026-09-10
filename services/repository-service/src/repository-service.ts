@@ -1370,7 +1370,21 @@ export class RepositoryService {
         repository.branch,
       ]);
       worktreeAdded = true;
-      const mergeArgs = (strategy?: "theirs" | "ours"): string[] => [
+      // One merge, and never with `-X`.
+      //
+      // `-X ours/theirs` is git's per-*hunk* preference, and that is not the
+      // question anybody was answered. The dialog says "for the clashing
+      // files only" and "Kumi's content is what the files hold afterwards";
+      // `-X` gives a file that is some of this side's paragraphs and some of
+      // that side's, which is neither, and can be a combination that never
+      // existed on either branch and that nobody wrote. One sync did exactly
+      // that across eight files and broke three separate features at once,
+      // each one half-applied, none of them named in the merge.
+      //
+      // So the merge is run plainly and the collisions are settled a whole
+      // file at a time below. A file that merges cleanly still merges
+      // cleanly — the promise is only about the ones that clash.
+      const mergeArgs = (): string[] => [
         "-C",
         worktreePath,
         "-c",
@@ -1384,18 +1398,11 @@ export class RepositoryService {
         "--no-edit",
         "--no-gpg-sign",
         "--no-verify",
-        ...(strategy === undefined ? [] : ["-X", strategy]),
         "-m",
-        strategy === undefined
-          ? `Sync ${upstreamBranch} from origin: merge ${upstreamRevision.slice(0, 12)} into canonical`
-          : `Sync ${upstreamBranch} from origin: merge ${upstreamRevision.slice(0, 12)} into canonical, ` +
-            `taking ${strategy === "theirs" ? "GitHub's" : "canonical's"} side where they collided`,
+        `Sync ${upstreamBranch} from origin: merge ${upstreamRevision.slice(0, 12)} into canonical`,
         "--end-of-options",
         upstreamRef,
       ];
-      // Always tried clean first, even when a resolution is on offer: a
-      // strategy must decide only the files that genuinely collide, and
-      // this pass is also what names them for the record.
       const plain = mergeArgs();
       const merge = await this.git.run(plain, { allowFailure: true });
       if (merge.exitCode === 0) {
@@ -1407,54 +1414,49 @@ export class RepositoryService {
         ]);
         return { revision: merged.stdout.trim() };
       }
+      // NUL separated, because a path is allowed to contain a newline and a
+      // line-split would report one such file as two that do not exist.
       const conflicted = await this.git.run(
-        ["-C", worktreePath, "diff", "--name-only", "--diff-filter=U"],
+        ["-C", worktreePath, "diff", "--name-only", "--diff-filter=U", "-z"],
         { allowFailure: true },
       );
       const conflicts = conflicted.stdout
-        .split(/\r?\n/u)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-      await this.git.run(["-C", worktreePath, "merge", "--abort"], {
-        allowFailure: true,
-      });
+        .split("\0")
+        .filter((file) => file.length > 0);
+      const abort = async (): Promise<void> => {
+        await this.git.run(["-C", worktreePath, "merge", "--abort"], {
+          allowFailure: true,
+        });
+      };
       if (conflicts.length === 0) {
+        // Failed before it reached the index — an untracked file in the way,
+        // a lock, a broken object. Nothing to settle and nothing to choose.
+        await abort();
         throw new GitCommandError(plain, merge);
       }
       if (conflictResolution === "refuse") {
+        await abort();
         throw new SyncDivergedError(upstreamBranch, conflicts);
       }
-      // `-X` is git's own per-hunk preference, not a wholesale checkout: a
-      // file that collides in one place and merges cleanly in another keeps
-      // both, and the losing content stays reachable through the merge's
-      // other parent either way.
+      // The merge is left in progress rather than aborted and re-run: the
+      // conflicted index is the only thing that knows which side's version
+      // of each file is which, and settling it in place is what makes the
+      // answer a file-level one.
       const strategy =
         conflictResolution === "prefer-remote" ? "theirs" : "ours";
-      const resolvedMerge = await this.git.run(mergeArgs(strategy), {
-        allowFailure: true,
-      });
-      if (resolvedMerge.exitCode !== 0) {
-        // `-X` is a preference between hunks, and a file deleted on one side
-        // and edited on the other has no hunks to prefer — so it is left
-        // unmerged and the merge fails, with the person's answer already
-        // given. This used to refuse here, which the browser reads as "ask
-        // again": the same dialog reopened on the same files forever, and
-        // neither button could ever end it.
-        //
-        // A delete against an edit has an answer; it is just not one `-X`
-        // can express. Taking GitHub's side means taking what GitHub did
-        // with the file, deletion included.
-        const settled = await this.settleUnmergedPaths(
-          worktreePath,
-          emptyHooks,
-          strategy,
-        );
-        if (!settled) {
-          await this.git.run(["-C", worktreePath, "merge", "--abort"], {
-            allowFailure: true,
-          });
-          throw new SyncDivergedError(upstreamBranch, conflicts);
-        }
+      const settled = await this.settleUnmergedPaths(
+        worktreePath,
+        emptyHooks,
+        strategy,
+        `Sync ${upstreamBranch} from origin: merge ` +
+          `${upstreamRevision.slice(0, 12)} into canonical, taking ` +
+          `${strategy === "theirs" ? "GitHub's" : "canonical's"} side of ` +
+          `${String(conflicts.length)} clashing file` +
+          `${conflicts.length === 1 ? "" : "s"}`,
+      );
+      if (!settled) {
+        await abort();
+        throw new SyncDivergedError(upstreamBranch, conflicts);
       }
       const merged = await this.git.run([
         "-C",
@@ -1489,22 +1491,31 @@ export class RepositoryService {
   }
 
   /**
-   * Finishes a merge `-X` left half-resolved, by taking one side outright.
+   * Settles every clashing file by taking one side of it whole.
    *
-   * `-X ours/theirs` decides hunks inside a file. It has nothing to say
-   * about a file that exists on one side and not the other, so a
-   * modify/delete collision survives it and the merge stops with the path
-   * still unmerged. That is the ordinary shape of a sync after somebody has
-   * deleted a file, not an exotic one.
+   * This is what "keep GitHub's version" means, and it is deliberately not
+   * what `-X theirs` does. `-X` is a preference between *hunks*: a file that
+   * clashes in two places and merges cleanly in a third comes out as some of
+   * this side's paragraphs and some of that side's — a version that never
+   * existed on either branch and that nobody wrote or reviewed. It was how a
+   * single sync landed halves of three different features across eight files
+   * and broke all three at once, with the merge naming none of it.
    *
-   * The index knows enough to settle it: an unmerged path carries stage 2
-   * for our version and stage 3 for theirs, and a missing stage is that side
-   * having deleted it. Taking a side means taking what that side did —
-   * its content when it has one, and its deletion when it does not.
+   * The index carries what is needed to do it properly. An unmerged path has
+   * stage 2 for our version and stage 3 for theirs, and a missing stage is
+   * that side having deleted the file. So taking a side means taking what
+   * that side actually did with each file: its content where it has one, its
+   * deletion where it does not — which is also why a modify/delete collision
+   * settles here and cannot settle under `-X` at all, there being no hunks to
+   * prefer. That case used to reopen the same dialog forever, because the
+   * merge failed after the person had already answered it.
+   *
+   * Only the clashing files are touched. Everything git merged cleanly stays
+   * merged, which is the other half of what the dialog promises.
    *
    * The merge is left in progress and committed here, so both parents
-   * survive and the losing content stays reachable through the other one,
-   * exactly as it does when `-X` settles a file by itself.
+   * survive and the losing side's content stays reachable through the other
+   * one — nothing is destroyed by choosing, only set aside.
    *
    * Returns false rather than throwing: the caller aborts and refuses, which
    * is the right answer for a collision nothing here understood.
@@ -1513,6 +1524,8 @@ export class RepositoryService {
     worktreePath: string,
     emptyHooks: string,
     strategy: "theirs" | "ours",
+    /** Names the side that won, because the plain merge's message cannot. */
+    message: string,
   ): Promise<boolean> {
     assertIdentity(this.identity);
     const listed = await this.git.run(
@@ -1571,8 +1584,11 @@ export class RepositoryService {
         return false;
       }
     }
-    // `--no-edit` keeps the message the merge already wrote, which names the
-    // side that won.
+    // Written here rather than inherited from the merge. The merge that is
+    // in progress was run plainly, before anybody knew it would clash, so
+    // the message it left says only that the two branches were joined — and
+    // the one fact worth reading off this commit later is which side won and
+    // over how many files.
     const committed = await this.git.run(
       [
         "-C",
@@ -1584,9 +1600,10 @@ export class RepositoryService {
         "-c",
         `core.hooksPath=${emptyHooks}`,
         "commit",
-        "--no-edit",
         "--no-gpg-sign",
         "--no-verify",
+        "-m",
+        message,
       ],
       { allowFailure: true },
     );

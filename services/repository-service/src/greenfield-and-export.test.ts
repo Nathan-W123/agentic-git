@@ -774,6 +774,186 @@ test("a conflicting sync refuses, names the files, and changes nothing", async (
   }
 });
 
+/**
+ * A file that clashes in one place and merges cleanly in another.
+ *
+ * This is the shape the whole choice turns on, and the shape that broke
+ * production three times. `-X theirs` is git's preference between *hunks*:
+ * it takes the remote's paragraph where the two collide and keeps the local
+ * one everywhere the merge succeeded, producing a file that is part of each
+ * and the whole of neither — a version nobody wrote and nobody reviewed.
+ *
+ * The dialog does not offer that. It says "for the clashing files only" and
+ * "Kumi's content is what the files hold afterwards", and a person clicking
+ * it is answering a question about files. So the answer is the file: the
+ * chosen side's copy of it, exactly, byte for byte.
+ */
+const REGIONS_BASE =
+  "header\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nfooter\n";
+const REGIONS_LOCAL =
+  "kumi header\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nkumi footer\n";
+const REGIONS_REMOTE =
+  "github header\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nfooter\n";
+
+/**
+ * Commits several files onto canonical at once, from canonical's own tip.
+ *
+ * `advanceCanonical` clones the *origin* and force-fetches the result back,
+ * so calling it twice re-bases on the origin and silently discards the first
+ * commit — which is fine for a single divergence and wrong for anything that
+ * needs two local commits to coexist.
+ */
+async function commitOnCanonical(
+  fixture: PushFixture,
+  files: Readonly<Record<string, string>>,
+): Promise<string> {
+  const git = new GitClient();
+  const work = path.join(
+    fixture.root,
+    `canon-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  await git.run(["clone", "--branch", "main", fixture.canonical.path, work]);
+  for (const [file, content] of Object.entries(files)) {
+    const target = path.join(work, file);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, content, "utf8");
+  }
+  await fixture.repositories.commitAll(work, "coordinator work");
+  await git.run([
+    `--git-dir=${fixture.canonical.path}`,
+    "fetch",
+    work,
+    "HEAD:refs/heads/main",
+    "--force",
+  ]);
+  return (await git.run(["-C", work, "rev-parse", "HEAD"])).stdout.trim();
+}
+
+/** Diverges canonical and the origin from a shared multi-region base. */
+async function divergeOverRegions(
+  fixture: PushFixture,
+  /** Extra files only this side has, committed with the local change. */
+  alsoLocally: Readonly<Record<string, string>> = {},
+): Promise<void> {
+  await advanceRemote(fixture, "a.txt", REGIONS_BASE);
+  // Fast-forward, so both sides genuinely share the base below.
+  await fixture.repositories.syncFromRemote(fixture.canonical, {
+    remoteUrl: LOOPBACK_HOST,
+    workspaceRoot: fixture.root,
+  });
+  await commitOnCanonical(fixture, { "a.txt": REGIONS_LOCAL, ...alsoLocally });
+  await advanceRemote(fixture, "a.txt", REGIONS_REMOTE);
+}
+
+async function fileAt(
+  fixture: PushFixture,
+  revision: string,
+  file: string,
+): Promise<string> {
+  return (
+    await new GitClient().run([
+      `--git-dir=${fixture.canonical.path}`,
+      "show",
+      `${revision}:${file}`,
+    ])
+  ).stdout;
+}
+
+test("taking a side takes the whole file, not the hunks that clashed", async () => {
+  const fixture = await pushFixture();
+  try {
+    await divergeOverRegions(fixture);
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-remote",
+    });
+    assert.equal(synced.status, "merged");
+
+    const merged = await fileAt(fixture, synced.revision, "a.txt");
+    // GitHub's file. All of it.
+    assert.equal(merged, REGIONS_REMOTE);
+    // The line that proves it. `footer` merged cleanly — only Kumi touched
+    // it — so `-X theirs` would have kept "kumi footer" beside GitHub's
+    // header, and the file would be a version neither side ever had.
+    assert.doesNotMatch(merged, /kumi footer/u);
+    assert.match(merged, /github header/u);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("keeping Kumi's side keeps the whole file too", async () => {
+  // Symmetric on purpose. A guard that only held in one direction would let
+  // the other button go on doing the thing this exists to stop.
+  const fixture = await pushFixture();
+  try {
+    await divergeOverRegions(fixture);
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-local",
+    });
+    assert.equal(synced.status, "merged");
+    assert.equal(await fileAt(fixture, synced.revision, "a.txt"), REGIONS_LOCAL);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a file that merged cleanly is not touched by the choice", async () => {
+  // The other half of "for the clashing files only". Taking GitHub's side of
+  // a collision must not reach into a file that had no collision — if it
+  // did, one answer about one file would quietly revert work everywhere.
+  const fixture = await pushFixture();
+  try {
+    // Kumi alone adds this one; the origin never sees it, so it cannot clash.
+    await divergeOverRegions(fixture, { "kumi-only.txt": "written here\n" });
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-remote",
+    });
+    assert.equal(synced.status, "merged");
+    assert.deepEqual(synced.resolved, { side: "remote", files: ["a.txt"] });
+    // Survives, even though GitHub's side does not contain it at all.
+    assert.equal(
+      await fileAt(fixture, synced.revision, "kumi-only.txt"),
+      "written here\n",
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the merge commit says which side won and over how many files", async () => {
+  // The commit is the only record that outlives the dialog. A message that
+  // said merely "merge X into canonical" would leave somebody reading this
+  // history later with no way to know a choice had been made at all.
+  const fixture = await pushFixture();
+  try {
+    await divergeOverRegions(fixture);
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-remote",
+    });
+    const message = (
+      await new GitClient().run([
+        `--git-dir=${fixture.canonical.path}`,
+        "log",
+        "-1",
+        "--format=%B",
+        synced.revision,
+      ])
+    ).stdout;
+    assert.match(message, /taking GitHub's side of 1 clashing file\b/u);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("a collision can be settled by taking GitHub's side, keeping both parents", async () => {
   const fixture = await pushFixture();
   try {
