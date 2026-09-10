@@ -556,5 +556,9 @@ test("a NATHAN-style invite link enters the invitation flow in a running session
     "async function showInviteLink(token, repositoryId) {",
     "\n/**\n * Removes one agent membership",
   );
-  assert.match(linkDialog, /anyone with the link can use this invitation/u);
+  // Case-insensitive because the sentence moved: it used to sit mid-sentence
+  // and now opens one, so the copy reads "Anyone with the link...". What is
+  // pinned is that the dialog still says the link is reusable — the fact the
+  // reader needs before they paste it somewhere — not how it is capitalised.
+  assert.match(linkDialog, /anyone with the link can use this invitation/iu);
 });

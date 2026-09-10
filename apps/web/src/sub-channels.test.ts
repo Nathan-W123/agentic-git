@@ -58,8 +58,20 @@ test("an undivided repository keeps the interface it always had", async () => {
   // did not have before, not that the two halves of one sentence disagree.
   assert.doesNotMatch(chats, /Message #\$\{repositoryLabel\(repositoryId\)\}/u);
   assert.match(chats, /`Message \$\{subChannelLabel\(/u);
-  // And the URL gains no query parameter it did not have.
-  assert.match(app, /subChannelsFor\(workspaceId\)\.length > 1/u);
+  // And the URL gains no query parameter it did not have. Archived rooms count
+  // towards "is this repository divided" because one of them can be the room
+  // the reader has open, and a link back that dropped it would land on
+  // #general instead. The two lists are disjoint filters of one array —
+  // `archived !== true` and `archived === true` — so an undivided repository
+  // still sums to one and still writes the URL it always wrote.
+  //
+  // Whitespace-tolerant: this is one expression that Prettier wraps across
+  // three lines, and pinning its formatting would fail on a reflow that
+  // changed nothing.
+  assert.match(
+    app,
+    /subChannelsFor\(workspaceId\)\.length \+\s*archivedSubChannelsFor\(workspaceId\)\.length >\s*1/u,
+  );
   assert.match(app, /query\.set\("channel", channelId\)/u);
 });
 

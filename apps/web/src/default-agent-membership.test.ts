@@ -36,10 +36,18 @@ test("every connected agent defaults into repositories made later", async () => 
 
   assert.match(data, /export async function addConnectedAgentsToRepository/u);
   assert.match(data, /agent\.mine === true && agent\.connected/u);
+  // Three ways to make a repository — created empty, imported from GitHub,
+  // and uploaded as a folder or zip — and one made any of the three ways has
+  // to come up with the same agents in it. Counting the call sites is what
+  // makes a fourth way arriving without the default fail here rather than
+  // ship a room whose agents nobody can mention.
+  //
+  // Bumped from two when the upload path landed; the sibling test below is
+  // maintained the same way and for the same reason.
   assert.equal(
     repositories.match(/await addConnectedAgentsToRepository\(/gu)?.length,
-    2,
-    "creation and GitHub import should apply the same default",
+    3,
+    "creation, GitHub import and upload should apply the same default",
   );
 });
 
