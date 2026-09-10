@@ -81,6 +81,7 @@ import type {
   HoldEditorFileInput,
   EditorHold,
   ClaimedShape,
+  MovedResources,
   CoordinationStore,
   CreateApprovalInput,
   CreateMcpServerInput,
@@ -5040,14 +5041,17 @@ public async recordBranchClaim(
         ...shape,
         consumers: [...shape.consumers],
       })),
+      ...(input.movedResources === undefined
+        ? {}
+        : { movedResources: cloneMovedResources(input.movedResources) }),
       createdAt: new Date().toISOString(),
     };
     await this.pool.query(
       `INSERT INTO branch_claims
          (id, repository_id, branch, task_id, revision,
           symbols, apis, schemas, config_keys, services, ranges,
-          shapes, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          shapes, moved_resources, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         claim.id,
         claim.repositoryId,
@@ -5061,6 +5065,8 @@ public async recordBranchClaim(
         JSON.stringify(claim.services),
         JSON.stringify(claim.ranges),
         JSON.stringify(claim.shapes),
+        // `{}` rather than null: absent is a shape the reader recognises.
+        JSON.stringify(claim.movedResources ?? {}),
         claim.createdAt,
       ],
     );
@@ -6159,6 +6165,45 @@ public async recordBranchClaim(
   }
 }
 
+/** A `moved_resources` column, or nothing when nobody measured. */
+function movedResourcesFrom(value: unknown): MovedResources | undefined {
+  try {
+    const parsed: unknown = JSON.parse(String(value ?? "{}"));
+    if (typeof parsed !== "object" || parsed === null) {
+      return undefined;
+    }
+    const names = (key: string): string[] => {
+      const list = (parsed as Record<string, unknown>)[key];
+      return Array.isArray(list) ? list.map((entry) => String(entry)) : [];
+    };
+    // `{}` is the default for every row written before the column existed, so
+    // an object with none of the four keys is "nobody measured" rather than
+    // "measured and found nothing".
+    const keys = ["apis", "schemas", "configKeys", "services"];
+    if (!keys.some((key) => key in (parsed as Record<string, unknown>))) {
+      return undefined;
+    }
+    return {
+      apis: names("apis"),
+      schemas: names("schemas"),
+      configKeys: names("configKeys"),
+      services: names("services"),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Copied so a caller cannot mutate what the store handed back. */
+function cloneMovedResources(moved: MovedResources): MovedResources {
+  return {
+    apis: [...moved.apis],
+    schemas: [...moved.schemas],
+    configKeys: [...moved.configKeys],
+    services: [...moved.services],
+  };
+}
+
 function postgresBranchClaim(row: Record<string, unknown>): BranchClaim {
   const list = (value: unknown): string[] => {
     try {
@@ -6213,6 +6258,12 @@ function postgresBranchClaim(row: Record<string, unknown>): BranchClaim {
                 ? entry.consumers.map((name) => String(name))
                 : [],
               ...(entry.inferred === true ? { inferred: true } : {}),
+              // Carried through both ways. A reader that rebuilt the shape
+              // field by field and forgot this one would write the mark and
+              // never read it back, which is a fix that silently does nothing.
+              ...(typeof entry.moved === "boolean"
+                ? { moved: entry.moved }
+                : {}),
             }))
         : [];
     } catch {
@@ -6226,6 +6277,13 @@ function postgresBranchClaim(row: Record<string, unknown>): BranchClaim {
     taskId: String(row["task_id"]),
     revision: String(row["revision"]),
     symbols: list(row["symbols"]),
+    ...(movedResourcesFrom(row["moved_resources"]) === undefined
+      ? {}
+      : {
+          movedResources: movedResourcesFrom(
+            row["moved_resources"],
+          ) as MovedResources,
+        }),
     apis: list(row["apis"]),
     schemas: list(row["schemas"]),
     configKeys: list(row["config_keys"]),

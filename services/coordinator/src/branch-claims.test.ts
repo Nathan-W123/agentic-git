@@ -21,6 +21,7 @@ import {
   branchClaimsAsActivePlans,
   claimCrossesBranches,
   claimFromChangeSet,
+  movedAgainstCanonical,
   rangesFromPatches,
 } from "./branch-claims.js";
 
@@ -440,5 +441,91 @@ test("a half-marked claim is treated as unmeasured, not half-trusted", () => {
     ],
   });
   assert.equal(claimCrossesBranches(half), true);
+});
+
+test("a route the branch touched but did not change holds nothing", () => {
+  // Same error as the shapes one, in the four name lists. A claim records
+  // every route in every file its diff touched, so editing a comment in a
+  // routes file claimed every route that file declares.
+  const touched = claim({
+    apis: ["POST /channels", "GET /channels"],
+    schemas: [],
+    configKeys: [],
+    services: [],
+    ranges: [],
+    shapes: [],
+  });
+  assert.equal(
+    claimCrossesBranches({
+      ...touched,
+      movedResources: { apis: [], schemas: [], configKeys: [], services: [] },
+    }),
+    false,
+  );
+  // One route genuinely added or removed is still a hold.
+  assert.equal(
+    claimCrossesBranches({
+      ...touched,
+      movedResources: {
+        apis: ["DELETE /channels"],
+        schemas: [],
+        configKeys: [],
+        services: [],
+      },
+    }),
+    true,
+  );
+  // Each dimension answers for itself: a measured-clean api list must not
+  // excuse a schema that moved.
+  assert.equal(
+    claimCrossesBranches({
+      ...touched,
+      schemas: ["sub_channels"],
+      movedResources: {
+        apis: [],
+        schemas: ["sub_channels"],
+        configKeys: [],
+        services: [],
+      },
+    }),
+    true,
+  );
+  // And an unmeasured claim falls back to presence, as before.
+  assert.equal(claimCrossesBranches(touched), true);
+});
+
+test("a name gone from the branch counts as moved, not as quiet", () => {
+  // Both directions. A route the branch added is obvious; a route it deleted
+  // is the one a set difference computed one way silently misses — and a
+  // branch that removed a route while reading as holding nothing is exactly
+  // the collision the blanket path exists to avoid.
+  const moved = movedAgainstCanonical(
+    { apis: ["GET /a"], schemas: [], configKeys: [], services: [] },
+    {
+      apis: ["GET /a", "DELETE /gone"],
+      schemas: [],
+      configKeys: [],
+      services: [],
+    },
+  );
+  assert.deepEqual(moved.apis, ["DELETE /gone"]);
+
+  const added = movedAgainstCanonical(
+    { apis: ["GET /a", "POST /new"], schemas: [], configKeys: [], services: [] },
+    { apis: ["GET /a"], schemas: [], configKeys: [], services: [] },
+  );
+  assert.deepEqual(added.apis, ["POST /new"]);
+
+  // Identical on both sides is a file touched without its routes changing.
+  const same = movedAgainstCanonical(
+    { apis: ["GET /a"], schemas: ["t"], configKeys: [], services: [] },
+    { apis: ["GET /a"], schemas: ["t"], configKeys: [], services: [] },
+  );
+  assert.deepEqual(same, {
+    apis: [],
+    schemas: [],
+    configKeys: [],
+    services: [],
+  });
 });
 

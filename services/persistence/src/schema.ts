@@ -1863,6 +1863,25 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE sub_channels ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`,
     ],
   },
+  {
+    /**
+     * The narrower half of what a branch claims.
+     *
+     * The name lists on a claim are everything the touched files declare, not
+     * what the branch changed — right for arbitration, far too wide for the
+     * cruder "is this branch holding something that crosses" the blanket fast
+     * path asks. Recorded beside them rather than replacing them, so the
+     * wider answer is still there for the reader that wants it.
+     *
+     * Default '{}', which reads as absent: a claim written before this could
+     * not have measured anything, and must not be taken to mean nothing moved.
+     */
+    version: 65,
+    name: "branch-claims-moved-resources",
+    statements: [
+      `ALTER TABLE branch_claims ADD COLUMN moved_resources TEXT NOT NULL DEFAULT '{}'`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

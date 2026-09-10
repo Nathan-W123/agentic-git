@@ -39,6 +39,7 @@ import type {
   BranchClaim,
   ClaimedRange,
   ClaimedShape,
+  MovedResources,
   RecordBranchClaimInput,
 } from "@coord/persistence";
 import type { AgentPlan, ChangeSet, FilePatch } from "@coord/shared-types";
@@ -268,13 +269,34 @@ export function branchClaimsAsActivePlans(
  * before any of this existed: a textual conflict at the merge.
  */
 export function claimCrossesBranches(claim: BranchClaim): boolean {
+  const moved = claim.movedResources;
   return (
-    claim.apis.length > 0 ||
-    claim.schemas.length > 0 ||
-    claim.configKeys.length > 0 ||
-    claim.services.length > 0 ||
+    namesCross(claim.apis, moved?.apis) ||
+    namesCross(claim.schemas, moved?.schemas) ||
+    namesCross(claim.configKeys, moved?.configKeys) ||
+    namesCross(claim.services, moved?.services) ||
     shapesCross(claim.shapes)
   );
+}
+
+/**
+ * Whether a dimension's names are ones this branch actually changed.
+ *
+ * The same distinction `shapesCross` draws, for the four name lists. A claim
+ * records every route in every file its diff touched, so a branch that edited
+ * a comment in a routes file claims every route that file declares — and read
+ * as presence, that is a branch holding the repository against everybody.
+ *
+ * `moved` is the measured answer: names added or removed against canonical.
+ * Absent means nobody measured, and falls back to presence rather than to
+ * "nothing changed", for the same reason as everywhere else here — a
+ * comparison that did not happen must not read like one that came back clean.
+ */
+function namesCross(
+  recorded: readonly string[],
+  moved: readonly string[] | undefined,
+): boolean {
+  return moved === undefined ? recorded.length > 0 : moved.length > 0;
 }
 
 /**
@@ -308,4 +330,46 @@ function shapesCross(shapes: readonly ClaimedShape[]): boolean {
   return measured
     ? shapes.some((shape) => shape.moved === true)
     : shapes.length > 0;
+}
+
+/**
+ * The names a branch added or removed against canonical, per dimension.
+ *
+ * Set difference both ways: a route the branch declares that canonical does
+ * not is added, one canonical declares that the branch does not is removed,
+ * and both are the branch having moved something. A name on both sides is a
+ * file that was touched without that route changing — the case this exists to
+ * stop reading as a hold.
+ */
+export function movedAgainstCanonical(
+  branch: {
+    apis: readonly string[];
+    schemas: readonly string[];
+    configKeys: readonly string[];
+    services: readonly string[];
+  },
+  canonical: {
+    apis: readonly string[];
+    schemas: readonly string[];
+    configKeys: readonly string[];
+    services: readonly string[];
+  },
+): MovedResources {
+  const differing = (
+    mine: readonly string[],
+    theirs: readonly string[],
+  ): string[] => {
+    const here = new Set(mine);
+    const there = new Set(theirs);
+    return [
+      ...mine.filter((name) => !there.has(name)),
+      ...theirs.filter((name) => !here.has(name)),
+    ].sort();
+  };
+  return {
+    apis: differing(branch.apis, canonical.apis),
+    schemas: differing(branch.schemas, canonical.schemas),
+    configKeys: differing(branch.configKeys, canonical.configKeys),
+    services: differing(branch.services, canonical.services),
+  };
 }

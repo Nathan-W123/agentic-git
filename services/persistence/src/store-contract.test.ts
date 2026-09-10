@@ -7251,6 +7251,30 @@ for (const backend of backends) {
         configKeys: ["PAYMENT_LIMIT_PER_MINUTE"],
         services: ["payments"],
         ranges: [{ file: "src/payments.ts", start: 8, end: 14 }],
+        shapes: [
+          {
+            file: "src/payments.ts",
+            symbol: "chargeTotal",
+            shape: "(cents: number): number",
+            digest: "moved-one",
+            consumers: ["src/checkout.ts"],
+            moved: true,
+          },
+          {
+            file: "src/payments.ts",
+            symbol: "Charge",
+            shape: "interface Charge",
+            digest: "same-as-canonical",
+            consumers: [],
+            moved: false,
+          },
+        ],
+        movedResources: {
+          apis: ["POST /charges"],
+          schemas: [],
+          configKeys: [],
+          services: [],
+        },
       });
       assert.ok(recorded.id.length > 0);
       assert.equal(recorded.branch, "kumi/payments-v2");
@@ -7276,6 +7300,23 @@ for (const backend of backends) {
       // wrongly against every other range and never overlaps anything.
       assert.equal(typeof claim?.ranges[0]?.start, "number");
       assert.equal(typeof claim?.ranges[0]?.end, "number");
+
+      // The measured half, both ways. A reader that rebuilds a shape field by
+      // field and forgets one writes the mark and never reads it back — a fix
+      // that compiles, passes its own unit tests, and does nothing at all.
+      assert.deepEqual(
+        claim?.shapes.map((shape) => [shape.symbol, shape.moved]),
+        [
+          ["chargeTotal", true],
+          ["Charge", false],
+        ],
+      );
+      assert.deepEqual(claim?.movedResources, {
+        apis: ["POST /charges"],
+        schemas: [],
+        configKeys: [],
+        services: [],
+      });
 
       // A second branch, and the exclusion that makes this usable: a task on
       // `kumi/payments-v2` must not contend with its own branch's earlier

@@ -1421,4 +1421,12 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE sub_channels ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE`,
     ],
   },
+  {
+    // See the SQLite copy for why.
+    version: 65,
+    name: "branch-claims-moved-resources",
+    statements: [
+      `ALTER TABLE branch_claims ADD COLUMN IF NOT EXISTS moved_resources TEXT NOT NULL DEFAULT '{}'`,
+    ],
+  },
 ];

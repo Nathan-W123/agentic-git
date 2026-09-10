@@ -1969,6 +1969,14 @@ export interface ClaimedShape {
  * forecast is a guess about what a task will touch; this is a fact about what
  * it did, which is both narrower and always true.
  */
+/** The names a branch added or removed, against canonical, when measured. */
+export interface MovedResources {
+  apis: string[];
+  schemas: string[];
+  configKeys: string[];
+  services: string[];
+}
+
 export interface BranchClaim {
   id: string;
   repositoryId: string;
@@ -1990,6 +1998,25 @@ export interface BranchClaim {
   schemas: string[];
   configKeys: string[];
   services: string[];
+  /**
+   * Which of the names above this branch actually changed, where anybody
+   * looked.
+   *
+   * The lists above are what the *touched files* declare — every route in a
+   * file whose comment was edited, every config key in a file that gained a
+   * blank line. That breadth is right for arbitration, which compares names
+   * and lets equal ones pass. It is wrong for any reader asking the cruder
+   * question "is this branch holding something that crosses", because the
+   * answer is yes for nearly every branch that has touched a routes file.
+   *
+   * So the narrower answer is recorded beside the wider one rather than
+   * replacing it: added or removed against canonical at the moment the claim
+   * was written. Absent means nobody compared — an older claim, or a
+   * canonical index that would not build — and absent is not "nothing
+   * changed"; see `claimCrossesBranches`.
+   */
+  movedResources?: MovedResources;
+
   /**
    * The lines actually changed, which is the half that only advises.
    *
@@ -2023,6 +2050,8 @@ export interface RecordBranchClaimInput {
   services?: readonly string[];
   ranges?: readonly ClaimedRange[];
   shapes?: readonly ClaimedShape[];
+  /** Omitted when nobody compared against canonical; see {@link BranchClaim}. */
+  movedResources?: MovedResources;
 }
 
 /**

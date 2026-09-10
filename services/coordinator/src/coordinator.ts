@@ -1,4 +1,3 @@
-import { claimFromChangeSet } from "./branch-claims.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -19,6 +18,10 @@ import {
   type RepositoryIndex,
 } from "@coord/code-intelligence";
 import { IntegrationService } from "@coord/integration-service";
+import {
+  claimFromChangeSet,
+  movedAgainstCanonical,
+} from "./branch-claims.js";
 import type { CoordinationStore } from "@coord/persistence";
 import {
   agentCommitIdentity,
@@ -4843,11 +4846,17 @@ export class Coordinator {
    * moving nothing. Absent says what actually happened — nobody looked — and
    * the reader falls back to the blunt test it used before this existed.
    */
-  private async canonicalShapesFor(
+  private async canonicalContractsFor(
     repository: CanonicalRepository,
     canonicalBranch: string | undefined,
     changedFiles: readonly string[],
-  ): Promise<ReadonlyMap<string, string> | undefined> {
+  ): Promise<
+    | {
+        shapes: ReadonlyMap<string, string>;
+        resources: ReturnType<CodeIntelligenceService["changedResources"]>;
+      }
+    | undefined
+  > {
     if (canonicalBranch === undefined || canonicalBranch === "") {
       return undefined;
     }
@@ -4855,11 +4864,17 @@ export class Coordinator {
       const canonical = { ...repository, branch: canonicalBranch };
       const version = await this.repositories.getCanonicalVersion(canonical);
       const index = await this.intelligence.index(canonical, version.revision);
-      return new Map(
-        this.intelligence
-          .shapesIn(changedFiles, index)
-          .map((shape) => [`${shape.file}\u0000${shape.symbol}`, shape.digest]),
-      );
+      return {
+        shapes: new Map(
+          this.intelligence
+            .shapesIn(changedFiles, index)
+            .map((shape) => [
+              `${shape.file}\u0000${shape.symbol}`,
+              shape.digest,
+            ]),
+        ),
+        resources: this.intelligence.changedResources(changedFiles, index),
+      };
     } catch {
       return undefined;
     }
@@ -4919,11 +4934,12 @@ export class Coordinator {
       // while any other channel stayed open. Best effort, and its absence is
       // recorded as absence rather than as "nothing moved": see
       // `claimCrossesBranches`.
-      const canonicalShapes = await this.canonicalShapesFor(
+      const canonicalHas = await this.canonicalContractsFor(
         input.repository,
         stored?.branch,
         changedFiles,
       );
+      const canonicalShapes = canonicalHas?.shapes;
       const observed = await this.intelligence
         .index(input.repository, integration.canonicalVersion.revision)
         .then((index) => {
@@ -4965,6 +4981,15 @@ export class Coordinator {
           };
         })
         .catch(() => undefined);
+      // Which of those names the branch actually changed, against canonical.
+      // Recorded beside the wider lists rather than instead of them: the wide
+      // ones are what arbitration compares, and narrowing them there would
+      // change how two branches contend. This only answers the cruder
+      // question the blanket fast path asks.
+      const movedResources =
+        canonicalHas === undefined || observed === undefined
+          ? undefined
+          : movedAgainstCanonical(observed.resources, canonicalHas.resources);
       await store.recordBranchClaim(
         claimFromChangeSet({
           repositoryId: input.repository.id,
@@ -4974,6 +4999,7 @@ export class Coordinator {
           ...(result.plan === undefined ? {} : { plan: result.plan }),
           ...(observed === undefined ? {} : { resources: observed.resources }),
           ...(observed === undefined ? {} : { contracts: observed.contracts }),
+          ...(movedResources === undefined ? {} : { movedResources }),
         }),
       );
     } catch {
