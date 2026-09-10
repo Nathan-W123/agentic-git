@@ -306,13 +306,68 @@ export class PostgresCoordinationStore implements CoordinationStore {
   private readonly ambientClient = new AsyncLocalStorage<PoolClient>();
   /** Migrations run lazily; every public method awaits this first. */
   private readonly ready: Promise<void>;
+  /** See {@link lastConnectionLoss}. */
+  private lastPoolError: { at: string; message: string } | undefined;
 
   private constructor(pool: pg.Pool) {
     this.pool = pool;
+    // The listener that keeps a database restart from being a process
+    // restart.
+    //
+    // `pg.Pool` is an `EventEmitter`, and it emits `error` when a connection
+    // it is *holding idle* dies — a Postgres restart, a failover, an
+    // administrator's `pg_terminate_backend`, a load balancer reaping an idle
+    // socket. None of those is a bug here: the pool has already discarded the
+    // client by the time it emits, and the next query opens a fresh one. But
+    // an `error` event with no listener is not an event at all. Node throws
+    // it, and because it is thrown from a socket callback rather than from
+    // inside anybody's `await`, there is nothing to catch it: the control
+    // plane exits.
+    //
+    // So the whole deployment died every time its database blinked, for a
+    // condition the pool had already recovered from, with a stack trace
+    // pointing into `pg-protocol` and nothing pointing at the cause. On
+    // Railway that reads as a container restarting for no reason.
+    //
+    // Kept rather than only swallowed, because "the database went away at
+    // some point" is the single most useful thing a readiness probe can say
+    // about a control plane that is otherwise answering fine.
+    this.pool.on("error", (error: Error) => {
+      this.lastPoolError = {
+        at: new Date().toISOString(),
+        message: error.message,
+      };
+    });
     this.ready = this.migrate();
     // A rejected migration must surface where the store is used, not as an
     // unhandled rejection that kills the process before any caller awaits.
     this.ready.catch(() => undefined);
+  }
+
+  /**
+   * The last connection this pool lost while nobody was using it.
+   *
+   * Never cleared. It is a record that the database went away, not a claim
+   * about whether it is away now — a caller that wants the latter asks
+   * {@link ping}, which finds out rather than remembering.
+   */
+  public lastConnectionLoss(): { at: string; message: string } | undefined {
+    return this.lastPoolError;
+  }
+
+  /**
+   * Whether the store can answer a query right now.
+   *
+   * Deliberately the cheapest round trip that proves a connection was
+   * obtained and a statement ran — `SELECT 1` touches no table, takes no
+   * lock, and cannot be answered from anything but a live backend. It also
+   * awaits `ready`, so a deployment whose migrations are still running or
+   * have failed reports itself unready rather than reporting the failure as
+   * a connection problem it is not.
+   */
+  public async ping(): Promise<void> {
+    await this.ready;
+    await this.pool.query("SELECT 1");
   }
 
   /**
