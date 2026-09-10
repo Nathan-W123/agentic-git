@@ -31,10 +31,20 @@ import {
   startPostgresTestServer,
 } from "./postgres-test-support.js";
 
+// Its own container, because `node --test` runs the files in a package
+// concurrently and `stop()` is a `docker rm -f`. Sharing the default name
+// with `store-contract.test.ts` means whichever of the two finishes first
+// destroys the server the other is still using — which is exactly what
+// happened: every Postgres test in this package went red on CI while
+// passing against a server that was already running locally, because a
+// local `COORD_TEST_POSTGRES_URL` never starts or stops a container at all.
+// `worker-operations.test.ts` names its own for the same reason.
 const server =
   process.env["COORD_SKIP_POSTGRES_TESTS"] === "1"
     ? undefined
-    : await startPostgresTestServer();
+    : await startPostgresTestServer({
+        containerName: "coord-postgres-resilience",
+      });
 
 if (server === undefined) {
   console.warn(
