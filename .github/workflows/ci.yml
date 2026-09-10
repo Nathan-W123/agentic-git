@@ -1,0 +1,83 @@
+# Whether main compiles, before the deploy that finds out.
+#
+# Railway builds this repository's Dockerfile and deploys it on every push to
+# `main`, and until this file existed that build was the first thing anywhere
+# that compiled the tree. Three separate breakages reached it that way — all
+# three from a browser sync landing hunks of two different features on top of
+# each other, all three obvious to `tsc`, and all three found by a person
+# staring at a red deploy log with no idea which of the commits in it was to
+# blame.
+#
+# So: `push` on `main` as well as `pull_request`, and the `push` half is the
+# half that matters. Work here lands on `main` directly — a channel merge
+# writes to the branch, there is no pull request in the way — so a
+# check that only ran on pull requests would have caught none of the three.
+# The pull-request half is for the human-sized changes that do arrive that
+# way.
+#
+# This does not gate the deploy by itself. Railway decides for itself whether
+# to wait for checks, and that is a service setting rather than anything in
+# this repository; `docs/deployment.md` says where it lives. What this
+# guarantees is that a red build is attributable to one commit within a few
+# minutes of it landing, rather than to whichever eight arrived before
+# somebody pressed redeploy.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per ref, and superseding only within a pull request. Two pushes to `main`
+  # are two different commits that will each be deployed, and cancelling the
+  # first leaves a commit that shipped with nothing ever having checked it.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # `node --test` has no deadline of its own: a test file that leaves a
+    # handle open never exits and the runner waits on it until GitHub's
+    # six-hour ceiling. The desktop release workflow learned this the
+    # expensive way; the whole suite is about three minutes.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # The floor in the root manifest's `engines`, and the major the
+          # control plane's image is pinned to.
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Split out from the checks below, and named, because "the build broke"
+      # and "a type is wrong" and "a test fails" are three different messages
+      # to whoever opens this log — and a build failure makes the other two
+      # meaningless rather than merely also-red.
+      #
+      # Concurrency capped for the same reason the Dockerfile caps it: this
+      # graph is dependency-bound rather than CPU-bound, so ten parallel
+      # compiles cost memory and buy no wall-clock.
+      - name: Build
+        run: npx turbo run build --concurrency=2
+
+      - name: Typecheck
+        run: npx turbo run typecheck
+
+      # This covers the dashboard's hand-written browser modules too. They are
+      # served to a browser exactly as they sit on disk — no bundler, no
+      # transpile, and `tsc` never reads them — so the only thing that has
+      # ever parsed them is a person's browser. `apps/web`'s
+      # `browser-modules.test.ts` parses every one of them here instead.
+      - name: Test
+        run: npx turbo run test

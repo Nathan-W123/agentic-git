@@ -350,6 +350,34 @@ evaluate it; a project without a policy uses the built-in defaults.
   its `done` message; an agent that reports nothing cannot be capped this way,
   and is recorded as having reported nothing rather than as having spent zero.
 
+## What checks a commit before it deploys
+
+`.github/workflows/ci.yml` builds, typechecks and tests the whole tree on
+every push to `main` and on every pull request. It exists because the deploy
+used to be the first thing anywhere that compiled the repository, and a red
+Railway build log is a poor place to find out which of the last eight commits
+broke it.
+
+**It does not block the deploy on its own.** Railway watches the branch and
+starts its own build as soon as a commit lands, in parallel with this. Making
+it wait is a setting on the Railway service — *Settings — Build — Wait for CI*
+— not anything in this repository, so a fork or a second environment has to
+turn it on for itself. With it off, CI is a fast attributable signal beside
+the deploy rather than a gate in front of it; with it on, a red check stops
+the deploy.
+
+Two things worth knowing about the shape of it:
+
+- The `push: main` half is the half that matters here. Work merged from a
+  channel lands on `main` directly, with no pull request in the way, so a
+  check that only ran on pull requests would see almost nothing this
+  deployment actually ships.
+- The dashboard's browser modules (`apps/web/public/*.js`) are served to a
+  browser exactly as they sit on disk — no bundler, no transpile, and `tsc`
+  never reads them. They are parsed by `apps/web`'s `browser-modules.test.ts`,
+  which runs as part of the test step; before it existed, the only thing that
+  had ever parsed them was somebody's browser.
+
 ## Production notes
 
 - The control-plane image contains no Docker CLI, so the containerized
