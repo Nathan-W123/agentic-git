@@ -1082,11 +1082,18 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       )`,
       `CREATE INDEX sub_channels_by_repository
          ON sub_channels(repository_id, slug)`,
-      // Two channels naming one branch would each think they owned it, and
-      // the second to merge would ship the first one's work under its own
-      // review. Nulls do not collide here, so conversation channels are free.
-      `CREATE UNIQUE INDEX sub_channels_by_branch
-         ON sub_channels(repository_id, branch)`,
+      // No index on `branch` here, and the mistake that put one here is
+      // worth naming. `sub_channels` gets its `branch` column in migration
+      // 58, nine migrations after this table is created — so a unique index
+      // on it, added to *this* already-shipped migration rather than to the
+      // one that adds the column, gave both of the failures an edit like
+      // that gives. A database that had already applied 49 never re-ran it
+      // and so never got the index at all, leaving the uniqueness rule that
+      // stops two channels owning one branch quietly absent in production;
+      // and a database created afterwards ran 49 from the top and died on
+      // `column "branch" does not exist` before it could reach 58, which
+      // means no new deployment could boot. Migration 58 creates the index,
+      // with `IF NOT EXISTS`, for both cases at once.
       // A repository's project comes from `project_repositories`, which is
       // where the link lives; a repository linked to nothing at all — a
       // fixture, or a row from before projects existed — falls back to the
