@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/protocol.test.js dist/generic-cli-adapter.test.js"
+    "test": "node --test dist/*.test.js"
   },
   "dependencies": {
     "@coord/agent-protocol": "*",
