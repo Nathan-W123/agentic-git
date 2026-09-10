@@ -59,6 +59,7 @@ import {
   type WorkAssignment,
   derivedRepositoryParallelism,
   maxAdmissionAttempts as maxAdmissionAttemptsForTest,
+  WORKER_PROTOCOL_VERSION,
 } from "./worker-operations.js";
 import { CoordinatorProject } from "./project.js";
 
@@ -1551,7 +1552,12 @@ test("the full remote cycle runs end to end against a Postgres store", async () 
     assert.ok(assignment);
     assert.equal(assignment.task.id, taskId);
     assert.equal(assignment.lease.baseRevision, harness.revision);
-    assert.equal(assignment.protocolVersion, 2);
+    // The constant, not the number it happened to be. This was `2`, written
+    // when it was 2, and it stayed 2 through the bump to 3 and the bump to 4
+    // because this test only runs where a Postgres server exists — which was
+    // nowhere until CI grew one. What is worth pinning is that a lease still
+    // carries the version at all, not which integer this month's is.
+    assert.equal(assignment.protocolVersion, WORKER_PROTOCOL_VERSION);
 
     // Plan first: the control plane answers before the worker edits anything,
     // and the verdict is durable in Postgres.
@@ -1574,13 +1580,26 @@ test("the full remote cycle runs end to end against a Postgres store", async () 
     await writeFile(bundlePath, bundle);
     const git = new GitClient();
     const workspace = path.join(remote, "workspace");
+    // Fetched by its full name and checked out detached, which is what the
+    // worker itself does — and had to be, because a lease ref is not a
+    // branch. `git clone --branch` resolves only branches and tags, so this
+    // failed with "Remote branch refs/coord/leases/... not found in upstream
+    // origin" against a bundle that contained that ref all along. It said so
+    // for as long as this test has existed and nobody read it, because
+    // nothing ever ran it: the whole test is skipped unless a Postgres server
+    // is reachable, and until CI grew one, none was. The SQLite twin of this
+    // test a thousand lines up does it correctly and carries the comment
+    // explaining why.
+    await git.run(["init", workspace]);
     await git.run([
-      "clone",
-      "--branch",
-      assignment.bundleRef,
-      bundlePath,
+      "-C",
       workspace,
+      "fetch",
+      "--no-tags",
+      bundlePath,
+      assignment.bundleRef,
     ]);
+    await git.run(["-C", workspace, "checkout", "--detach", "FETCH_HEAD"]);
     await writeFile(
       path.join(workspace, "src", "value.js"),
       "export const value = 2;\n",
