@@ -1928,6 +1928,22 @@ export interface ClaimedShape {
   /** Part of this contract is inferred, so this claim cannot see all of it. */
   inferred?: boolean;
   /**
+   * Whether this branch actually left the contract somewhere canonical is not.
+   *
+   * A claim records every exported shape in every file its diff touched, not
+   * only the ones that moved — deliberately, because contention is decided by
+   * comparing digests and a shape that did not move compares equal. But a
+   * reader that only asks "are there shapes here" cannot tell the two apart,
+   * and every branch that has touched any file with an export looks like it
+   * is holding a contract.
+   *
+   * `true` is a digest that differs from canonical's, `false` is one that
+   * matches, and absent means the comparison was not made — an older claim,
+   * or a canonical index that would not build. Absent is not "no": see
+   * {@link claimCrossesBranches} for why a reader must not read it as one.
+   */
+  moved?: boolean;
+  /**
    * The files that were built on this contract when the branch left it.
    *
    * Held per contract rather than as one list for the claim, because the

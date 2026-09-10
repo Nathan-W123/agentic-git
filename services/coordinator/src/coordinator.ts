@@ -1276,6 +1276,15 @@ const DEFAULT_CONVERSATION_SESSION_IDLE_MS = 15 * 60 * 1000;
  */
 const DEFAULT_MAX_CONVERSATION_SESSIONS = 8;
 
+/** Whether a branch's shape differs from the one canonical already has. */
+function movedFromCanonical(
+  canonical: ReadonlyMap<string, string>,
+  shape: { file: string; symbol: string; digest: string },
+): boolean {
+  const was = canonical.get(`${shape.file}\u0000${shape.symbol}`);
+  return was !== undefined && was !== shape.digest;
+}
+
 export class Coordinator {
   private readonly repositories: RepositoryService;
   private readonly workspaces: WorkspaceManager;
@@ -4822,6 +4831,40 @@ export class Coordinator {
    * had, and losing the promotion over it would be the wrong trade by a wide
    * margin.
    */
+  /**
+   * Canonical's own digest for every contract in the files a branch touched.
+   *
+   * Keyed `file\0symbol`, so a shape recorded on the branch can be looked up
+   * and compared without another pass over the index.
+   *
+   * Returns nothing rather than an empty map when it cannot be built, and the
+   * difference matters: an empty map would say "canonical holds no contracts
+   * here", which reads as every shape on the branch being an arrival and so
+   * moving nothing. Absent says what actually happened — nobody looked — and
+   * the reader falls back to the blunt test it used before this existed.
+   */
+  private async canonicalShapesFor(
+    repository: CanonicalRepository,
+    canonicalBranch: string | undefined,
+    changedFiles: readonly string[],
+  ): Promise<ReadonlyMap<string, string> | undefined> {
+    if (canonicalBranch === undefined || canonicalBranch === "") {
+      return undefined;
+    }
+    try {
+      const canonical = { ...repository, branch: canonicalBranch };
+      const version = await this.repositories.getCanonicalVersion(canonical);
+      const index = await this.intelligence.index(canonical, version.revision);
+      return new Map(
+        this.intelligence
+          .shapesIn(changedFiles, index)
+          .map((shape) => [`${shape.file}\u0000${shape.symbol}`, shape.digest]),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
   private async holdOnBranch(
     input: CoordinatorRunInput,
     result: PreparedTask,
@@ -4866,6 +4909,21 @@ export class Coordinator {
       // Best effort: an index that cannot be built falls back to the plan,
       // which is what this did before and is still better than nothing.
       const changedFiles = result.changeSet.patches.map((patch) => patch.path);
+      // What canonical holds for those same files, so each recorded shape can
+      // say whether this branch actually moved it.
+      //
+      // Without this the claim can only report "there are contracts in the
+      // files I touched", which is true of nearly every branch and is read
+      // downstream as "this branch is holding something that crosses" — the
+      // reason the blanket fast path was refused for almost every solo task
+      // while any other channel stayed open. Best effort, and its absence is
+      // recorded as absence rather than as "nothing moved": see
+      // `claimCrossesBranches`.
+      const canonicalShapes = await this.canonicalShapesFor(
+        input.repository,
+        stored?.branch,
+        changedFiles,
+      );
       const observed = await this.intelligence
         .index(input.repository, integration.canonicalVersion.revision)
         .then((index) => {
@@ -4888,6 +4946,20 @@ export class Coordinator {
                     file: shape.file,
                     symbol: shape.symbol,
                   }),
+                  // Left out entirely when canonical could not be read, which
+                  // is what makes "not measured" distinguishable from "did
+                  // not move".
+                  ...(canonicalShapes === undefined
+                    ? {}
+                    : {
+                        // A contract canonical does not have is an arrival,
+                        // and an arrival moves nothing: nothing can be
+                        // depending on a name that did not exist. Same
+                        // asymmetry `contractChanges` draws, and the reason a
+                        // branch that adds a file does not thereby hold the
+                        // repository against everybody else.
+                        moved: movedFromCanonical(canonicalShapes, shape),
+                      }),
                 })),
             },
           };

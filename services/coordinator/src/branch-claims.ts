@@ -273,6 +273,39 @@ export function claimCrossesBranches(claim: BranchClaim): boolean {
     claim.schemas.length > 0 ||
     claim.configKeys.length > 0 ||
     claim.services.length > 0 ||
-    claim.shapes.length > 0
+    shapesCross(claim.shapes)
   );
+}
+
+/**
+ * Whether a claim's contracts are ones this branch actually moved.
+ *
+ * The first version of this asked `shapes.length > 0`, which is the same
+ * mistake `symbols` was excluded for, one level down. A claim records every
+ * exported shape in every file its diff touched — changed or not — so a
+ * branch that fixed a typo in a private helper, in a file that happens to
+ * export anything, reads here as holding a contract. Almost every branch
+ * does. The fast path was refused for almost every solo task, for as long as
+ * any other channel stayed open.
+ *
+ * `moved` settles it where it was measured. Where it was not — an older claim
+ * written before this existed, or a canonical index that would not build —
+ * there is no measurement to read, and this falls back to the presence test
+ * it used to be. Falling back rather than assuming: "we did not check" and
+ * "we checked and it is fine" are different answers, and a reader that
+ * conflated them would quietly widen the fast path every time indexing
+ * hiccuped, which is exactly when being careful matters.
+ *
+ * "Did we check" is inferred rather than stored: a comparison that ran marks
+ * every shape it saw, `true` or `false`, so a claim counts as measured only
+ * when all of them carry a mark. Demanding all rather than any is the safe
+ * reading of a state that should not arise — a half-marked claim means
+ * something went wrong, and the answer to that is the blunt test, not a
+ * confident one built on the half that happens to be there.
+ */
+function shapesCross(shapes: readonly ClaimedShape[]): boolean {
+  const measured = shapes.every((shape) => shape.moved !== undefined);
+  return measured
+    ? shapes.some((shape) => shape.moved === true)
+    : shapes.length > 0;
 }

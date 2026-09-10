@@ -344,3 +344,101 @@ test("only what can reach another branch holds the blanket path off", () => {
   );
 });
 
+test("a contract the branch touched but did not move holds nothing", () => {
+  // The case that made the fast path unreachable. A claim records every
+  // exported shape in every file its diff touched, so a branch that fixed a
+  // private helper in a file that happens to export something recorded a
+  // shape — and the old presence test read that as a held contract. Almost
+  // every branch has one, so almost every solo task planned instead.
+  const shape = (over: Partial<ClaimedShape> = {}): ClaimedShape => ({
+    file: "apps/web/public/app.js",
+    symbol: "render",
+    shape: "(): void",
+    digest: "same-as-canonical",
+    consumers: [],
+    ...over,
+  });
+  const held = claim({
+    symbols: ["helper"],
+    apis: [],
+    schemas: [],
+    configKeys: [],
+    services: [],
+    ranges: [],
+  });
+
+  assert.equal(
+    claimCrossesBranches({ ...held, shapes: [shape({ moved: false })] }),
+    false,
+  );
+  assert.equal(
+    claimCrossesBranches({ ...held, shapes: [shape({ moved: true })] }),
+    true,
+  );
+  // One moved among many that did not is still a hold: the test is "any",
+  // not "all", or a branch could hide a moved contract behind untouched ones.
+  assert.equal(
+    claimCrossesBranches({
+      ...held,
+      shapes: [
+        shape({ moved: false }),
+        shape({ symbol: "mount", moved: true }),
+        shape({ symbol: "unmount", moved: false }),
+      ],
+    }),
+    true,
+  );
+});
+
+test("a claim nobody measured falls back rather than guessing", () => {
+  // Written before `moved` existed, or written when canonical would not
+  // index. Either way there is no measurement to read, and "we did not
+  // check" must not be answered as "we checked and it is fine" — that would
+  // widen the fast path exactly when something went wrong.
+  const unmeasured = claim({
+    apis: [],
+    schemas: [],
+    configKeys: [],
+    services: [],
+    ranges: [],
+    shapes: [
+      {
+        file: "apps/web/public/app.js",
+        symbol: "render",
+        shape: "(): void",
+        digest: "d",
+        consumers: [],
+      },
+    ],
+  });
+  assert.equal(claimCrossesBranches(unmeasured), true);
+  // And a measured claim with nothing in it is not the same as an unmeasured
+  // one: no shapes at all is genuinely nothing held.
+  assert.equal(claimCrossesBranches({ ...unmeasured, shapes: [] }), false);
+});
+
+test("a half-marked claim is treated as unmeasured, not half-trusted", () => {
+  // Should not arise: the recorder marks every shape it saw or none of them.
+  // If it ever does, something went wrong, and the answer to that is the
+  // blunt test rather than a confident one built on the half that is there.
+  const half = claim({
+    apis: [],
+    schemas: [],
+    configKeys: [],
+    services: [],
+    ranges: [],
+    shapes: [
+      {
+        file: "a.ts",
+        symbol: "one",
+        shape: "(): void",
+        digest: "d",
+        consumers: [],
+        moved: false,
+      },
+      { file: "a.ts", symbol: "two", shape: "(): void", digest: "d", consumers: [] },
+    ],
+  });
+  assert.equal(claimCrossesBranches(half), true);
+});
+
