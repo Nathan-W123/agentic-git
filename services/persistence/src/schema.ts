@@ -1882,6 +1882,25 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE branch_claims ADD COLUMN moved_resources TEXT NOT NULL DEFAULT '{}'`,
     ],
   },
+  {
+    /**
+     * Where a replayed result was replayed from.
+     *
+     * `IntegrationResult.replayedFrom` has been produced by the integration
+     * service since replay existed and stored by nobody: no dialect ever had
+     * the column. The narration path never noticed because it reads the live
+     * object; only the durable record lost it, which is exactly the half
+     * nobody looks at until they need it.
+     *
+     * A migration rather than an edit to the historical CREATE TABLE — see
+     * `schema-parity.test.ts` for the outage that rule comes from: a column
+     * added to the baseline DDL arrives in fresh databases and never in
+     * existing ones.
+     */
+    version: 66,
+    name: "integration-replayed-from",
+    statements: [`ALTER TABLE integrations ADD COLUMN replayed_from TEXT`],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

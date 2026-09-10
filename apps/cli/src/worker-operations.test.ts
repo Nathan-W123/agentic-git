@@ -1314,7 +1314,17 @@ test("a failed result settles the task and is audited", async () => {
 });
 
 test("concurrent workers in one repository cannot corrupt canonical; a disjoint loser is replayed", async () => {
-  const harness = await createHarness();
+  // `src/other.js` has to exist at the base, and the reason is load-bearing
+  // rather than incidental: since 71b9484 a plan that declares only files the
+  // index has never seen is marked `dependenciesUnknown`, and `assessReplay`
+  // then treats every advanced file as a semantic blocker — deliberately,
+  // because a blind read set is not proof of independence. A worker whose
+  // whole change is a new module is therefore requeued by design, and this
+  // test is about the other case: a result that is provably disjoint. Seed it,
+  // or this silently stops testing replay and starts testing the requeue.
+  const harness = await createHarness(undefined, {
+    "src/other.js": "export const other = 0;\n",
+  });
   try {
     const secondUser = await harness.store.createUser({
       email: "fleet-b@example.com",

@@ -3560,8 +3560,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
            (run_id, task_id, changeset_id, status,
             previous_sequence, previous_revision, previous_branch, previous_created_at,
             canonical_sequence, canonical_revision, canonical_branch, canonical_created_at,
-            candidate_revision, validation_json, cleanup_warnings_json, explanation, recorded_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            candidate_revision, validation_json, cleanup_warnings_json, explanation,
+            replayed_from, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         runId,
@@ -3580,6 +3581,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
         JSON.stringify(validation),
         JSON.stringify(result.cleanupWarnings ?? []),
         result.explanation,
+        // Absent on an ordinary promotion; set only when the result outlived
+        // its base and was replayed onto a newer revision.
+        result.replayedFrom ?? null,
         new Date().toISOString(),
       );
   }
@@ -6347,6 +6351,7 @@ public async recordBranchClaim(
       .all(runId) as Row[];
     return rows.map((row) => {
       const candidate = optionalText(row, "candidate_revision");
+      const replayedFrom = optionalText(row, "replayed_from");
       const cleanupWarnings = parseJson<string[]>(
         row,
         "cleanup_warnings_json",
@@ -6369,6 +6374,7 @@ public async recordBranchClaim(
         },
         validation: parseJson<CommandResult[]>(row, "validation_json"),
         ...(candidate === undefined ? {} : { candidateRevision: candidate }),
+        ...(replayedFrom === undefined ? {} : { replayedFrom }),
         ...(cleanupWarnings.length === 0 ? {} : { cleanupWarnings }),
         explanation: text(row, "explanation"),
       };

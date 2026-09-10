@@ -1429,4 +1429,12 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE branch_claims ADD COLUMN IF NOT EXISTS moved_resources TEXT NOT NULL DEFAULT '{}'`,
     ],
   },
+  {
+    // See the SQLite copy for why.
+    version: 66,
+    name: "integration-replayed-from",
+    statements: [
+      `ALTER TABLE integrations ADD COLUMN IF NOT EXISTS replayed_from TEXT`,
+    ],
+  },
 ];

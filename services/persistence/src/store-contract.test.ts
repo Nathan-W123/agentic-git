@@ -653,6 +653,36 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a replayed result remembers what it was replayed from`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      // `replayedFrom` is the whole record that a result outlived its base and
+      // was replayed onto a newer revision rather than promoted ordinarily.
+      // The integration service has stamped it since replay existed and no
+      // store ever wrote it down: there was no column, in either dialect, and
+      // nothing here asked for one back. It went unnoticed because the only
+      // reader in production is handed the live object, and because the test
+      // harness used a store that returned the same object graph it was given.
+      await store.saveIntegration(runId, {
+        ...INTEGRATION,
+        replayedFrom: "b".repeat(40),
+      });
+      const detail = await store.getRun(runId);
+      assert.equal(detail?.integrations.at(-1)?.replayedFrom, "b".repeat(40));
+
+      // And absent stays absent: an ordinary promotion did not replay
+      // anything, and a field that came back as `null` or `""` would read as
+      // one that had.
+      await store.saveIntegration(runId, { ...INTEGRATION });
+      const plain = await store.getRun(runId);
+      assert.equal(plain?.integrations.at(-1)?.replayedFrom, undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a command's stored output is bounded, tail first`, async () => {
     const { store, cleanup } = await backend.open();
     try {
