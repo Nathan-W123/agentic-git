@@ -21,3 +21,8 @@ coverage/
 # dependencies, so the worker reaches it as a bundle rather than as an edge in
 # the dependency graph.
 apps/desktop/resources/
+
+# Scratch worktrees the coding-agent harness checks out inside the repository.
+# Copies of the tree, not source: committing them would put the repository
+# inside itself.
+.claude/worktrees/
