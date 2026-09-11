@@ -172,6 +172,32 @@ next message before the waiting is over.
 Turn-by-turn conversation is not a long-lived agent. Between turns nothing is
 running; what survives is context.
 
+What a task is told about the room it came from is carried in one field,
+`SubmittedTask.context`, that the gateway alone writes. A request made inside
+a thread carries that thread — progress narration dropped, the request itself
+dropped because it is already the objective, cut to a token budget with a
+notice where the cut is (`threadContextFor` in the gateway, over
+`selectThreadContext`); a request the gateway auto-merges into a resembling
+thread carries the thread it joined; and every mention-dispatched task, thread
+or not, carries a channel memo of one line per conversation the room settled
+lately (`channelMemoFor`). The coordinator and the remote worker place the
+thread ahead of handoff notes and planning hints in `StartTaskInput.priorContext`
+for the planning round and hand it to the execution rounds on its own as
+`task.context`; the codex and prompt-cli adapters render both, and a
+`generic-cli` agent receives them as the optional `context` and `priorContext`
+fields of its `start` message. Both runners mark a turn of a conversation
+`conversational`, but only the coordinator resumes the vendor-side session on
+the next turn: a remote worker opens the session resumable and never resumes
+it, so on a worker every turn starts a fresh `startTask` and the thread in
+`task.context` is the only continuity there is. Work an agent proposes in answer to a question
+carries that question and answer; work an editor files for itself through MCP
+carries the memo, and an editor that takes a task filed in a thread is shown
+the thread in its brief. What still travels bare: a question routed to an
+owner's machine (only ever asked at the channel root today), and an MCP
+`submit_task` call, which cannot file inside an existing thread and so joins
+one only when the gateway merges it there. See
+[docs/handoff/task-context.md](../handoff/task-context.md).
+
 ## Repository Lifecycle
 
 - Greenfield start: `coord repo create` and the web repository form create an

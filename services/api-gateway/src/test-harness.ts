@@ -1430,6 +1430,9 @@ export async function startRuntime(
             leaseId: leased.lease.id,
             taskId: leased.task.id,
             objective: leased.task.objective,
+            ...(leased.task.context === undefined
+              ? {}
+              : { context: leased.task.context }),
             repositoryId: leased.task.repositoryId,
             branch: "main",
             baseRevision: leased.lease.baseRevision,
@@ -2321,6 +2324,8 @@ export async function seedTaskFor(
   repositoryId: string,
   userId: string,
   objective = "raise the retry ceiling",
+  /** The conversation it was asked inside, for a task filed from a thread. */
+  context?: string,
 ) {
   return await runtime.store.submitTask({
     repositoryId,
@@ -2329,6 +2334,7 @@ export async function seedTaskFor(
     agentId: "anthropic",
     validationCommands: [],
     submittedBy: userId,
+    ...(context === undefined ? {} : { context }),
   });
 }
 

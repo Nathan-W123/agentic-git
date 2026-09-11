@@ -1806,10 +1806,22 @@ export class Worker {
     const prepared = await this.options.client.claimRepository(
       assignment.lease.id,
     );
-    const context = [
-      assignment.task.context?.trim() ?? "",
-      prepared.planningContext ?? "",
-    ]
+    // Two slots, and they are not interchangeable — see `StartTaskInput` in
+    // `packages/agent-protocol`. `task.context` is the conversation this was
+    // asked inside and nothing else: the codex and prompt-cli adapters read
+    // it back in every execution, replan and forced-question round as "the
+    // conversation this was asked inside", so a file list or a recent-touch
+    // hint placed there is presented to the model as something somebody
+    // said. `priorContext` is read by the planning prompt alone, labelled as
+    // notes to verify, which is the right frame for both. The thread goes
+    // first in it because it is about this request; the planning hints are
+    // about the repository.
+    //
+    // This used to join the two and pass the join in both slots. An adapter
+    // cannot take the join apart again, so the split has to happen here,
+    // exactly as the in-process coordinator does it.
+    const conversation = assignment.task.context?.trim() ?? "";
+    const priorContext = [conversation, prepared.planningContext ?? ""]
       .filter((part) => part !== "")
       .join("\n\n");
     const session = await adapter.startTask({
@@ -1818,11 +1830,20 @@ export class Worker {
         objective: assignment.task.objective,
         agentId: assignment.task.agentId,
         validationCommands: assignment.task.validationCommands,
-        ...(context === "" ? {} : { context }),
+        ...(conversation === "" ? {} : { context: conversation }),
       },
       canonicalVersion: assignment.canonicalVersion,
       repositoryId: assignment.repository.id,
-      ...(context === "" ? {} : { priorContext: context }),
+      ...(priorContext === "" ? {} : { priorContext }),
+      // Told before the session opens, as the coordinator tells it: some CLIs
+      // decide at invocation time whether a session persists at all (Codex's
+      // `--ephemeral`), and a turn of a conversation must keep its
+      // vendor-side state resumable where a one-shot task is better off
+      // hermetic. The worker never said so, and every conversational turn
+      // it ran was opened as a one-shot.
+      ...(assignment.task.conversationId === undefined
+        ? {}
+        : { conversational: true }),
     });
     run.session = { adapter, sessionId: session.id };
     // Listening starts here, not at execution.

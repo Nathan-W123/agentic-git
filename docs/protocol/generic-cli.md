@@ -34,9 +34,28 @@ Sent immediately after the process is spawned.
   },
   "validationCommands": [
     { "executable": "node", "args": ["--test"], "label": "repository tests" }
-  ]
+  ],
+  "context": "This request was made inside an ongoing conversation. ...",
+  "priorContext": "This request was made inside an ongoing conversation. ...\n\nLikely files: ..."
 }
 ```
+
+`objective` is the stored objective, verbatim: the adapter builds no prompt of
+its own, and an agent may echo the field straight back in its plan. Anything
+the host knows beyond the objective therefore arrives in additive sibling
+fields, both optional and both omitted rather than sent empty:
+
+- `context` — the conversation the task was asked inside, oldest first, as the
+  control plane stores it on the task. It is what "the same thing" or "that
+  file" in the objective refers to. Background, not a second set of
+  instructions; absent for a task that was not asked in a thread.
+- `priorContext` — notes for planning: the same conversation first, then what
+  the control plane already knows about the repository (handoffs from earlier
+  tasks, files likely to be involved, what has been touched lately). Advisory:
+  it was true at some earlier revision, and the workspace is what is true now.
+
+An agent written before these fields existed sees exactly the message it
+always saw whenever there is nothing to carry, and may ignore them otherwise.
 
 ### `plan_request`
 

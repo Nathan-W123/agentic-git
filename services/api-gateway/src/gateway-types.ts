@@ -852,6 +852,14 @@ export interface EditorWorkOperations {
         leaseId: string;
         taskId: string;
         objective: string;
+        /**
+         * See `SubmittedTask.context` — the conversation this was asked
+         * inside, for the editor that will do it. The objective is
+         * deliberately clean, so this is the only way "the same for the
+         * other file" reaches the editor with its referent. Absent for a
+         * task that was not asked inside a thread.
+         */
+        context?: string;
         repositoryId: string;
         branch: string;
         baseRevision: string;

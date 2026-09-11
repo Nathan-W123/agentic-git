@@ -1186,6 +1186,129 @@ test("a Codex worker uses the clone Git directory and configured model args", as
   );
 });
 
+test("a remote worker keeps the thread as the conversation and planning hints as notes, and opens a conversational session", async (t) => {
+  // The worker used to join the thread and the control plane's planning
+  // hints into one string and pass it in both of the adapter's slots. The
+  // adapters read `task.context` back in every execution round as "the
+  // conversation this was asked inside", so a file list was presented to the
+  // model as something somebody said. And the worker never said the turn
+  // was conversational, so a Codex turn of a conversation was opened
+  // `--ephemeral` and the next turn had nothing to resume.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+
+  const thread =
+    "This request was made inside an ongoing conversation.\n" +
+    "- Rewrote src/value.js to export the value from a loader.";
+  const hints = "Files that declare the names the objective uses: src/value.js";
+  class ControlPlaneWithHints extends WorkerClient {
+    public override async claimRepository(
+      ...args: Parameters<WorkerClient["claimRepository"]>
+    ): ReturnType<WorkerClient["claimRepository"]> {
+      return { ...(await super.claimRepository(...args)), planningContext: hints };
+    }
+  }
+
+  const prompts: Array<{ args: string[]; prompt: string }> = [];
+  // The plan names the task it is for; set once each task has an id.
+  let taskId = "";
+  const runner: CodexProcessRunner = async (_executable, args, options) => {
+    const prompt = options?.input ?? "";
+    prompts.push({ args: [...args], prompt });
+    if (!prompt.includes("Implement the approved task")) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          taskId,
+          objective: "raise the value",
+          expectedFiles: ["src/value.js"],
+          expectedSymbols: ["value"],
+          dependencies: [],
+          commands: [],
+          externalAccess: [],
+          riskLevel: "low",
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    const cwd = options?.cwd;
+    assert.ok(cwd);
+    await writeFile(
+      path.join(cwd, "src", "value.js"),
+      "export const value = 5;\n",
+    );
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "raised in a conversation",
+      }),
+      stderr: "",
+      durationMs: 1,
+    };
+  };
+  const worker = makeWorker(runtime, {
+    client: new ControlPlaneWithHints({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+    codexRunner: runner,
+  });
+  await worker.register();
+
+  const conversational = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "now raise the value the same way",
+    agentId: "local",
+    validationCommands: [],
+    context: thread,
+    conversationId: "msg_thread_root",
+  });
+  taskId = conversational.id;
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(prompts.length, 2, JSON.stringify(prompts.map((p) => p.args)));
+  const [planning, execution] = prompts;
+  assert.ok(planning !== undefined && execution !== undefined);
+
+  // Planning is told both, thread first: it is about this request, where the
+  // hints are about the repository.
+  assert.ok(planning.prompt.includes(thread), planning.prompt);
+  assert.ok(planning.prompt.includes(hints), planning.prompt);
+  assert.ok(
+    planning.prompt.indexOf(thread) < planning.prompt.indexOf(hints),
+    planning.prompt,
+  );
+  // Execution is told the conversation and nothing that was not said in it.
+  assert.ok(execution.prompt.includes(thread), execution.prompt);
+  assert.equal(execution.prompt.includes(hints), false, execution.prompt);
+  // And the session was opened to be continued.
+  for (const { args } of prompts) {
+    assert.equal(args.includes("--ephemeral"), false, args.join(" "));
+  }
+
+  // A one-shot task on the same worker is still hermetic.
+  prompts.length = 0;
+  const once = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value once more",
+    agentId: "local",
+    validationCommands: [],
+  });
+  taskId = once.id;
+  const oneShot = await worker.runOnce();
+  assert.equal(oneShot.accepted, true, oneShot.reason);
+  assert.ok(prompts.length > 0);
+  for (const { args } of prompts) {
+    assert.equal(args.includes("--ephemeral"), true, args.join(" "));
+  }
+});
+
 test("the Codex adapter refuses to pretend it is sandboxed", async (t) => {
   const runtime = await startRuntime(t);
   runtime.project.config.sandbox = { mode: "docker", image: "coord/agent:1" };

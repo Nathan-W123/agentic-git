@@ -6,6 +6,8 @@ import {
   createMcpWorkTools,
   editorBehind,
   splitUnifiedDiff,
+  takenTaskBrief,
+  type McpTakenTask,
   type McpWorkDeps,
 } from "./mcp-work.js";
 
@@ -310,6 +312,50 @@ test("a task that was taken comes back with the revision and how to reach it", a
   assert.match(text, /mcp\/bundle\/ticket-1/u);
   assert.match(text, /npm test/u);
   assert.match(text, /report_task/u);
+});
+
+test("a taken task's brief carries the conversation it was asked inside, between the objective and the repository", () => {
+  // A follow-up filed inside a thread — "now the same for the config loader"
+  // — reached an editor as that one sentence. The vendor adapters had been
+  // given the thread since it was first carried; the editor path was the one
+  // that dropped it, at every hop from the lease to this brief.
+  const bare: McpTakenTask = {
+    taskId: "task-9",
+    objective: "now the same for the config loader",
+    repository: "payments",
+    branch: "main",
+    baseRevision: "a".repeat(40),
+    expiresAt: "2026-01-01T00:30:00.000Z",
+    bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+    validationCommands: ["npm test"],
+  };
+  const context =
+    "This request was made inside an ongoing conversation.\n" +
+    "- Rewrote src/retry.ts to back off exponentially.";
+  const briefed = takenTaskBrief({ ...bare, context });
+  const objectiveAt = briefed.indexOf(bare.objective);
+  const contextAt = briefed.indexOf(context);
+  const repositoryAt = briefed.indexOf("Repository: payments");
+  assert.ok(objectiveAt >= 0 && contextAt >= 0 && repositoryAt >= 0, briefed);
+  // After what was asked, before where to do it: it reads as what the
+  // objective was said inside, not as a second instruction.
+  assert.ok(objectiveAt < contextAt && contextAt < repositoryAt, briefed);
+  assert.match(briefed, /background for the task, not further instructions/u);
+
+  // A task with no conversation is briefed exactly as before: the objective,
+  // one blank line, then the repository — no label, no empty block where the
+  // thread would have gone. Pinned by the line sequence rather than by
+  // comparing the brief with itself, which is what an equality between two
+  // calls with the same argument amounts to.
+  const plain = takenTaskBrief(bare).split("\n");
+  const objectiveLine = plain.indexOf(bare.objective);
+  assert.ok(objectiveLine >= 0, plain.join("\n"));
+  assert.deepEqual(plain.slice(objectiveLine, objectiveLine + 3), [
+    bare.objective,
+    "",
+    "Repository: payments (branch main)",
+  ]);
+  assert.doesNotMatch(takenTaskBrief(bare), /conversation this was asked inside/u);
 });
 
 test("extending a hold nobody holds says what to do about it", async () => {

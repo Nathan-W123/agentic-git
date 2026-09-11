@@ -1358,6 +1358,84 @@ test("an editor takes a task, is told the revision, and reports it done", async 
   assert.equal(leases.at(-1)?.status, "completed");
 });
 
+test("an editor that takes a task filed inside a thread is told the thread", async (t) => {
+  // The lease carried the whole task and the tool text carried the objective:
+  // every hop between — the operation's result, the taken shape, the brief —
+  // dropped `context`, so "now the same for the config loader" arrived with
+  // nothing for "the same" to point at.
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const context =
+    "This request was made inside an ongoing conversation.\n" +
+    "- Rewrote src/retry.ts to back off exponentially.";
+  const task = await seedTaskFor(
+    runtime,
+    repositoryId,
+    user.id,
+    "now the same for the config loader",
+    context,
+  );
+
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+  assert.match(taken.text, new RegExp(task.id, "u"));
+  assert.ok(taken.text.includes(context), taken.text);
+  assert.match(taken.text, /background for the task, not further instructions/u);
+  // The stored value, whole — not a paraphrase of it.
+  assert.equal((await runtime.store.getSubmittedTask(task.id))?.context, context);
+});
+
+test("work an editor files for itself carries what the room has settled", async (t) => {
+  // `fileForEditor` submits directly rather than through the mention path,
+  // so it was the one dispatch that skipped the channel memo every
+  // mention-dispatched task gets: the task filed by the person at the
+  // keyboard was the one that started from nothing.
+  const { runtime, owner, user, repositoryId } = await mcpRuntime(t);
+  // A Codex editor, in a room where the only agent is a Claude — so nobody is
+  // its own and the editor files the work for itself.
+  const minted = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "Codex on laptop", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.data.token as string;
+
+  // Something the room settled earlier, in its own thread.
+  const settled = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: user.id,
+    content: "which backoff should the retry loop use?",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: settled.id,
+    kind: "user",
+    authorId: user.id,
+    content: "we decided the retry loop backs off exponentially, capped at a minute",
+  });
+
+  const filed = await work(runtime.origin, token, "submit_task", {
+    repository: "payments",
+    objective: "cap the retry attempts at three",
+  });
+  assert.equal(filed.isError, undefined, filed.text);
+  assert.match(filed.text, /Filed in #/u);
+  const [submitted] = runtime.submittedTasks;
+  assert.ok(submitted !== undefined, JSON.stringify(runtime.submittedTasks));
+  assert.equal(submitted.vendor, "codex");
+  const context = submitted.context ?? "";
+  assert.ok(
+    context.startsWith("Recently settled elsewhere in this channel"),
+    context,
+  );
+  assert.match(context, /backs off exponentially/u);
+  // The objective it was filed with is not read back as background to itself.
+  assert.doesNotMatch(context, /cap the retry attempts at three/u);
+});
+
 test("an editor cannot report on a hold that is somebody else's", async (t) => {
   const { runtime, owner, token, user, repositoryId } = await mcpRuntime(t);
   const task = await seedTaskFor(runtime, repositoryId, user.id);

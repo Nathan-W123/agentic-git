@@ -4091,6 +4091,9 @@ export function workerOperations(
               leaseId: taken.leaseId,
               taskId: taken.task.id,
               objective: taken.task.objective,
+              ...(taken.task.context === undefined
+                ? {}
+                : { context: taken.task.context }),
               repositoryId: taken.task.repositoryId,
               branch: taken.repository.branch,
               baseRevision: taken.baseRevision,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -55,6 +55,10 @@ const FIXTURE_AGENT = [
   '  const mode = process.env.FIXTURE_MODE ?? "ok";',
   '  if (message.type === "start") {',
   "    started = message;",
+  "    // Written whole, so a test can read exactly what the wire carried.",
+  "    if (process.env.FIXTURE_START_LOG) {",
+  "      fs.writeFileSync(process.env.FIXTURE_START_LOG, JSON.stringify(message));",
+  "    }",
   "    return;",
   "  }",
   '  if (message.type === "plan_request") {',
@@ -172,8 +176,11 @@ function createAdapter(
   overrides: {
     sandbox?: WorkspaceSandbox;
     requestTimeoutMs?: number;
+    /** Where the fixture agent writes the `start` message it received. */
+    startLog?: string;
   } = {},
 ): GenericCliAdapter {
+  const { startLog, ...adapterOverrides } = overrides;
   return new GenericCliAdapter({
     agentId: TASK.agentId,
     launch: {
@@ -183,12 +190,13 @@ function createAdapter(
         ...process.env,
         FIXTURE_MODE: mode,
         FIXTURE_PLAN: JSON.stringify(PLAN),
+        ...(startLog === undefined ? {} : { FIXTURE_START_LOG: startLog }),
       },
     },
     repository: fixture.repository,
     workspaces: fixture.workspaces,
     planningRoot: path.join(fixture.root, "planning"),
-    ...overrides,
+    ...adapterOverrides,
   });
 }
 
@@ -299,6 +307,78 @@ test("drives a real child process from plan through changeset", async () => {
     );
 
     await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the start message carries the conversation and prior notes as their own fields, and only when there are any", async () => {
+  // This adapter writes no prompt, so it was the one adapter that handed a
+  // task over with no thread, no memo and no handoffs at all — every other
+  // adapter had rendered them since they were first carried. They travel as
+  // additive sibling fields: `objective` stays the stored objective verbatim
+  // (a third-party agent may echo it straight back in its plan), and an
+  // agent that ignores unknown keys is unaffected.
+  const fixture = await createFixture();
+  try {
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const context =
+      "This request was made inside an ongoing conversation.\n- cap it at ten";
+    const priorContext = `${context}\n\nLikely files: src/counter.js`;
+
+    const withLog = path.join(fixture.root, "start-with.json");
+    const carrying = createAdapter(fixture, "ok", { startLog: withLog });
+    const first = await carrying.startTask({
+      task: { ...TASK, context },
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+      priorContext,
+    });
+    // A plan answered proves the child read its stdin up to and including
+    // `start`; cancelling straight away could kill it before it had.
+    await carrying.requestPlan(first.id);
+    await carrying.cancel(first.id);
+    const carried = JSON.parse(await readFile(withLog, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(carried["type"], "start");
+    assert.equal(carried["objective"], TASK.objective);
+    assert.equal(carried["context"], context);
+    assert.equal(carried["priorContext"], priorContext);
+
+    // Without either, the message is the one it always was: no key at all,
+    // not a key holding nothing.
+    const withoutLog = path.join(fixture.root, "start-without.json");
+    const bare = createAdapter(fixture, "ok", { startLog: withoutLog });
+    const second = await bare.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    await bare.requestPlan(second.id);
+    await bare.cancel(second.id);
+    const plain = JSON.parse(await readFile(withoutLog, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    assert.equal("context" in plain, false, JSON.stringify(plain));
+    assert.equal("priorContext" in plain, false, JSON.stringify(plain));
+    assert.deepEqual(
+      Object.keys(plain).sort(),
+      [
+        "canonicalVersion",
+        "objective",
+        "repositoryId",
+        "sessionId",
+        "taskId",
+        "type",
+        "validationCommands",
+        "workspacePath",
+      ],
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

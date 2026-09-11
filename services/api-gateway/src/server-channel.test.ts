@@ -2160,6 +2160,45 @@ test("a question answer that proposes a repository change starts one scoped task
   assert.doesNotMatch(allVisible, /ANSWER_TASK/u);
 });
 
+test("work proposed by an answer carries the question and the answer that scoped it", async (t) => {
+  // The objective the model writes is one sentence distilled from its own
+  // answer. The task used to be dispatched with that sentence alone: the
+  // answer is a flat message referencing the question, not a reply under
+  // it, so nothing that reads a thread back would ever have found it.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "answer-carries-exchange");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.channelAnswerText =
+    "The retry routes currently have no cap, so malformed clients can loop forever.\n" +
+    "ANSWER_TASK: Add a three-attempt cap to retry routes";
+  runtime.chatAnswer.text = "I will add the cap.";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Claude (Owner) should retry routes cap malformed clients?",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const [task] = runtime.submittedTasks;
+  const context = task?.context ?? "";
+  assert.match(context, /should retry routes cap malformed clients\?/u);
+  assert.match(context, /currently have no cap, so malformed clients can loop forever/u);
+  // The private routing line never travels; the objective is already it.
+  assert.doesNotMatch(context, /ANSWER_TASK/u);
+  assert.doesNotMatch(context, /Add a three-attempt cap/u);
+  // Carried as background, not as a continuation: the thread this task opens
+  // is the question itself.
+  assert.equal(task?.conversationId, posted.data.message.id);
+});
+
 test("an agent's answer carries a reference to the message it answers", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

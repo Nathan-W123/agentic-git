@@ -1784,6 +1784,61 @@ test("work merged into an existing thread says what asked for it", async (t) => 
   );
 });
 
+test("work merged into a resembling thread carries that thread with it", async (t) => {
+  // The automatic half of continuing a thread: nobody asked inside it, the
+  // request merely resembled it closely enough for `findThreadToContinue`
+  // to put the work there. A task that lands in a thread has to carry what
+  // that thread already said, or it joins a conversation it cannot read.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-merge-context");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // An agent's own thread about the same subject, with something said in it.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "Raising the retry ceiling to five attempts in src/retry.ts",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: root.id,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "Raised the retry ceiling to five; the backoff cap is still one minute.",
+  });
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+
+  runtime.chatAnswer.text = "On it — raising the ceiling for the config loader too.";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: `@${name} raise the retry ceiling to five attempts in src/config.ts too`,
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the resembling request never dispatched a task",
+  );
+  const [merged] = runtime.submittedTasks;
+  // Merged: the work threads under the existing root, not under its own post.
+  assert.equal(merged?.conversationId, root.id);
+  const context = merged?.context ?? "";
+  assert.match(context, /Raising the retry ceiling to five attempts/u);
+  assert.match(context, /backoff cap is still one minute/u);
+  assert.doesNotMatch(context, /src\/config\.ts too/u);
+});
+
 test("channel messages and replies can be corrected only before anyone acts on them", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

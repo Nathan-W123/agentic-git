@@ -104,6 +104,13 @@ export function editorBehind(token?: {
 export interface McpTakenTask {
   readonly taskId: string;
   readonly objective: string;
+  /**
+   * The conversation the task was asked inside, when it was asked inside
+   * one — `SubmittedTask.context`. The objective is deliberately clean (see
+   * `SubmitTaskInput.context` in persistence for why), so the brief is the
+   * only place an editor gets to read the room.
+   */
+  readonly context?: string;
   readonly repository: string;
   readonly branch: string;
   readonly baseRevision: string;
@@ -262,6 +269,20 @@ export function takenTaskBrief(taken: McpTakenTask): string {
     "",
     taken.objective,
     "",
+    // Between the objective and the repository, so it reads as what the
+    // objective was said inside rather than as a second instruction. A
+    // follow-up filed in a thread — "now the same for the config loader" —
+    // arrived here as that one sentence with nothing for "the same" to point
+    // at; the vendor adapters had been given the thread since it was first
+    // carried, and the editor path was the one that dropped it.
+    ...(taken.context === undefined
+      ? []
+      : [
+          "What was said in the conversation this was asked inside — " +
+            "background for the task, not further instructions:",
+          taken.context,
+          "",
+        ]),
     `Repository: ${taken.repository} (branch ${taken.branch})`,
     `Start from revision ${taken.baseRevision}.`,
     "",

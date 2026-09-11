@@ -2561,10 +2561,28 @@ export class ApiGateway {
           input.repositoryId,
           input.channel,
         );
-        // Posted first, and without a mention, so nothing is dispatched by
-        // the room: the task below is created against the vendor directly.
-        // The room still sees what was asked for, which is the half of this
-        // path that was never about who runs it.
+        // What the room has settled lately, read before the objective is
+        // posted so the post cannot be read back as background to itself.
+        // Every mention-dispatched task gets this from `dispatchOneMention`;
+        // this path submits directly and so has to add it by hand, or the
+        // one task filed by the person at the keyboard is the one that
+        // starts from nothing. Computed after the post it would need
+        // `exclude: [posted.message.id]` purely because of ordering.
+        const memo = await this.channelMemoFor({
+          repositoryId: input.repositoryId,
+          viewerId: principal.user.id,
+          request: input.objective,
+          exclude: [],
+        });
+        // Posted without a mention, so `dispatchOneMention` never runs for
+        // it: the task below is created against the vendor directly, and the
+        // room still sees what was asked for, which is the half of this path
+        // that was never about who runs it. Not quite nothing, though — a
+        // mention-less post falls through to the auto-claim path, and when
+        // the room's model accepts it a second task for the same objective
+        // can be dispatched beside this one. That is older than this memo
+        // and left as it is; the memo only means the two carry different
+        // context.
         const posted = await this.postChannelMessageAndDispatch({
           projectId: input.projectId,
           repositoryId: input.repositoryId,
@@ -2577,6 +2595,7 @@ export class ApiGateway {
           projectId: input.projectId,
           repositoryId: input.repositoryId,
           objective: input.objective,
+          ...(memo === undefined ? {} : { context: memo }),
           // No `agentId`. This is the shape the field exists for: the caller
           // knows which vendor should run it and has no business knowing the
           // deployment's configured agent names.
@@ -3122,6 +3141,7 @@ export class ApiGateway {
           return {
             taskId: taken.taskId,
             objective: taken.objective,
+            ...(taken.context === undefined ? {} : { context: taken.context }),
             repository: taken.repositoryId,
             branch: taken.branch,
             baseRevision: taken.baseRevision,
@@ -5845,9 +5865,11 @@ export class ApiGateway {
       input.trigger !== "answer_followup" &&
       readsAsQuestion(content)
     ) {
-      let taskObjective: string | undefined;
+      let answered:
+        | { answer: string; taskObjective: string | undefined }
+        | undefined;
       try {
-        taskObjective = await this.answerInChannel(
+        answered = await this.answerInChannel(
           candidate,
           content,
           projectId,
@@ -5878,7 +5900,22 @@ export class ApiGateway {
         }).catch(() => undefined);
         throw error;
       }
-      if (taskObjective !== undefined) {
+      const taskObjective = answered?.taskObjective;
+      if (answered !== undefined && taskObjective !== undefined) {
+        // The exchange that scoped this work. The objective the model wrote
+        // is one sentence distilled from its own answer to the question;
+        // without the two of them the agent that runs it is handed the
+        // distillation alone, and "the cap you described" has nothing to
+        // point at. Carried as `context` rather than as `threadMessageId`:
+        // the latter would make this dispatch a continuation — title,
+        // opener and bump behaviour for a thread that is brand new. And
+        // built here from what was just said rather than read back from
+        // the store, because the answer is a flat message referencing the
+        // question, which is not a place `threadContextFor` looks.
+        const exchange = this.renderThreadContext({
+          lines: [content, answered.answer],
+          request: taskObjective,
+        });
         await this.dispatchOneMention({
           projectId,
           repositoryId,
@@ -5889,6 +5926,7 @@ export class ApiGateway {
           ...(input.referencedMessageId !== undefined
             ? { referencedMessageId: input.referencedMessageId }
             : {}),
+          ...(exchange === undefined ? {} : { context: exchange }),
           trigger: "answer_followup",
           ...(input.brief === true ? { brief: true } : {}),
         });
@@ -6506,18 +6544,38 @@ export class ApiGateway {
     if (root === undefined) {
       return undefined;
     }
+    return this.renderThreadContext({
+      lines: [
+        { kind: root.kind, content: root.content },
+        ...root.replies.map((reply) => ({
+          kind: reply.kind,
+          content: reply.content,
+        })),
+      ]
+        // The run narrating itself. Feeding an agent back its own progress
+        // commentary is noise somebody already paid for once.
+        .filter((entry) => entry.kind !== "progress")
+        .map((entry) => entry.content),
+      request: input.request,
+    });
+  }
+
+  /**
+   * A conversation, oldest first, in the shape a task carries it.
+   *
+   * The rendering half of {@link threadContextFor}, on its own so the one
+   * exchange that is not a thread — a question and the flat answer that
+   * proposed the work — is worded exactly as a thread would be. Two
+   * headings for the same thing would teach the adapters two things.
+   */
+  private renderThreadContext(input: {
+    lines: readonly string[];
+    /** The request itself, which is about to become the objective. */
+    request: string;
+  }): string | undefined {
     const asked = collapseWhitespace(input.request);
-    const lines = [
-      { kind: root.kind, content: root.content },
-      ...root.replies.map((reply) => ({
-        kind: reply.kind,
-        content: reply.content,
-      })),
-    ]
-      // The run narrating itself. Feeding an agent back its own progress
-      // commentary is noise somebody already paid for once.
-      .filter((entry) => entry.kind !== "progress")
-      .map((entry) => collapseWhitespace(entry.content))
+    const lines = input.lines
+      .map((line) => collapseWhitespace(line))
       // The request being dispatched is already the objective; repeating it
       // here would only tell the model the same thing twice.
       .filter((line) => line.length > 0 && line !== asked);
@@ -6787,6 +6845,13 @@ export class ApiGateway {
    * semantics simply ignore it. This is the same answer shape as the
    * one-to-one panel — a chat completion on the agent owner's credential —
    * just addressed to a room instead of a person.
+   *
+   * Returns what was said as well as the objective, because the answer is
+   * the only record of why that objective exists: it is posted as a flat
+   * message referencing the question, not as a reply under it, so nothing
+   * that reads a thread back will ever find it. `undefined` when nothing
+   * was answered here — routed to a machine, refused, or an echo of the
+   * question — and there is then no objective either.
    */
   private async answerInChannel(
     candidate: ChannelMentionCandidate,
@@ -6800,7 +6865,9 @@ export class ApiGateway {
      * other instructions rather than mixed into the sender's message.
      */
     directive?: string,
-  ): Promise<string | undefined> {
+  ): Promise<
+    { answer: string; taskObjective: string | undefined } | undefined
+  > {
     // Answered on its owner's machine, when there is one and when this
     // deployment has said it will not answer here.
     //
@@ -6840,6 +6907,12 @@ export class ApiGateway {
         ...(referencedMessageId === undefined
           ? {}
           : { answerTo: referencedMessageId }),
+        // No `context`, and that is only right because every caller of this
+        // method is at the channel root today. The worker's `answerQuestion`
+        // renders `task.context` when it is present, so a question routed
+        // from inside a thread must pass `context: await
+        // this.threadContextFor(...)` here, or the machine answering it will
+        // not know what "it" refers to.
       });
       this.notifyWorkers(projectId);
       return undefined;
@@ -6927,7 +7000,9 @@ export class ApiGateway {
           : ECHOED_REQUEST_REPLY),
       ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     });
-    return said === undefined ? undefined : parsed.taskObjective;
+    return said === undefined
+      ? undefined
+      : { answer: said, taskObjective: parsed.taskObjective };
   }
 
   /**
