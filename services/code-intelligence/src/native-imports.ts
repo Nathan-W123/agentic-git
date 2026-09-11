@@ -25,6 +25,11 @@ export type NativeDialect = "c" | "csharp";
 /**
  * Blanks comments, keeping string bodies — the header name lives in one.
  *
+ * A reader of *calls* wants the opposite: `getenv("PATH")` written inside a
+ * test fixture's raw string is prose, and the argument is read back from
+ * the source once the head is found in code. `blankStrings` blanks every
+ * string form — ordinary, raw, verbatim — the same way comments are.
+ *
  * Lines that *begin* inside a raw string or a block comment are reported so
  * the caller can skip them: that is what stops a `#include` written inside
  * `R"cpp( ... )cpp"` from becoming an edge. So is every physical line that
@@ -42,7 +47,9 @@ export type NativeDialect = "c" | "csharp";
 export function maskNative(
   source: string,
   dialect: NativeDialect = "c",
+  options: { blankStrings?: boolean } = {},
 ): { text: string; dead: Set<number> } | undefined {
+  const blankStrings = options.blankStrings === true;
   if (source.startsWith("\uFEFF")) {
     source = source.slice(1);
   }
@@ -157,6 +164,9 @@ export function maskNative(
           return undefined;
         }
         markDead(index, end + quotes.length);
+        if (blankStrings) {
+          blank(index, end + quotes.length);
+        }
         advanceTo(end + quotes.length);
         continue;
       }
@@ -178,6 +188,9 @@ export function maskNative(
           at += 1;
         }
         markDead(index, at);
+        if (blankStrings) {
+          blank(index, at);
+        }
         advanceTo(at);
         continue;
       }
@@ -190,6 +203,9 @@ export function maskNative(
         return undefined;
       }
       markDead(index, end + terminator.length);
+      if (blankStrings) {
+        blank(index, end + terminator.length);
+      }
       advanceTo(end + terminator.length);
       continue;
     }
@@ -221,7 +237,11 @@ export function maskNative(
         }
         return undefined;
       }
-      // Left intact: the header name is inside it.
+      // Left intact: the header name is inside it. Unless the caller reads
+      // calls rather than directives, in which case it is not code.
+      if (blankStrings) {
+        blank(index, at);
+      }
       advanceTo(at);
       continue;
     }
@@ -233,26 +253,49 @@ export function maskNative(
 /**
  * Whether each line sits inside a group the preprocessor never enters.
  *
- * Only `#if 0` (and C#'s `#if false`) is known to be dead; any other
- * condition depends on flags this cannot see and is left alone. An `#else`
- * or `#elif` after a dead opener is live, or at least not known dead.
+ * Only a condition written as a constant is known. `#if 0` (C#'s `#if
+ * false`) opens a dead group; `#if 1` (`#if true`) opens a live one, and
+ * that makes every `#elif` and `#else` after it dead — the compiler never
+ * enters the other arm of a toggle. An `#elif 0` is dead on its own, and an
+ * `#elif 1` takes its group the way `#if 1` does. Any other condition
+ * depends on flags this cannot see: its arm is left alone, and so is what
+ * follows its `#else` — not known dead, so live.
+ *
+ * Exported for the resource reader, which blanks these lines: a `getenv`
+ * inside `#if 0` is a call nobody makes.
  */
-function excludedLines(lines: readonly string[], dialect: NativeDialect): Set<number> {
+export function excludedLines(lines: readonly string[], dialect: NativeDialect): Set<number> {
   const excluded = new Set<number>();
-  const stack: boolean[] = [];
-  const deadOpener = dialect === "c" ? /^[ \t]*#[ \t]*if[ \t]+0[ \t]*$/u : /^[ \t]*#[ \t]*if[ \t]+false[ \t]*$/u;
-  for (const [position, line] of lines.entries()) {
+  // One entry per open group: whether the arm being read is dead, and
+  // whether an arm before it was known taken — which is what makes the
+  // arms after it dead whatever their own conditions say.
+  const stack: { dead: boolean; taken: boolean }[] = [];
+  const constant =
+    dialect === "c"
+      ? { dead: /^[ \t]*#[ \t]*(?:if|elif)[ \t]+0[ \t]*$/u, live: /^[ \t]*#[ \t]*(?:if|elif)[ \t]+1[ \t]*$/u }
+      : { dead: /^[ \t]*#[ \t]*(?:if|elif)[ \t]+false[ \t]*$/u, live: /^[ \t]*#[ \t]*(?:if|elif)[ \t]+true[ \t]*$/u };
+  for (const [position, physical] of lines.entries()) {
+    // The masked text of a CRLF file still ends every line in `\r`, and a
+    // constant test anchored at the end of the line has to see past it.
+    const line = physical.replace(/\r$/u, "");
     const directive = /^[ \t]*#[ \t]*(if|ifdef|ifndef|elif|else|endif)\b/u.exec(line)?.[1];
+    const top = stack[stack.length - 1];
     if (directive === "if" || directive === "ifdef" || directive === "ifndef") {
-      stack.push(deadOpener.test(line));
-    } else if (directive === "elif" || directive === "else") {
-      if (stack.length > 0) {
-        stack[stack.length - 1] = false;
+      stack.push({ dead: constant.dead.test(line), taken: constant.live.test(line) });
+    } else if (directive === "elif" && top !== undefined) {
+      if (top.taken) {
+        top.dead = true;
+      } else {
+        top.dead = constant.dead.test(line);
+        top.taken = constant.live.test(line);
       }
+    } else if (directive === "else" && top !== undefined) {
+      top.dead = top.taken;
+      top.taken = true;
     } else if (directive === "endif") {
       stack.pop();
     }
-    if (stack.some(Boolean)) {
+    if (stack.some((group) => group.dead)) {
       excluded.add(position);
     }
   }
@@ -338,8 +381,40 @@ export function resolveInclude(
   // Then the search path, which is a compiler flag. A suffix match stands in
   // for it, and only when exactly one file in the repository ends that way —
   // two `config.h` is precisely the case where guessing is wrong.
-  const hit = context.suffixes.get(specifier.replace(/^\.\//u, ""));
-  return hit === undefined || hit === fromFile ? [] : [hit];
+  const wanted = specifier.replace(/^\.\//u, "");
+  const hit = context.suffixes.get(wanted);
+  if (hit === undefined || hit === fromFile) {
+    return [];
+  }
+  // A bare name that only matches inside somebody else's tree is the
+  // generated-header case: the project's own `config.h` is written by
+  // ./configure and never committed, and the one `config.h` in the
+  // repository is zlib's. A directory in the specifier is evidence tying it
+  // to a tree; a bare name has none, and a vendored tree is not this one.
+  if (!wanted.includes("/")) {
+    const tree = vendoredTree(hit);
+    if (tree !== undefined && !fromFile.startsWith(`${tree}/`)) {
+      return [];
+    }
+  }
+  return [hit];
+}
+
+/** Directory names that hold somebody else's sources. */
+const VENDORED =
+  /^(?:third[_-]?party|3rd[_-]?party|vendor|vendored|external|externals|extern|deps|contrib|submodules)$/iu;
+
+/**
+ * The vendored tree a path lives in, or nothing: `third_party/zlib` for
+ * `third_party/zlib/config.h`, `vendor` for `vendor/config.h`.
+ */
+function vendoredTree(file: string): string | undefined {
+  const segments = file.split("/");
+  const at = segments.findIndex((segment) => VENDORED.test(segment));
+  if (at === -1 || at === segments.length - 1) {
+    return undefined;
+  }
+  return segments.slice(0, Math.min(at + 2, segments.length - 1)).join("/");
 }
 
 /* ------------------------------------------------------------ C# ------- */
