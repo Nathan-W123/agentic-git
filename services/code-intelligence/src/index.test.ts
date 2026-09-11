@@ -1494,3 +1494,220 @@ test("a transient interpreter failure is not cached as a file's contract", async
     await rm(fake, { recursive: true, force: true });
   }
 });
+
+/** A repository seeded with `files`, and a way to advance it one commit. */
+async function seededRepository(files: Record<string, string>, name: string) {
+  const root = await mkdtemp(path.join(os.tmpdir(), `coord-${name}-`));
+  const source = path.join(root, "source");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(source);
+  const write = async (entries: Record<string, string>) => {
+    for (const [relative, text] of Object.entries(entries)) {
+      await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+      await writeFile(path.join(source, relative), text);
+    }
+  };
+  await write(files);
+  await repositories.commitAll(source, "seed");
+  const repository = await repositories.importLocalRepository(
+    source,
+    path.join(root, "canonical.git"),
+    name,
+  );
+  const revision = (await repositories.getCanonicalVersion(repository)).revision;
+  const advance = async (entries: Record<string, string>, message: string) => {
+    await write(entries);
+    await repositories.commitAll(source, message);
+    await execFile("git", ["-C", source, "push", "-q", repository.path, "main:main"]);
+    return (await repositories.getCanonicalVersion(repository)).revision;
+  };
+  return {
+    repositories,
+    repository,
+    revision,
+    advance,
+    dispose: () => rm(root, { recursive: true, force: true }),
+  };
+}
+
+test("a file the parse cache lost mid-build is unreadable, not empty, and is not remembered", async () => {
+  // Two builds overlap and the cache is at capacity, so an entry present at
+  // the chunk's pre-check is gone by the per-entry lookup. The first version
+  // then indexed the file as empty — no symbols, no unknown flag — and
+  // remembered that under the real blob, so every later build served it and
+  // contractDrift reported every export as removed.
+  const repo = await seededRepository(
+    {
+      "a.ts": 'import { b } from "./b.js";\nexport const a = b;\n',
+      "b.ts": "export const b = 1;\nexport function bee() { return 2; }\n",
+    },
+    "evict",
+  );
+  try {
+    const service = new CodeIntelligenceService(repo.repositories, { maxParsedFiles: 1 });
+    await service.index(repo.repository, repo.revision);
+    const r2 = await repo.advance({ "README.md": "1\n" }, "r2");
+    const r3 = await repo.advance({ "README.md": "2\n" }, "r3");
+    const overlapping = await Promise.all([
+      service.index(repo.repository, r2),
+      service.index(repo.repository, r3),
+    ]);
+    for (const index of overlapping) {
+      for (const file of index.files) {
+        // Either read properly or marked unreadable; never "declares nothing".
+        assert.ok(
+          file.symbols.length > 0 || file.symbolRangesUnknown === true,
+          `${file.path} must not be indexed as empty`,
+        );
+      }
+    }
+    const r4 = await repo.advance({ "README.md": "3\n" }, "r4");
+    const later = await service.index(repo.repository, r4);
+    assert.deepEqual(later.files.find((file) => file.path === "b.ts")?.symbols, ["b", "bee"]);
+    assert.deepEqual(service.contractDrift(overlapping[0], later).map((change) => change.symbol), []);
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a file named with a backslash is indexed under its own name, never aliased onto another", async () => {
+  const repo = await seededRepository(
+    {
+      "lone\\file.ts": "export const REAL_BACKSLASH = 1;\n",
+      "bs/x/y.ts": "export const slash = 1;\n",
+      "bs/x\\y.ts": "export const only_in_backslash_file = 1;\n",
+      "user.ts": 'import { slash } from "./bs/x/y.js";\nexport const u = slash;\n',
+    },
+    "backslash",
+  );
+  try {
+    const index = await new CodeIntelligenceService(repo.repositories).index(repo.repository, repo.revision);
+    const paths = index.files.map((file) => file.path);
+    assert.equal(new Set(paths).size, paths.length, "no path is indexed twice");
+    assert.ok(paths.includes("lone\\file.ts"));
+    assert.ok(!paths.includes("lone/file.ts"));
+    assert.deepEqual(
+      index.files.find((file) => file.path === "bs/x\\y.ts")?.exportedSymbols,
+      ["only_in_backslash_file"],
+    );
+    assert.deepEqual(
+      index.files.find((file) => file.path === "bs/x/y.ts")?.exportedSymbols,
+      ["slash"],
+    );
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a manifest is not charged against the budgets that bound the index", async () => {
+  const goMod = `module example.com/m\n\ngo 1.22\n\nrequire (\n${Array.from(
+    { length: 60 },
+    (_, i) => `\texample.org/dep${i} v1.0.${i}\n`,
+  ).join("")})\n`;
+  const repo = await seededRepository(
+    {
+      "go.mod": goMod,
+      "app/main.go": 'package main\n\nimport "example.com/m/billing"\n\nfunc main() { billing.Charge() }\n',
+      "billing/money.go": "package billing\n\nfunc Charge() {}\n",
+    },
+    "budget",
+  );
+  try {
+    for (const options of [{ maxFileBytes: 512 }, { maxFiles: 2 }, { maxTotalBytes: 400 }]) {
+      const index = await new CodeIntelligenceService(repo.repositories, options).index(
+        repo.repository,
+        repo.revision,
+      );
+      assert.ok(
+        index.edges.some(
+          (edge) => edge.fromFile === "app/main.go" && edge.toFile === "billing/money.go",
+        ),
+        `${JSON.stringify(options)}: go.mod must still be read`,
+      );
+    }
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("one dependency imported several ways is one edge, and a specifier is shown as written", async () => {
+  const repo = await seededRepository(
+    {
+      "src/dir/index.ts": "export const d = 1;\n",
+      "src/useDir.ts": 'import { d } from "./dir";\nimport "./dir/";\nimport "./dir/index";\nimport "./dir/index.js";\nexport const ud = d;\n',
+      "go.mod": "module example.com/m\n",
+      "main.go": 'package main\n\nimport (\n\ta "example.com/m/billing"\n\tb "example.com/m/billing"\n)\n\nfunc main() { a.Charge(); b.Charge() }\n',
+      "billing/money.go": "package billing\n\nfunc Charge() {}\n",
+      "lib/app.rb": "require 'json'\nrequire_relative 'zzz'\n",
+      "src/main.rs": "mod nothere;\nuse serde::Serialize;\n",
+      "Cargo.toml": '[package]\nname = "x"\n',
+      "php/A.php": "<?php\nuse Vendor\\Thing;\nrequire 'nope.php';\n",
+    },
+    "dupes",
+  );
+  try {
+    const index = await new CodeIntelligenceService(repo.repositories).index(repo.repository, repo.revision);
+    const to = (from: string, target: string) =>
+      index.edges.filter((edge) => edge.fromFile === from && edge.toFile === target).length;
+    assert.equal(to("src/useDir.ts", "src/dir/index.ts"), 1);
+    assert.equal(to("main.go", "billing/money.go"), 1);
+    assert.deepEqual(index.files.find((file) => file.path === "main.go")?.imports, ["example.com/m/billing"]);
+    // Ruby, Rust and PHP carry how each import was written beside it, not
+    // inside it: the specifier the index shows is the one the file wrote.
+    const imports = (file: string) => index.files.find((entry) => entry.path === file)?.imports;
+    assert.deepEqual(imports("lib/app.rb"), ["json", "zzz"]);
+    assert.deepEqual(imports("src/main.rs"), ["nothere", "serde::Serialize"]);
+    assert.deepEqual(imports("php/A.php"), ["Vendor\\Thing", "nope.php"]);
+    const unresolved = index.edges
+      .filter((edge) => edge.kind === "import" && edge.toFile === undefined)
+      .map((edge) => edge.resource);
+    assert.ok(unresolved.includes("json") && unresolved.includes("nothere") && unresolved.includes("Vendor\\Thing"));
+    assert.ok(!unresolved.some((resource) => /^(?:lib|rel|mod|use|req):/u.test(resource)));
+    // And the kinds still steer resolution: require_relative found its file.
+    assert.deepEqual(index.files.find((file) => file.path === "lib/app.rb")?.dependencies, ["json", "zzz"]);
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a script import resolves the way TypeScript resolves it", async () => {
+  const repo = await seededRepository(
+    {
+      "src/both.js": "module.exports = 1;\n",
+      "src/both.ts": "export const both = 1;\n",
+      "src/useBoth.ts": 'import { both } from "./both.js";\nexport const ub = both;\n',
+      "src/onlym.mts": "export const m = 1;\n",
+      "src/useOnlym.ts": 'import { m } from "./onlym.mjs";\nimport { m as m2 } from "./onlym";\nexport const um = m;\n',
+      "src/script": "#!/bin/sh\necho hi\n",
+      "src/useScript.ts": 'import "./script";\nexport const us = 1;\n',
+      "index.ts": "export const rootIndex = 1;\n",
+      "root.ts": 'import ".";\nimport "./";\nimport "../outside.js";\nexport const r = 1;\n',
+      ".ts": "trap\n",
+      "src/styles.css": "body {}\n",
+      "src/data.json": "{}",
+      "src/useCss.ts": 'import "./styles.css";\nimport data from "./data.json";\nexport const uc = 1;\n',
+    },
+    "scriptres",
+  );
+  try {
+    const index = await new CodeIntelligenceService(repo.repositories).index(repo.repository, repo.revision);
+    const target = (from: string, resource: string) =>
+      index.edges.find((edge) => edge.fromFile === from && (edge.resource === resource || edge.toFile === resource))?.toFile;
+    // `./both.js` is the source beside the build output.
+    assert.equal(target("src/useBoth.ts", "src/both.ts"), "src/both.ts");
+    assert.equal(index.edges.some((edge) => edge.fromFile === "src/useBoth.ts" && edge.toFile === "src/both.js"), false);
+    // `.mjs` is `.mts`; an extensionless specifier never is.
+    assert.equal(target("src/useOnlym.ts", "src/onlym.mts"), "src/onlym.mts");
+    assert.equal(index.edges.filter((edge) => edge.fromFile === "src/useOnlym.ts" && edge.toFile !== undefined).length, 1);
+    // A file with no extension is not a module.
+    assert.equal(index.edges.some((edge) => edge.fromFile === "src/useScript.ts" && edge.toFile !== undefined), false);
+    // `.` from a root file is the root index; climbing out is nothing — and
+    // never the dotfile called `.ts`.
+    assert.equal(index.edges.filter((edge) => edge.fromFile === "root.ts" && edge.toFile === "index.ts").length, 1);
+    assert.equal(index.edges.some((edge) => edge.fromFile === "root.ts" && edge.toFile === ".ts"), false);
+    assert.equal(target("src/useCss.ts", "src/styles.css"), "src/styles.css");
+    assert.equal(target("src/useCss.ts", "src/data.json"), "src/data.json");
+  } finally {
+    await repo.dispose();
+  }
+});

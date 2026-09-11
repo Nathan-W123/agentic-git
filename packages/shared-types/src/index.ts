@@ -1946,6 +1946,34 @@ export function normalizeRepositoryPath(value: string): string {
   return normalized;
 }
 
+/**
+ * A path as git printed it, checked but not rewritten.
+ *
+ * {@link normalizeRepositoryPath} turns backslashes into slashes, which is
+ * right for a path somebody typed on Windows and wrong for one git listed: a
+ * committed file called `lone\file.ts` is a real file with a backslash in
+ * its name, and rewriting it produced a path that did not exist, a duplicate
+ * of a path that did, and an empty parse remembered under a real blob.
+ */
+export function repositoryPathFromGit(value: string): string {
+  if (
+    value.length === 0 ||
+    value.includes("\0") ||
+    path.posix.isAbsolute(value)
+  ) {
+    throw new Error(`Invalid repository path from git: ${JSON.stringify(value)}`);
+  }
+  const normalized = path.posix.normalize(value);
+  if (
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../")
+  ) {
+    throw new Error(`Path escapes the repository: ${JSON.stringify(value)}`);
+  }
+  return normalized;
+}
+
 export function uniqueRepositoryPaths(values: readonly string[]): string[] {
   return [...new Set(values.map(normalizeRepositoryPath))].sort();
 }

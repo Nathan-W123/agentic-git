@@ -12,6 +12,7 @@ import path from "node:path";
 
 import {
   normalizeRepositoryPath,
+  repositoryPathFromGit,
   type CanonicalVersion,
 } from "@coord/shared-types";
 
@@ -2892,7 +2893,7 @@ export class RepositoryService {
         // Submodules stay in the listing. They are real paths, and `listFiles`
         // has always reported them, so dropping them here would quietly shrink
         // the set that answers "does this declared path exist".
-        return [{ path: normalizeRepositoryPath(entry.slice(tab + 1)), oid, type }];
+        return [{ path: repositoryPathFromGit(entry.slice(tab + 1)), oid, type }];
       })
       .sort((left, right) => (left.path < right.path ? -1 : 1));
   }
@@ -2925,7 +2926,7 @@ export class RepositoryService {
     return result.stdout
       .split("\0")
       .filter((entry) => entry.length > 0)
-      .map(normalizeRepositoryPath)
+      .map(repositoryPathFromGit)
       .sort();
   }
 
@@ -3001,7 +3002,7 @@ export class RepositoryService {
     return result.stdout
       .split("\0")
       .filter((entry) => entry.length > 0)
-      .map(normalizeRepositoryPath)
+      .map(repositoryPathFromGit)
       .sort();
   }
 

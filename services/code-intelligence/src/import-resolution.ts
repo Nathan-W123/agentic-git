@@ -85,6 +85,11 @@ export type ImportResolver = (
   context: ResolutionContext,
 ) => readonly string[];
 
+/** Extensions a script import can name by itself. */
+const SCRIPT_EXTENSIONS = new Set([
+  ".ts", ".tsx", ".mts", ".cts", ".d.ts", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css",
+]);
+
 /**
  * Relative specifiers only, which is the whole of what a bundler-free
  * TypeScript project can be resolved without reading its `tsconfig`.
@@ -92,25 +97,65 @@ export type ImportResolver = (
  * A bare specifier is a package. Dropping it is the same answer this has
  * always given and the same one every other resolver here gives for the
  * standard library.
+ *
+ * The candidate order is TypeScript's: `./x.js` is `x.ts` before it is a
+ * committed `x.js` (build output beside its source), `./x.mjs` is `x.mts`,
+ * and an extensionless `./x` is never `x.mts` — and never a file with no
+ * extension at all, which is a script or a binary, not a module. A path
+ * that climbed out of the repository resolves to nothing, rather than to a
+ * root dotfile called `.ts`.
  */
 const resolveScriptImport: ImportResolver = (fromFile, specifier, context) => {
   if (!specifier.startsWith(".")) {
     return [];
   }
   const base = posixJoin(posixDirname(fromFile), specifier);
-  const withoutExtension = /\.(?:c|m)?jsx?$/u.test(base)
-    ? base.replace(/\.(?:c|m)?jsx?$/u, "")
-    : base;
-  const candidates = [
-    base,
-    ...[".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"].map(
-      (extension) => `${withoutExtension}${extension}`,
-    ),
-    ...[".ts", ".tsx", ".js", ".jsx", ".json"].map(
-      (extension) => `${base}/index${extension}`,
-    ),
-  ];
-  const hit = candidates.find((candidate) => context.files.has(candidate));
+  // `posixJoin` answers "" for a path that escaped the repository and also
+  // for `./` from a root file; only the first is a reason to stop.
+  if (base === "" && specifier.split("/").includes("..")) {
+    return [];
+  }
+  const written = /\.[^./]+$/u.exec(specifier.split("/").at(-1) ?? "")?.[0] ?? "";
+  const stem = written === "" ? base : base.slice(0, -written.length);
+  const candidates: string[] = [];
+  switch (written) {
+    case ".js":
+      candidates.push(`${stem}.ts`, `${stem}.tsx`, `${stem}.d.ts`, `${stem}.js`, `${stem}.jsx`);
+      break;
+    case ".jsx":
+      candidates.push(`${stem}.tsx`, `${stem}.jsx`);
+      break;
+    case ".mjs":
+      candidates.push(`${stem}.mts`, `${stem}.mjs`);
+      break;
+    case ".cjs":
+      candidates.push(`${stem}.cts`, `${stem}.cjs`);
+      break;
+    case "":
+      if (base !== "") {
+        candidates.push(
+          ...[".ts", ".tsx", ".js", ".jsx", ".json"].map((extension) => `${base}${extension}`),
+        );
+      }
+      break;
+    default:
+      // Written with an extension: that file, and only that file.
+      candidates.push(base);
+  }
+  if (written === "" || written === ".js") {
+    const directory = base === "" ? "" : `${base}/`;
+    candidates.push(
+      ...[".ts", ".tsx", ".js", ".jsx", ".json"].map((extension) => `${directory}index${extension}`),
+    );
+  }
+  const hit = candidates.find(
+    (candidate) =>
+      candidate !== "" &&
+      context.files.has(candidate) &&
+      SCRIPT_EXTENSIONS.has(
+        candidate.endsWith(".d.ts") ? ".d.ts" : (/\.[^./]+$/u.exec(candidate)?.[0] ?? ""),
+      ),
+  );
   return hit === undefined || hit === fromFile ? [] : [hit];
 };
 
@@ -132,11 +177,14 @@ const RESOLVERS: Partial<Record<SupportedLanguage, ImportResolver>> = {
   scala: (fromFile, specifier, context) =>
     resolveJvmImport(fromFile, specifier, "scala" as JvmLanguage, context.jvm),
   // `mod name;` is a file reference and is marked as one on the way in, so
-  // the two kinds of Rust dependency do not have to be told apart by shape.
+  // the two kinds of Rust dependency do not have to be told apart by shape;
+  // `path:` is a `#[path]` literal, which the module resolver reads as one.
   rust: (fromFile, specifier, context) =>
     specifier.startsWith("mod:")
       ? resolveRustModule(fromFile, specifier.slice(4), context)
-      : resolveRustUse(fromFile, specifier, context),
+      : specifier.startsWith("path:")
+        ? resolveRustModule(fromFile, specifier, context)
+        : resolveRustUse(fromFile, specifier, context),
   // `require` and `require_relative` measure from different bases, so which
   // one it was is marked on the way in rather than guessed at here.
   ruby: (fromFile, specifier, context) =>
@@ -194,11 +242,20 @@ export function resolveImportedFiles(
   fromFile: string,
   specifier: string,
   context: ResolutionContext,
+  /**
+   * How the specifier was written, for the languages whose imports come in
+   * kinds — Ruby's `require` against `require_relative`, PHP's `use`
+   * against `require`, Rust's `mod` against `use`. Carried beside the
+   * specifier rather than inside it, so what the index shows is what the
+   * file wrote.
+   */
+  kind?: string,
 ): readonly string[] {
   const resolver = language === undefined ? undefined : RESOLVERS[language];
+  const marked = kind === undefined ? specifier : `${kind}:${specifier}`;
   return resolver === undefined
     ? []
-    : resolver(fromFile, specifier, context).filter(
+    : resolver(fromFile, marked, context).filter(
         (target) => target !== fromFile,
       );
 }

@@ -224,6 +224,13 @@ export interface ScanFacts {
   packageName?: string;
   buildIgnored?: boolean;
   declared?: string[];
+  /**
+   * How each entry of `imports` was written, aligned by position — `rel`
+   * for Ruby's `require_relative`, `req` for PHP's `require`, `mod` and
+   * `path` for Rust's module declarations — and "" where the specifier
+   * alone says enough. The specifier itself stays as the file wrote it.
+   */
+  importKinds?: string[];
 }
 
 /** Paths enrichment treats as tests in their own right. */
@@ -816,6 +823,64 @@ const BRACE_LANGUAGES = new Set<string>([
  * recorded here as an unparsed file so `symbolRangesInFile` says "no idea".
  */
 /**
+ * A file whose source could not be obtained: known to exist, and nothing
+ * else. Every "unknown" flag is set, so nothing downstream reads it as empty.
+ */
+function unreadableFile(filePath: string, language: SupportedLanguage): IndexedFile {
+  return {
+    path: filePath,
+    language,
+    bytes: 0,
+    symbols: [],
+    symbolRanges: [],
+    symbolRangesUnknown: true,
+    exportedShapes: [],
+    exportedShapesUnknown: true,
+    symbolCalls: [],
+    imports: [],
+    dependencies: [],
+    exportedSymbols: [],
+    referencedSymbols: [],
+    apis: [],
+    schemas: [],
+    configKeys: [],
+    tests: [],
+    services: [],
+  };
+}
+
+/**
+ * Records a scanned file's imports as written, with how each was written
+ * kept beside it rather than inside it, and unique — a target imported
+ * under two aliases is one dependency.
+ */
+function recordImports(
+  file: IndexedFile,
+  imports: ReadonlyArray<readonly [kind: string | undefined, specifier: string]>,
+): void {
+  const seen = new Set<string>();
+  const specifiers: string[] = [];
+  const kinds: string[] = [];
+  let anyKind = false;
+  for (const [kind, specifier] of imports) {
+    const trimmed = specifier.trim();
+    const key = `${kind ?? ""}\u0000${trimmed}`;
+    if (trimmed === "" || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    specifiers.push(trimmed);
+    kinds.push(kind ?? "");
+    anyKind = anyKind || kind !== undefined;
+  }
+  file.imports = specifiers;
+  file.dependencies = uniqueStrings(specifiers);
+  if (anyKind) {
+    file.scan = { ...file.scan, importKinds: kinds };
+  }
+}
+
+/**
  * An extractor that throws answers "no idea", which is what every extractor
  * here answers when it is unsure. A stack overflow on one pathological file
  * must not take the whole index build with it.
@@ -1292,6 +1357,17 @@ export class CodeIntelligenceService {
     const maxTotalBytes = this.options.maxTotalBytes ?? 50 * 1024 * 1024;
     const entries = await this.repositories.listFileEntries(repository, revision);
     const repositoryFiles = entries.map((entry) => entry.path);
+    // Two entries under one path — two names the listing could not tell
+    // apart — are neither indexed: one would be recorded twice with the
+    // other's content and the other's declarations would vanish.
+    const seenPaths = new Set<string>();
+    const duplicated = new Set<string>();
+    for (const entry of entries) {
+      if (seenPaths.has(entry.path)) {
+        duplicated.add(entry.path);
+      }
+      seenPaths.add(entry.path);
+    }
     const candidates = entries.filter(
       (entry) =>
         entry.type === "blob" &&
@@ -1341,44 +1417,80 @@ export class CodeIntelligenceService {
         // revision is never read or parsed again. That is what makes the
         // revision after a three-file change cost three files instead of the
         // four hundred that had not moved.
-        const unseen = chunk.filter((entry) => !this.parsed.has(parsedKey(entry)));
+        // The cached entries are taken now, in the same breath as the
+        // decision not to read them. A concurrent build can evict from the
+        // parse cache between here and the loop below, and the first
+        // version looked the cache up again per entry: an evicted file then
+        // had neither a cached parse nor a source, and was indexed — and
+        // remembered — as empty. "Declares nothing" is the one answer an
+        // unread file must never give.
+        const remembered = new Map<string, IndexedFile>();
+        for (const entry of chunk) {
+          const cached = this.parsed.get(parsedKey(entry));
+          if (cached !== undefined) {
+            remembered.set(entry.path, cached);
+          }
+        }
+        const unseen = chunk.filter((entry) => !remembered.has(entry.path));
         const fetched =
           unseen.length === 0
             ? []
             : await reader.read(unseen.map((entry) => entry.path));
         const sources = new Map<string, string>();
         unseen.forEach((entry, position) => {
-          sources.set(entry.path, fetched[position]?.toString("utf8") ?? "");
+          const blob = fetched[position];
+          if (blob !== undefined) {
+            sources.set(entry.path, blob.toString("utf8"));
+          }
         });
 
         for (const entry of chunk) {
+          const filePath = entry.path;
+          const cached = remembered.get(filePath);
+          const source = sources.get(filePath);
+          const language = languageOf(filePath);
+          if (language === undefined) {
+            // A manifest is read for what it says about the repository and
+            // occupies no slot, so it is not charged against the budgets
+            // that bound the index: a go.mod that did not fit would have
+            // silently unresolved every Go import.
+            if (MANIFESTS.has(path.posix.basename(filePath)) && source !== undefined) {
+              manifests.set(filePath, source);
+            }
+            continue;
+          }
+          if (duplicated.has(filePath)) {
+            skippedFiles += 1;
+            continue;
+          }
+          if (cached === undefined && source === undefined) {
+            // Nothing to read from: the blob was not served (a name the
+            // listing could not spell exactly) or the cache lost it since
+            // the check above. Unreadable, counted, and never remembered.
+            skippedFiles += 1;
+            slots.push(unreadableFile(filePath, language));
+            continue;
+          }
           if (slots.length >= maxFiles || totalBytes >= maxTotalBytes) {
             skippedFiles += 1;
             continue;
           }
-          const filePath = entry.path;
-          const cached = this.parsed.get(parsedKey(entry));
-          const source = sources.get(filePath) ?? "";
           // `bytes` is the source's byte length wherever an analyzer sets it,
           // so a remembered file replays the budget exactly as reading it
           // again would have.
-          const bytes = cached?.bytes ?? Buffer.byteLength(source);
+          const bytes = cached?.bytes ?? Buffer.byteLength(source ?? "");
           if (bytes > maxFileBytes || totalBytes + bytes > maxTotalBytes) {
             skippedFiles += 1;
             continue;
           }
           totalBytes += bytes;
-          const language = languageOf(filePath);
-          if (language === undefined) {
-            if (MANIFESTS.has(path.posix.basename(filePath))) {
-              manifests.set(filePath, source);
-            }
-            continue;
-          }
           if (cached !== undefined) {
             // Cloned on the way out: this entry outlives the index being
             // built, and two indexes must never share one mutable file.
             slots.push(structuredClone(cached));
+            continue;
+          }
+          if (source === undefined) {
             continue;
           }
           if (language === "typescript" || language === "javascript") {
@@ -1415,8 +1527,9 @@ export class CodeIntelligenceService {
             // than `require`, so the two are marked apart on the way in.
             const requires = safely(() => readRubyRequires(source));
             if (requires !== undefined) {
-              scanned.imports = requires.map((request) =>
-                `${request.relative ? "rel:" : "lib:"}${request.specifier}`,
+              recordImports(
+                scanned,
+                requires.map((request) => [request.relative ? "rel" : "lib", request.specifier]),
               );
             }
             slots.push(scanned);
@@ -1435,8 +1548,9 @@ export class CodeIntelligenceService {
               // to contain a method body.
               const unit = safely(() => readJvmHeader(source, language as JvmLanguage));
               if (unit !== undefined) {
-                scanned.imports = unit.imports;
+                recordImports(scanned, unit.imports.map((name) => [undefined, name]));
                 scanned.scan = {
+                  ...scanned.scan,
                   packageName: unit.packageName,
                   // The types alone, for the resolver's walk back up a
                   // specifier: a top-level function is a declaration but
@@ -1451,7 +1565,7 @@ export class CodeIntelligenceService {
               // there is nothing here to read.
               const includes = safely(() => readIncludes(source));
               if (includes !== undefined) {
-                scanned.imports = includes;
+                recordImports(scanned, includes.map((name) => [undefined, name]));
               }
             }
             if (language === "csharp") {
@@ -1460,7 +1574,7 @@ export class CodeIntelligenceService {
               // `#load` is a real path.
               const loads = safely(() => readCSharpLoads(source));
               if (loads !== undefined) {
-                scanned.imports = loads;
+                recordImports(scanned, loads.map((name) => [undefined, name]));
               }
             }
             if (language === "rust") {
@@ -1469,10 +1583,12 @@ export class CodeIntelligenceService {
               // module tree, and only the anchored forms are resolvable.
               const facts = safely(() => readRustFile(source));
               if (facts !== undefined) {
-                scanned.imports = [
-                  ...facts.modules.map((name) => `mod:${name}`),
-                  ...facts.uses,
-                ];
+                recordImports(scanned, [
+                  ...facts.modules.map((name): readonly [string, string] =>
+                    name.startsWith("path:") ? ["path", name.slice(5)] : ["mod", name],
+                  ),
+                  ...facts.uses.map((name): readonly [undefined, string] => [undefined, name]),
+                ]);
               }
             }
             if (language === "go") {
@@ -1481,8 +1597,9 @@ export class CodeIntelligenceService {
               // defined end and cannot contain a function body.
               const facts = safely(() => readGoFile(source));
               if (facts !== undefined) {
-                scanned.imports = facts.imports;
+                recordImports(scanned, facts.imports.map((name) => [undefined, name]));
                 scanned.scan = {
+                  ...scanned.scan,
                   packageName: facts.packageName,
                   buildIgnored: facts.buildIgnored,
                 };
@@ -1495,11 +1612,12 @@ export class CodeIntelligenceService {
               // imports at all while the unit tests for the reader passed.
               const unit = safely(() => readPhpFile(source));
               if (unit !== undefined) {
-                scanned.imports = [
-                  ...unit.uses.map((name) => `use:${name}`),
-                  ...unit.requires.map((name) => `req:${name}`),
-                ];
+                recordImports(scanned, [
+                  ...unit.uses.map((name): readonly [string, string] => ["use", name]),
+                  ...unit.requires.map((name): readonly [string, string] => ["req", name]),
+                ]);
                 scanned.scan = {
+                  ...scanned.scan,
                   packageName: unit.namespace,
                   declared: unit.declared,
                 };
@@ -1632,7 +1750,14 @@ export class CodeIntelligenceService {
       }
     }
 
-    const allPaths = new Set(repositoryFiles);
+    // Files, for the resolvers: a submodule is a path in the listing and
+    // not a file anybody can edit here, so it is not somewhere an import
+    // can land.
+    const allPaths = new Set(
+      entries
+        .filter((entry) => entry.type === "blob" && !duplicated.has(entry.path))
+        .map((entry) => entry.path),
+    );
     // Built once, after every file has been read, because what a specifier
     // resolves to is a fact about the repository rather than about the file:
     // a Go import names a directory, a JVM import names a type, and Python
@@ -1662,13 +1787,25 @@ export class CodeIntelligenceService {
       },
     };
     const edges: DependencyEdge[] = [];
+    // One edge per (from, to, resource, kind): a target imported four ways
+    // is one dependency, not four.
+    const seenEdges = new Set<string>();
+    const record = (edge: DependencyEdge): void => {
+      const key = `${edge.fromFile}\u0000${edge.toFile ?? ""}\u0000${edge.resource}\u0000${edge.kind}`;
+      if (!seenEdges.has(key)) {
+        seenEdges.add(key);
+        edges.push(edge);
+      }
+    };
     for (const file of files) {
-      for (const imported of file.imports) {
+      for (const [position, imported] of file.imports.entries()) {
+        const kind = file.scan?.importKinds?.[position];
         const targets = resolveImportedFiles(
           file.language,
           file.path,
           imported,
           resolution,
+          kind === undefined || kind === "" ? undefined : kind,
         );
         if (targets.length === 0) {
           // Unresolved, and that is the ordinary case: the standard library,
@@ -1676,7 +1813,7 @@ export class CodeIntelligenceService {
           // is still recorded against the specifier, because "this file
           // imports express" is worth knowing even though express is not
           // here.
-          edges.push({
+          record({
             fromFile: file.path,
             resource: imported,
             kind: "import",
@@ -1686,7 +1823,7 @@ export class CodeIntelligenceService {
         // One specifier, several edges: a Go import names a directory, and
         // every file in it is a real dependency of the importer.
         for (const target of targets) {
-          edges.push({
+          record({
             fromFile: file.path,
             toFile: target,
             resource: target,
@@ -1695,7 +1832,7 @@ export class CodeIntelligenceService {
         }
       }
       for (const service of file.services) {
-        edges.push({
+        record({
           fromFile: file.path,
           resource: service,
           kind: "service",
