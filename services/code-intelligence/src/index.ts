@@ -8,6 +8,13 @@ import {
 import { goModuleRoots, readGoFile, type GoFileFacts } from "./go-imports.js";
 import { readRustFile } from "./rust-imports.js";
 import {
+  phpTypes,
+  readPhpFile,
+  readRubyRequires,
+  rubyLoadRoots,
+  type PhpUnit,
+} from "./script-imports.js";
+import {
   jvmDeclarations,
   readJvmHeader,
   topLevelNames,
@@ -1180,6 +1187,8 @@ export class CodeIntelligenceService {
     const manifests = new Map<string, string>();
     /** What each Go file says about itself, for resolving a package to files. */
     const goFacts = new Map<string, GoFileFacts>();
+    /** What each PHP file declares and imports, for the class table. */
+    const phpUnits = new Map<string, PhpUnit>();
     /** What each JVM file declares and imports, for the declaration index. */
     const jvmUnits = new Map<string, JvmUnit>();
     const jvmDeclared = new Map<
@@ -1276,9 +1285,23 @@ export class CodeIntelligenceService {
             pythonSources.set(filePath, source);
             slots.push(analyzeScannedFile(filePath, source, language, undefined));
           } else if (language === "ruby") {
-            slots.push(
-              analyzeScannedFile(filePath, source, language, rubySymbolRanges(source)),
+            const scanned = analyzeScannedFile(
+              filePath,
+              source,
+              language,
+              rubySymbolRanges(source),
             );
+            // A `require` inside a heredoc is a sentence, not a dependency,
+            // which is why this reads from the masked text rather than the
+            // raw source. `require_relative` measures from a different base
+            // than `require`, so the two are marked apart on the way in.
+            const requires = readRubyRequires(source);
+            if (requires !== undefined) {
+              scanned.imports = requires.map((request) =>
+                `${request.relative ? "rel:" : "lib:"}${request.specifier}`,
+              );
+            }
+            slots.push(scanned);
           } else if (BRACE_LANGUAGES.has(language)) {
             const scanned = analyzeScannedFile(
               filePath,
@@ -1322,6 +1345,17 @@ export class CodeIntelligenceService {
                 goFacts.set(filePath, facts);
                 scanned.imports = facts.imports;
               }
+            }
+            slots.push(scanned);
+          } else if (language === "php") {
+            const scanned = analyzeScannedFile(filePath, source, language, undefined);
+            const unit = readPhpFile(source);
+            if (unit !== undefined) {
+              phpUnits.set(filePath, unit);
+              scanned.imports = [
+                ...unit.uses.map((name) => `use:${name}`),
+                ...unit.requires.map((name) => `req:${name}`),
+              ];
             }
             slots.push(scanned);
           } else {
@@ -1393,6 +1427,8 @@ export class CodeIntelligenceService {
       pythonStdlib: pythonAnswers.stdlib,
       goModuleRoots: goModuleRoots(manifests),
       goFacts,
+      rubyRoots: rubyLoadRoots(allPaths),
+      phpTypes: phpTypes(phpUnits),
       jvm: {
         declarations: jvmDeclarations(jvmDeclared),
         basenames: byBasename(allPaths),

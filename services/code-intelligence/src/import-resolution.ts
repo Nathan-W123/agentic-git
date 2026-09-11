@@ -39,6 +39,11 @@ import {
 } from "./jvm-imports.js";
 import { resolvePythonImport } from "./python-imports.js";
 import { resolveRustModule, resolveRustUse } from "./rust-imports.js";
+import {
+  resolvePhpRequire,
+  resolvePhpUse,
+  resolveRubyRequire,
+} from "./script-imports.js";
 
 /**
  * Everything about the repository that resolving needs and one file cannot
@@ -57,6 +62,10 @@ export interface ResolutionContext {
   goModuleRoots: ReadonlyMap<string, string>;
   /** What each `.go` file says about itself: its package, and its imports. */
   goFacts: ReadonlyMap<string, GoFileFacts>;
+  /** Ruby's load-path roots, derived from layout alone. */
+  rubyRoots: readonly string[];
+  /** Lowercased PHP class name to its declaring file. */
+  phpTypes: ReadonlyMap<string, string>;
   /** Qualified name to declaring file, for the languages that import types. */
   jvm: JvmContext;
 }
@@ -120,6 +129,26 @@ const RESOLVERS: Partial<Record<SupportedLanguage, ImportResolver>> = {
     specifier.startsWith("mod:")
       ? resolveRustModule(fromFile, specifier.slice(4), context)
       : resolveRustUse(fromFile, specifier, context),
+  // `require` and `require_relative` measure from different bases, so which
+  // one it was is marked on the way in rather than guessed at here.
+  ruby: (fromFile, specifier, context) =>
+    resolveRubyRequire(
+      fromFile,
+      { relative: specifier.startsWith("rel:"), specifier: specifier.slice(4) },
+      { files: context.files, roots: context.rubyRoots },
+    ),
+  // A `use` names a class and a `require` names a file; nothing but the
+  // keyword tells them apart.
+  php: (fromFile, specifier, context) =>
+    specifier.startsWith("use:")
+      ? resolvePhpUse(fromFile, specifier.slice(4), {
+          files: context.files,
+          types: context.phpTypes,
+        })
+      : resolvePhpRequire(fromFile, specifier.slice(4), {
+          files: context.files,
+          types: context.phpTypes,
+        }),
   python: (fromFile, specifier, context) => {
     const hit = resolvePythonImport(fromFile, specifier, {
       files: context.files,
