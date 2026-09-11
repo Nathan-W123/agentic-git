@@ -38,6 +38,7 @@ import {
   type JvmLanguage,
 } from "./jvm-imports.js";
 import { resolvePythonImport } from "./python-imports.js";
+import { resolveRustModule, resolveRustUse } from "./rust-imports.js";
 
 /**
  * Everything about the repository that resolving needs and one file cannot
@@ -113,6 +114,12 @@ const RESOLVERS: Partial<Record<SupportedLanguage, ImportResolver>> = {
     resolveJvmImport(fromFile, specifier, "kotlin" as JvmLanguage, context.jvm),
   scala: (fromFile, specifier, context) =>
     resolveJvmImport(fromFile, specifier, "scala" as JvmLanguage, context.jvm),
+  // `mod name;` is a file reference and is marked as one on the way in, so
+  // the two kinds of Rust dependency do not have to be told apart by shape.
+  rust: (fromFile, specifier, context) =>
+    specifier.startsWith("mod:")
+      ? resolveRustModule(fromFile, specifier.slice(4), context)
+      : resolveRustUse(fromFile, specifier, context),
   python: (fromFile, specifier, context) => {
     const hit = resolvePythonImport(fromFile, specifier, {
       files: context.files,

@@ -6,6 +6,7 @@ import {
   type ResolutionContext,
 } from "./import-resolution.js";
 import { goModuleRoots, readGoFile, type GoFileFacts } from "./go-imports.js";
+import { readRustFile } from "./rust-imports.js";
 import {
   jvmDeclarations,
   readJvmHeader,
@@ -1298,6 +1299,18 @@ export class CodeIntelligenceService {
                   packageName: unit.packageName,
                   topLevelNames: topLevelNames(scanned.symbolRanges),
                 });
+              }
+            }
+            if (language === "rust") {
+              // Two kinds of dependency and `mod` is the valuable one: it
+              // literally names a file. A `use` path is a walk through a
+              // module tree, and only the anchored forms are resolvable.
+              const facts = readRustFile(source);
+              if (facts !== undefined) {
+                scanned.imports = [
+                  ...facts.modules.map((name) => `mod:${name}`),
+                  ...facts.uses,
+                ];
               }
             }
             if (language === "go") {
