@@ -37,7 +37,7 @@ import {
   type JvmContext,
   type JvmLanguage,
 } from "./jvm-imports.js";
-import { resolvePythonImport } from "./python-imports.js";
+import { resolvePythonImport, type PythonLayout } from "./python-imports.js";
 import {
   resolveCSharpLoad,
   resolveInclude,
@@ -60,8 +60,10 @@ export interface ResolutionContext {
   /** Every path at this revision, indexed or not — a `.sql` file is a valid
    *  target even though nothing parses it. */
   files: ReadonlySet<string>;
-  /** The running interpreter's `sys.stdlib_module_names`. */
-  pythonStdlib: ReadonlySet<string>;
+  /** The running interpreter's `sys.stdlib_module_names`, if one answered. */
+  pythonStdlib: ReadonlySet<string> | undefined;
+  /** Where Python's roots are, read from the layout once. */
+  pythonLayout: PythonLayout;
   /** Module path to the directory its `go.mod` sits in. */
   goModuleRoots: ReadonlyMap<string, string>;
   /** What each `.go` file says about itself: its package, and its imports. */
@@ -174,6 +176,7 @@ const RESOLVERS: Partial<Record<SupportedLanguage, ImportResolver>> = {
     const hit = resolvePythonImport(fromFile, specifier, {
       files: context.files,
       stdlib: context.pythonStdlib,
+      layout: context.pythonLayout,
     });
     return hit === undefined ? [] : [hit];
   },

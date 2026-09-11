@@ -521,7 +521,9 @@ payload = json.loads(sys.stdin.read())
 out = {}
 for path, source in payload.items():
     try:
-        tree = ast.parse(source)
+        # A byte-order mark is not a token, and ast.parse on a str does not
+        # strip it the way the tokenizer does for bytes.
+        tree = ast.parse(source[1:] if source.startswith("\\ufeff") else source)
         found = spans(tree)
         out[path] = None if found is None else {"ranges": found, "imports": imports(tree)}
     except Exception:

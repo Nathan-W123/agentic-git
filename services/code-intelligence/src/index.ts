@@ -11,6 +11,7 @@ import {
   readCSharpLoads,
   readIncludes,
 } from "./native-imports.js";
+import { pythonLayout } from "./python-imports.js";
 import { resourcesFromNames, resourcesFromText } from "./resources.js";
 import { readRustFile } from "./rust-imports.js";
 import {
@@ -201,6 +202,26 @@ export interface IndexedFile {
   configKeys: string[];
   tests: string[];
   services: string[];
+  /**
+   * What a scanned file says about itself that resolution needs and
+   * `imports` does not carry: a Go, JVM or PHP package clause, a Go build
+   * constraint, the classes a PHP file declares.
+   *
+   * On the file rather than in a table beside the scan loop, because a file
+   * served from the parse cache never goes through that loop. The first
+   * version kept these in loop-local maps, so every build after the first —
+   * any revision that did not touch a given file — resolved that file's
+   * package to nothing in Go, Java, Kotlin, Scala and PHP. The unit tests
+   * for each reader passed throughout.
+   */
+  scan?: ScanFacts;
+}
+
+/** See {@link IndexedFile.scan}. */
+export interface ScanFacts {
+  packageName?: string;
+  buildIgnored?: boolean;
+  declared?: string[];
 }
 
 /** Paths enrichment treats as tests in their own right. */
@@ -983,6 +1004,16 @@ export class CodeIntelligenceService {
    * are two different indexed files.
    */
   private readonly parsed = new Map<string, IndexedFile>();
+  /**
+   * The interpreter's standard-library names, from the last batch that ran.
+   *
+   * The batch only runs for Python files not already in the parse cache, so
+   * on the second build in a process — any commit that touched no Python —
+   * it is skipped and comes back with no list. Without this, that build
+   * resolved `import json` to a repository file called `json.py`: a false
+   * edge that appeared on warm builds and vanished on cold ones.
+   */
+  private pythonStdlib: ReadonlySet<string> | undefined;
   /** Started by {@link warmUp}, kept for the service's life, unref'd when idle. */
   private pool: Promise<Worker[]> | undefined;
   /**
@@ -1201,16 +1232,6 @@ export class CodeIntelligenceService {
     const pythonSources = new Map<string, string>();
     /** Manifests read for what they say about the repository, not indexed. */
     const manifests = new Map<string, string>();
-    /** What each Go file says about itself, for resolving a package to files. */
-    const goFacts = new Map<string, GoFileFacts>();
-    /** What each PHP file declares and imports, for the class table. */
-    const phpUnits = new Map<string, PhpUnit>();
-    /** What each JVM file declares and imports, for the declaration index. */
-    const jvmUnits = new Map<string, JvmUnit>();
-    const jvmDeclared = new Map<
-      string,
-      { packageName: string; topLevelNames: readonly string[] }
-    >();
     /** Parsed this time round, remembered once Python has had its turn. */
     const fresh = new Map<string, IndexedFile>();
     let totalBytes = 0;
@@ -1332,12 +1353,8 @@ export class CodeIntelligenceService {
               // to contain a method body.
               const unit = readJvmHeader(source, language as JvmLanguage);
               if (unit !== undefined) {
-                jvmUnits.set(filePath, unit);
                 scanned.imports = unit.imports;
-                jvmDeclared.set(filePath, {
-                  packageName: unit.packageName,
-                  topLevelNames: topLevelNames(scanned.symbolRanges),
-                });
+                scanned.scan = { packageName: unit.packageName };
               }
             }
             if (C_LANGUAGES.has(language)) {
@@ -1376,8 +1393,11 @@ export class CodeIntelligenceService {
               // defined end and cannot contain a function body.
               const facts = readGoFile(source);
               if (facts !== undefined) {
-                goFacts.set(filePath, facts);
                 scanned.imports = facts.imports;
+                scanned.scan = {
+                  packageName: facts.packageName,
+                  buildIgnored: facts.buildIgnored,
+                };
               }
             }
             if (language === "php") {
@@ -1387,11 +1407,14 @@ export class CodeIntelligenceService {
               // imports at all while the unit tests for the reader passed.
               const unit = readPhpFile(source);
               if (unit !== undefined) {
-                phpUnits.set(filePath, unit);
                 scanned.imports = [
                   ...unit.uses.map((name) => `use:${name}`),
                   ...unit.requires.map((name) => `req:${name}`),
                 ];
+                scanned.scan = {
+                  packageName: unit.namespace,
+                  declared: unit.declared,
+                };
               }
             }
             slots.push(scanned);
@@ -1446,17 +1469,71 @@ export class CodeIntelligenceService {
         // own module parts; `imports` carries the submodule probes too,
         // because only the file set can say which of those is real.
         file.imports = answer.imports;
-        file.dependencies = answer.imports.filter(
-          (name) => !name.includes("."),
+        // The distribution a dotted import names is its first segment:
+        // `django.db.models` is a dependency on django. Relative imports are
+        // kept whole, as a `./util` is on the TypeScript side.
+        file.dependencies = uniqueStrings(
+          answer.imports.map((name) =>
+            name.startsWith(".") ? name : (name.split(".")[0] ?? name),
+          ),
         );
       }
+    }
+    if (pythonAnswers.stdlib.size > 0) {
+      this.pythonStdlib = pythonAnswers.stdlib;
     }
 
     // Remembered only now: a Python file is a placeholder until the batch
     // above fills its ranges in, and caching it before that would serve the
-    // placeholder to every later revision.
+    // placeholder to every later revision. A Python file the interpreter did
+    // not answer for is not remembered at all — a timeout or a missing
+    // interpreter is transient, and caching the placeholder would make it
+    // that file's permanent contract.
     for (const [key, file] of fresh) {
+      if (file.language === "python" && !pythonAnswers.files.has(file.path)) {
+        continue;
+      }
       this.remember(key, file);
+    }
+
+    // The per-language tables resolution needs, rebuilt from every file in
+    // the index — cached or fresh — rather than from the ones the scan loop
+    // happened to read this time.
+    const goFacts = new Map<string, GoFileFacts>();
+    const phpUnits = new Map<string, PhpUnit>();
+    const jvmUnits = new Map<string, JvmUnit>();
+    const jvmDeclared = new Map<
+      string,
+      { packageName: string; topLevelNames: readonly string[] }
+    >();
+    for (const file of files) {
+      const scan = file.scan;
+      if (scan?.packageName === undefined) {
+        continue;
+      }
+      if (file.language === "go") {
+        goFacts.set(file.path, {
+          packageName: scan.packageName,
+          buildIgnored: scan.buildIgnored === true,
+          imports: file.imports,
+        });
+      } else if (JVM_LANGUAGES.has(file.language)) {
+        jvmUnits.set(file.path, {
+          packageName: scan.packageName,
+          imports: file.imports,
+        });
+        jvmDeclared.set(file.path, {
+          packageName: scan.packageName,
+          topLevelNames: topLevelNames(file.symbolRanges),
+        });
+      } else if (file.language === "php") {
+        phpUnits.set(file.path, {
+          namespace: scan.packageName,
+          declared: scan.declared ?? [],
+          uses: [],
+          requires: [],
+        });
+      }
     }
 
     const allPaths = new Set(repositoryFiles);
@@ -1466,7 +1543,9 @@ export class CodeIntelligenceService {
     // needs the interpreter's own standard-library list.
     const resolution: ResolutionContext = {
       files: allPaths,
-      pythonStdlib: pythonAnswers.stdlib,
+      pythonStdlib:
+        pythonAnswers.stdlib.size > 0 ? pythonAnswers.stdlib : this.pythonStdlib,
+      pythonLayout: pythonLayout(allPaths),
       goModuleRoots: goModuleRoots(manifests),
       goFacts,
       rubyRoots: rubyLoadRoots(allPaths),

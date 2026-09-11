@@ -1345,3 +1345,146 @@ test("every scanned language puts its imports into the graph, not just its reade
     await rm(root, { recursive: true, force: true });
   }
 });
+
+/**
+ * Two builds of one repository by the same service, the second with every
+ * source file already in the parse cache, plus a cold service's view of the
+ * second revision for comparison.
+ */
+async function warmAndCold(
+  files: Record<string, string>,
+  name: string,
+): Promise<{ warm: RepositoryIndex; cold: RepositoryIndex }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), `coord-${name}-`));
+  try {
+    const source = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    for (const [relative, text] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+      await writeFile(path.join(source, relative), text);
+    }
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      name,
+    );
+    const service = new CodeIntelligenceService(repositories);
+    await service.index(
+      repository,
+      (await repositories.getCanonicalVersion(repository)).revision,
+    );
+    // A revision that touches no source, so every blob is served from cache.
+    await writeFile(path.join(source, "README.md"), "touched\n");
+    await repositories.commitAll(source, "docs");
+    await execFile("git", ["-C", source, "push", "-q", repository.path, "main:main"]);
+    const second = (await repositories.getCanonicalVersion(repository)).revision;
+    return {
+      warm: await service.index(repository, second),
+      cold: await new CodeIntelligenceService(repositories).index(repository, second),
+    };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+const edgeLines = (index: RepositoryIndex): string[] =>
+  index.edges
+    .filter((edge) => edge.kind === "import")
+    .map((edge) => `${edge.fromFile} -> ${edge.toFile ?? `(${edge.resource})`}`)
+    .sort();
+
+test("a build served from the parse cache resolves what a cold build resolves", async () => {
+  // Resolution needs facts the scan loop learns — a Go package clause, a JVM
+  // package, a PHP namespace, the interpreter's standard-library list — and
+  // the loop is skipped for every file already in the cache. The first
+  // version kept those facts beside the loop, so the second build in a
+  // process lost nearly every Go, Kotlin and PHP edge and gained a false one
+  // from `import json` to a file called json.py.
+  const { warm, cold } = await warmAndCold(
+    {
+      "go.mod": "module example.com/m\n",
+      "main.go": 'package main\n\nimport "example.com/m/billing"\n\nfunc main() { billing.Charge() }\n',
+      "billing/money.go": "package billing\n\nfunc Charge() {}\n",
+      "app/__init__.py": "",
+      "app/main.py": "import json\nfrom . import x\n",
+      "app/x.py": "VALUE = 1\n",
+      "json.py": "TRAP = True\n",
+      "kt/util/Money.kt": "package com.acme.util\n\nclass Money(val amount: Int) {}\n",
+      "kt/app/Entry.kt": "package com.acme.app\n\nimport com.acme.util.Money\n\nclass Entry {\n    fun run() = Money(1)\n}\n",
+      "php/src/Money.php": "<?php\nnamespace Acme;\nclass Money {}\n",
+      "php/src/App.php": "<?php\nnamespace Acme\\App;\nuse Acme\\Money;\nclass App {}\n",
+    },
+    "warm",
+  );
+  const expected = [
+    "app/main.py -> (json)",
+    "app/main.py -> app/__init__.py",
+    "app/main.py -> app/x.py",
+    "kt/app/Entry.kt -> kt/util/Money.kt",
+    "main.go -> billing/money.go",
+    "php/src/App.php -> php/src/Money.php",
+  ];
+  assert.deepEqual(edgeLines(cold), expected);
+  assert.deepEqual(edgeLines(warm), expected);
+});
+
+test("a transient interpreter failure is not cached as a file's contract", async () => {
+  // The first build runs with a python3 that fails; the second, with the
+  // interpreter back, touches no Python file. The placeholder from the first
+  // build must not be what the second one serves.
+  const fake = await mkdtemp(path.join(os.tmpdir(), "coord-fakepy-"));
+  const originalPath = process.env["PATH"];
+  try {
+    await writeFile(path.join(fake, "python3"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const root = await mkdtemp(path.join(os.tmpdir(), "coord-poison-"));
+    try {
+      const source = path.join(root, "source");
+      const repositories = new RepositoryService();
+      await repositories.initializeWorkingRepository(source);
+      await mkdir(path.join(source, "app"), { recursive: true });
+      await writeFile(path.join(source, "app", "__init__.py"), "");
+      await writeFile(path.join(source, "app", "main.py"), "from . import x\ndef f():\n    pass\n");
+      await writeFile(path.join(source, "app", "x.py"), "VALUE = 1\n");
+      await repositories.commitAll(source, "seed");
+      const repository = await repositories.importLocalRepository(
+        source,
+        path.join(root, "canonical.git"),
+        "poison",
+      );
+      const service = new CodeIntelligenceService(repositories);
+      process.env["PATH"] = `${fake}${path.delimiter}${originalPath ?? ""}`;
+      const first = await service.index(
+        repository,
+        (await repositories.getCanonicalVersion(repository)).revision,
+      );
+      process.env["PATH"] = originalPath;
+      assert.equal(
+        first.files.find((file) => file.path === "app/main.py")?.symbolRangesUnknown,
+        true,
+        "with no interpreter the file is unreadable, and says so",
+      );
+      await writeFile(path.join(source, "README.md"), "touched\n");
+      await repositories.commitAll(source, "docs");
+      await execFile("git", ["-C", source, "push", "-q", repository.path, "main:main"]);
+      const second = await service.index(
+        repository,
+        (await repositories.getCanonicalVersion(repository)).revision,
+      );
+      const main = second.files.find((file) => file.path === "app/main.py");
+      assert.deepEqual(main?.symbols, ["f"]);
+      assert.equal(main?.symbolRangesUnknown, undefined);
+      assert.ok(
+        second.edges.some(
+          (edge) => edge.fromFile === "app/main.py" && edge.toFile === "app/x.py",
+        ),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    process.env["PATH"] = originalPath;
+    await rm(fake, { recursive: true, force: true });
+  }
+});

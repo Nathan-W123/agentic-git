@@ -169,3 +169,10 @@ test("python that does not parse is left unanswered", async () => {
 test("asking for nothing spawns nothing", async () => {
   assert.equal((await pythonSymbolRanges(new Map())).files.size, 0);
 });
+
+test("a byte-order mark does not make a Python file unreadable", async () => {
+  const read = await pythonSymbolRanges(
+    new Map([["bom.py", "﻿import os\ndef f():\n    pass\n"]]),
+  );
+  assert.deepEqual(spans(read.files.get("bom.py")?.ranges), ["f:2-3"]);
+});
