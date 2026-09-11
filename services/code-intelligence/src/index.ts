@@ -314,6 +314,9 @@ const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".pyi", "python"],
   [".rb", "ruby"],
   [".rake", "ruby"],
+  [".rbw", "ruby"],
+  [".ru", "ruby"],
+  [".gemspec", "ruby"],
   [".go", "go"],
   [".rs", "rust"],
   [".java", "java"],
@@ -336,6 +339,10 @@ const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".cu", "cpp"],
   [".cuh", "cpp"],
   [".php", "php"],
+  [".phtml", "php"],
+  [".php5", "php"],
+  [".php7", "php"],
+  [".inc", "php"],
   [".swift", "swift"],
   [".kt", "kotlin"],
   [".kts", "kotlin"],
@@ -346,6 +353,26 @@ const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".sql", "sql"],
   [".prisma", "prisma"],
 ]);
+
+/** Files whose name is their whole extension. */
+const SOURCE_BASENAMES = new Map<string, SupportedLanguage>([
+  ["Rakefile", "ruby"],
+  ["Gemfile", "ruby"],
+  ["Guardfile", "ruby"],
+  ["Capfile", "ruby"],
+  ["Vagrantfile", "ruby"],
+  ["Berksfile", "ruby"],
+  ["Podfile", "ruby"],
+  ["Fastfile", "ruby"],
+]);
+
+/** The language a path is written in, by extension and then by name. */
+function languageOf(filePath: string): SupportedLanguage | undefined {
+  return (
+    SOURCE_EXTENSIONS.get(path.posix.extname(filePath).toLowerCase()) ??
+    SOURCE_BASENAMES.get(path.posix.basename(filePath))
+  );
+}
 
 const HTTP_METHODS = new Set([
   "all",
@@ -1268,7 +1295,7 @@ export class CodeIntelligenceService {
     const candidates = entries.filter(
       (entry) =>
         entry.type === "blob" &&
-        (SOURCE_EXTENSIONS.has(path.posix.extname(entry.path).toLowerCase()) ||
+        (languageOf(entry.path) !== undefined ||
           // Not indexed, but read: a Go module's own import path lives in
           // `go.mod` and nowhere else — not in the source, not in the clone
           // path — so without this every Go specifier looks like a
@@ -1341,9 +1368,7 @@ export class CodeIntelligenceService {
             continue;
           }
           totalBytes += bytes;
-          const language = SOURCE_EXTENSIONS.get(
-            path.posix.extname(filePath).toLowerCase(),
-          );
+          const language = languageOf(filePath);
           if (language === undefined) {
             if (MANIFESTS.has(path.posix.basename(filePath))) {
               manifests.set(filePath, source);
@@ -1807,8 +1832,8 @@ export class CodeIntelligenceService {
     // should have been in the index and were not, because they are new, or
     // skipped by the byte budget, or in a language that is scanned rather than
     // parsed.
-    const couldHaveDependencies = plan.expectedFiles.some((file) =>
-      SOURCE_EXTENSIONS.has(path.posix.extname(file).toLowerCase()),
+    const couldHaveDependencies = plan.expectedFiles.some(
+      (file) => languageOf(file) !== undefined,
     );
     const blind = couldHaveDependencies && files.length === 0;
     const enriched: AgentPlan = {

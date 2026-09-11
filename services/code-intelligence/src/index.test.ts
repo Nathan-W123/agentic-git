@@ -1308,6 +1308,10 @@ test("every scanned language puts its imports into the graph, not just its reade
       "scala/util/Money.scala": "package com.acme.sutil\nobject Money {}\n",
       "scala/app/Main.scala":
         "package com.acme.sapp\nimport com.acme.sutil.Money\nobject Main {}\n",
+      // Named without an extension, and spelt without the usual one.
+      "Rakefile": 'require_relative "rb/lib/greeter"\n',
+      "tpl/view.phtml": "<?php require 'inc/conf.inc'; ?>\n",
+      "tpl/inc/conf.inc": "<?php\n$x = 1;\n",
     };
     for (const [relative, text] of Object.entries(files)) {
       await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
@@ -1332,6 +1336,8 @@ test("every scanned language puts its imports into the graph, not just its reade
       ["cs/Program.cs", "cs/Helpers.cs"],
       ["java/app/Main.java", "java/util/Money.java"],
       ["scala/app/Main.scala", "scala/util/Money.scala"],
+      ["Rakefile", "rb/lib/greeter.rb"],
+      ["tpl/view.phtml", "tpl/inc/conf.inc"],
     ];
     const missing = expected.filter(
       ([from, to]) =>

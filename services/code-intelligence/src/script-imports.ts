@@ -22,7 +22,30 @@ import { posixDirname, posixJoin } from "./import-resolution.js";
 
 const RUBY_PAIRS: Record<string, string> = { "(": ")", "[": "]", "{": "}", "<": ">" };
 
-/** Blanks Ruby comments, strings, heredocs and percent literals. */
+/**
+ * Words after which Ruby expects a value, so a `/` or `<<` that follows one
+ * begins a literal rather than an operator.
+ */
+const RUBY_VALUE_EXPECTED = new Set([
+  "if", "unless", "while", "until", "when", "and", "or", "not", "return",
+  "yield", "puts", "print", "p", "raise", "elsif", "case", "then", "else",
+  "do", "begin", "rescue", "ensure", "in", "class", "module", "def",
+]);
+
+/**
+ * Blanks Ruby comments, strings, heredocs, regexes and percent literals.
+ *
+ * The one thing this has to know that a character scanner does not is
+ * whether Ruby is expecting a *value* at each point: after one, `<<` is a
+ * shift and `/` is a division; before one, they open a heredoc and a regex.
+ * The first version asked only what the previous character was, and
+ * `x = [<<~SQL]` — a heredoc after a bracket — or `A = /'/` — a regex with
+ * an apostrophe in it — put the scanner in the wrong state, and a `require`
+ * in prose read as code.
+ *
+ * Several heredocs can open on one line, and the rest of that line is still
+ * code; each body is blanked from the line after, in the order opened.
+ */
 export function maskRuby(source: string): string | undefined {
   const out = source.split("");
   const blank = (from: number, to: number): void => {
@@ -33,21 +56,111 @@ export function maskRuby(source: string): string | undefined {
     }
   };
   let index = 0;
-  const atLineStart = (at: number): boolean =>
-    at === 0 || source[at - 1] === "\n";
+  /** Whether the last significant token ended a value. */
+  let afterValue = false;
+  /** The last identifier seen, for `class <<self` and keyword arguments. */
+  let lastWord = "";
+  const pending: Array<{ tag: string; indented: boolean }> = [];
+  const atLineStart = (at: number): boolean => at === 0 || source[at - 1] === "\n";
+  const previousChar = (): string => source[index - 1] ?? "";
+
+  /** Skips a `#{...}` interpolation, nested strings and braces included. */
+  const skipInterpolation = (from: number): number | undefined => {
+    let depth = 0;
+    let at = from;
+    while (at < source.length) {
+      const character = source[at] ?? "";
+      if (character === "{") {
+        depth += 1;
+      } else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          return at + 1;
+        }
+      } else if (character === '"' || character === "'" || character === "`") {
+        const end = skipString(at, character);
+        if (end === undefined) {
+          return undefined;
+        }
+        at = end;
+        continue;
+      }
+      at += 1;
+    }
+    return undefined;
+  };
+  /** Skips a quoted string starting at `from`, returning the offset after it. */
+  const skipString = (from: number, quote: string): number | undefined => {
+    let at = from + 1;
+    for (;;) {
+      if (at >= source.length) {
+        return undefined;
+      }
+      const character = source[at];
+      if (character === "\\") {
+        at += 2;
+        continue;
+      }
+      if (quote !== "'" && character === "#" && source[at + 1] === "{") {
+        const end = skipInterpolation(at + 1);
+        if (end === undefined) {
+          return undefined;
+        }
+        at = end;
+        continue;
+      }
+      if (character === quote) {
+        return at + 1;
+      }
+      at += 1;
+    }
+  };
+  /** Blanks every heredoc body opened on the line that just ended. */
+  const drainHeredocs = (lineEnd: number): number | undefined => {
+    let cursor = lineEnd + 1;
+    for (const heredoc of pending.splice(0)) {
+      const terminator = new RegExp(
+        `^${heredoc.indented ? "[ \\t]*" : ""}${heredoc.tag}\r?$`,
+        "mu",
+      );
+      const found = terminator.exec(source.slice(cursor));
+      if (found === null) {
+        return undefined;
+      }
+      const end = cursor + found.index + found[0].length;
+      blank(cursor, end);
+      cursor = end;
+    }
+    return cursor;
+  };
+
   while (index < source.length) {
     const character = source[index] ?? "";
+    if (character === "\n") {
+      if (pending.length > 0) {
+        const resumed = drainHeredocs(index);
+        if (resumed === undefined) {
+          return undefined;
+        }
+        index = resumed;
+      } else {
+        index += 1;
+      }
+      afterValue = false;
+      lastWord = "";
+      continue;
+    }
     // Everything below `__END__` is data, and is a complete answer above it.
-    if (atLineStart(index) && source.startsWith("__END__", index)) {
+    if (atLineStart(index) && /^__END__\r?$/mu.test(source.slice(index, index + 9))) {
       blank(index, source.length);
       break;
     }
-    if (atLineStart(index) && source.startsWith("=begin", index)) {
-      const end = source.indexOf("\n=end", index);
-      if (end === -1) {
+    if (atLineStart(index) && /^=begin(?:[ \t]|\r?$)/mu.test(source.slice(index, index + 8))) {
+      const end = /^=end(?:[ \t]|\r?$)/mu.exec(source.slice(index));
+      if (end === null) {
         return undefined;
       }
-      const lineEnd = source.indexOf("\n", end + 1);
+      const lineEnd = source.indexOf("\n", index + end.index);
       blank(index, lineEnd === -1 ? source.length : lineEnd);
       index = lineEnd === -1 ? source.length : lineEnd;
       continue;
@@ -58,35 +171,34 @@ export function maskRuby(source: string): string | undefined {
       index = end === -1 ? source.length : end;
       continue;
     }
-    // A heredoc runs from the line *after* the opener to its terminator.
-    const heredoc = /^<<([~-]?)(["'`]?)([A-Za-z_]\w*)\2/u.exec(source.slice(index));
-    if (heredoc !== null && /[=(,\s]|^$/u.test(source[index - 1] ?? "")) {
-      const tag = heredoc[3] ?? "";
-      const squiggly = heredoc[1] !== "";
-      const bodyStart = source.indexOf("\n", index);
-      if (bodyStart === -1) {
-        return undefined;
-      }
-      const terminator = new RegExp(
-        `^${squiggly ? "[ \\t]*" : ""}${tag}[ \\t]*$`,
-        "mu",
-      );
-      const after = source.slice(bodyStart + 1);
-      const found = terminator.exec(after);
-      if (found === null) {
-        return undefined;
-      }
-      const end = bodyStart + 1 + found.index + found[0].length;
-      blank(index, index + heredoc[0].length);
-      blank(bodyStart + 1, end);
-      index = end;
+    if (/\s/u.test(character)) {
+      index += 1;
       continue;
     }
-    const percent = /^%([wWiIqQrsx]?)(.)/u.exec(source.slice(index));
+    // A special global is not a string opener.
+    if (character === "$" && /["'`]/u.test(source[index + 1] ?? "")) {
+      index += 2;
+      afterValue = true;
+      continue;
+    }
+    // A heredoc opener; the body is blanked when this line ends.
+    const heredoc = /^<<([~-]?)(["'`]?)([A-Za-z_]\w*)\2/u.exec(source.slice(index, index + 80));
+    if (
+      heredoc !== null &&
+      lastWord !== "class" &&
+      (!afterValue || /\s/u.test(previousChar()))
+    ) {
+      pending.push({ tag: heredoc[3] ?? "", indented: heredoc[1] !== "" });
+      blank(index, index + heredoc[0].length);
+      index += heredoc[0].length;
+      afterValue = true;
+      continue;
+    }
+    const percent = /^%([wWiIqQrsx]?)(.)/u.exec(source.slice(index, index + 3));
     if (
       percent !== null &&
       (percent[1] !== "" || /[([{<|!/]/u.test(percent[2] ?? "")) &&
-      !/[\w)\]}]/u.test(source[index - 1] ?? "")
+      !afterValue
     ) {
       const open = percent[2] ?? "";
       const close = RUBY_PAIRS[open] ?? open;
@@ -113,29 +225,81 @@ export function maskRuby(source: string): string | undefined {
       }
       blank(index, at);
       index = at;
+      afterValue = true;
       continue;
     }
     if (character === '"' || character === "'" || character === "`") {
+      const end = skipString(index, character);
+      if (end === undefined) {
+        return undefined;
+      }
+      blank(index, end);
+      index = end;
+      afterValue = true;
+      continue;
+    }
+    // A regex, where a value is expected; a division where one just ended.
+    if (character === "/" && (!afterValue || (/\s/u.test(previousChar()) && !/[\s=]/u.test(source[index + 1] ?? "") && RUBY_VALUE_EXPECTED.has(lastWord)))) {
       let at = index + 1;
       for (;;) {
-        if (at >= source.length) {
+        if (at >= source.length || source[at] === "\n") {
           return undefined;
         }
         if (source[at] === "\\") {
           at += 2;
           continue;
         }
-        if (source[at] === character) {
+        if (source[at] === "#" && source[at + 1] === "{") {
+          const end = skipInterpolation(at + 1);
+          if (end === undefined) {
+            return undefined;
+          }
+          at = end;
+          continue;
+        }
+        if (source[at] === "/") {
           at += 1;
           break;
         }
         at += 1;
       }
+      while (/[imxounse]/u.test(source[at] ?? "")) {
+        at += 1;
+      }
       blank(index, at);
       index = at;
+      afterValue = true;
       continue;
     }
+    // A character literal, `?'`, where a value is expected.
+    const charLiteral = /^\?(?:\\.|[^\s\w])(?!\w)/u.exec(source.slice(index, index + 4));
+    if (charLiteral !== null && !afterValue) {
+      blank(index, index + charLiteral[0].length);
+      index += charLiteral[0].length;
+      afterValue = true;
+      continue;
+    }
+    const word = /^[A-Za-z_]\w*[?!]?/u.exec(source.slice(index, index + 80));
+    if (word !== null) {
+      lastWord = word[0];
+      afterValue = !RUBY_VALUE_EXPECTED.has(word[0]);
+      index += word[0].length;
+      continue;
+    }
+    const number = /^\d[\w.]*/u.exec(source.slice(index, index + 40));
+    if (number !== null) {
+      index += number[0].length;
+      afterValue = true;
+      continue;
+    }
+    afterValue = /[)\]}]/u.test(character);
+    if (!/[)\]}]/u.test(character)) {
+      lastWord = "";
+    }
     index += 1;
+  }
+  if (pending.length > 0) {
+    return undefined;
   }
   return out.join("");
 }
@@ -165,14 +329,20 @@ export function readRubyRequires(source: string): ScriptRequire[] | undefined {
   }
   const out: ScriptRequire[] = [];
   for (const match of source.matchAll(
-    /(?:^|[\s;(])(require|require_relative)[\s(]+(["'])([^"'\n]+)\2/gu,
+    /(?:^|[\s;(])(require|require_relative)[\s(]+(["'])([^"'\n]+)\2(?=\s*(?:$|[;#)]|\b(?:if|unless|rescue)\b))/gmu,
   )) {
     const specifier = match[3];
     // Matched against the original, because the masker blanks the quoted
     // argument itself — it is a string, and that is the whole point of it.
     // The mask decides only whether the *keyword* was code: a `require`
-    // inside a heredoc or a comment has been blanked away there.
-    if (specifier !== undefined && keywordIsCode(source, code, match)) {
+    // inside a heredoc or a comment has been blanked away there. The
+    // lookahead is what keeps `require 'plugins/' + name` — computed at run
+    // time — from being read as `plugins/`.
+    if (
+      specifier !== undefined &&
+      !specifier.endsWith("/") &&
+      keywordIsCode(source, code, match)
+    ) {
       out.push({ relative: match[1] === "require_relative", specifier });
     }
   }
@@ -246,22 +416,26 @@ export function resolveRubyRequire(
   context: RubyContext,
 ): readonly string[] {
   const { files } = context;
+  // Only a loadable file: `bin/cli` with no extension is not what
+  // `require_relative "../bin/cli"` loads, whatever sits at that path.
   const withExtension = (base: string): string | undefined => {
     if (base === "") {
       return undefined;
     }
-    for (const candidate of [base.endsWith(".rb") ? base : `${base}.rb`, base]) {
-      if (files.has(candidate)) {
-        return candidate;
-      }
-    }
-    return undefined;
+    const candidate = /\.(?:rb|so)$/u.test(base) ? base : `${base}.rb`;
+    return files.has(candidate) ? candidate : undefined;
   };
   if (request.relative) {
     const hit = withExtension(
       posixJoin(posixDirname(fromFile), request.specifier),
     );
     return hit === undefined || hit === fromFile ? [] : [hit];
+  }
+  // `require './x'` is measured from the process's working directory, which
+  // is a run-time fact; `require '/x'` and `require '~/x'` name nothing in
+  // a repository. None of them is a load-path lookup.
+  if (/^(?:\.{1,2}\/|\/|~)/u.test(request.specifier)) {
+    return [];
   }
   const hits = new Set<string>();
   for (const root of context.roots) {
@@ -291,16 +465,17 @@ export function maskPhp(source: string): string | undefined {
   let inCode = false;
   while (index < source.length) {
     if (!inCode) {
-      const open = source.indexOf("<?php", index);
-      const short = source.indexOf("<?=", index);
-      const at = open === -1 ? short : short === -1 ? open : Math.min(open, short);
-      if (at === -1) {
+      // The tag is case-insensitive: `<?PHP` opens code too.
+      const tag = /<\?(?:php\b|=)/giu;
+      tag.lastIndex = index;
+      const found = tag.exec(source);
+      if (found === null) {
         blank(index, source.length);
         break;
       }
       // Everything before the tag is markup, not code.
-      blank(index, at);
-      index = at + (at === open ? 5 : 3);
+      blank(index, found.index);
+      index = found.index + found[0].length;
       inCode = true;
       continue;
     }
@@ -310,14 +485,23 @@ export function maskPhp(source: string): string | undefined {
       continue;
     }
     // `#[` opens a PHP 8 attribute, not a comment — and `#[Route('/x')]` is
-    // exactly the line a route reader needs to see.
+    // exactly the line a route reader needs to see. A line comment ends at
+    // the newline or at a `?>`, whichever is first: `// header ?>` leaves
+    // code mode, and what follows is markup.
     if (
       source.startsWith("//", index) ||
       (source[index] === "#" && !source.startsWith("#[", index))
     ) {
-      const end = source.indexOf("\n", index);
-      blank(index, end === -1 ? source.length : end);
-      index = end === -1 ? source.length : end;
+      const newline = source.indexOf("\n", index);
+      const close = source.indexOf("?>", index);
+      const end =
+        close !== -1 && (newline === -1 || close < newline)
+          ? close
+          : newline === -1
+            ? source.length
+            : newline;
+      blank(index, end);
+      index = end;
       continue;
     }
     if (source.startsWith("/*", index)) {
@@ -329,7 +513,7 @@ export function maskPhp(source: string): string | undefined {
       index = end + 2;
       continue;
     }
-    const heredoc = /^<<<(["']?)([A-Za-z_]\w*)\1/u.exec(source.slice(index));
+    const heredoc = /^<<<[ \t]*(["']?)([A-Za-z_]\w*)\1/u.exec(source.slice(index, index + 80));
     if (heredoc !== null) {
       const tag = heredoc[2] ?? "";
       const bodyStart = source.indexOf("\n", index);
@@ -358,6 +542,19 @@ export function maskPhp(source: string): string | undefined {
           at += 2;
           continue;
         }
+        // `"{$t("...")}"`: a nested string inside an interpolation does not
+        // end the outer one.
+        if (
+          character === '"' &&
+          (source.startsWith("{$", at) || source.startsWith("${", at))
+        ) {
+          const end = skipPhpInterpolation(source, at);
+          if (end === undefined) {
+            return undefined;
+          }
+          at = end;
+          continue;
+        }
         if (source[at] === character) {
           at += 1;
           break;
@@ -371,6 +568,33 @@ export function maskPhp(source: string): string | undefined {
     index += 1;
   }
   return out.join("");
+}
+
+/** The offset after a `{$...}` or `${...}` interpolation, nested strings included. */
+function skipPhpInterpolation(source: string, from: number): number | undefined {
+  let depth = 0;
+  let at = from;
+  while (at < source.length) {
+    const character = source[at] ?? "";
+    if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return at + 1;
+      }
+    } else if (character === '"' || character === "'") {
+      at += 1;
+      while (at < source.length && source[at] !== character) {
+        at += source[at] === "\\" ? 2 : 1;
+      }
+      if (at >= source.length) {
+        return undefined;
+      }
+    }
+    at += 1;
+  }
+  return undefined;
 }
 
 export interface PhpUnit {
@@ -388,32 +612,67 @@ export function readPhpFile(source: string): PhpUnit | undefined {
   if (code === undefined) {
     return undefined;
   }
-  const namespace = /(?:^|[\s;{])namespace\s+([\w\\]+)\s*[;{]/u
-    .exec(code)?.[1]
-    ?.replace(/^\\/u, "") ?? "";
-  const declared = [
-    ...code.matchAll(
-      /(?:^|[\s;{}])(?:final\s+|abstract\s+|readonly\s+)*(?:class|interface|trait|enum)\s+([A-Za-z_]\w*)/gu,
-    ),
-  ]
-    .map((match) => match[1] ?? "")
-    .filter((name) => name !== "");
-  const uses = [
-    ...code.matchAll(/(?:^|[\s;{}])use\s+(?:function\s+|const\s+)?([\w\\]+)\s*(?:;|\sas\s)/gu),
-  ]
-    .map((match) => (match[1] ?? "").replace(/^\\/u, ""))
-    .filter((name) => name !== "");
+  const namespaces = [
+    ...code.matchAll(/(?:^|[\s;{}])namespace\s+([\w\\]+)\s*[;{]/gu),
+  ].map((match) => (match[1] ?? "").replace(/^\\/u, ""));
+  // Two namespace blocks in one file put each declaration under a different
+  // name, and this records one namespace per file. Rather than file every
+  // class under the first, the file declares nothing: its imports still
+  // resolve, and nothing resolves wrongly onto it.
+  const namespace = namespaces.length === 1 ? (namespaces[0] ?? "") : "";
+  const declared =
+    namespaces.length > 1
+      ? []
+      : [
+          ...code.matchAll(
+            /(?<!\bnew\s+)(?:^|[\s;{}])(?:final\s+|abstract\s+|readonly\s+)*(?:class|interface|trait|enum)\s+(?!(?:extends|implements)\b)([A-Za-z_]\w*)/gu,
+          ),
+        ]
+          .map((match) => match[1] ?? "")
+          .filter((name) => name !== "");
+  // A `use` is an import only at the top of the file — or directly inside a
+  // `namespace X { }` block. Inside a class body it inserts a trait, whose
+  // bare name is relative to the namespace and not something to look up as
+  // written. `use function` and `use const` name things that are not
+  // classes and have no file in the class table.
+  const uses: string[] = [];
+  for (const match of code.matchAll(
+    /(?:^|[\s;{}])use\s+(function\s+|const\s+)?([\w\\]+)\s*(?:;|\sas\s)/gu,
+  )) {
+    const name = (match[2] ?? "").replace(/^\\/u, "");
+    if (name === "" || match[1] !== undefined || match.index === undefined) {
+      continue;
+    }
+    if (insideNamespaceOnly(code, match.index)) {
+      uses.push(name);
+    }
+  }
   // Against the original for the same reason Ruby's is: the argument is a
-  // string, so the masker has already blanked it.
+  // string, so the masker has already blanked it. The lookahead refuses a
+  // computed path, `require 'f.php' . $ext`, rather than half-reading it.
   const requires = [
     ...source.matchAll(
-      /(?:^|[\s;({])(require|include)(?:_once)?[\s(]+(["'])([^"'\n]+)\2/gu,
+      /(?:^|[\s;({])(require|include)(?:_once)?[\s(]+(["'])([^"'\n]+)\2(?=\s*(?:[;)]|\?>|$))/gmu,
     ),
   ]
     .filter((match) => keywordIsCode(source, code, match))
     .map((match) => match[3] ?? "")
     .filter((name) => name !== "");
   return { namespace, declared, uses, requires };
+}
+
+/** Whether every brace open at `offset` is a `namespace X {` block. */
+function insideNamespaceOnly(code: string, offset: number): boolean {
+  const stack: boolean[] = [];
+  for (let at = 0; at < offset; at += 1) {
+    const character = code[at];
+    if (character === "{") {
+      stack.push(/namespace\s+[\w\\]*\s*$/u.test(code.slice(Math.max(0, at - 120), at)));
+    } else if (character === "}") {
+      stack.pop();
+    }
+  }
+  return stack.every(Boolean);
 }
 
 export interface PhpContext {
@@ -461,6 +720,10 @@ export function resolvePhpRequire(
   specifier: string,
   context: PhpContext,
 ): readonly string[] {
+  // An absolute path is not in this repository, whatever it happens to match.
+  if (/^(?:\/|\\|[A-Za-z]:[\\/])/u.test(specifier)) {
+    return [];
+  }
   const hit = posixJoin(posixDirname(fromFile), specifier);
   return hit !== "" && hit !== fromFile && context.files.has(hit) ? [hit] : [];
 }
