@@ -15,7 +15,7 @@ import {
   jvmDeclarations,
   readJvmHeader,
   resolveJvmImport,
-  topLevelNames,
+  topLevelDeclarations,
   type JvmUnit,
 } from "./jvm-imports.js";
 
@@ -87,17 +87,41 @@ test("a header the reader cannot account for abandons the file", () => {
 
 /* ------------------------------------------------------- declarations --- */
 
-test("only top-level names are indexed", () => {
+test("only top-level names are indexed, and only a body encloses", () => {
   // A nested type indexed at the top level means an import of a same-named
   // external type resolves onto it. Nothing is lost: a nested type is reached
   // through its outer one, which truncation already walks to.
   assert.deepEqual(
-    topLevelNames([
-      { name: "Money", startLine: 1, endLine: 40 },
-      { name: "Builder", startLine: 10, endLine: 20 },
-      { name: "Ledger", startLine: 42, endLine: 50 },
+    topLevelDeclarations([
+      { name: "Money", declared: "type", start: 0, open: 12, close: 400 },
+      { name: "Builder", declared: "type", start: 100, open: 120, close: 200 },
+      { name: "Ledger", declared: "type", start: 420, open: 432, close: 500 },
     ]),
-    ["Money", "Ledger"],
+    { names: ["Money", "Ledger"], types: ["Money", "Ledger"] },
+  );
+  // Two overloads of a top-level Kotlin function around a class: the symbol
+  // ranges merge the overloads into one span from the first to the last, and
+  // read from those the class lay inside it and left the index. Neither
+  // overload has a body that holds it.
+  assert.deepEqual(
+    topLevelDeclarations([
+      { name: "format", declared: "function", start: 17 },
+      { name: "Money", declared: "type", start: 51 },
+      { name: "format", declared: "function", start: 80 },
+    ]),
+    { names: ["format", "Money"], types: ["Money"] },
+  );
+  // Two nested `Builder`s in one Java file: merged into one span, they were
+  // held by neither outer class and became a phantom top-level type that made
+  // the real `Builder` in the package ambiguous.
+  assert.deepEqual(
+    topLevelDeclarations([
+      { name: "A", declared: "type", start: 0, open: 8, close: 40 },
+      { name: "Builder", declared: "type", start: 10, open: 30, close: 31 },
+      { name: "B", declared: "type", start: 42, open: 50, close: 80 },
+      { name: "Builder", declared: "type", start: 52, open: 70, close: 71 },
+    ]),
+    { names: ["A", "B"], types: ["A", "B"] },
   );
 });
 
@@ -328,4 +352,111 @@ test("the clause after a licence block's closing line is still the header", () =
     packageName: "com.acme",
     imports: [],
   });
+});
+
+test("a comment is read where it is, so a URL in one does not end the header", () => {
+  // `//.*$` was stripped before `/*` and `*/` were counted, so the `*/` closing
+  // a one-line Javadoc with a link in it went with the URL, the block never
+  // closed, and the file's imports were reported as none at all.
+  assert.deepEqual(
+    readJvmHeader("package com.acme.store\nimport com.acme.util.Ids\n/** See https://acme.example/ledger */\nclass Ledger\n", "kotlin"),
+    { packageName: "com.acme.store", imports: ["com.acme.util.Ids"] },
+  );
+  assert.deepEqual(
+    readJvmHeader("/* Licence: https://acme.example/lic */\npackage a;\nimport x.Y;\nclass X {}\n", "java"),
+    { packageName: "a", imports: ["x.Y"] },
+  );
+  // A trailing block comment after a complete clause is a comment.
+  assert.deepEqual(readJvmHeader("package a; /* note */\nimport x.Y; // used\nclass X {}\n", "java"), {
+    packageName: "a",
+    imports: ["x.Y"],
+  });
+  // A `//` inside a block comment is text, and an annotation's string
+  // argument opens no comment.
+  assert.deepEqual(
+    readJvmHeader('/*\n * see http://x\n */\n@SuppressWarnings("http://y")\npackage a;\nimport x.Y;\nclass X {}\n', "java"),
+    { packageName: "a", imports: ["x.Y"] },
+  );
+  // Kotlin and Scala nest block comments; Java does not, so the same text
+  // is a closed comment followed by the clause in Java and a comment that
+  // never closes in Kotlin.
+  assert.deepEqual(readJvmHeader("/* a /* b */ still */\npackage a\nimport x.Y\n", "kotlin"), {
+    packageName: "a",
+    imports: ["x.Y"],
+  });
+  assert.deepEqual(readJvmHeader("/* a /* b */ package a;\nimport x.Y;\n", "java"), {
+    packageName: "a",
+    imports: ["x.Y"],
+  });
+  assert.equal(readJvmHeader("/* a /* b */ package a\nimport x.Y\n", "kotlin"), undefined);
+  // And a block that never closes is still abandoned.
+  assert.equal(readJvmHeader("/* open http://x\npackage a;\n", "java"), undefined);
+});
+
+test("a Scala alias names the type, and one import may carry several clauses", () => {
+  // `import a.b.C as D` is Scala 3; kept whole, the alias collapsed into the
+  // specifier `a.b.CasD`, which names nothing.
+  assert.deepEqual(readJvmHeader("package q\nimport a.b.C as D\nimport a.B, c.D\nclass Use\n", "scala"), {
+    packageName: "q",
+    imports: ["a.b.C", "a.B", "c.D"],
+  });
+  const ctx = context({
+    "s/C.scala": { packageName: "a.b", topLevelNames: ["C"] },
+    "s/Use.scala": { packageName: "q", topLevelNames: ["Use"] },
+  });
+  assert.deepEqual(resolveJvmImport("s/Use.scala", "a.b.C as D", "scala", ctx), ["s/C.scala"]);
+  // Whitespace the alias rule did not account for is a line this mis-read,
+  // not a name; a backticked alias with a space in it is still an alias.
+  assert.equal(readJvmHeader("package q\nimport a.b.C D\nclass Use\n", "scala"), undefined);
+  assert.deepEqual(readJvmHeader("package a\nimport a.b.C as `D E`\nclass X\n", "kotlin"), {
+    packageName: "a",
+    imports: ["a.b.C"],
+  });
+  // Java 25's `import module` names a module, not a type: skipped, and the
+  // header is still readable rather than abandoned for its whitespace.
+  assert.deepEqual(readJvmHeader("package a;\nimport module java.base;\nimport x.Y;\nclass X {}\n", "java"), {
+    packageName: "a",
+    imports: ["x.Y"],
+  });
+});
+
+test("a Scala member of a nested object walks two steps back to the type", () => {
+  // `import a.b.Outer.Inner.member` was bounded at one step for Scala alone,
+  // so it never reached `object Outer`. The package guard is what keeps a
+  // truncation off a package, and it applies in every language.
+  const ctx = context(
+    {
+      "s/Outer.scala": { packageName: "a.b", topLevelNames: ["Outer"] },
+      "s/Use.scala": { packageName: "q", topLevelNames: ["Use"] },
+    },
+    { "s/Use.scala": { packageName: "q", imports: ["a.b.Outer.Inner.member"] } },
+  );
+  assert.deepEqual(resolveJvmImport("s/Use.scala", "a.b.Outer.Inner.member", "scala", ctx), ["s/Outer.scala"]);
+});
+
+test("the filename clue also speaks for a Java body the scanner could not read", () => {
+  // The header was read — the package is known — but the declaration pass
+  // lost its place in the body, so the file is in no table. Java's rule that
+  // a public type lives in a file of its own name still holds, and the
+  // package must be the specifier's own.
+  const ctx = {
+    ...context({
+      "src/com/acme/db/Queries.java": { packageName: "com.acme.db", topLevelNames: [] },
+      "src/com/acme/app/Main.java": { packageName: "com.acme.app", topLevelNames: ["Main"] },
+    }, {
+      "src/com/acme/db/Queries.java": { packageName: "com.acme.db", imports: [] },
+    }),
+    unreadBodies: new Set(["src/com/acme/db/Queries.java"]),
+  };
+  assert.deepEqual(
+    resolveJvmImport("src/com/acme/app/Main.java", "com.acme.db.Queries", "java", ctx),
+    ["src/com/acme/db/Queries.java"],
+  );
+  // A different package in the same-named file is not that type.
+  assert.deepEqual(resolveJvmImport("src/com/acme/app/Main.java", "org.other.db.Queries", "java", ctx), []);
+  // And a readable body that simply declares nothing of the name gets no clue.
+  assert.deepEqual(
+    resolveJvmImport("src/com/acme/app/Main.java", "com.acme.db.Queries", "java", { ...ctx, unreadBodies: new Set() }),
+    [],
+  );
 });

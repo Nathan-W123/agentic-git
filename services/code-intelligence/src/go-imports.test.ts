@@ -368,3 +368,64 @@ test("a go.mod under testdata is a fixture, not a module root", () => {
     [["example.com/m", ""]],
   );
 });
+
+test("a CRLF file is read as go/build reads it, one trimmed line at a time", () => {
+  // The old constraint form, saved with CRLF. go/build trims each header
+  // line, so `\r\n\r\n` is the blank line the form needs and the constraint
+  // counts: `go list` puts the file in IgnoredGoFiles. Read raw, the
+  // `+build` pattern never matched a body ending in `\r` and the blank-line
+  // test never saw one, so a generator script joined its package — or, as
+  // `package main`, gave the directory two package names and cost every
+  // importer of it every edge.
+  assert.equal(
+    readGoFile("// +build ignore\r\n\r\npackage billing\r\n\r\nfunc main() {}\r\n")
+      ?.buildIgnored,
+    true,
+  );
+  // Without the blank line it is still a doc comment, CRLF or not.
+  assert.equal(
+    readGoFile("// +build ignore\r\npackage under\r\n")?.buildIgnored,
+    false,
+  );
+  // And the prologue itself reads through CRLF.
+  assert.deepEqual(
+    readGoFile('package a\r\n\r\nimport "example.com/m/x"\r\n\r\nfunc F() {}\r\n')
+      ?.imports,
+    ["example.com/m/x"],
+  );
+});
+
+test("a parenthesised ignore is the ignore tag, as the go tool evaluates it", () => {
+  // `//go:build (ignore)` and `//go:build ignore` are one expression to
+  // constraint.Parse, and `go list` puts both files in IgnoredGoFiles.
+  // Compared as text against the word `ignore`, the parenthesised form read
+  // as some other constraint and the file joined its package.
+  for (const expression of ["(ignore)", "((ignore))", "( ignore )"]) {
+    assert.equal(
+      readGoFile(`//go:build ${expression}\n\npackage x\n`)?.buildIgnored,
+      true,
+      expression,
+    );
+  }
+  // Only a pair enclosing the whole expression is removed. These depend on
+  // tags this cannot see, negate the tag, or are not an expression at all.
+  for (const expression of ["(ignore) && linux", "(ignore)&&(linux)", "!(ignore)", "(ignore"]) {
+    assert.equal(
+      readGoFile(`//go:build ${expression}\n\npackage x\n`)?.buildIgnored,
+      false,
+      expression,
+    );
+  }
+});
+
+test("an identifier is any Unicode letter, so a file with one is read rather than abandoned", () => {
+  // `π "math"` is a legal import alias and `package données` a legal package
+  // clause. Matched as `[A-Za-z_]\w*`, either abandoned the whole file, and
+  // the index recorded it as importing nothing — indistinguishable from a
+  // file that does.
+  const read = readGoFile(
+    'package données\n\nimport (\n\tπ "math"\n\t"example.com/m/billing"\n)\n\nfunc Aire(r float64) float64 { return π.Pi * r * r }\n',
+  );
+  assert.equal(read?.packageName, "données");
+  assert.deepEqual(read?.imports, ["math", "example.com/m/billing"]);
+});

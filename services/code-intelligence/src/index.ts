@@ -14,7 +14,7 @@ import {
 import { pythonLayout } from "./python-imports.js";
 import { resourcesFromNames, resourcesFromText } from "./resources.js";
 import { braceShapes, pythonShapes, rubyShapes } from "./signature-shapes.js";
-import { readRustFile } from "./rust-imports.js";
+import { cargoTargets, readRustFile } from "./rust-imports.js";
 import {
   phpTypes,
   readPhpFile,
@@ -25,7 +25,7 @@ import {
 import {
   jvmDeclarations,
   readJvmHeader,
-  topLevelNames,
+  topLevelDeclarations,
   type JvmLanguage,
   type JvmUnit,
 } from "./jvm-imports.js";
@@ -198,18 +198,23 @@ export interface IndexedFile {
   /** Call edges inside this file, attributed to the calling symbol. */
   symbolCalls: SymbolCall[];
   imports: string[];
-  dependencies: string[];
   /**
-   * Set when this file's imports could not be read: the masker that tells
-   * a Ruby or PHP file's code from its heredocs and comments lost its place,
-   * or the file could not be read at all.
+   * Set when this file's language has imports worth reading and this file's
+   * could not be read — the reader lost its place in a prologue or header
+   * and abandoned the file, the masker that tells a Ruby or PHP file's code
+   * from its heredocs and comments lost its place, or the file could not be
+   * read at all.
    *
    * The distinction {@link symbolRangesUnknown} draws, for `imports` and
-   * `dependencies`: both are `[]` here, and "depends on nothing" is safe to
-   * treat as independence while "could not read" is not. A plan over such a
-   * file is enriched as {@link AgentPlan.dependenciesUnknown}.
+   * `dependencies`: both are `[]` here, and a file that imports nothing is
+   * safe to leave out of every dependency while a file whose imports could
+   * not be read is not. Without it a Go file with an unreadable prologue was
+   * indexed as importing nothing, and a change to a package it depended on
+   * was attributed to nobody. A plan over such a file is enriched as
+   * {@link AgentPlan.dependenciesUnknown}.
    */
   importsUnknown?: boolean;
+  dependencies: string[];
   referencedSymbols: string[];
   apis: string[];
   schemas: string[];
@@ -243,6 +248,14 @@ export interface ScanFacts {
    * alone says enough. The specifier itself stays as the file wrote it.
    */
   importKinds?: string[];
+  /**
+   * Every top-level declaration of a JVM file by name, functions included,
+   * where `declared` holds its types alone: a Kotlin or Scala import may
+   * name a top-level function, so the specifier as written is looked up
+   * here. Absent when the declaration pass could not read the file — which
+   * is not the same as declaring nothing.
+   */
+  topLevel?: string[];
 }
 
 /** Paths enrichment treats as tests in their own right. */
@@ -299,10 +312,13 @@ export interface CodeIntelligenceOptions {
  *
  * A Go module's import path is written in `go.mod` and nowhere else — not in
  * the source, and not in the clone path either — so a repository whose
- * `go.mod` is never read has no resolvable Go imports at all. These are not
- * indexed: they produce no `IndexedFile` and no symbols.
+ * `go.mod` is never read has no resolvable Go imports at all. A Cargo
+ * manifest is where a crate root that does not follow the layout convention
+ * is named (`[[bin]] path = "src/tools/tool.rs"`), and without it that root's
+ * `crate::` resolved into the library beside it. These are not indexed: they
+ * produce no `IndexedFile` and no symbols.
  */
-const MANIFESTS = new Set(["go.mod"]);
+const MANIFESTS = new Set(["go.mod", "Cargo.toml"]);
 
 /** The languages whose imports name a type rather than a path. */
 const JVM_LANGUAGES = new Set<SupportedLanguage>(["java", "kotlin", "scala"]);
@@ -885,8 +901,8 @@ function unreadableFile(
     exportedShapesUnknown: true,
     symbolCalls: [],
     imports: [],
-    dependencies: [],
     importsUnknown: true,
+    dependencies: [],
     exportedSymbols: [],
     referencedSymbols: [],
     apis: [],
@@ -987,29 +1003,17 @@ function decodeSource(blob: Buffer): string | undefined {
   return text.startsWith("\uFEFF") ? text.slice(1) : text;
 }
 
-/** The names of type declarations not nested inside another declaration. */
-function topLevelTypeNames(source: string, language: BraceLanguage): string[] {
+/**
+ * The names declared at the top level of a brace-language file — every one,
+ * and the types alone — or nothing when the declaration pass could not read
+ * it.
+ */
+function topLevelDeclared(
+  source: string,
+  language: BraceLanguage,
+): { names: string[]; types: string[] } | undefined {
   const read = safely(() => braceDeclarations(source, language));
-  if (read === undefined) {
-    return [];
-  }
-  const { declarations } = read;
-  return uniqueStrings(
-    declarations
-      .filter(
-        (declaration) =>
-          declaration.declared === "type" &&
-          !declarations.some(
-            (other) =>
-              other !== declaration &&
-              other.open !== undefined &&
-              other.close !== undefined &&
-              other.open < declaration.start &&
-              other.close > declaration.start,
-          ),
-      )
-      .map((declaration) => declaration.name),
-  );
+  return read === undefined ? undefined : topLevelDeclarations(read.declarations);
 }
 
 function analyzeScannedFile(
@@ -1637,17 +1641,19 @@ export class CodeIntelligenceService {
     // had already started, which is what the sequential version did by never
     // issuing them; the resulting index is identical either way.
     const reader = this.repositories.openBatchReader(repository, revision);
+    const readAhead = 256;
     try {
-      // Manifests first, every one of them, before the budgeted loop. They
-      // are few and bounded and occupy no slot, and the first version read
-      // them inside the loop, where a chunk-level `break` on a spent budget
-      // skipped whatever chunk go.mod happened to fall in: whether a Go
+      // Manifests first, in a pass of their own, because they are exempt
+      // from the budgets and the loop below is not. The first version read
+      // them inside that loop, where a chunk-level `break` on a spent budget
+      // skipped whatever chunk `go.mod` happened to fall in: whether a Go
       // import resolved depended on which 256-entry chunk the manifest was
       // in, and "a manifest is not charged against the budgets" was only
-      // true of chunks the loop reached.
-      if (manifestEntries.length > 0) {
-        const fetched = await reader.read(manifestEntries.map((entry) => entry.path));
-        manifestEntries.forEach((entry, position) => {
+      // true of the chunks the loop reached.
+      for (let offset = 0; offset < manifestEntries.length; offset += readAhead) {
+        const chunk = manifestEntries.slice(offset, offset + readAhead);
+        const fetched = await reader.read(chunk.map((entry) => entry.path));
+        chunk.forEach((entry, position) => {
           const blob = fetched[position];
           const text = blob === undefined ? undefined : decodeSource(blob);
           if (text !== undefined) {
@@ -1655,7 +1661,6 @@ export class CodeIntelligenceService {
           }
         });
       }
-      const readAhead = 256;
       for (let offset = 0; offset < candidates.length; offset += readAhead) {
         if (slots.length >= maxFiles || totalBytes >= maxTotalBytes) {
           skippedFiles += candidates.length - offset;
@@ -1702,6 +1707,7 @@ export class CodeIntelligenceService {
           const source = sources.get(filePath);
           const language = languageOf(filePath);
           if (language === undefined) {
+            // Every candidate has one; this narrows the type.
             continue;
           }
           if (duplicated.has(filePath)) {
@@ -1807,13 +1813,19 @@ export class CodeIntelligenceService {
               const unit = safely(() => readJvmHeader(source, language as JvmLanguage));
               if (unit !== undefined) {
                 recordImports(scanned, unit.imports.map((name) => [undefined, name]));
+                // From the declarations, not the symbol ranges: the ranges
+                // merge same-named declarations into one span, and a class
+                // between two overloads of a top-level function lay inside
+                // it and left the index.
+                const declared = topLevelDeclared(source, language as BraceLanguage);
                 scanned.scan = {
                   ...scanned.scan,
                   packageName: unit.packageName,
                   // The types alone, for the resolver's walk back up a
                   // specifier: a top-level function is a declaration but
                   // not something an import can be truncated onto.
-                  declared: topLevelTypeNames(source, language as BraceLanguage),
+                  declared: declared?.types ?? [],
+                  ...(declared === undefined ? {} : { topLevel: declared.names }),
                 };
               }
             }
@@ -1861,6 +1873,11 @@ export class CodeIntelligenceService {
                   packageName: facts.packageName,
                   buildIgnored: facts.buildIgnored,
                 };
+              } else {
+                // Abandoned, not empty. The reader refuses a whole file over
+                // one thing it cannot place, and "imports nothing" is the
+                // one answer that file must not give.
+                scanned.importsUnknown = true;
               }
             }
             if (language === "php") {
@@ -2003,7 +2020,7 @@ export class CodeIntelligenceService {
         });
         jvmDeclared.set(file.path, {
           packageName: scan.packageName,
-          topLevelNames: topLevelNames(file.symbolRanges),
+          topLevelNames: scan.topLevel ?? [],
           typeNames: scan.declared ?? [],
         });
       } else if (file.language === "php") {
@@ -2042,13 +2059,16 @@ export class CodeIntelligenceService {
     // went into it; otherwise the lookups that depend on uniqueness answer
     // nothing. The budget may lose an edge and must never add one. Java's
     // layout fallback is path-based over the complete listing and stays.
+    //
+    // A header the reader could read over a body it could not is a file that
+    // did go in: its package is known, so whatever it hides is hidden inside
+    // that package and not somewhere else in the repository. Counting it as
+    // missing emptied every JVM table in a repository over one unreadable
+    // body, and the declaration index stopped answering for files nobody had
+    // touched. {@link JvmContext.unreadBodies} is what carries that file.
     const known = new Set(
       files
-        .filter(
-          (file) =>
-            file.scan?.packageName !== undefined &&
-            file.symbolRangesUnknown !== true,
-        )
+        .filter((file) => file.scan?.packageName !== undefined)
         .map((file) => file.path),
     );
     let phpComplete = true;
@@ -2092,7 +2112,20 @@ export class CodeIntelligenceService {
           : new Map(),
         basenames: byBasename(allPaths),
         units: jvmUnits,
+        // A readable header over a body the declaration pass could not
+        // read: the file is in no table, and only its name speaks for it.
+        unreadBodies: new Set(
+          files
+            .filter(
+              (file) =>
+                file.language === "java" &&
+                file.scan?.packageName !== undefined &&
+                file.scan.topLevel === undefined,
+            )
+            .map((file) => file.path),
+        ),
       },
+      rustTargets: cargoTargets(manifests),
     };
     const edges: DependencyEdge[] = [];
     // One edge per (from, to, resource, kind): a target imported four ways
@@ -2284,6 +2317,10 @@ export class CodeIntelligenceService {
     const couldHaveDependencies = plan.expectedFiles.some(
       (file) => languageOf(file) !== undefined,
     );
+    // And a plan over a file that is in the index but whose imports could not
+    // be read is blind in the same way: its read set is whatever the reader
+    // managed before it gave up, which is nothing, and nothing is not what
+    // the file depends on.
     const blind =
       couldHaveDependencies &&
       (files.length === 0 || files.some((file) => file.importsUnknown === true));

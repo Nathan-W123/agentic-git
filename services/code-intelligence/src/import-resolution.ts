@@ -76,6 +76,8 @@ export interface ResolutionContext {
   phpTypes: ReadonlyMap<string, string>;
   /** Qualified name to declaring file, for the languages that import types. */
   jvm: JvmContext;
+  /** Crate roots the Cargo manifests name explicitly, beyond the layout convention. */
+  rustTargets: ReadonlySet<string>;
 }
 
 /** A resolver answers with every file the specifier names. Empty is normal. */

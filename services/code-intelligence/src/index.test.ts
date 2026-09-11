@@ -1436,6 +1436,55 @@ test("a build served from the parse cache resolves what a cold build resolves", 
   assert.deepEqual(edgeLines(warm), expected);
 });
 
+test("the declaration index is built from bodies, manifests and filenames, warm or cold", async () => {
+  // Three things the front door has to carry that the unit suites cannot:
+  // the top-level names ride on the file (`scan.topLevel`), so a cached
+  // build must resolve what a cold one does; a Cargo manifest is read as a
+  // manifest and not as a file; and a Java file whose body the scanner
+  // could not read is still reachable by its name.
+  const { warm, cold } = await warmAndCold(
+    {
+      // Two overloads around a class: read from merged symbol ranges, the
+      // class lay inside the overloads' span and left the index.
+      "lib/Money.kt":
+        'package com.acme.money\n\nfun format(m: Money): String = ""\n\nclass Money(val cents: Long)\n\nfun format(m: Money, locale: String): String = ""\n',
+      "app/Main.kt": "package com.acme.app\nimport com.acme.money.Money\nclass Main\n",
+      // Two nested Builders merged into a phantom top-level one that made
+      // the real Builder ambiguous.
+      "src/main/java/com/acme/Models.java":
+        "package com.acme;\npublic class Models {\n}\nclass A {\n    public static class Builder {}\n}\nclass B {\n    public static class Builder {}\n}\n",
+      "src/main/java/com/acme/Builder.java": "package com.acme;\npublic class Builder {}\n",
+      // A text block the scanner cannot read: the header still names the
+      // package, and the filename is the clue.
+      "src/main/java/com/acme/db/Queries.java":
+        'package com.acme.db;\npublic class Queries {\n    static final String ALL = """\n        SELECT 1\n        """;\n}\n',
+      "src/main/java/com/acme/app/Main.java":
+        "package com.acme.app;\nimport com.acme.Builder;\nimport com.acme.db.Queries;\npublic class Main {}\n",
+      // A declared bin target beside the library that shares its module
+      // names: `crate::config` from the tool is the tool's own.
+      "rs/Cargo.toml": '[package]\nname = "acme"\n\n[[bin]]\nname = "tool"\npath = "src/tools/tool.rs"\n',
+      "rs/src/lib.rs": "pub mod config;\n",
+      "rs/src/config.rs": "pub struct Settings;\n",
+      "rs/src/tools/tool.rs": "mod config;\nuse crate::config::Settings;\nfn main() { let _ = Settings; }\n",
+      "rs/src/tools/config.rs": "pub struct Settings;\n",
+    },
+    "declared",
+  );
+  const expected = [
+    "app/Main.kt -> lib/Money.kt",
+    "rs/src/lib.rs -> rs/src/config.rs",
+    "rs/src/tools/tool.rs -> rs/src/tools/config.rs",
+    "src/main/java/com/acme/app/Main.java -> src/main/java/com/acme/Builder.java",
+    "src/main/java/com/acme/app/Main.java -> src/main/java/com/acme/db/Queries.java",
+  ];
+  assert.deepEqual(edgeLines(cold), expected);
+  assert.deepEqual(edgeLines(warm), expected);
+  const queries = cold.files.find((file) => file.path === "src/main/java/com/acme/db/Queries.java");
+  assert.equal(queries?.symbolRangesUnknown, true, "the body really is unreadable");
+  assert.equal(queries?.scan?.topLevel, undefined, "and says so, rather than declaring nothing");
+  assert.equal(cold.files.some((file) => file.path === "rs/Cargo.toml"), false, "a manifest is read, not indexed");
+});
+
 test("a transient interpreter failure is not cached as a file's contract", async () => {
   // The first build runs with a python3 that fails; the second, with the
   // interpreter back, touches no Python file. The placeholder from the first
@@ -1689,6 +1738,100 @@ test("a manifest is not charged against the budgets that bound the index", async
         `${JSON.stringify(options)}: go.mod must still be read`,
       );
     }
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a go.mod sorted past the first read chunk is read whatever the budget", async () => {
+  // The manifest branch sat ahead of the per-file budget checks, and the
+  // loop still stopped at a chunk boundary once the budget was spent — so a
+  // go.mod behind more than a chunk's worth of earlier-sorting files was
+  // never fetched, and a truncated index had Go edges or none depending on
+  // what the directory holding the bulk of the code was called.
+  const bulk = Object.fromEntries(
+    Array.from({ length: 300 }, (_, i) => [
+      `a/f${String(i).padStart(3, "0")}.go`,
+      `package a\n\nfunc F${i}() {}\n`,
+    ]),
+  );
+  const repo = await seededRepository(
+    {
+      "0main.go": 'package main\n\nimport "example.com/m/a"\n\nfunc main() { a.F0() }\n',
+      "go.mod": "module example.com/m\n\ngo 1.22\n",
+      ...bulk,
+    },
+    "late-gomod",
+  );
+  try {
+    const index = await new CodeIntelligenceService(repo.repositories, { maxFiles: 10 }).index(
+      repo.repository,
+      repo.revision,
+    );
+    assert.equal(index.truncated, true);
+    assert.ok(
+      index.edges.some((edge) => edge.fromFile === "0main.go" && edge.toFile === "a/f000.go"),
+      "go.mod must still be read",
+    );
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a Go file whose prologue could not be read says so, rather than importing nothing", async () => {
+  // A Unicode alias is legal Go, and the reader abandoned the file over it:
+  // indexed with `imports: []` and nothing to tell it from a file that
+  // imports nothing, so a change to billing's contract was attributed to
+  // nobody. The alias is read now; and a file the reader genuinely cannot
+  // follow is marked, so a plan over it is blind rather than independent.
+  const repo = await seededRepository(
+    {
+      "go.mod": "module example.com/m\n",
+      "calc/calc.go":
+        'package calc\n\nimport (\n\tπ "math"\n\t"example.com/m/billing"\n)\n\nfunc Area(r float64) float64 { billing.Charge(); return π.Pi * r * r }\n',
+      "broken/broken.go": 'package broken\n\nimport (\n\t"unterminated\n)\n\nfunc F() {}\n',
+      "billing/money.go": "package billing\n\nfunc Charge() {}\n",
+    },
+    "go-unknown",
+  );
+  try {
+    const service = new CodeIntelligenceService(repo.repositories);
+    const index = await service.index(repo.repository, repo.revision);
+    const calc = index.files.find((file) => file.path === "calc/calc.go");
+    assert.deepEqual(calc?.imports, ["math", "example.com/m/billing"]);
+    assert.equal(calc?.importsUnknown, undefined);
+    assert.ok(
+      index.edges.some(
+        (edge) => edge.fromFile === "calc/calc.go" && edge.toFile === "billing/money.go",
+      ),
+    );
+    const broken = index.files.find((file) => file.path === "broken/broken.go");
+    assert.deepEqual(broken?.imports, []);
+    assert.equal(broken?.importsUnknown, true);
+    const base = {
+      taskId: "task_1",
+      objective: "edit",
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low" as const,
+    };
+    assert.equal(
+      service.enrichPlan({ ...base, expectedFiles: ["broken/broken.go"] }, index).dependenciesUnknown,
+      true,
+    );
+    assert.equal(
+      service.enrichPlan({ ...base, expectedFiles: ["calc/calc.go"] }, index).dependenciesUnknown,
+      undefined,
+    );
+    // The marker survives being served from memory: the second index of the
+    // same revision is a copy of the first, and must still say so.
+    const again = await service.index(repo.repository, repo.revision);
+    assert.equal(
+      again.files.find((file) => file.path === "broken/broken.go")?.importsUnknown,
+      true,
+    );
   } finally {
     await repo.dispose();
   }
@@ -2024,9 +2167,10 @@ test("a symbolic link is unreadable, and an import through it lands nowhere", as
       "the include is still recorded, unresolved",
     );
     assert.deepEqual(service.consumersOf(index, { file: "include/foo.h" }), []);
-    // The real header is read under its own name, and the link is still a
-    // path that exists.
-    assert.deepEqual(index.files.find((entry) => entry.path === "src/foo.h")?.symbols, ["Foo"]);
+    // The real header is read under its own name — prototype and struct
+    // both, since a `;` ends a declaration as surely as a body does — and
+    // the link is still a path that exists.
+    assert.deepEqual(index.files.find((entry) => entry.path === "src/foo.h")?.symbols, ["foo", "Foo"]);
     assert.ok(index.paths.includes("include/foo.h"));
   } finally {
     await repo.dispose();
@@ -2071,7 +2215,9 @@ test("a UTF-16 source is decoded, a BOM does not hide the first line, and bytes 
     const symbolsOf = (file: string): string[] | undefined =>
       index.files.find((entry) => entry.path === file)?.symbols;
     assert.deepEqual(symbolsOf("u16/Money.java"), ["Money"]);
-    assert.deepEqual(symbolsOf("u16/main.cpp"), ["Big"]);
+    // A one-line definition is a definition: `int main() { return 0; }` is
+    // read whether or not its body fits beside its head.
+    assert.deepEqual(symbolsOf("u16/main.cpp"), ["Big", "main"]);
     assert.deepEqual(symbolsOf("u16/a.ts"), ["a", "fa"]);
     assert.deepEqual(symbolsOf("u16/m.py"), ["f"]);
     assert.deepEqual(symbolsOf("u16/Wide.swift"), ["Wide"]);

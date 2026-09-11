@@ -53,33 +53,20 @@ export function readJvmHeader(
 
   const lines = text.split("\n");
   for (const raw of lines) {
-    // A trailing line comment is not part of the clause, and a `"""`
-    // anywhere in the header is a shape this does not model at all.
-    let line = raw.replace(/\/\/.*$/u, "").trim();
+    // Comments are read left to right, in order: the first version stripped
+    // `//.*$` first and then counted `/*` and `*/`, so the `*/` closing a
+    // one-line `/** See https://acme.example/x */` was cut away with the
+    // URL and the header never closed. A Javadoc with a link in it emptied
+    // the file's import list.
+    const read = codeOf(raw, depth, language !== "java");
+    depth = read.depth;
+    const line = read.code.trim();
     if (line === "") {
       continue;
     }
+    // A `"""` anywhere in the header is a shape this does not model at all.
     if (line.includes('"""')) {
       return undefined;
-    }
-    // A block comment spanning lines is tracked crudely and conservatively.
-    // The text after the `*/` that closes it is still a line of the header:
-    // `*/ package com.acme;` is a licence block ending on the clause.
-    if (depth > 0 || line.startsWith("/*")) {
-      for (const token of line.matchAll(/\/\*|\*\//gu)) {
-        depth += token[0] === "/*" ? 1 : -1;
-        if (depth < 0) {
-          return undefined;
-        }
-      }
-      if (depth > 0) {
-        continue;
-      }
-      const closed = line.lastIndexOf("*/");
-      line = closed === -1 ? "" : line.slice(closed + 2).trim();
-      if (line === "") {
-        continue;
-      }
     }
     // An annotation or a Kotlin file-level target sits in the header and says
     // nothing this needs — unless a clause is glued to it, which is a line
@@ -112,31 +99,47 @@ export function readJvmHeader(
       packages.push(name);
       continue;
     }
-    const imported = /^import (?:static )?(.+?) ?;?$/u.exec(compact);
+    const imported = /^import (static |module )?(.+?) ?;?$/u.exec(compact);
     if (imported !== null) {
-      let specifier = (imported[1] ?? "").trim();
+      const clause = (imported[2] ?? "").trim();
       // Several directives on one line is legal, and a pattern that reaches
       // to end-of-line swallows them all into one specifier that names
       // nothing. A surviving separator means this line holds more than the
       // one clause this understood.
-      if (specifier === "" || /;|\bimport\b/u.test(specifier)) {
+      if (clause === "" || /;|\bimport\b/u.test(clause)) {
         return undefined;
       }
-      // `import a.B as C` names `a.B`; the alias is local to this file.
-      if (language === "kotlin") {
-        specifier = specifier.replace(/\s+as\s+[\w`]+$/u, "");
+      // `import module java.base` names a module, which is not a type and
+      // not a file; the header is still readable.
+      if (imported[1] === "module ") {
+        continue;
       }
-      // A specifier that ends in a dot is the first line of a directive
-      // that continues on the next, and a slash is not a name at all: both
-      // mean this reader has lost its place.
-      if (
-        /\.$/u.test(specifier) ||
-        specifier.includes("/") ||
-        !/^[\w.`{},=> *_]+$/u.test(specifier)
-      ) {
-        return undefined;
+      // Scala lets one `import` carry several clauses: `import a.B, c.D`.
+      const clauses = language === "scala" ? splitOutsideBraces(clause) : [clause];
+      for (const written of clauses) {
+        // `import a.B as C` names `a.B`; the alias is local to this file.
+        // Kotlin's syntax, and Scala 3's.
+        const specifier =
+          language === "java"
+            ? written
+            : written.replace(/\s+as\s+(?:\w+|`[^`]+`)$/u, "");
+        // A specifier that ends in a dot is the first line of a directive
+        // that continues on the next, and a slash is not a name at all:
+        // both mean this reader has lost its place. So does whitespace
+        // anywhere but around a dot or inside a brace group: an alias this
+        // did not strip would otherwise collapse into a name nobody
+        // declares.
+        if (
+          specifier === "" ||
+          /\.$/u.test(specifier) ||
+          specifier.includes("/") ||
+          !/^[\w.`{},=> *_]+$/u.test(specifier) ||
+          /\s/u.test(specifier.replace(/\s*\.\s*/gu, ".").replace(/\{[^}]*\}/gu, ""))
+        ) {
+          return undefined;
+        }
+        imports.push(specifier);
       }
-      imports.push(specifier);
       continue;
     }
     // The header is over. Anything still carrying one of the two keywords
@@ -151,6 +154,81 @@ export function readJvmHeader(
     return undefined;
   }
   return { packageName: packages.join("."), imports };
+}
+
+/**
+ * The code on one header line, with comments removed and the block-comment
+ * depth carried across lines.
+ *
+ * Left to right, one token at a time: inside a block comment a `//` is
+ * text; outside one a `//` ends the line, a `/*` opens a block, and a
+ * quoted string — an annotation's argument — is copied through so that a
+ * `//` inside it opens nothing. Kotlin and Scala nest block comments and
+ * Java does not, so `nests` says whether a `/*` inside one counts.
+ */
+function codeOf(raw: string, depth: number, nests: boolean): { code: string; depth: number } {
+  let code = "";
+  let at = 0;
+  while (at < raw.length) {
+    if (depth > 0) {
+      const open = nests ? raw.indexOf("/*", at) : -1;
+      const close = raw.indexOf("*/", at);
+      if (open !== -1 && (close === -1 || open < close)) {
+        depth += 1;
+        at = open + 2;
+      } else if (close !== -1) {
+        depth -= 1;
+        at = close + 2;
+        code += " ";
+      } else {
+        break;
+      }
+      continue;
+    }
+    const next = /\/\/|\/\*|"/u.exec(raw.slice(at));
+    if (next === null) {
+      code += raw.slice(at);
+      break;
+    }
+    const found = at + next.index;
+    code += raw.slice(at, found);
+    if (next[0] === "//") {
+      break;
+    }
+    if (next[0] === "/*") {
+      depth += 1;
+      at = found + 2;
+      continue;
+    }
+    // A string: copied whole, up to its closing quote or the line's end.
+    const end = /^"(?:[^"\\]|\\.)*"/u.exec(raw.slice(found));
+    const length = end === null ? raw.length - found : end[0].length;
+    code += raw.slice(found, found + length);
+    at = found + length;
+  }
+  return { code, depth };
+}
+
+/** Splits on commas outside `{...}`, trimmed, empties dropped. */
+function splitOutsideBraces(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const character of text) {
+    if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+    }
+    if (character === "," && depth === 0) {
+      out.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  out.push(current);
+  return out.map((part) => part.trim()).filter((part) => part !== "");
 }
 
 /** Whitespace around dots is legal; backticks quote a segment. */
@@ -176,6 +254,12 @@ export interface JvmContext {
   /** Every repository path by basename, for the Java filename convention. */
   basenames: ReadonlyMap<string, readonly string[]>;
   units: ReadonlyMap<string, JvmUnit>;
+  /**
+   * Files whose header was read but whose declarations could not be — a
+   * body the scanner lost its place in. They are in no table, so for Java
+   * the filename convention is all that speaks for them.
+   */
+  unreadBodies?: ReadonlySet<string>;
 }
 
 /**
@@ -214,7 +298,9 @@ export function jvmDeclarations(
  * lookup walks back up. Bounded at two steps, and never below two segments:
  * unbounded truncation eventually reaches `com.example`, and if anything in
  * the repository declares a top-level `example` in package `com`, that is a
- * confident wrong answer.
+ * confident wrong answer. Two steps in every language: Scala's
+ * `Outer.Inner.member` is as common as Java's, and a truncation may only
+ * land on a type, never on a package, whatever the language.
  */
 function candidates(base: string, limit: number): string[] {
   const out: string[] = [];
@@ -236,7 +322,12 @@ export function resolveJvmImport(
   language: JvmLanguage,
   context: JvmContext,
 ): readonly string[] {
-  const cleaned = normalizeName(specifier);
+  // The header strips an alias; one that reaches here regardless still
+  // names the type before it, and collapsed into the name it would have
+  // walked back onto whatever `object b` the package held.
+  const cleaned = normalizeName(
+    language === "java" ? specifier : specifier.replace(/\s+as\s+(?:\w+|`[^`]+`)$/u, ""),
+  );
   if (cleaned === "") {
     return [];
   }
@@ -258,10 +349,9 @@ export function resolveJvmImport(
       bases.push(`${own}.${cleaned}`);
     }
   }
-  const limit = language === "scala" ? 1 : 2;
   return lookUp(
     fromFile,
-    bases.flatMap((base) => candidates(base, limit)),
+    bases.flatMap((base) => candidates(base, 2)),
     language,
     context,
   );
@@ -303,20 +393,22 @@ function lookUp(
   if (hits.size === 0 && language === "java" && written !== undefined) {
     // Java alone requires a public type to live in a file of its own name,
     // so a repository whose package layout this could not read still has one
-    // reliable clue. Only for a file whose header could not be read — one
-    // that could be read is in the declarations, under its real package —
-    // only where the path ends in the package as directories, and only when
-    // that leaves one file: `import java.util.List` must never land on the
+    // reliable clue. Only for a file that is in no table: one whose header
+    // could not be read, or whose header was read — so its package is known,
+    // and must be the specifier's — over a body that could not be. Only
+    // where the path ends in the package as directories, and only when that
+    // leaves one file: `import java.util.List` must never land on the
     // repository's own `com/acme/ui/List.java`.
     const parts = written.split(".");
     const tail = parts.at(-1) ?? "";
     const suffix = `${parts.join("/")}.java`;
     const paths = (context.basenames.get(`${tail}.java`) ?? []).filter((path) => {
       const unit = context.units.get(path);
-      return (
-        (unit === undefined || unit.packageName === "") &&
-        (path === suffix || path.endsWith(`/${suffix}`))
-      );
+      const headerless = unit === undefined || unit.packageName === "";
+      const bodyless =
+        context.unreadBodies?.has(path) === true &&
+        unit?.packageName === parts.slice(0, -1).join(".");
+      return (headerless || bodyless) && (path === suffix || path.endsWith(`/${suffix}`));
     });
     if (paths.length === 1 && paths[0] !== undefined) {
       hits.add(paths[0]);
@@ -330,24 +422,53 @@ function lookUp(
   return hits.size === 1 ? [...hits] : [];
 }
 
-/** The declarations not contained inside another one. */
-export function topLevelNames(
-  ranges: readonly { name: string; startLine: number; endLine: number }[],
-): string[] {
-  return ranges
-    .filter(
-      (range, position) =>
-        !ranges.some(
-          (other, otherPosition) =>
-            otherPosition !== position &&
-            other.startLine <= range.startLine &&
-            other.endLine >= range.endLine &&
-            // A tie on both ends would otherwise make two identical ranges
-            // each swallow the other and leave neither top level.
-            (other.startLine < range.startLine || other.endLine > range.endLine),
-        ),
-    )
-    .map((range) => range.name);
+/** What the declaration index needs of one brace-language declaration. */
+export interface TopLevelCandidate {
+  name: string;
+  declared: "function" | "type";
+  /** Offset of the declaration's first keyword. */
+  start: number;
+  /** Offsets of the body's braces, when it has a body. */
+  open?: number;
+  close?: number;
+}
+
+/**
+ * The declarations no other declaration's body encloses, by name: every
+ * one, and the types alone.
+ *
+ * Read from the declarations rather than from the symbol ranges. The ranges
+ * merge same-named declarations into one span, and a span is not a body:
+ * two overloads of a Kotlin top-level `format` became one range from the
+ * first to the last, the class declared between them lay inside it and was
+ * not top level; two nested `Builder`s in one Java file merged into a span
+ * that neither outer class held, and became a phantom top-level type that
+ * made the real `Builder` in the package ambiguous. Only a body encloses,
+ * and only a declaration knows where its body is.
+ */
+export function topLevelDeclarations(
+  declarations: readonly TopLevelCandidate[],
+): { names: string[]; types: string[] } {
+  const outermost = declarations.filter(
+    (declaration) =>
+      !declarations.some(
+        (other) =>
+          other !== declaration &&
+          other.open !== undefined &&
+          other.close !== undefined &&
+          other.open < declaration.start &&
+          other.close > declaration.start,
+      ),
+  );
+  const names = new Set<string>();
+  const types = new Set<string>();
+  for (const declaration of outermost) {
+    names.add(declaration.name);
+    if (declaration.declared === "type") {
+      types.add(declaration.name);
+    }
+  }
+  return { names: [...names], types: [...types] };
 }
 
 export { posixBasename };

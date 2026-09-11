@@ -18,6 +18,14 @@
  * type, and every Ruby method are marked `inferred`, the same flag the
  * TypeScript side raises for a `const` with no annotation.
  *
+ * Two forms are kept of everything. The `shape` is for a person: whitespace
+ * collapsed, otherwise as written. The `comparable` is what is hashed, and
+ * it is canonical: no whitespace beside punctuation, no parameter names
+ * where a caller cannot use them, a default's *value* replaced by a marker
+ * that says only that there is one. A change to a caller-visible contract
+ * must move the digest; a change to formatting, a body, a private member, a
+ * positional parameter's name or a default value must not.
+ *
  * The contract is the one `symbol-ranges.ts` keeps. An array means "these are
  * the shapes"; `undefined` means the masker could not read the file, and the
  * caller must keep saying the shapes are unknown rather than empty.
@@ -27,97 +35,387 @@ import { digestOf, type ShapeKind, type SymbolShape } from "./contract-shape.js"
 import {
   blankBraceLanguage,
   braceDeclarations,
+  isAssignment,
+  looksLikeTypeArgument,
   rubyDeclarations,
   type BraceLanguage,
   type PythonShape,
   type RubyDeclaration,
 } from "./symbol-ranges.js";
 
-/** Languages where a caller passes by position, so a parameter's name is not contract. */
-const POSITIONAL = new Set<BraceLanguage>(["java", "c", "cpp", "rust"]);
+/**
+ * Languages where a caller passes by position, so a parameter's name is not
+ * contract. Go has no named arguments either.
+ */
+const POSITIONAL = new Set<BraceLanguage>(["java", "c", "cpp", "rust", "go"]);
 
 /** Languages whose types are written before the name, `Type name`. */
 const TYPE_FIRST = new Set<BraceLanguage>(["java", "c", "cpp"]);
 
-/** Whitespace and trailing separators are not contract. */
+/**
+ * Code-point order. `String#localeCompare` follows the process locale, and
+ * under da_DK or cs_CZ the same file sorted its members differently from
+ * the same file under en_US; a digest is a function of the source only.
+ */
+function byCodePoint(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * The readable form: whitespace collapsed, a wrapped parameter list pulled
+ * back onto one line, a trailing comma or separator dropped.
+ */
 function normalize(text: string): string {
-  return text.replace(/\s+/gu, " ").replace(/\s*([,;])\s*$/u, "").trim();
+  return text
+    .replace(/\s+/gu, " ")
+    .replace(/([(\[])\s+/gu, "$1")
+    .replace(/\s+([)\],;])/gu, "$1")
+    .replace(/,(?=[)\]])/gu, "")
+    .replace(/,(?! |$)/gu, ", ")
+    .replace(/\s*([,;])\s*$/u, "")
+    .trim();
+}
+
+/**
+ * The hashed form: no whitespace beside punctuation at all, so `char *s`,
+ * `char* s`, `x : Int` and a gofmt'd multi-line parameter list compare as
+ * what they are. Whitespace between two words stays: `unsigned int` is not
+ * `unsignedint`.
+ */
+function canonical(text: string): string {
+  return normalize(text).replace(/\s*([^\w\s$])\s*/gu, "$1");
+}
+
+/**
+ * Bracket depth, the way `headEndOf` counts it: a stack, so a `<` that was
+ * a comparison is discarded when the parenthesis around it closes; `<` only
+ * where a type argument could follow; the `>` of `->` and `=>` never a
+ * closer. The first version counted every `<` and `>`, and the `>` of an
+ * arrow drove the depth negative — after which commas stopped splitting and
+ * `=` stopped cutting, so a closure parameter's default vanished from the
+ * comparable and a Scala function type was cut off at its arrow.
+ */
+class Brackets {
+  private readonly openers: string[] = [];
+
+  get depth(): number {
+    return this.openers.length;
+  }
+
+  /** Whether the stack holds only braces, so a `(` here is still a parameter list. */
+  get onlyBraces(): boolean {
+    return this.openers.every((opener) => opener === "{");
+  }
+
+  step(text: string, at: number, angles = true): void {
+    const character = text[at];
+    if (character === "(" || character === "[" || character === "{") {
+      this.openers.push(character);
+      return;
+    }
+    if (angles && character === "<" && looksLikeTypeArgument(text, at)) {
+      this.openers.push("<");
+      return;
+    }
+    if (character === ")" || character === "]" || character === "}") {
+      const wanted = character === ")" ? "(" : character === "]" ? "[" : "{";
+      if (!this.openers.includes(wanted)) {
+        return;
+      }
+      while (this.openers.length > 0 && this.openers.pop() !== wanted) {
+        // Unclosed angle brackets inside are not brackets.
+      }
+      return;
+    }
+    if (
+      character === ">" &&
+      this.openers.at(-1) === "<" &&
+      text[at - 1] !== "-" &&
+      text[at - 1] !== "="
+    ) {
+      this.openers.pop();
+    }
+  }
 }
 
 /** Split on a separator at bracket depth zero. */
 function splitTopLevel(text: string, separator: string): string[] {
   const out: string[] = [];
-  let depth = 0;
+  const brackets = new Brackets();
   let current = "";
-  for (const character of text) {
-    if ("([<{".includes(character)) {
-      depth += 1;
-    } else if (")]>}".includes(character)) {
-      depth -= 1;
-    }
-    if (character === separator && depth === 0) {
+  for (let at = 0; at < text.length; at += 1) {
+    brackets.step(text, at);
+    if (text[at] === separator && brackets.depth === 0) {
       out.push(current);
       current = "";
       continue;
     }
-    current += character;
+    current += text[at];
   }
   out.push(current);
   return out.map((part) => part.trim()).filter((part) => part !== "");
 }
 
-/**
- * The parameter list of a head with the names taken out, for the languages
- * where a name is not something a caller can depend on.
- *
- * `Type name` languages drop the last token of each parameter; Rust drops
- * everything before the `:`. Where the parameter list cannot be found the
- * head is compared as written, which errs toward reporting a rename as a
- * change rather than hiding a real one.
- */
-function withoutParameterNames(head: string, language: BraceLanguage): string {
-  const open = head.indexOf("(");
-  if (open === -1) {
-    return head;
+/** The first `needle` at bracket depth zero, or -1. */
+function topLevelIndex(text: string, needle: string): number {
+  const brackets = new Brackets();
+  for (let at = 0; at < text.length; at += 1) {
+    brackets.step(text, at);
+    if (brackets.depth === 0 && text[at] === needle) {
+      return at;
+    }
   }
+  return -1;
+}
+
+/**
+ * The index of the `=` that begins a value — an initializer, a default, an
+ * expression body — or -1. Not one inside brackets, and not one that is
+ * part of an operator: `isAssignment` knows `==`, `+=`, `operator=` and
+ * the two readings of `=>`.
+ */
+function assignmentAt(text: string, language: BraceLanguage): number {
+  const brackets = new Brackets();
+  for (let at = 0; at < text.length; at += 1) {
+    brackets.step(text, at);
+    if (brackets.depth === 0 && text[at] === "=" && isAssignment(text, at, language === "csharp")) {
+      return at;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Whether the text after a C++ declarator's `=` is a specifier a caller
+ * depends on rather than a value: `= delete`, `= default`, and the `= 0`
+ * of a pure virtual function — only after a parameter list, since a
+ * field's `= 0` is an initializer like any other.
+ */
+function isSpecifier(declarator: string, value: string): boolean {
+  if (value === "delete" || value === "default") {
+    return true;
+  }
+  return value === "0" && /\)(?:\s*(?:const|volatile|noexcept|override|final|&&?))*$/u.test(declarator);
+}
+
+/**
+ * A member with its value cut. An initializer or an expression body is a
+ * value, not a contract — except a C++ `= delete`, `= default` or `= 0`,
+ * which say what a caller may do, and an alias, whose target is the whole
+ * point.
+ */
+function withoutInitializer(line: string, language: BraceLanguage): string {
+  const at = assignmentAt(line, language);
+  if (at === -1) {
+    return line;
+  }
+  const value = line.slice(at + 1).trim();
+  if (language === "cpp" && isSpecifier(line.slice(0, at).trim(), value)) {
+    return line;
+  }
+  if (
+    /^(?:using|typedef)\b/u.test(line) ||
+    (language === "rust" && /^(?:pub(?:\([^)]*\))?\s+)?type\b/u.test(line)) ||
+    (language === "go" && /^type\b/u.test(line))
+  ) {
+    return line;
+  }
+  return line.slice(0, at).trim();
+}
+
+/**
+ * Leading annotations, attributes and the like removed: `@Inject`,
+ * `[JsonIgnore]`, `#[serde(default)]`, `[[nodiscard]]`,
+ * `__attribute__((...))`. They are not what a caller writes, and the
+ * modifier that decides reachability may hide behind one.
+ */
+function stripAttributes(text: string): string {
+  let rest = text.trimStart();
+  for (;;) {
+    const marker = /^(?:@[\w.:]+|#\[|\[\[|\[|__attribute__\s*\()/u.exec(rest);
+    if (marker === null) {
+      return rest;
+    }
+    let at = marker[0].length;
+    if (marker[0].startsWith("@")) {
+      if (rest[at] === "(") {
+        at = balancedEnd(rest, at);
+      }
+    } else {
+      at = balancedEnd(rest, at - 1);
+      if (marker[0] === "[[" && rest[at] === "]") {
+        at += 1;
+      }
+    }
+    rest = rest.slice(at).trimStart();
+  }
+}
+
+/** The offset just past the bracket group opening at `open`. */
+function balancedEnd(text: string, open: number): number {
+  const opener = text[open] ?? "";
+  const closer = opener === "(" ? ")" : opener === "[" ? "]" : "}";
   let depth = 0;
-  let close = -1;
-  for (let at = open; at < head.length; at += 1) {
-    if (head[at] === "(") {
+  for (let at = open; at < text.length; at += 1) {
+    if (text[at] === opener) {
       depth += 1;
-    } else if (head[at] === ")") {
+    } else if (text[at] === closer) {
       depth -= 1;
       if (depth === 0) {
-        close = at;
-        break;
+        return at + 1;
       }
     }
   }
-  if (close === -1) {
-    return head;
-  }
-  const parameters = splitTopLevel(head.slice(open + 1, close), ",").map(
-    (parameter) => {
-      if (language === "rust") {
-        if (/^(?:&\s*(?:mut\s+)?)?(?:mut\s+)?self$/u.test(parameter)) {
-          return parameter;
-        }
-        const colon = parameter.indexOf(":");
-        return colon === -1 ? parameter : parameter.slice(colon + 1).trim();
-      }
-      if (TYPE_FIRST.has(language)) {
-        const tokens = parameter.split(/\s+/u);
-        // `int` alone is an unnamed parameter; `int a[]` and `void (*f)(int)`
-        // are left as written rather than mangled.
-        if (tokens.length < 2 || /[\])]$/u.test(tokens.at(-1) ?? "")) {
-          return parameter;
-        }
-        return tokens.slice(0, -1).join(" ");
-      }
+  return text.length;
+}
+
+/** The C-family keywords that are complete types on their own. */
+const TYPE_KEYWORDS = new Set([
+  "int",
+  "char",
+  "short",
+  "long",
+  "float",
+  "double",
+  "void",
+  "bool",
+  "boolean",
+  "byte",
+  "signed",
+  "unsigned",
+  "auto",
+  "size_t",
+  "wchar_t",
+  "_Bool",
+]);
+
+/** The C-family words that qualify a type without being one. */
+const QUALIFIERS = new Set([
+  "const",
+  "volatile",
+  "struct",
+  "union",
+  "enum",
+  "restrict",
+  "register",
+  "static",
+  "inline",
+  "final",
+  "typename",
+  "class",
+]);
+
+/** Go's type-introducing keywords, which are never a parameter's name. */
+const GO_TYPE_KEYWORDS = /^(?:chan|func|map|struct|interface)\b/u;
+
+/**
+ * A parameter with its name taken out, for a language where a caller
+ * cannot use the name.
+ *
+ * `Type name` languages drop the trailing identifier and only that: the
+ * `*` of `char *s` and the `&` of `const Money &m` stay on the type (the
+ * first version dropped the last whitespace-separated token, so `char *s`
+ * and `char s` hashed the same), an `int a[]` becomes `int[]`, and `void
+ * (*f)(int)` is left as written. A parameter that is only a type — `int`,
+ * `unsigned int`, `const Money` — is left alone. Rust drops everything
+ * before the `:`.
+ */
+function withoutName(parameter: string, language: BraceLanguage): string {
+  if (language === "rust") {
+    if (/^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?)?(?:mut\s+)?self$/u.test(parameter)) {
       return parameter;
-    },
+    }
+    const colon = topLevelIndex(parameter, ":");
+    return colon === -1 ? parameter : parameter.slice(colon + 1).trim();
+  }
+  if (!TYPE_FIRST.has(language) || /[()]/u.test(parameter)) {
+    return parameter;
+  }
+  const array = /^(.*?)((?:\s*\[[^\]]*\])+)$/u.exec(parameter);
+  const core = (array?.[1] ?? parameter).trim();
+  const suffix = array?.[2]?.replace(/\s+/gu, "") ?? "";
+  const split = /^(.*?[\s*&])([A-Za-z_]\w*)$/u.exec(core);
+  if (split?.[1] === undefined || split[2] === undefined || TYPE_KEYWORDS.has(split[2])) {
+    return parameter;
+  }
+  const prefix = split[1].split(/[\s*&]+/u).filter((token) => token !== "");
+  if (prefix.every((token) => QUALIFIERS.has(token) || token.startsWith("@"))) {
+    return parameter;
+  }
+  return `${split[1].trim()}${suffix}`;
+}
+
+/**
+ * A Go parameter list with the names out. Names come in groups — `a, b
+ * int` — where a bare identifier takes the type of the next parameter
+ * that has one, and a list is either all named or all unnamed.
+ */
+function goParameters(parts: readonly string[]): string[] {
+  const named = parts.some(
+    (part) => /^[A-Za-z_]\w*\s+\S/u.test(part) && !GO_TYPE_KEYWORDS.test(part),
   );
-  return `${head.slice(0, open + 1)}${parameters.join(", ")}${head.slice(close)}`;
+  if (!named) {
+    return [...parts];
+  }
+  return parts.map((part, index) => {
+    if (/^[A-Za-z_]\w*$/u.test(part)) {
+      const typed = parts.slice(index + 1).find((later) => /\s/u.test(later));
+      return typed === undefined ? part : typed.replace(/^[A-Za-z_]\w*\s+/u, "");
+    }
+    return part.replace(/^[A-Za-z_]\w*\s+/u, "");
+  });
+}
+
+/**
+ * A parameter as it is compared: the name out where it is not contract,
+ * and a default's value replaced by a marker. That a parameter is optional
+ * is contract; what it defaults to is a value, the same rule the Python
+ * reader keeps.
+ */
+function comparableParameter(
+  parameter: string,
+  language: BraceLanguage,
+  stripNames: boolean,
+): string {
+  const at = assignmentAt(parameter, language);
+  let type = at === -1 ? parameter : parameter.slice(0, at).trim();
+  if (stripNames) {
+    type = withoutName(type, language);
+    // A Go function-typed parameter has parameters of its own.
+    if (language === "go" && /\(/u.test(type)) {
+      type = comparableHead(type, language, true, false);
+    }
+  }
+  return at === -1 ? type : `${type} = ?`;
+}
+
+/**
+ * A head or a member in its comparable form: every parameter list rebuilt
+ * from its parameters, then canonicalised.
+ */
+function comparableHead(
+  text: string,
+  language: BraceLanguage,
+  stripNames: boolean,
+  finish = true,
+): string {
+  const brackets = new Brackets();
+  let out = "";
+  for (let at = 0; at < text.length; at += 1) {
+    if (text[at] === "(" && brackets.onlyBraces) {
+      const close = balancedEnd(text, at);
+      const inner = text.slice(at + 1, close - 1);
+      const parts = splitTopLevel(inner, ",").map((part) =>
+        comparableParameter(part, language, stripNames),
+      );
+      out += `(${(language === "go" && stripNames ? goParameters(parts) : parts).join(", ")})`;
+      at = close - 1;
+      continue;
+    }
+    brackets.step(text, at);
+    out += text[at];
+  }
+  return finish ? canonical(out) : out;
 }
 
 /**
@@ -162,6 +460,10 @@ function returnInferred(
  * function marked `static`, a `private`/`protected` member elsewhere. A
  * package-visible Java method is shared with every other file in the
  * package, which is the same shape of dependency the graph tracks.
+ *
+ * The modifier is looked for anywhere before the parameter list, not only
+ * as the first word: `static private`, `final private` and `@Inject
+ * private` are all private. Swift's `private(set)` hides only the setter.
  */
 function reachable(
   head: string,
@@ -188,70 +490,231 @@ function reachable(
       (member || !/^\s*static\b/u.test(head))
     );
   }
-  return !/^\s*(?:private|protected|fileprivate)\b/u.test(head);
+  const modifiers = head
+    .replace(/\b(?:private|protected|internal|fileprivate|public|open)\s*\(set\)/gu, "")
+    .split(/[(=<{:]/u)[0] ?? "";
+  return !/\b(?:private|protected|fileprivate)\b/u.test(modifiers);
+}
+
+/** What ends a member line and what may continue it onto the next. */
+const CONTINUES_AFTER =
+  /(?:[,=:.&|+<\[(]|->|=>|\b(?:throws|where|extends|implements|with|permits))$/u;
+const CONTINUES_BEFORE =
+  /(?:[{:.?&|+)\]>,=]|->|=>|(?:throws|where|extends|implements|with|permits)\b)/uy;
+const BLANK = /\s*/uy;
+
+/** Whether the next non-blank text after `at` continues the member before it. */
+function continuesBefore(body: string, at: number): boolean {
+  BLANK.lastIndex = at;
+  BLANK.exec(body);
+  CONTINUES_BEFORE.lastIndex = BLANK.lastIndex;
+  return CONTINUES_BEFORE.test(body);
+}
+
+/**
+ * Text of a nested body `{...}` where a member keeps one level of it: a
+ * Go field of anonymous struct type, a Rust enum's struct variant, a
+ * Kotlin companion object, an inline C struct. Their fields are contract
+ * and have no declaration of their own to be read from.
+ */
+function nestedRendering(
+  before: string,
+  inner: string,
+  literal: string | undefined,
+  after: string,
+  language: BraceLanguage,
+  kind: ShapeKind,
+  budget: number,
+): string | undefined {
+  if (budget === 0) {
+    return undefined;
+  }
+  const head = stripAttributes(before).trim();
+  let innerKind: ShapeKind | undefined;
+  let publicByDefault = false;
+  if (language === "go" && /\b(?:struct|interface)$/u.test(head)) {
+    innerKind = "type";
+  } else if (language === "rust" && kind === "enum" && /(?:^|\s)[A-Za-z_]\w*$/u.test(head)) {
+    innerKind = "type";
+    publicByDefault = true;
+  } else if (language === "kotlin" && /\bcompanion\s+object$/u.test(head)) {
+    innerKind = "class";
+  } else if (
+    (language === "c" || language === "cpp") &&
+    /\b(?:struct|union|enum)(?:\s+[A-Za-z_]\w*)?$/u.test(head) &&
+    (after !== "" || /\b(?:struct|union|enum)$/u.test(head))
+  ) {
+    // An inline definition — anonymous, or with a declarator after it — is
+    // not a declaration of its own, so its fields are read here.
+    innerKind = /\benum$/u.test(head) ? "enum" : "type";
+  }
+  if (innerKind === undefined) {
+    return undefined;
+  }
+  const { members } = membersOf(
+    inner,
+    literal,
+    language,
+    innerKind,
+    "public",
+    true,
+    budget - 1,
+    publicByDefault,
+  );
+  return members.length === 0 ? undefined : `{${members.join("; ")}}`;
 }
 
 /**
  * The members of a type body, one per line, nested bodies removed.
  *
+ * A member ends at a `;`, at a `,` where the language separates members
+ * with one, or at a newline — but only at bracket depth zero and only where
+ * neither the line's end nor the next line's start says the member goes
+ * on. The first version split every newline, so a wrapped parameter list
+ * became several garbage members and the digest moved on a reformat.
+ *
  * Sorted, because moving a field is not a contract change — except for an
  * enum, where a member with no explicit value takes it from its position.
+ * `literal` is the body with its string literals restored: an enum's raw
+ * values are its contract, and a line that ends in a string does not end
+ * in the `=` before it.
  */
 function membersOf(
   body: string,
+  literal: string | undefined,
   language: BraceLanguage,
   kind: ShapeKind,
   defaultAccess: string,
   classLike: boolean,
+  budget = 1,
+  publicByDefault = false,
 ): { members: string[]; comparable: string[] } {
-  let flattened = "";
-  let depth = 0;
-  for (const character of body) {
-    if (character === "{") {
-      depth += 1;
-      if (depth === 1) {
-        flattened += "{}";
+  const segments: string[] = [];
+  // `current` is the blanked text and decides structure; `shown` has the
+  // literals back and is what an enum member is read from — and what says
+  // whether a line ends in `=`, since a blanked `= "x"` ends in spaces.
+  let current = "";
+  let shown = "";
+  let afterAssign = false;
+  let brackets = new Brackets();
+  const flush = (): void => {
+    if (current.trim() !== "") {
+      segments.push(kind === "enum" ? shown : current);
+    }
+    current = "";
+    shown = "";
+    afterAssign = false;
+    brackets = new Brackets();
+  };
+  const commaSeparates = (): boolean => {
+    if (language === "rust") {
+      // Fields and variants end in commas; a `where` clause has some too.
+      return !/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern)\s+)*fn\b/u.test(current);
+    }
+    return kind === "enum" && language !== "swift";
+  };
+  for (let at = 0; at < body.length; at += 1) {
+    const character = body[at] ?? "";
+    if (brackets.depth === 0 && character === "{") {
+      const close = balancedEnd(body, at);
+      const after = /^[ \t]*([A-Za-z_]\w*)?/u.exec(body.slice(close))?.[1] ?? "";
+      const nested =
+        nestedRendering(
+          current,
+          body.slice(at + 1, close - 1),
+          literal?.slice(at + 1, close - 1),
+          after,
+          language,
+          kind,
+          budget,
+        ) ?? "{}";
+      current += nested;
+      shown += nested;
+      at = close - 1;
+      // A body ends its member: `void a() {} void b() {}` is two. Only a C
+      // struct definition carries on into a declarator, `struct { } in;`.
+      if (
+        /^[ \t]*[A-Za-z_@#\[]/u.test(body.slice(close)) &&
+        !((language === "c" || language === "cpp") && /\b(?:struct|union|enum)\b/u.test(current))
+      ) {
+        flush();
       }
       continue;
     }
-    if (character === "}") {
-      depth -= 1;
-      continue;
+    if (brackets.depth === 0) {
+      if (character === ";" || (character === "," && commaSeparates())) {
+        flush();
+        continue;
+      }
+      if (character === "\n") {
+        const trimmed = shown.trimEnd();
+        if (
+          trimmed !== "" &&
+          !CONTINUES_AFTER.test(trimmed) &&
+          !continuesBefore(body, at + 1)
+        ) {
+          flush();
+          continue;
+        }
+        current += " ";
+        shown += " ";
+        continue;
+      }
+      if (character === "=" && kind !== "enum" && isAssignment(body, at, language === "csharp")) {
+        afterAssign = true;
+      }
     }
-    if (depth === 0) {
-      flattened += character;
-    }
+    // Past an `=` the text is a value, where `a < b` is a comparison.
+    brackets.step(body, at, !afterAssign);
+    current += character;
+    shown += literal?.[at] ?? character;
   }
+  flush();
+
   const members: string[] = [];
   const comparable: string[] = [];
   let access = defaultAccess;
-  // Fields end in commas, statements in semicolons, and a Go struct's in
-  // newlines; all three separate members. An initializer or an expression
-  // body after `=` is a value, not a contract, and is cut — except in an
-  // enum, where `B = 3` is exactly the contract.
-  const lines = flattened
-    .split(/[;\n]/u)
-    .flatMap((statement) => splitTopLevel(statement, ","));
-  for (const raw of lines) {
-    let line = normalize(raw.replace(/\{\}/gu, ""));
+  for (const raw of segments) {
+    let line = normalize(stripAttributes(raw));
+    // `#region`, `#if`, `#include`: not members.
+    if (line === "" || line.startsWith("#")) {
+      continue;
+    }
+    // C++ access labels apply to everything after them, on their own line
+    // or as a prefix of the first member.
+    const label = /^(public|private|protected)\s*:(?!:)\s*/u.exec(line);
+    if (label?.[1] !== undefined) {
+      access = label[1];
+      line = line.slice(label[0].length);
+    }
     if (kind !== "enum") {
-      line = normalize(splitTopLevel(line, "=")[0] ?? "");
+      line = withoutInitializer(line, language);
+    }
+    // A trailing body is the one thing that is never contract.
+    line = normalize(line.replace(/\s*\{\}$/u, ""));
+    if (language === "kotlin") {
+      // A property's accessors are read with the property, on the same
+      // line or the next; an `init` block is only a body.
+      if (/^(?:(?:private|protected|internal)\s+)?(?:get|set)\b/u.test(line) || line === "init") {
+        continue;
+      }
+      line = line.replace(/\s+get\(\)$/u, "");
+    }
+    // PHP's default visibility is spelled out, so the two spellings agree.
+    if (language === "php" && /^(?:(?:static|final|abstract)\s+)*function\b/u.test(line)) {
+      line = `public ${line}`;
     }
     if (line === "") {
       continue;
     }
-    // C++ access labels apply to everything after them.
-    const label = /^(public|private|protected)\s*:$/u.exec(line);
-    if (label?.[1] !== undefined) {
-      access = label[1];
-      continue;
-    }
-    // Every variant of an enum and every item of a trait is as public as
-    // the type; a struct field or an impl item needs its own `pub`.
+    // Every variant of an enum, every item of a trait and every item of a
+    // trait impl is as public as the type; a struct field or an inherent
+    // impl item needs its own `pub`.
     if (
       language === "rust" &&
       kind !== "enum" &&
       kind !== "interface" &&
+      !publicByDefault &&
       !/^pub\b/u.test(line)
     ) {
       continue;
@@ -264,21 +727,41 @@ function membersOf(
     ) {
       continue;
     }
-    members.push(line);
-    comparable.push(
-      POSITIONAL.has(language) ? withoutParameterNames(line, language) : line,
-    );
+    // Go's grouped fields, `X, Y int`, are the fields `X int` and `Y int`.
+    for (const member of language === "go" ? goFields(line) : [line]) {
+      members.push(member);
+      comparable.push(
+        comparableHead(member, language, POSITIONAL.has(language) && !/\brecord\b/u.test(member)),
+      );
+    }
   }
   if (kind !== "enum") {
-    members.sort((left, right) => left.localeCompare(right));
-    comparable.sort((left, right) => left.localeCompare(right));
+    members.sort(byCodePoint);
+    comparable.sort(byCodePoint);
   }
   return { members, comparable };
+}
+
+/** A Go field line as the fields it declares. */
+function goFields(line: string): string[] {
+  if (!/,/u.test(line)) {
+    return [line];
+  }
+  const parts = splitTopLevel(line, ",");
+  const last = parts.at(-1) ?? "";
+  const type = /^[A-Za-z_]\w*\s+(.+)$/u.exec(last)?.[1];
+  if (type === undefined || !parts.slice(0, -1).every((part) => /^[A-Za-z_]\w*$/u.test(part))) {
+    return [line];
+  }
+  return parts.map((part, index) => (index === parts.length - 1 ? part : `${part} ${type}`));
 }
 
 function kindOf(head: string, declared: "function" | "type"): ShapeKind {
   if (declared === "function") {
     return "function";
+  }
+  if (/^(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\b/u.test(head)) {
+    return "variable";
   }
   const keyword = /\b(class|struct|interface|enum|trait|record|object|protocol|extension|actor|union|namespace|impl)\b/u.exec(
     head,
@@ -302,18 +785,88 @@ function kindOf(head: string, declared: "function" | "type"): ShapeKind {
 
 interface Piece {
   kind: ShapeKind;
-  shape: string;
-  comparable: string;
+  head: string;
+  comparableHead: string;
+  /** Absent for a function or a variable; a type's members and their comparable forms. */
+  members?: string[];
+  comparableMembers?: string[];
+  /** Whether member order is contract (an enum). */
+  ordered: boolean;
   inferred: boolean;
 }
 
-function assemble(symbol: string, pieces: readonly Piece[]): SymbolShape {
-  const sorted = [...pieces].sort((left, right) =>
-    left.comparable.localeCompare(right.comparable),
-  );
-  // Several declarations under one name — overloads, a struct and its impl
-  // blocks — are one contract, in an order that does not depend on where
-  // each was written.
+/**
+ * Several declarations under one name — overloads, a struct and its impl
+ * blocks, a prototype and its definition — are one contract, in an order
+ * that does not depend on where each was written.
+ *
+ * Blocks with the same head are one block: an inherent `impl` split in two,
+ * a C# `partial class` in two halves, a Swift `extension` of a type declared
+ * beside it. A caller sees the same members either way.
+ */
+function assemble(symbol: string, pieces: readonly Piece[], language?: BraceLanguage): SymbolShape {
+  let list = pieces.map((piece) => ({
+    ...piece,
+    members: piece.members === undefined ? undefined : [...piece.members],
+    comparableMembers:
+      piece.comparableMembers === undefined ? undefined : [...piece.comparableMembers],
+  }));
+  if (language === "swift") {
+    const primary = list.find(
+      (piece) => piece.members !== undefined && !/^extension\b/u.test(piece.head),
+    );
+    if (primary?.members !== undefined && primary.comparableMembers !== undefined) {
+      const kept: typeof list = [];
+      for (const piece of list) {
+        if (piece === primary || piece.members === undefined || !/^extension\b/u.test(piece.head)) {
+          kept.push(piece);
+          continue;
+        }
+        primary.members.push(...piece.members);
+        primary.comparableMembers.push(...(piece.comparableMembers ?? []));
+        // A conformance or a constraint is contract of its own; a bare
+        // extension is only where its members were written.
+        if (/:|\bwhere\b/u.test(piece.head)) {
+          kept.push({ ...piece, members: [], comparableMembers: [] });
+        }
+      }
+      list = kept;
+    }
+  }
+  const merged = new Map<string, (typeof list)[number]>();
+  for (const piece of list) {
+    const key = `${piece.kind}\0${piece.comparableHead}`;
+    const existing = merged.get(key);
+    if (existing === undefined) {
+      merged.set(key, piece);
+      continue;
+    }
+    if (existing.members !== undefined && piece.members !== undefined) {
+      existing.members = piece.ordered
+        ? [...existing.members, ...piece.members]
+        : [...new Set([...existing.members, ...piece.members])];
+      existing.comparableMembers = piece.ordered
+        ? [...(existing.comparableMembers ?? []), ...(piece.comparableMembers ?? [])]
+        : [...new Set([...(existing.comparableMembers ?? []), ...(piece.comparableMembers ?? [])])];
+    }
+    existing.inferred = existing.inferred || piece.inferred;
+  }
+  const rendered = [...merged.values()].map((piece) => {
+    if (piece.members === undefined) {
+      return { ...piece, shape: piece.head, comparable: piece.comparableHead };
+    }
+    const members = piece.ordered ? piece.members : [...piece.members].sort(byCodePoint);
+    const comparable = piece.ordered
+      ? (piece.comparableMembers ?? [])
+      : [...(piece.comparableMembers ?? [])].sort(byCodePoint);
+    // A Ruby module has no heritage, so its head may be empty.
+    return {
+      ...piece,
+      shape: `${piece.head} {${members.join("; ")}}`.trim(),
+      comparable: `${piece.comparableHead} {${comparable.join("; ")}}`.trim(),
+    };
+  });
+  const sorted = rendered.sort((left, right) => byCodePoint(left.comparable, right.comparable));
   const kind = sorted.find((piece) => piece.kind !== "function")?.kind ?? "function";
   const shape = sorted.map((piece) => piece.shape).join(" | ");
   const comparable = sorted.map((piece) => piece.comparable).join(" | ");
@@ -325,6 +878,26 @@ function assemble(symbol: string, pieces: readonly Piece[]): SymbolShape {
     digest: digestOf(`${kind} ${comparable}`),
     ...(inferred ? { inferred: true } : {}),
   };
+}
+
+/** `code` between `from` and `to`, with the string literals inside put back. */
+function restoreStrings(
+  source: string,
+  code: string,
+  strings: readonly [number, number][],
+  from: number,
+  to: number,
+): string {
+  let out = "";
+  let span = 0;
+  for (let at = from; at < to; at += 1) {
+    while (span < strings.length && (strings[span]?.[1] ?? 0) <= at) {
+      span += 1;
+    }
+    const inside = strings[span];
+    out += inside !== undefined && inside[0] <= at ? source[at] : code[at];
+  }
+  return out;
 }
 
 /**
@@ -341,11 +914,28 @@ export function braceShapes(
   if (read === undefined) {
     return undefined;
   }
-  const { code, declarations } = read;
+  const { code, declarations, strings } = read;
   const pieces = new Map<string, Piece[]>();
   for (const declaration of declarations) {
-    const head = normalize(code.slice(declaration.start, declaration.headEnd));
+    let head = normalize(stripAttributes(code.slice(declaration.start, declaration.headEnd)));
     const kind = kindOf(head, declaration.declared);
+    // A PHP method with no modifier is public; the two spellings are one
+    // head, as they are one member of the class above.
+    if (
+      language === "php" &&
+      kind === "function" &&
+      /^(?:(?:static|final|abstract)\s+)*function\b/u.test(head) &&
+      declarations.some(
+        (other) =>
+          other.declared === "type" &&
+          other.open !== undefined &&
+          other.close !== undefined &&
+          other.open < declaration.start &&
+          other.close > declaration.start,
+      )
+    ) {
+      head = `public ${head}`;
+    }
     // C++ members are private until a label says otherwise — in a class. A
     // struct, a union and a namespace start public.
     const enclosingAccess =
@@ -355,50 +945,63 @@ export function braceShapes(
     if (!reachable(head, declaration.name, language, declaration.access, false)) {
       continue;
     }
-    const strippedHead = POSITIONAL.has(language)
-      ? withoutParameterNames(head, language)
-      : head;
-    if (kind === "function") {
+    // A C++ function's head ends at its `=`; what follows is contract when
+    // it is `delete`, `default` or a pure virtual's `0`.
+    if (language === "cpp" && kind === "function" && declaration.terminator === "=") {
+      const end = code.indexOf(";", declaration.headEnd);
+      const value = code.slice(declaration.headEnd + 1, end === -1 ? undefined : end).trim();
+      if (isSpecifier(head, value)) {
+        head = `${head} = ${value}`;
+      }
+    }
+    // A Java record's components are its accessors, so their names stay.
+    const stripNames = POSITIONAL.has(language) && !/\brecord\b/u.test(head);
+    const comparable = comparableHead(head, language, stripNames);
+    if (kind === "function" || kind === "variable") {
       pieces.set(declaration.name, [
         ...(pieces.get(declaration.name) ?? []),
         {
           kind,
-          shape: head,
-          comparable: strippedHead,
-          inferred: returnInferred(
-            head,
-            language,
-            declaration.terminator,
-            declaration.name,
-          ),
+          head,
+          comparableHead: comparable,
+          ordered: false,
+          inferred: returnInferred(head, language, declaration.terminator, declaration.name),
         },
       ]);
       continue;
     }
-    const body =
-      declaration.open === undefined || declaration.close === undefined
-        ? ""
-        : code.slice(declaration.open + 1, declaration.close);
-    const { members, comparable } = membersOf(
+    const { open, close } = declaration;
+    const body = open === undefined || close === undefined ? "" : code.slice(open + 1, close);
+    const literal =
+      open === undefined || close === undefined
+        ? undefined
+        : restoreStrings(source, code, strings, open + 1, close);
+    const { members, comparable: comparableMembers } = membersOf(
       body,
+      literal,
       language,
       kind,
       enclosingAccess,
       !/\bnamespace\b/u.test(head),
+      1,
+      language === "rust" && /^impl\b.*\bfor\b/u.test(head),
     );
     pieces.set(declaration.name, [
       ...(pieces.get(declaration.name) ?? []),
       {
         kind,
-        shape: `${head} {${members.join("; ")}}`,
-        comparable: `${strippedHead} {${comparable.join("; ")}}`,
+        head,
+        comparableHead: comparable,
+        members,
+        comparableMembers,
+        ordered: kind === "enum",
         inferred: false,
       },
     ]);
   }
   return [...pieces]
-    .map(([symbol, list]) => assemble(symbol, list))
-    .sort((left, right) => left.symbol.localeCompare(right.symbol));
+    .map(([symbol, list]) => assemble(symbol, list, language))
+    .sort((left, right) => byCodePoint(left.symbol, right.symbol));
 }
 
 /** Offsets of every `separator` at bracket depth zero. */
@@ -570,9 +1173,17 @@ export function rubyShapes(source: string): SymbolShape[] | undefined {
         continue;
       }
       const signature = signatureOf(declaration);
+      // A method has no members, so it carries none: a piece with a member
+      // list renders as `(x) {}`, which is not a signature anyone wrote.
       pieces.set(declaration.name, [
         ...(pieces.get(declaration.name) ?? []),
-        { kind: "function", ...signature, inferred: true },
+        {
+          kind: "function",
+          head: signature.shape,
+          comparableHead: signature.comparable,
+          ordered: false,
+          inferred: true,
+        },
       ]);
       continue;
     }
@@ -585,21 +1196,30 @@ export function rubyShapes(source: string): SymbolShape[] | undefined {
         const prefix = `${other.singleton ? "self." : ""}${other.name}`;
         return { shape: prefix + signature.shape, comparable: prefix + signature.comparable };
       })
-      .sort((left, right) => left.comparable.localeCompare(right.comparable));
+      // Code-point order, as everywhere else, and on the pair together so
+      // the readable form lists its members in the order the hashed one does.
+      .sort((left, right) => byCodePoint(left.comparable, right.comparable));
     const heritage = normalize(restOf(declaration).raw);
+    // The body is rendered here rather than handed to `assemble` as members:
+    // `assemble` folds pieces that share a head into one, and two classes
+    // with one name in two modules are two contracts, not one reopened
+    // class. Rendered, their heads differ and both survive.
     pieces.set(declaration.name, [
       ...(pieces.get(declaration.name) ?? []),
       {
         kind: declaration.keyword === "class" ? "class" : "type",
-        shape: `${heritage} {${members.map((member) => member.shape).join("; ")}}`.trim(),
-        comparable: `${heritage} {${members.map((member) => member.comparable).join("; ")}}`.trim(),
+        head: `${heritage} {${members.map((member) => member.shape).join("; ")}}`.trim(),
+        comparableHead: `${heritage} {${members
+          .map((member) => member.comparable)
+          .join("; ")}}`.trim(),
+        ordered: false,
         inferred: false,
       },
     ]);
   }
   return [...pieces]
     .map(([symbol, list]) => assemble(symbol, list))
-    .sort((left, right) => left.symbol.localeCompare(right.symbol));
+    .sort((left, right) => byCodePoint(left.symbol, right.symbol));
 }
 
 /**
@@ -610,35 +1230,33 @@ export function rubyShapes(source: string): SymbolShape[] | undefined {
  * brace language's overloads are. Left as several entries they compared
  * each `before` entry to whichever `after` entry came last, and an
  * unchanged file drifted against itself.
+ *
+ * The reader renders a class body itself, members and their order included,
+ * so every entry arrives as one head with nothing left for `assemble` to
+ * join or sort — an enum's members stay where the file put them.
  */
 export function pythonShapes(read: readonly PythonShape[]): SymbolShape[] {
   const pieces = new Map<string, Piece[]>();
   for (const entry of read) {
-    const list = pieces.get(entry.symbol) ?? [];
     // The same signature written on each branch of a platform switch is one
     // signature. Kept once per branch it hashed as "() -> str | () -> str",
     // and dropping a branch moved the digest while a caller saw no change.
-    if (
-      list.some(
-        (piece) =>
-          piece.kind === entry.kind && piece.comparable === entry.comparable,
-      )
-    ) {
-      continue;
-    }
+    // `assemble` keeps one piece per kind and head, so the repeat falls away
+    // there, and two branches that disagree are both still contract.
     pieces.set(entry.symbol, [
-      ...list,
+      ...(pieces.get(entry.symbol) ?? []),
       {
         kind: entry.kind,
-        shape: entry.shape,
-        comparable: entry.comparable,
+        head: entry.shape,
+        comparableHead: entry.comparable,
+        ordered: false,
         inferred: entry.inferred,
       },
     ]);
   }
   return [...pieces]
     .map(([symbol, list]) => assemble(symbol, list))
-    .sort((left, right) => left.symbol.localeCompare(right.symbol));
+    .sort((left, right) => byCodePoint(left.symbol, right.symbol));
 }
 
 // Re-exported so a caller with a masked file in hand can share it.

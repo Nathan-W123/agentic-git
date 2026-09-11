@@ -56,7 +56,16 @@ interface BraceDialect {
   /** Quote characters that begin a string literal. */
   quotes: readonly string[];
   /**
-   * Declarations worth owning, each capturing the name in group 1.
+   * Whether `'x'` is a character literal. Rust, Kotlin and Scala write one
+   * with the quote that also begins a lifetime or a symbol, so only a
+   * literal that closes within one (escaped) character is blanked, and `'a`
+   * in `&'a str` is left alone. Without this `'{'` counted as a brace, and
+   * the body it sat in leaked into the members of the type around it.
+   */
+  charLiterals?: boolean;
+  /**
+   * Declarations worth owning, each capturing the name in group 1 (or, for
+   * a pattern with two alternatives, in group 2).
    *
    * Deliberately anchored to a line start with optional leading whitespace:
    * a declaration is a statement, and matching mid-line finds the same words
@@ -69,102 +78,185 @@ interface BraceDialect {
    * range starts at the first of them rather than at the keyword.
    */
   attached: RegExp;
+  /**
+   * Line starts that can never continue a head: a `val`, an `import`, a
+   * `#region`. A body-less head ends at the newline before one of these.
+   * Before this list existed a head ran on until the next line that was
+   * itself one of the declarations above, so an unrelated `val DEFAULT =
+   * Foo(1)` was folded into the head of the `data class Foo` before it.
+   */
+  statements: RegExp;
+  /**
+   * Declarations whose `=` is part of the head rather than the start of a
+   * value: a Rust `type Id = u32`, a Go `type Alias = T`. The alias target
+   * is what a caller depends on, so the head runs on to the `;` or the end
+   * of the line.
+   */
+  aliases?: RegExp;
+  /** Whether `=>` opens an expression body (C#) rather than naming a function type (Scala). */
+  arrowBodies?: boolean;
 }
 
 const ATTACHED_ANNOTATION = /^[ \t]*(?:@[\w.]|#\[|\[[A-Z])/u;
 
+/**
+ * Statement keywords a C or C++ function pattern must not read as a return
+ * type or a name: `return frobnicate(`, `else if (`, `while (`.
+ */
+const C_STATEMENT =
+  "return|else|if|while|for|switch|case|goto|do|sizeof|typedef|throw|new|delete|using|co_return|co_await|co_yield|try|catch|static_assert|namespace|public|private|protected|break|continue|alignas|alignof|decltype|noexcept|requires|concept";
+
+/*
+ * The C, C++ and Java function patterns end at the `(` that opens the
+ * parameter list and no further. The first version ran `\([^;]*$` from
+ * there, and `[^;]` matches a newline: a function whose body reached the
+ * next head before its first `;` — an empty stub, an Allman brace, an
+ * overload on the next line — swallowed that head, and the second function
+ * was never read; a one-line definition and a prototype, whose `;` is on
+ * the same line, were never read at all. Where the head ends is
+ * `headEndOf`'s job: a `;` is a prototype, a `{` is a definition, and both
+ * are declarations.
+ */
 const DIALECTS: Record<BraceLanguage, BraceDialect> = {
   go: {
     lineComments: ["//"],
     quotes: ['"', "'", "`"],
     declarations: [
       /^[ \t]*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\(/gmu,
-      /^[ \t]*type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b/gmu,
+      // Any named type: a struct, an interface, `type ID string`, a generic
+      // `type List[T any] struct`.
+      /^[ \t]*type\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+\S/gmu,
+      // A member of a `type ( ... )` group. Only the matches inside such a
+      // group are kept: the same shape inside a struct body is a field with
+      // an anonymous struct type, not a declaration.
+      /^[ \t]+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+(?:struct|interface)\s*\{/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
+    statements: /^[ \t]*(?:var|const|import|package)\b/u,
+    aliases: /^[ \t]*type\b/u,
   },
   rust: {
     lineComments: ["//"],
     quotes: ['"'],
+    charLiterals: true,
     declarations: [
-      /^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|const\s+|unsafe\s+|extern\s+"[^"]*"\s+)*fn\s+([A-Za-z_]\w*)/gmu,
-      /^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|union)\s+([A-Za-z_]\w*)/gmu,
-      /^[ \t]*impl(?:\s*<[^>]*>)?\s+(?:[\w:<>, ]+\s+for\s+)?([A-Za-z_]\w*)/gmu,
+      // The ABI string of `extern "C"` is blanked with every other string,
+      // so the pattern has to accept the spaces left where it was.
+      /^[ \t]*(?:#\[[^\]]*\][ \t]*)*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|const|unsafe|extern(?:\s+"[^"]*")?)\s+)*fn\s+([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:#\[[^\]]*\][ \t]*)*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|union)\s+([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:#\[[^\]]*\][ \t]*)*impl(?:\s*<[^>]*>)?\s+(?:[\w:<>, ]+\s+for\s+)?([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:#\[[^\]]*\][ \t]*)*pub(?:\([^)]*\))?\s+(?:type|const|static)\s+([A-Za-z_]\w*)/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
+    statements: /^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:let|use|mod|const|static|type|macro_rules!|extern\s+crate)\b/u,
+    aliases: /^[ \t]*(?:#\[[^\]]*\][ \t]*)*(?:pub(?:\([^)]*\))?\s+)?type\b/u,
   },
   java: {
     lineComments: ["//"],
     quotes: ['"', "'"],
     declarations: [
-      /^[ \t]*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed|synchronized|native|strictfp|default)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_]\w*)/gmu,
-      /^[ \t]*(?:(?:public|private|protected|static|final|abstract|synchronized|native|strictfp|default)\s+)+(?:<[^>]*>\s*)?[\w.<>\[\],? ]+\s+([A-Za-z_]\w*)\s*\([^;]*$/gmu,
+      /^[ \t]*(?:@[\w.]+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed|synchronized|native|strictfp|default)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:@[\w.]+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|strictfp|default)\s+)+(?:<[^>]*>\s*)?[\w.<>\[\],? ]+\s+([A-Za-z_]\w*)\s*\(/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
+    statements: /^[ \t]*(?:import|package)\b/u,
   },
   csharp: {
     lineComments: ["//"],
     quotes: ['"', "'"],
     declarations: [
-      /^[ \t]*(?:(?:public|private|protected|internal|static|sealed|abstract|partial|readonly|record)\s+)*(?:class|interface|struct|enum|record)\s+([A-Za-z_]\w*)/gmu,
-      /^[ \t]*(?:(?:public|private|protected|internal|static|virtual|override|abstract|async|sealed|extern|unsafe|partial)\s+)+[\w.<>\[\],? ]+\s+([A-Za-z_]\w*)\s*\(/gmu,
+      /^[ \t]*(?:\[[^\]]*\][ \t]*)*(?:(?:public|private|protected|internal|static|sealed|abstract|partial|readonly|record)\s+)*(?:class|interface|struct|enum|record)\s+([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:\[[^\]]*\][ \t]*)*(?:(?:public|private|protected|internal|static|virtual|override|abstract|async|sealed|extern|unsafe|partial)\s+)+[\w.<>\[\],? ]+\s+([A-Za-z_]\w*)\s*\(/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
+    statements: /^[ \t]*(?:using|namespace|#)/u,
+    arrowBodies: true,
   },
   c: {
     lineComments: ["//"],
     quotes: ['"', "'"],
     declarations: [
-      /^[ \t]*(?:(?:static|inline|extern|const|unsigned|signed|struct|enum)\s+)*[A-Za-z_]\w*[\w \t*]*\s+\*?([A-Za-z_]\w*)\s*\([^;]*$/gmu,
+      new RegExp(
+        `^[ \\t]*(?!(?:${C_STATEMENT})\\b)(?:__attribute__\\s*\\(\\([^)]*\\)\\)[ \\t]+)*(?:(?:static|inline|extern|const|unsigned|signed|struct|enum|union|volatile|register|__inline__?)\\s+)*[A-Za-z_]\\w*[\\w \\t*]*\\s+\\*?(?!(?:${C_STATEMENT})\\b)([A-Za-z_]\\w*)\\s*\\(`,
+        "gmu",
+      ),
       /^[ \t]*(?:typedef\s+)?(?:struct|union|enum)\s+([A-Za-z_]\w*)\s*\{/gmu,
+      // `typedef struct { ... } money_t;` is named after its body.
+      /^[ \t]*typedef\s+(?:struct|union|enum)\s*\{[^{}]*\}\s*\**([A-Za-z_]\w*)/gmu,
     ],
     attached: /^[ \t]*#\s*\w/u,
+    statements: /^[ \t]*(?:#|typedef\b)/u,
   },
   cpp: {
     lineComments: ["//"],
     quotes: ['"', "'"],
     declarations: [
-      /^[ \t]*(?:(?:static|inline|virtual|explicit|constexpr|const|extern|friend|template\s*<[^>]*>)\s+)*[\w:<>~ \t*&]*?([A-Za-z_~]\w*)\s*\([^;]*$/gmu,
-      /^[ \t]*(?:class|struct|union|enum(?:\s+class)?)\s+([A-Za-z_]\w*)/gmu,
+      // Two forms. A return type (or a qualifier such as `Widget::`) before
+      // the name, which may be an operator; or a bare name — a constructor,
+      // a destructor — which is not read when its line ends in `);`, the
+      // shape of a local `Foo bar(1);` or a `REGISTER(x);` macro rather
+      // than of a declaration.
+      new RegExp(
+        `^[ \\t]*(?!(?:${C_STATEMENT})\\b)(?:(?:\\[\\[[^\\]]*\\]\\]|__attribute__\\s*\\(\\([^)]*\\)\\))[ \\t]+)*(?:(?:static|inline|virtual|explicit|constexpr|consteval|constinit|const|extern|friend|template\\s*<[^>]*>)\\s+)*(?:[\\w:<>~ \\t*&]*?[\\w>*&][\\s*&]+(?:[A-Za-z_]\\w*::)*(~?[A-Za-z_]\\w*|operator\\s*(?:[^\\s\\w(]+|\\(\\s*\\)|\\[\\s*\\]))|(?:[A-Za-z_]\\w*::)*(~?[A-Za-z_]\\w*)(?![^\\n]*\\)[ \\t]*;[ \\t]*$))\\s*\\(`,
+        "gmu",
+      ),
+      // A type with a body: `class Foo;` (a forward declaration) and
+      // `struct stat st;` (a local) are not declarations of a type.
+      /^[ \t]*(?:class|struct|union|enum(?:\s+(?:class|struct))?)\s+([A-Za-z_]\w*)\b[^;{}=]*\{/gmu,
       /^[ \t]*namespace\s+([A-Za-z_]\w*)/gmu,
     ],
     attached: /^[ \t]*(?:#\s*\w|\[\[)/u,
+    statements: /^[ \t]*(?:#|typedef\b|using\b)/u,
   },
   php: {
     lineComments: ["//", "#"],
     quotes: ['"', "'"],
     declarations: [
-      /^[ \t]*(?:(?:final|abstract|public|private|protected|static|readonly)\s+)*function\s+&?([A-Za-z_]\w*)/gmu,
-      /^[ \t]*(?:(?:final|abstract|readonly)\s+)*(?:class|interface|trait|enum)\s+([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:#\[[^\]]*\][ \t]*)*(?:(?:final|abstract|public|private|protected|static|readonly)\s+)*function\s+&?([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:#\[[^\]]*\][ \t]*)*(?:(?:final|abstract|readonly)\s+)*(?:class|interface|trait|enum)\s+([A-Za-z_]\w*)/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
+    statements: /^[ \t]*(?:use|namespace|const|case)\b/u,
   },
   swift: {
     lineComments: ["//"],
     quotes: ['"'],
     declarations: [
-      /^[ \t]*(?:(?:public|private|internal|fileprivate|open|static|final|override|mutating|convenience|required|@\w+)\s+)*func\s+([A-Za-z_]\w*)/gmu,
-      /^[ \t]*(?:(?:public|private|internal|fileprivate|open|final|indirect)\s+)*(?:class|struct|enum|protocol|extension|actor)\s+([A-Za-z_]\w*)/gmu,
+      // `class func` is a function, not a type named `func`; an operator
+      // function is named by its symbol.
+      /^[ \t]*(?:@\w+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|internal|fileprivate|open|static|class|final|override|mutating|nonmutating|convenience|required|dynamic)\s+)*func\s+([A-Za-z_]\w*|[^\s\w(]+)\s*[(<]/gmu,
+      /^[ \t]*(?:@\w+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|internal|fileprivate|open|final|indirect)\s+)*(?:class|struct|enum|protocol|extension|actor)\s+(?!(?:func|var|let|init|subscript)\b)([A-Za-z_]\w*)/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
+    statements:
+      /^[ \t]*(?:(?:(?:public|private|internal|fileprivate|open)(?:\(set\))?|static|final|override|lazy|weak|unowned|@\w+(?:\([^)]*\))?)\s+)*(?:var|let|typealias|import|init\b|deinit\b|subscript\b|case\b|associatedtype\b|#)/u,
   },
   kotlin: {
     lineComments: ["//"],
     quotes: ['"'],
+    charLiterals: true,
     declarations: [
-      /^[ \t]*(?:(?:public|private|internal|protected|open|final|abstract|override|suspend|inline|operator|tailrec|external|sealed|data|inner|companion)\s+)*fun\s+(?:<[^>]*>\s*)?(?:[\w.<>]+\.)?([A-Za-z_]\w*)/gmu,
-      /^[ \t]*(?:(?:public|private|internal|protected|open|final|abstract|sealed|data|inner|value|annotation|companion)\s+)*(?:class|interface|object)\s+([A-Za-z_]\w*)/gmu,
+      // The type-parameter list may nest one level (`<T : Comparable<T>>`),
+      // the receiver may carry spaces (`Map<K, V>.toQuery`), and `fun
+      // interface` is a type.
+      /^[ \t]*(?:@[\w.:]+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|internal|protected|open|final|abstract|override|suspend|inline|infix|operator|tailrec|external|expect|actual|sealed|data|inner|companion)\s+)*fun\s+(?!interface\b)(?:<(?:[^<>]|<[^<>]*>)*>\s*)?(?:[\w.<>, ?]*?\.)?([A-Za-z_]\w*)\s*[(<]/gmu,
+      /^[ \t]*(?:@[\w.:]+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|internal|protected|open|final|abstract|sealed|data|inner|value|annotation|companion|enum|fun|inline|expect|actual|external)\s+)*(?:class|interface|object)\s+([A-Za-z_]\w*)/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
+    statements:
+      /^[ \t]*(?:(?:public|private|internal|protected|open|final|abstract|override|lateinit|const|inline|actual|expect|@[\w.:]+(?:\([^)]*\))?)\s+)*(?:val|var|typealias|import|package|init\s*\{|companion\s+object|get\s*\(|set\s*\()/u,
   },
   scala: {
     lineComments: ["//"],
     quotes: ['"'],
+    charLiterals: true,
     declarations: [
-      /^[ \t]*(?:(?:private|protected|final|override|implicit|sealed|abstract|case|lazy)\s+)*def\s+([A-Za-z_]\w*)/gmu,
-      /^[ \t]*(?:(?:private|protected|final|sealed|abstract|case|implicit)\s+)*(?:class|trait|object)\s+([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:@\w+(?:\([^)]*\))?[ \t]+)*(?:(?:private|protected|final|override|implicit|sealed|abstract|case|lazy|inline|transparent|infix)\s+)*def\s+([A-Za-z_]\w*|[^\s\w(\[]+)/gmu,
+      /^[ \t]*(?:@\w+(?:\([^)]*\))?[ \t]+)*(?:(?:private|protected|final|sealed|abstract|case|implicit|open|opaque)\s+)*(?:class|trait|object|enum)\s+([A-Za-z_]\w*)/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
+    statements:
+      /^[ \t]*(?:(?:private|protected|final|override|implicit|lazy|sealed|abstract|case|inline)\s+)*(?:val|var|type|import|package|given|export)\b/u,
   },
 };
 
@@ -176,11 +268,11 @@ const DIALECTS: Record<BraceLanguage, BraceDialect> = {
  * the word `struct` in a return type, so the keyword is not enough.
  */
 const DECLARED: Record<BraceLanguage, readonly ("function" | "type")[]> = {
-  go: ["function", "type"],
-  rust: ["function", "type", "type"],
+  go: ["function", "type", "type"],
+  rust: ["function", "type", "type", "type"],
   java: ["type", "function"],
   csharp: ["type", "function"],
-  c: ["function", "type"],
+  c: ["function", "type", "type"],
   cpp: ["function", "type", "type"],
   php: ["function", "type"],
   swift: ["function", "type"],
@@ -205,7 +297,23 @@ function blankNonCode(
   source: string,
   dialect: BraceDialect,
 ): string | undefined {
+  return blankNonCodeWithSpans(source, dialect)?.code;
+}
+
+/** A character literal that closes within one (escaped) character. */
+const CHAR_LITERAL = /^'(?:[^'\\\n]|\\(?:u\{[0-9A-Fa-f]{1,6}\}|.))'/u;
+
+/**
+ * The blanker, also reporting where each string literal was. A reader that
+ * needs a literal's text — an enum's raw values are its contract — can put
+ * it back at the same offsets.
+ */
+function blankNonCodeWithSpans(
+  source: string,
+  dialect: BraceDialect,
+): { code: string; strings: [number, number][] } | undefined {
   const out = source.split("");
+  const strings: [number, number][] = [];
   let index = 0;
   const blank = (from: number, to: number): void => {
     for (let at = from; at < to && at < out.length; at += 1) {
@@ -217,7 +325,9 @@ function blankNonCode(
   while (index < source.length) {
     const rest = source.slice(index);
     const line = dialect.lineComments.find((marker) => rest.startsWith(marker));
-    if (line !== undefined) {
+    // PHP's `#[Attribute]` is not a comment; blanking it as one took the
+    // declaration on the same line with it.
+    if (line !== undefined && !(line === "#" && rest.startsWith("#["))) {
       const end = source.indexOf("\n", index);
       blank(index, end === -1 ? source.length : end);
       index = end === -1 ? source.length : end;
@@ -231,6 +341,15 @@ function blankNonCode(
       blank(index, end + 2);
       index = end + 2;
       continue;
+    }
+    if (dialect.charLiterals === true && rest.startsWith("'")) {
+      const literal = CHAR_LITERAL.exec(rest);
+      if (literal !== null) {
+        strings.push([index, index + literal[0].length]);
+        blank(index, index + literal[0].length);
+        index += literal[0].length;
+        continue;
+      }
     }
     const quote = dialect.quotes.find((mark) => rest.startsWith(mark));
     if (quote !== undefined) {
@@ -256,13 +375,14 @@ function blankNonCode(
         }
         at += 1;
       }
+      strings.push([index, at]);
       blank(index, at);
       index = at;
       continue;
     }
     index += 1;
   }
-  return out.join("");
+  return { code: out.join(""), strings };
 }
 
 /** 1-based line number of an offset, from a prefix scan of newlines. */
@@ -339,54 +459,44 @@ export function braceSymbolRanges(
   const starts = lineStarts(source);
   const lines = source.split("\n");
   const found = new Map<string, SymbolRange>();
-  for (const pattern of dialect.declarations) {
-    // Each pattern carries its own lastIndex across calls when reused, so it
-    // is reset rather than trusted.
-    pattern.lastIndex = 0;
-    for (const match of code.matchAll(pattern)) {
-      const name = match[1];
-      if (name === undefined || match.index === undefined) {
+  for (const declaration of locate(code, language)) {
+    // Where the head ends decides what the body is. A `{` opens one; an
+    // `=` opens an expression body that runs to the next declaration; a
+    // `;`, a newline before another declaration, or the `}` of the
+    // enclosing block means there is no body at all. The first version
+    // took the next `{` in the file, so a body-less Kotlin declaration
+    // swallowed whatever braced declaration came after it — a nested
+    // type surfaced as top level, a real top-level type vanished, and the
+    // duplicate-name refusal that depends on both was defeated.
+    const { name, headEnd } = declaration;
+    let close: number;
+    if (code[headEnd] === "{") {
+      if (declaration.close === undefined) {
         continue;
       }
-      // Where the head ends decides what the body is. A `{` opens one; an
-      // `=` opens an expression body that runs to the next declaration; a
-      // `;`, a newline before another declaration, or the `}` of the
-      // enclosing block means there is no body at all. The first version
-      // took the next `{` in the file, so a body-less Kotlin declaration
-      // swallowed whatever braced declaration came after it — a nested
-      // type surfaced as top level, a real top-level type vanished, and the
-      // duplicate-name refusal that depends on both was defeated.
-      const headEnd = headEndOf(code, match.index, dialect);
-      let close: number;
-      if (code[headEnd] === "{") {
-        const found = closingBrace(code, headEnd);
-        if (found === undefined) {
-          continue;
-        }
-        close = found;
-      } else if (code[headEnd] === "=") {
-        close = expressionBodyEnd(code, headEnd + 1, dialect);
-      } else {
-        close = Math.min(headEnd, code.length - 1);
-      }
-      let startLine = lineOf(starts, match.index);
-      while (
-        startLine > 1 &&
-        dialect.attached.test(lines[startLine - 2] ?? "")
-      ) {
-        startLine -= 1;
-      }
-      const endLine = lineOf(starts, close);
-      const existing = found.get(name);
-      // Overloads and same-named members in different scopes collapse to one
-      // span covering both, which is the honest reading: a plan naming that
-      // symbol means all of them.
-      found.set(name, {
-        name,
-        startLine: Math.min(existing?.startLine ?? startLine, startLine),
-        endLine: Math.max(existing?.endLine ?? endLine, endLine),
-      });
+      close = declaration.close;
+    } else if (code[headEnd] === "=") {
+      close = expressionBodyEnd(code, headEnd + 1, dialect);
+    } else {
+      close = Math.min(headEnd, code.length - 1);
     }
+    let startLine = lineOf(starts, declaration.start);
+    while (
+      startLine > 1 &&
+      dialect.attached.test(lines[startLine - 2] ?? "")
+    ) {
+      startLine -= 1;
+    }
+    const endLine = lineOf(starts, close);
+    const existing = found.get(name);
+    // Overloads and same-named members in different scopes collapse to one
+    // span covering both, which is the honest reading: a plan naming that
+    // symbol means all of them.
+    found.set(name, {
+      name,
+      startLine: Math.min(existing?.startLine ?? startLine, startLine),
+      endLine: Math.max(existing?.endLine ?? endLine, endLine),
+    });
   }
   return [...found.values()].sort((a, b) => a.startLine - b.startLine);
 }
@@ -412,13 +522,20 @@ export interface BraceDeclaration {
  *
  * The first, at bracket depth zero, of: the `{` that opens its body; a `;`
  * (a prototype, an abstract member); an `=` (an expression body, `fun f() =
- * 1`); a `}` closing the block it sits in; or a newline whose next
- * non-blank line begins another declaration or an annotation — a Kotlin
- * interface method has no terminator of its own. Angle brackets count as
- * depth so `Iterator<Item = u8>` does not end a Rust head, and the `>` of an
- * arrow does not close one.
+ * 1`), unless the declaration is an alias whose `=` is its contract; a `}`
+ * closing the block it sits in; or a newline past the pattern's own match
+ * whose next non-blank line begins another declaration, an annotation or a
+ * statement — a Kotlin interface method has no terminator of its own.
+ * Angle brackets count as depth so `Iterator<Item = u8>` does not end a
+ * Rust head, and the `>` of an arrow does not close one.
  */
-function headEndOf(code: string, start: number, dialect: BraceDialect): number {
+function headEndOf(
+  code: string,
+  start: number,
+  dialect: BraceDialect,
+  alias = false,
+  matched = start,
+): number {
   // A stack rather than a counter, so a `<` that was a comparison inside a
   // default value is discarded when the parenthesis around it closes.
   const openers: string[] = [];
@@ -451,27 +568,64 @@ function headEndOf(code: string, start: number, dialect: BraceDialect): number {
     if (character === "{" || character === ";" || character === "}") {
       return at;
     }
-    if (character === "=" && code[at + 1] !== "=" && code[at - 1] !== "=") {
+    if (!alias && character === "=" && isAssignment(code, at, dialect.arrowBodies === true)) {
       return at;
     }
-    if (character === "\n" && startsDeclaration(code, at + 1, dialect)) {
+    // A newline inside the match itself — `int\nmain(` — is the pattern's
+    // own, however the next line reads.
+    if (character === "\n" && at >= matched && startsDeclaration(code, at + 1, dialect)) {
       return at;
     }
   }
   return code.length;
 }
 
-/** `<` opens a type argument when a type could follow it; `<<` and `<(` do not. */
-function looksLikeTypeArgument(code: string, at: number): boolean {
-  return /^<[ \t]*(?:[A-Za-z_?*&'\[]|>)/u.test(code.slice(at, at + 3));
+/**
+ * Whether the `=` at `at` begins a value — an expression body, an
+ * initializer, a default — rather than being part of an operator.
+ *
+ * Not half of `==`, `!=`, `<=`, `+=` and the rest; not the `=` of a C++
+ * `operator=` or `operator==`, nor of a Scala `def ==` or a Swift `func
+ * ==`; and not the `=` of `=>`, which is an expression body in C# and a
+ * function type in Scala. Cutting at the first `=` on the line, as the
+ * first version did, left `bool operator` of an operator overload and
+ * `NC(const NC&)` of a deleted copy constructor.
+ */
+export function isAssignment(code: string, at: number, arrowBodies: boolean): boolean {
+  const before = code[at - 1] ?? "";
+  const after = code[at + 1] ?? "";
+  if (after === "=" || (before !== "" && "=!<>+-*/%&|^~:".includes(before))) {
+    return false;
+  }
+  if (after === ">") {
+    return arrowBodies;
+  }
+  return !/\boperator\s*[^\s\w(]*$/u.test(code.slice(Math.max(0, at - 16), at));
 }
 
-/** Whether the next non-blank line begins a declaration or an annotation. */
+/**
+ * `<` opens a type argument when a type could follow it; `<<` and `<(` do
+ * not, except that Rust's unit `Result<(), E>` does.
+ */
+export function looksLikeTypeArgument(code: string, at: number): boolean {
+  return /^<[ \t]*(?:[A-Za-z_?*&'\[]|>|\(\))/u.test(code.slice(at, at + 4));
+}
+
+/** The declaration patterns without their global flag, one compile per dialect. */
+const START_PATTERNS = new Map<BraceDialect, RegExp[]>();
+
+/** Whether the next non-blank line begins a declaration, an annotation or a statement. */
 function startsDeclaration(code: string, from: number, dialect: BraceDialect): boolean {
   const rest = code.slice(from).replace(/^(?:[ \t]*\n)*/u, "");
+  let patterns = START_PATTERNS.get(dialect);
+  if (patterns === undefined) {
+    patterns = dialect.declarations.map((pattern) => new RegExp(pattern.source, "u"));
+    START_PATTERNS.set(dialect, patterns);
+  }
   return (
     dialect.attached.test(rest) ||
-    dialect.declarations.some((pattern) => new RegExp(pattern.source, "u").test(rest))
+    dialect.statements.test(rest) ||
+    patterns.some((pattern) => pattern.test(rest))
   );
 }
 
@@ -505,55 +659,47 @@ function expressionBodyEnd(code: string, from: number, dialect: BraceDialect): n
  * located, for the shape reader.
  *
  * Kept beside {@link braceSymbolRanges} rather than folded into it: the two
- * agree on what a declaration is and differ on what they need from it, and
- * a span that is too small is the one wrong answer the ranges must never
- * give, so their walk is left exactly as it is.
+ * agree on what a declaration is — they share {@link locate} — and differ
+ * on what they need from it. A span that is too small is the one wrong
+ * answer the ranges must never give, so the ranges keep every match,
+ * including one nested in a function body; the shapes drop those, because
+ * a local is not a contract.
  */
 export function braceDeclarations(
   source: string,
   language: BraceLanguage,
-): { code: string; declarations: BraceDeclaration[] } | undefined {
+): { code: string; declarations: BraceDeclaration[]; strings: [number, number][] } | undefined {
   const dialect = DIALECTS[language];
-  const code = blankNonCode(source, dialect);
-  if (code === undefined || !bracesBalance(code)) {
+  const blanked = blankNonCodeWithSpans(source, dialect);
+  // Parentheses and square brackets are checked beside the braces: a file
+  // cut off inside a parameter list has balanced braces (none at all), and
+  // its head would otherwise run to the end of the file and be answered as
+  // a shape rather than as unknown.
+  if (
+    blanked === undefined ||
+    !bracesBalance(blanked.code) ||
+    !bracketsBalance(blanked.code, "(", ")") ||
+    !bracketsBalance(blanked.code, "[", "]")
+  ) {
     return undefined;
   }
-  const byStart = new Map<number, BraceDeclaration>();
-  for (const [position, pattern] of dialect.declarations.entries()) {
-    const declared = DECLARED[language][position] ?? "type";
-    pattern.lastIndex = 0;
-    for (const match of code.matchAll(pattern)) {
-      const name = match[1];
-      if (name === undefined || match.index === undefined) {
-        continue;
-      }
-      // Two patterns can match one declaration — a Java `record` is both a
-      // type and, to the method pattern, a name followed by a parenthesis.
-      // The type reading wins because it was listed first.
-      if (byStart.has(match.index)) {
-        continue;
-      }
-      const headEnd = headEndOf(code, match.index, dialect);
-      const declaration: BraceDeclaration = {
-        name,
-        declared,
-        start: match.index,
-        headEnd,
-        terminator: code[headEnd] ?? "",
-        access: "public",
-      };
-      if (code[headEnd] === "{") {
-        const close = closingBrace(code, headEnd);
-        if (close === undefined) {
-          continue;
-        }
-        declaration.open = headEnd;
-        declaration.close = close;
-      }
-      byStart.set(match.index, declaration);
-    }
-  }
-  const declarations = [...byStart.values()].sort((a, b) => a.start - b.start);
+  const { code, strings } = blanked;
+  const all = locate(code, language);
+  // A match inside a function body is a statement that looked like a
+  // declaration — a local `Foo bar(1);`, a `while (`, a wrapped call after
+  // a `return` — or a local type nobody outside can name. Neither is a
+  // contract.
+  const declarations = all.filter(
+    (declaration) =>
+      !all.some(
+        (other) =>
+          other.declared === "function" &&
+          other.open !== undefined &&
+          other.close !== undefined &&
+          other.open < declaration.start &&
+          other.close > declaration.start,
+      ),
+  );
   if (language === "cpp") {
     for (const declaration of declarations) {
       const enclosing = declarations
@@ -591,7 +737,100 @@ export function braceDeclarations(
       }
     }
   }
-  return { code, declarations };
+  return { code, declarations, strings };
+}
+
+/**
+ * Every match of a dialect's declaration patterns, with its head and body
+ * located, in file order and one per start offset.
+ *
+ * Two patterns can match one declaration — a Java `record` is both a type
+ * and, to the method pattern, a name followed by a parenthesis. The reading
+ * listed first wins. A declaration whose `{` body cannot be closed is left
+ * out; the file's braces balance, so it is the pattern that misread.
+ */
+function locate(code: string, language: BraceLanguage): BraceDeclaration[] {
+  const dialect = DIALECTS[language];
+  const groups = language === "go" ? typeGroupsOf(code) : [];
+  const byStart = new Map<number, BraceDeclaration>();
+  for (const [position, pattern] of dialect.declarations.entries()) {
+    const declared = DECLARED[language][position] ?? "type";
+    // Each pattern carries its own lastIndex across calls when reused, so it
+    // is reset rather than trusted.
+    pattern.lastIndex = 0;
+    for (const match of code.matchAll(pattern)) {
+      const name = match[1] ?? match[2];
+      if (name === undefined || match.index === undefined || byStart.has(match.index)) {
+        continue;
+      }
+      // A Go `type ( ... )` group member is a declaration only inside such
+      // a group; the same shape inside a struct body is a field.
+      if (
+        language === "go" &&
+        position === 2 &&
+        !groups.some(([open, close]) => open < match.index && match.index < close)
+      ) {
+        continue;
+      }
+      const matched = match.index + match[0].length;
+      const alias = dialect.aliases?.test(code.slice(match.index, matched + 1)) === true;
+      const headEnd = headEndOf(code, match.index, dialect, alias, matched);
+      const declaration: BraceDeclaration = {
+        name,
+        declared,
+        start: match.index,
+        headEnd,
+        terminator: code[headEnd] ?? "",
+        access: "public",
+      };
+      if (code[headEnd] === "{") {
+        const close = closingBrace(code, headEnd);
+        if (close === undefined) {
+          continue;
+        }
+        declaration.open = headEnd;
+        declaration.close = close;
+      }
+      byStart.set(match.index, declaration);
+    }
+  }
+  return [...byStart.values()].sort((a, b) => a.start - b.start);
+}
+
+/** The `( ... )` spans of Go's grouped `type (` declarations. */
+function typeGroupsOf(code: string): [number, number][] {
+  const groups: [number, number][] = [];
+  for (const match of code.matchAll(/^[ \t]*type\s*\(/gmu)) {
+    const open = match.index + match[0].length - 1;
+    let depth = 0;
+    for (let at = open; at < code.length; at += 1) {
+      if (code[at] === "(") {
+        depth += 1;
+      } else if (code[at] === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          groups.push([open, at]);
+          break;
+        }
+      }
+    }
+  }
+  return groups;
+}
+
+function bracketsBalance(code: string, open: string, close: string): boolean {
+  let depth = 0;
+  for (const character of code) {
+    if (character === open) {
+      depth += 1;
+    } else if (character === close) {
+      depth -= 1;
+      if (depth < 0) {
+        return false;
+      }
+    }
+  }
+  return depth === 0;
 }
 
 function bracesBalance(code: string): boolean {
