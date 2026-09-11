@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1496,15 +1496,22 @@ test("a transient interpreter failure is not cached as a file's contract", async
 });
 
 /** A repository seeded with `files`, and a way to advance it one commit. */
-async function seededRepository(files: Record<string, string>, name: string) {
+/** What a seeded file holds: text, raw bytes, or a link to another path. */
+type SeededFile = string | Buffer | { symlink: string };
+
+async function seededRepository(files: Record<string, SeededFile>, name: string) {
   const root = await mkdtemp(path.join(os.tmpdir(), `coord-${name}-`));
   const source = path.join(root, "source");
   const repositories = new RepositoryService();
   await repositories.initializeWorkingRepository(source);
-  const write = async (entries: Record<string, string>) => {
-    for (const [relative, text] of Object.entries(entries)) {
+  const write = async (entries: Record<string, SeededFile>) => {
+    for (const [relative, content] of Object.entries(entries)) {
       await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
-      await writeFile(path.join(source, relative), text);
+      if (typeof content === "object" && !Buffer.isBuffer(content)) {
+        await symlink(content.symlink, path.join(source, relative));
+      } else {
+        await writeFile(path.join(source, relative), content);
+      }
     }
   };
   await write(files);
@@ -1515,7 +1522,7 @@ async function seededRepository(files: Record<string, string>, name: string) {
     name,
   );
   const revision = (await repositories.getCanonicalVersion(repository)).revision;
-  const advance = async (entries: Record<string, string>, message: string) => {
+  const advance = async (entries: Record<string, SeededFile>, message: string) => {
     await write(entries);
     await repositories.commitAll(source, message);
     await execFile("git", ["-C", source, "push", "-q", repository.path, "main:main"]);
@@ -1765,6 +1772,504 @@ test("a script import resolves the way TypeScript resolves it", async () => {
     assert.equal(target("src/useCss.ts", "src/styles.css"), "src/styles.css");
     assert.equal(target("src/useCss.ts", "src/data.json"), "src/data.json");
   } finally {
+    await repo.dispose();
+  }
+});
+
+test("one script the parser cannot walk is one unreadable file, not a failed build", async () => {
+  // A generated string table — thousands of terms joined with `+` — nests
+  // deeper than the call stack allows, though the parser reads it fine. The
+  // walk used to recurse, so this one file threw a RangeError out of
+  // `index()` for the whole repository, on every build, and `staleContracts`
+  // and every coordinator path built on it rejected with it.
+  const line = "A".repeat(76);
+  const table =
+    'export const table = "" +\n' +
+    Array.from({ length: 3000 }, () => `  "${line}" +`).join("\n") +
+    '\n  "";\n';
+  // Past what the parser itself can take: this one is unreadable, and must
+  // say so rather than take the build down.
+  const nested = `var s = ${"[".repeat(6000)}${"]".repeat(6000)};\n`;
+  const files: Record<string, SeededFile> = {
+    "vendor/table.ts": table,
+    "vendor/nested.js": nested,
+    "src/good.ts": "export function fine(a: number): string { return String(a); }\n",
+    "src/user.ts": 'import { fine } from "./good.js";\nexport const u = fine(1);\n',
+  };
+  // Enough scripts that a warmed service hands the batch to its threads,
+  // which must report one bad file the same way the calling thread does.
+  for (let n = 0; n < 70; n += 1) {
+    files[`src/mod_${String(n)}.ts`] = `export const m${String(n)} = ${String(n)};\n`;
+  }
+  const repo = await seededRepository(files, "deep");
+  try {
+    const single = new CodeIntelligenceService(repo.repositories, { maxParseWorkers: 1 });
+    const index = await single.index(repo.repository, repo.revision);
+    const read = index.files.find((file) => file.path === "vendor/table.ts");
+    assert.equal(read?.symbolRangesUnknown, undefined, "a deep but legal file is read");
+    assert.deepEqual(read?.exportedSymbols, ["table"]);
+    const refused = index.files.find((file) => file.path === "vendor/nested.js");
+    assert.equal(refused?.symbolRangesUnknown, true);
+    assert.equal(refused?.exportedShapesUnknown, true);
+    assert.equal(single.symbolRangesInFile(index, "vendor/nested.js"), undefined);
+    assert.deepEqual(
+      index.files.find((file) => file.path === "src/good.ts")?.exportedSymbols,
+      ["fine"],
+    );
+    assert.ok(
+      index.edges.some((edge) => edge.fromFile === "src/user.ts" && edge.toFile === "src/good.ts"),
+    );
+
+    const threaded = new CodeIntelligenceService(repo.repositories, { maxParseWorkers: 3 });
+    await threaded.warmUp();
+    const across = await threaded.index(repo.repository, repo.revision);
+    const comparable = (entry: RepositoryIndex): string =>
+      JSON.stringify({ ...entry, generatedAt: "" });
+    assert.equal(comparable(across), comparable(index));
+
+    // The refusal is this build's, not the blob's: a later build reads the
+    // file again rather than serving the refusal from the parse cache.
+    const r2 = await repo.advance({ "README.md": "docs\n" }, "docs");
+    const later = await single.index(repo.repository, r2);
+    assert.equal(
+      later.files.find((file) => file.path === "vendor/table.ts")?.symbolRangesUnknown,
+      undefined,
+    );
+    assert.deepEqual(
+      await single.staleContracts(repo.repository, {
+        mergeBase: repo.revision,
+        baseHead: r2,
+        files: ["src/user.ts"],
+      }),
+      [],
+    );
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a budget that leaves out a second declaration of a name resolves the name to nothing", async () => {
+  // Two files declaring one qualified name — a build-variant source set, a
+  // vendored copy, a test double — is the case the resolvers refuse on
+  // purpose: no way to say which one the importer compiles against. The
+  // tables were rebuilt from the files the budget kept, so once the second
+  // copy fell past `maxFiles` or over `maxFileBytes` the refusal turned into
+  // a confident edge to the surviving copy. A budget may lose an edge and
+  // must never add one.
+  const files = {
+    "php/a/App.php": "<?php\nnamespace Acme;\nuse Acme\\Money;\nclass App { public function run(Money $m) {} }\n",
+    "php/b/Money.php": "<?php\nnamespace Acme;\nclass Money { public function amount(): int { return 1; } }\n",
+    "php/z/Money.php": "<?php\nnamespace Acme;\nclass Money { public function amount(): int { return 2; } }\n",
+    "kt/app/Entry.kt": "package com.acme.app\n\nimport com.acme.cfg.Config\n\nclass Entry { fun run() = Config() }\n",
+    "kt/debug/Config.kt": "package com.acme.cfg\n\nclass Config { val debug = true }\n",
+    "kt/release/Config.kt": "package com.acme.cfg\n\nclass Config { val debug = false }\n",
+    "java/app/Main.java": "package com.acme.app;\nimport com.acme.cfg.Flags;\npublic class Main {}\n",
+    "java/debug/Flags.java": "package com.acme.cfg;\npublic class Flags {}\n",
+    "java/release/Flags.java": "package com.acme.cfg;\npublic class Flags {}\n",
+  };
+  const repo = await seededRepository(files, "budget-unique");
+  try {
+    const resolved = (index: RepositoryIndex): string[] =>
+      index.edges
+        .filter((edge) => edge.kind === "import" && edge.toFile !== undefined)
+        .map((edge) => `${edge.fromFile} -> ${edge.toFile ?? ""}`)
+        .sort();
+    assert.deepEqual(
+      resolved(await new CodeIntelligenceService(repo.repositories).index(repo.repository, repo.revision)),
+      [],
+      "with every file read, each name is declared twice and resolves to nothing",
+    );
+    // Sorted, the cutoffs drop php/z, then kt/release too, then java/release.
+    for (const options of [{ maxFiles: 8 }, { maxFiles: 5 }, { maxFiles: 2 }]) {
+      const limited = await new CodeIntelligenceService(repo.repositories, options).index(
+        repo.repository,
+        repo.revision,
+      );
+      assert.equal(limited.truncated, true);
+      assert.deepEqual(resolved(limited), [], JSON.stringify(options));
+    }
+    const padded = await repo.advance(
+      {
+        "php/z/Money.php": `<?php\nnamespace Acme;\n${"// padding\n".repeat(200)}class Money {}\n`,
+        "kt/release/Config.kt": `package com.acme.cfg\n\n${"// pad\n".repeat(300)}class Config\n`,
+      },
+      "pad",
+    );
+    const overSize = await new CodeIntelligenceService(repo.repositories, { maxFileBytes: 1500 }).index(
+      repo.repository,
+      padded,
+    );
+    assert.equal(overSize.truncated, true);
+    assert.deepEqual(resolved(overSize), []);
+  } finally {
+    await repo.dispose();
+  }
+
+  // The rule is per language: a budget that leaves out a file in some other
+  // language says nothing about whether a PHP name is unique, and the edge
+  // stays.
+  const unique = await seededRepository(
+    {
+      "php/a/App.php": "<?php\nnamespace Acme;\nuse Acme\\Money;\nclass App {}\n",
+      "php/b/Money.php": "<?php\nnamespace Acme;\nclass Money {}\n",
+      "zz/late.ts": "export const late = 1;\n",
+    },
+    "budget-other",
+  );
+  try {
+    const index = await new CodeIntelligenceService(unique.repositories, { maxFiles: 2 }).index(
+      unique.repository,
+      unique.revision,
+    );
+    assert.equal(index.truncated, true);
+    assert.ok(
+      index.edges.some((edge) => edge.fromFile === "php/a/App.php" && edge.toFile === "php/b/Money.php"),
+    );
+  } finally {
+    await unique.dispose();
+  }
+});
+
+test("a file the budget left out at canonical's tip is unknown there, not removed", async () => {
+  // Exactly `maxFiles` files fit at the merge base. Two unrelated files that
+  // sort earlier are added, and a file nobody touched falls past the cutoff.
+  // It is at the tip and unread there; the old comparison had nothing for
+  // it in `after` and reported every contract in it as removed, through
+  // every consumer, for a file that did not change.
+  const files: Record<string, SeededFile> = {
+    "src/m/lib.ts": "export function f(a: number): string { return String(a); }\nexport interface Shape { w: number }\n",
+    "src/m/user.ts": 'import { f } from "./lib.js";\nexport const u = f(1);\n',
+  };
+  for (let n = 0; n < 6; n += 1) {
+    files[`src/a/file${String(n)}.ts`] = `export const a${String(n)} = ${String(n)};\n`;
+  }
+  const repo = await seededRepository(files, "cutoff");
+  try {
+    const service = new CodeIntelligenceService(repo.repositories, { maxFiles: 8 });
+    const before = await service.index(repo.repository, repo.revision);
+    assert.equal(before.truncated, false);
+    const r2 = await repo.advance(
+      { "src/a/extra1.ts": "export const e1 = 1;\n", "src/a/extra2.ts": "export const e2 = 2;\n" },
+      "grow",
+    );
+    const after = await service.index(repo.repository, r2);
+    assert.equal(after.files.some((file) => file.path === "src/m/lib.ts"), false);
+    assert.ok(after.paths.includes("src/m/lib.ts"));
+    assert.deepEqual(service.contractDrift(before, after), []);
+    assert.deepEqual(
+      await service.staleContracts(repo.repository, {
+        mergeBase: repo.revision,
+        baseHead: r2,
+        files: ["src/m/user.ts"],
+      }),
+      [],
+    );
+    // A file that really is gone is still reported as gone.
+    const r3 = await repo.advance({ "src/a/file0.ts": "export const a0 = 0;\n" }, "same");
+    await execFile("git", ["-C", repo.source, "rm", "-q", "src/a/file1.ts"]);
+    const r4 = await repo.advance({}, "delete");
+    assert.notEqual(r3, r4);
+    const deleted = await service.index(repo.repository, r4);
+    assert.deepEqual(
+      service.contractDrift(before, deleted).map((change) => `${change.file}#${change.symbol} ${change.after}`),
+      ["src/a/file1.ts#a1 (removed)"],
+    );
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a symbolic link is unreadable, and an import through it lands nowhere", async () => {
+  // Git lists a link as a blob whose contents are the target path, so the
+  // index read `../src/foo.h` as a header and recorded one that declares
+  // nothing — no unknown flag — with the consumer resolved onto the link.
+  // The real header then had no consumers, and the link's empty contract
+  // never moved.
+  const repo = await seededRepository(
+    {
+      "src/foo.h": "int foo(int a);\nstruct Foo { int x; };\n",
+      "include/foo.h": { symlink: "../src/foo.h" },
+      "app/main.c": '#include "../include/foo.h"\nint main(void) { return foo(1); }\n',
+      "shared/types.ts": "export interface User { id: string }\nexport function mk(): User { return { id: '' }; }\n",
+      "pkg/a/src/types.ts": { symlink: "../../../shared/types.ts" },
+      "pkg/a/src/use.ts": 'import { mk } from "./types.js";\nexport const u = mk();\n',
+      "go.mod": "module example.com/m\n",
+      "lib/real.go": "package lib\n\nfunc Real() {}\n",
+      "lib/link.go": { symlink: "real.go" },
+      "cmd/main.go": 'package main\n\nimport "example.com/m/lib"\n\nfunc main() { lib.Real() }\n',
+      "Money.kt": "package com.acme\n\nclass Money(val amount: Int)\n",
+      "kt/link/Money.kt": { symlink: "../../Money.kt" },
+    },
+    "symlink",
+  );
+  try {
+    const service = new CodeIntelligenceService(repo.repositories);
+    const index = await service.index(repo.repository, repo.revision);
+    for (const link of ["include/foo.h", "pkg/a/src/types.ts", "lib/link.go", "kt/link/Money.kt"]) {
+      const file = index.files.find((entry) => entry.path === link);
+      assert.equal(file?.symbolRangesUnknown, true, link);
+      assert.equal(file?.exportedShapesUnknown, true, link);
+      assert.equal(service.symbolRangesInFile(index, link), undefined, link);
+    }
+    const resolved = index.edges
+      .filter((edge) => edge.kind === "import" && edge.toFile !== undefined)
+      .map((edge) => `${edge.fromFile} -> ${edge.toFile ?? ""}`)
+      .sort();
+    // The Go package resolves to the file in it and not to the link beside
+    // it; the include and the script import name the link and so name
+    // nothing this index can point at.
+    assert.deepEqual(resolved, ["cmd/main.go -> lib/real.go"]);
+    assert.ok(
+      index.edges.some((edge) => edge.fromFile === "app/main.c" && edge.toFile === undefined),
+      "the include is still recorded, unresolved",
+    );
+    assert.deepEqual(service.consumersOf(index, { file: "include/foo.h" }), []);
+    // The real header is read under its own name, and the link is still a
+    // path that exists.
+    assert.deepEqual(index.files.find((entry) => entry.path === "src/foo.h")?.symbols, ["Foo"]);
+    assert.ok(index.paths.includes("include/foo.h"));
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a UTF-16 source is decoded, a BOM does not hide the first line, and bytes that are not text are unreadable", async () => {
+  // Visual Studio writes some .cs and .cpp files as UTF-16 with a byte-order
+  // mark. Read as UTF-8 they were NUL-interleaved strings every scanner found
+  // nothing in — "declares nothing", with no unknown flag — so a contract
+  // change in such a file was invisible and a commit converting it to UTF-8
+  // made every export appear. A UTF-8 BOM, handed to the scanners as-is,
+  // glued itself to the first token and erased a line-1 declaration in
+  // Rust, Swift, C++ and C#.
+  const utf16 = (text: string): Buffer =>
+    Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]);
+  const utf16be = (text: string): Buffer =>
+    Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(text, "utf16le").swap16()]);
+  const BOM = "﻿";
+  const repo = await seededRepository(
+    {
+      "u16/Money.java": utf16("package com.acme.u16;\npublic class Money { public int amount; }\n"),
+      "u16/main.cpp": utf16("class Big { public: int go(); };\nint main() { return 0; }\n"),
+      "u16/a.ts": utf16("export const a = 1;\nexport function fa(x: number): string { return String(x); }\n"),
+      "u16/m.py": utf16("def f(a: int) -> int:\n    return a\n"),
+      "u16/Wide.swift": utf16be("struct Wide { var x: Int }\n"),
+      "bom/util.rs": `${BOM}pub fn helper() -> i32 { 1 }\npub struct S { pub x: u32 }\n`,
+      "bom/Point.swift": `${BOM}struct Point { var x: Int }\nfunc go(_ p: Point) -> Int { return p.x }\n`,
+      "bom/lib.cpp": `${BOM}class Lib { public: int go(); };\n`,
+      "bom/Program.cs": `${BOM}namespace Acme;\npublic class Program { public static void Main() {} }\n`,
+      "plain/util.rs": "pub fn helper() -> i32 { 1 }\npub struct S { pub x: u32 }\n",
+      // UTF-16 without a mark: NUL bytes, and no encoding this reads.
+      "bad/nul.ts": Buffer.from("export const nul = 1;\n", "utf16le"),
+      // Not UTF-8 at all.
+      "bad/latin.ts": Buffer.concat([Buffer.from("export const caf"), Buffer.from([0xe9]), Buffer.from(" = 1;\n")]),
+    },
+    "encoding",
+  );
+  try {
+    const service = new CodeIntelligenceService(repo.repositories);
+    const index = await service.index(repo.repository, repo.revision);
+    const symbolsOf = (file: string): string[] | undefined =>
+      index.files.find((entry) => entry.path === file)?.symbols;
+    assert.deepEqual(symbolsOf("u16/Money.java"), ["Money"]);
+    assert.deepEqual(symbolsOf("u16/main.cpp"), ["Big"]);
+    assert.deepEqual(symbolsOf("u16/a.ts"), ["a", "fa"]);
+    assert.deepEqual(symbolsOf("u16/m.py"), ["f"]);
+    assert.deepEqual(symbolsOf("u16/Wide.swift"), ["Wide"]);
+    assert.deepEqual(symbolsOf("bom/util.rs"), ["helper", "S"]);
+    assert.deepEqual(symbolsOf("bom/Point.swift"), ["Point", "go"]);
+    assert.deepEqual(symbolsOf("bom/lib.cpp"), ["Lib"]);
+    assert.deepEqual(symbolsOf("bom/Program.cs"), ["Program"]);
+    // Identical contracts with and without the mark, which is what keeps a
+    // commit that adds or drops one from moving anything.
+    const shapesOf = (file: string): string[] | undefined =>
+      index.files.find((entry) => entry.path === file)?.exportedShapes.map((shape) => shape.digest);
+    assert.deepEqual(shapesOf("bom/util.rs"), shapesOf("plain/util.rs"));
+    for (const bad of ["bad/nul.ts", "bad/latin.ts"]) {
+      const file = index.files.find((entry) => entry.path === bad);
+      assert.equal(file?.symbolRangesUnknown, true, bad);
+      assert.equal(file?.exportedShapesUnknown, true, bad);
+    }
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a manifest is read wherever the budget runs out", async () => {
+  // Three hundred Go files sort before go.mod, and a budget small enough
+  // that the chunk loop stops before the chunk holding it. The manifest was
+  // read inside that loop, so whether a Go import resolved depended on which
+  // 256-entry chunk go.mod fell in.
+  const files: Record<string, SeededFile> = {
+    "a/app/main.go": 'package main\n\nimport "example.com/m/a/p000"\n\nfunc main() { p000.F0() }\n',
+    "go.mod": "module example.com/m\n",
+  };
+  for (let n = 0; n < 300; n += 1) {
+    const id = String(n).padStart(3, "0");
+    files[`a/p${id}/f.go`] = `package p${id}\n\nfunc F${String(n)}() {}\n`;
+  }
+  const repo = await seededRepository(files, "gomod-late");
+  try {
+    for (const options of [{ maxFiles: 100 }, { maxFiles: 260 }]) {
+      const index = await new CodeIntelligenceService(repo.repositories, options).index(
+        repo.repository,
+        repo.revision,
+      );
+      assert.equal(index.truncated, true);
+      assert.ok(
+        index.edges.some((edge) => edge.fromFile === "a/app/main.go" && edge.toFile === "a/p000/f.go"),
+        `${JSON.stringify(options)}: go.mod must be read`,
+      );
+    }
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("which changed files an index could not read the contracts of", async () => {
+  // The question the coordinator has to ask before comparing a branch's
+  // shapes against canonical's: `shapesIn` answers from what the index
+  // holds, and a file it holds nothing for looks exactly like a file with
+  // nothing in it. Unreadable is: shapes or ranges unknown, or a source file
+  // at this revision that never made it into `files`. Not unreadable is: a
+  // file that is not at this revision, a file with no language, and a data
+  // file whose unknown-shapes flag is structural.
+  const fake = await mkdtemp(path.join(os.tmpdir(), "coord-fakepy-"));
+  const originalPath = process.env["PATH"];
+  const repo = await seededRepository(
+    {
+      "app/lib.py": "def f(a: int) -> int:\n    return a\n",
+      "config.json": '{ "key": 1 }\n',
+      "src/a.ts": "export const a = 1;\n",
+      "README.md": "docs\n",
+    },
+    "unreadable",
+  );
+  try {
+    await writeFile(path.join(fake, "python3"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    // Sorted: README.md, app/lib.py, config.json, src/a.ts — three slots
+    // leave src/a.ts out.
+    const service = new CodeIntelligenceService(repo.repositories, { maxFiles: 2 });
+    process.env["PATH"] = `${fake}${path.delimiter}${originalPath ?? ""}`;
+    const index = await service.index(repo.repository, repo.revision);
+    process.env["PATH"] = originalPath;
+    assert.equal(index.files.find((file) => file.path === "app/lib.py")?.exportedShapesUnknown, true);
+    assert.deepEqual(
+      service.unreadableIn(
+        ["app/lib.py", "config.json", "src/a.ts", "README.md", "gone.ts"],
+        index,
+      ),
+      ["app/lib.py", "src/a.ts"],
+    );
+    const readable = await new CodeIntelligenceService(repo.repositories).index(repo.repository, repo.revision);
+    assert.deepEqual(service.unreadableIn(["app/lib.py", "config.json", "src/a.ts"], readable), []);
+  } finally {
+    process.env["PATH"] = originalPath;
+    await rm(fake, { recursive: true, force: true });
+    await repo.dispose();
+  }
+});
+
+/**
+ * A python3 that logs how many files each run was fed, refuses a run whose
+ * payload names `poison`, and otherwise defers to the real interpreter.
+ */
+async function pythonShim(poison?: string): Promise<{ dir: string; spawns: () => Promise<number[]> }> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "coord-pyshim-"));
+  const log = path.join(dir, "spawns.log");
+  const refuse = poison === undefined ? "" : `if grep -q '"${poison}"' "$tmp"; then exit 1; fi\n`;
+  await writeFile(
+    path.join(dir, "python3"),
+    [
+      "#!/bin/sh",
+      `real=$(PATH="${process.env["PATH"] ?? ""}" command -v python3)`,
+      "tmp=$(mktemp)",
+      'cat > "$tmp"',
+      `n=$("$real" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$tmp")`,
+      `echo "$n" >> "${log}"`,
+      refuse,
+      'exec "$real" "$@" < "$tmp"',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await writeFile(log, "");
+  return {
+    dir,
+    spawns: async () =>
+      (await readFile(log, "utf8"))
+        .split("\n")
+        .filter((line) => line !== "")
+        .map(Number),
+  };
+}
+
+test("a Python batch that is lost loses its own files and no others", async () => {
+  // One interpreter run answered for the whole repository, all or nothing,
+  // against a fixed timeout that a budget-sized batch came within reach of.
+  // Runs are bounded now, so a run that fails — here, refused by the shim —
+  // is that run's files unknown, and every other file is read.
+  const files: Record<string, SeededFile> = {};
+  // Five files of 1.2 MB each: four fit the 5 MB bound, the fifth and the
+  // poisoned file after it make a second run.
+  for (let n = 0; n < 5; n += 1) {
+    files[`pkg/big${String(n)}.py`] = `"""${"x".repeat(1_200_000)}"""\n\ndef f${String(n)}(a: int) -> int:\n    return a\n`;
+  }
+  files["pkg/zz_poison.py"] = "def poisoned() -> None:\n    pass\n";
+  const repo = await seededRepository(files, "pybatch");
+  const shim = await pythonShim("pkg/zz_poison.py");
+  const originalPath = process.env["PATH"];
+  try {
+    process.env["PATH"] = `${shim.dir}${path.delimiter}${originalPath ?? ""}`;
+    const index = await new CodeIntelligenceService(repo.repositories).index(repo.repository, repo.revision);
+    process.env["PATH"] = originalPath;
+    assert.deepEqual(await shim.spawns(), [4, 2]);
+    for (let n = 0; n < 4; n += 1) {
+      assert.deepEqual(index.files.find((file) => file.path === `pkg/big${String(n)}.py`)?.symbols, [`f${String(n)}`]);
+    }
+    for (const lost of ["pkg/big4.py", "pkg/zz_poison.py"]) {
+      assert.equal(index.files.find((file) => file.path === lost)?.symbolRangesUnknown, true, lost);
+    }
+  } finally {
+    process.env["PATH"] = originalPath;
+    await rm(shim.dir, { recursive: true, force: true });
+    await repo.dispose();
+  }
+});
+
+test("two builds asking about the same Python blobs share one interpreter run", async () => {
+  // Nothing is remembered until a build ends, so a cold `staleContracts` —
+  // both revisions indexed at once — fed the whole corpus to two
+  // interpreters at the same instant. A build that finds a blob already
+  // being asked about joins that run.
+  const files: Record<string, SeededFile> = { "README.md": "1\n", "pkg/__init__.py": "" };
+  for (let n = 0; n < 8; n += 1) {
+    files[`pkg/mod${String(n)}.py`] = `def f${String(n)}(a: int) -> int:\n    return a\n`;
+  }
+  files["pkg/user.py"] = "from .mod0 import f0\n\ndef g(): return f0(1)\n";
+  const repo = await seededRepository(files, "pyshare");
+  const shim = await pythonShim();
+  const originalPath = process.env["PATH"];
+  try {
+    const r2 = await repo.advance({ "README.md": "2\n" }, "docs");
+    process.env["PATH"] = `${shim.dir}${path.delimiter}${originalPath ?? ""}`;
+    const service = new CodeIntelligenceService(repo.repositories);
+    const stale = await service.staleContracts(repo.repository, {
+      mergeBase: repo.revision,
+      baseHead: r2,
+      files: ["pkg/user.py"],
+    });
+    process.env["PATH"] = originalPath;
+    assert.deepEqual(stale, []);
+    assert.deepEqual(await shim.spawns(), [10]);
+    // Both builds got the answer, not only the one that ran the interpreter.
+    for (const revision of [repo.revision, r2]) {
+      const index = await service.index(repo.repository, revision);
+      assert.deepEqual(index.files.find((file) => file.path === "pkg/mod3.py")?.symbols, ["f3"]);
+      assert.ok(index.edges.some((edge) => edge.fromFile === "pkg/user.py" && edge.toFile === "pkg/mod0.py"));
+    }
+  } finally {
+    process.env["PATH"] = originalPath;
+    await rm(shim.dir, { recursive: true, force: true });
     await repo.dispose();
   }
 });
