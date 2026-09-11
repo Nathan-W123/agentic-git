@@ -199,6 +199,17 @@ export interface IndexedFile {
   symbolCalls: SymbolCall[];
   imports: string[];
   dependencies: string[];
+  /**
+   * Set when this file's imports could not be read: the masker that tells
+   * a Ruby or PHP file's code from its heredocs and comments lost its place,
+   * or the file could not be read at all.
+   *
+   * The distinction {@link symbolRangesUnknown} draws, for `imports` and
+   * `dependencies`: both are `[]` here, and "depends on nothing" is safe to
+   * treat as independence while "could not read" is not. A plan over such a
+   * file is enriched as {@link AgentPlan.dependenciesUnknown}.
+   */
+  importsUnknown?: boolean;
   referencedSymbols: string[];
   apis: string[];
   schemas: string[];
@@ -875,6 +886,7 @@ function unreadableFile(
     symbolCalls: [],
     imports: [],
     dependencies: [],
+    importsUnknown: true,
     exportedSymbols: [],
     referencedSymbols: [],
     apis: [],
@@ -1767,8 +1779,12 @@ export class CodeIntelligenceService {
             // which is why this reads from the masked text rather than the
             // raw source. `require_relative` measures from a different base
             // than `require`, so the two are marked apart on the way in.
+            // A file the masker could not follow has an import list nobody
+            // read, which is not an empty one.
             const requires = safely(() => readRubyRequires(source));
-            if (requires !== undefined) {
+            if (requires === undefined) {
+              scanned.importsUnknown = true;
+            } else {
               recordImports(
                 scanned,
                 requires.map((request) => [request.relative ? "rel" : "lib", request.specifier]),
@@ -1853,7 +1869,9 @@ export class CodeIntelligenceService {
               // one was dead code, and every PHP file indexed with no
               // imports at all while the unit tests for the reader passed.
               const unit = safely(() => readPhpFile(source));
-              if (unit !== undefined) {
+              if (unit === undefined) {
+                scanned.importsUnknown = true;
+              } else {
                 recordImports(scanned, [
                   ...unit.uses.map((name): readonly [string, string] => ["use", name]),
                   ...unit.requires.map((name): readonly [string, string] => ["req", name]),
@@ -2259,10 +2277,16 @@ export class CodeIntelligenceService {
     // should have been in the index and were not, because they are new, or
     // skipped by the byte budget, or in a language that is scanned rather than
     // parsed.
+    //
+    // And a file that is in the index with an import list nobody could read
+    // — `importsUnknown`, the Ruby or PHP masker having lost its place — is
+    // the same blindness with a file beside it.
     const couldHaveDependencies = plan.expectedFiles.some(
       (file) => languageOf(file) !== undefined,
     );
-    const blind = couldHaveDependencies && files.length === 0;
+    const blind =
+      couldHaveDependencies &&
+      (files.length === 0 || files.some((file) => file.importsUnknown === true));
     const enriched: AgentPlan = {
       ...structuredClone(plan),
       ...(blind ? { dependenciesUnknown: true } : {}),

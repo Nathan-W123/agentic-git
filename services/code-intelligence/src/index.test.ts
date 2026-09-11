@@ -2273,3 +2273,77 @@ test("two builds asking about the same Python blobs share one interpreter run", 
     await repo.dispose();
   }
 });
+
+test("a file whose imports could not be read says so, and a plan over it is blind", async () => {
+  // A Ruby or PHP file the masker loses its place in was recorded with
+  // `imports: []` and nothing else — indistinguishable from a file that
+  // requires nothing, which replay reads as independence. The masker's
+  // refusal is the honest answer, and it has to survive into the index.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-imports-unknown-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "lib"), { recursive: true });
+    await writeFile(path.join(source, "Gemfile"), "source 'https://rubygems.org'\n");
+    await writeFile(path.join(source, "lib", "util.rb"), "module Util; end\n");
+    await writeFile(path.join(source, "lib", "fine.rb"), "require 'util'\nmodule Fine; end\n");
+    // An unterminated string: the masker cannot say where code resumes.
+    await writeFile(
+      path.join(source, "lib", "torn.rb"),
+      "require 'util'\ns = 'never closed\nmodule Torn; end\n",
+    );
+    // And an unterminated block comment does the same to PHP.
+    await writeFile(
+      path.join(source, "lib", "torn.php"),
+      "<?php\nuse App\\Util;\n/* never closed\nclass Torn {}\n",
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "imports-unknown",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+    const byPath = new Map(index.files.map((file) => [file.path, file]));
+
+    assert.deepEqual(byPath.get("lib/fine.rb")?.imports, ["util"]);
+    assert.equal(byPath.get("lib/fine.rb")?.importsUnknown, undefined);
+    assert.deepEqual(byPath.get("lib/torn.rb")?.imports, []);
+    assert.equal(byPath.get("lib/torn.rb")?.importsUnknown, true);
+    assert.deepEqual(byPath.get("lib/torn.php")?.imports, []);
+    assert.equal(byPath.get("lib/torn.php")?.importsUnknown, true);
+
+    // The consumer that matters: a plan over the torn file has a read set
+    // nobody computed, not an empty one.
+    const base = {
+      taskId: "task_1",
+      objective: "edit",
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low" as const,
+    };
+    assert.equal(
+      service.enrichPlan({ ...base, expectedFiles: ["lib/torn.rb"] }, index)
+        .dependenciesUnknown,
+      true,
+    );
+    assert.equal(
+      service.enrichPlan({ ...base, expectedFiles: ["lib/torn.php"] }, index)
+        .dependenciesUnknown,
+      true,
+    );
+    assert.equal(
+      service.enrichPlan({ ...base, expectedFiles: ["lib/fine.rb"] }, index)
+        .dependenciesUnknown,
+      undefined,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
