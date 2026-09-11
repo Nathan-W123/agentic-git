@@ -107,7 +107,13 @@ export interface PythonLayout {
  * A `setup.py` under `tests/fixtures/sample/` is something a test installs
  * into a temporary environment; read as a root it would make that fixture's
  * `settings.py` the answer to `import settings` from anywhere in the
- * repository.
+ * repository. An example project is the same thing under another name: a
+ * `pyproject.toml` under `examples/demo/` is not on the application's
+ * `sys.path`, and with it as a root the Django idiom `from local_settings
+ * import *` — whose target is gitignored and so absent from the tree —
+ * resolved onto the example's `local_settings.py`, the only file of that
+ * name anywhere. Files under these directories keep their own ancestor
+ * roots; only the generosity to every other importer is withheld.
  */
 const FIXTURE_DIRS = new Set([
   "test",
@@ -117,6 +123,12 @@ const FIXTURE_DIRS = new Set([
   "fixture",
   "fixtures",
   "__fixtures__",
+  "example",
+  "examples",
+  "sample",
+  "samples",
+  "demo",
+  "demos",
 ]);
 
 const LAYOUTS = new WeakMap<ReadonlySet<string>, PythonLayout>();
@@ -150,8 +162,12 @@ export function pythonLayout(files: ReadonlySet<string>): PythonLayout {
  *
  * A vendored copy of a package imports itself by its own top-level name, so
  * without this a repository that vendors anything grows an edge from every
- * vendored file to the real package beside it. `build` is deliberately absent
- * — it is a real package name on PyPI, and excluding it drops correct edges.
+ * vendored file to the real package beside it. `_vendor` is the name pip,
+ * setuptools and poetry-core use and `vendored` is botocore's; neither was
+ * here, and `poetry/core/_vendor/lark/` — inside the `poetry.core` package,
+ * so every ancestor root refused — resolved `import lark` to the repository
+ * root's real `lark/`. `build` is deliberately absent — it is a real package
+ * name on PyPI, and excluding it drops correct edges.
  */
 const VENDOR = new Set([
   "node_modules",
@@ -159,6 +175,8 @@ const VENDOR = new Set([
   ".venv",
   "venv",
   "vendor",
+  "_vendor",
+  "vendored",
   "third_party",
   ".tox",
   "dist",
@@ -308,17 +326,25 @@ export function resolvePythonImport(
     }
   }
 
+  const searched = [...roots].filter(
+    (root) =>
+      (fromVendored || root === "" || !vendored(root)) &&
+      (root === "" || !insidePackage(root, files)),
+  );
+  // A plain module under any searched root cuts the dotted path off under
+  // every root, not just its own. The import system reads each `sys.path`
+  // entry in turn and a regular module on any of them beats a namespace
+  // directory on any other, so with `src/config.py` and `config/dev.py`
+  // CPython loads the module and then fails: "'config' is not a package".
+  // Checked per root, the shadow only removed `src` from the search and the
+  // repository root still handed out `config/dev.py` — a file Python never
+  // opens — while answering `import config` with `src/config.py` in the same
+  // breath.
+  if (searched.some((root) => shadowedByModule(root, parts, files))) {
+    return undefined;
+  }
   const hits = new Set<string>();
-  for (const root of roots) {
-    if (!fromVendored && root !== "" && vendored(root)) {
-      continue;
-    }
-    if (root !== "" && insidePackage(root, files)) {
-      continue;
-    }
-    if (shadowedByModule(root, parts, files)) {
-      continue;
-    }
+  for (const root of searched) {
     const hit = candidates(join(root, parts)).find(
       (candidate) => files.has(candidate) && (fromVendored || !vendored(candidate)),
     );
