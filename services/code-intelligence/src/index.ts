@@ -25,7 +25,7 @@ import {
 import {
   jvmDeclarations,
   readJvmHeader,
-  topLevelNames,
+  topLevelDeclarations,
   type JvmLanguage,
   type JvmUnit,
 } from "./jvm-imports.js";
@@ -231,6 +231,14 @@ export interface ScanFacts {
    * alone says enough. The specifier itself stays as the file wrote it.
    */
   importKinds?: string[];
+  /**
+   * Every top-level declaration of a JVM file by name, functions included,
+   * where `declared` holds its types alone: a Kotlin or Scala import may
+   * name a top-level function, so the specifier as written is looked up
+   * here. Absent when the declaration pass could not read the file — which
+   * is not the same as declaring nothing.
+   */
+  topLevel?: string[];
 }
 
 /** Paths enrichment treats as tests in their own right. */
@@ -893,29 +901,17 @@ function safely<T>(read: () => T): T | undefined {
   }
 }
 
-/** The names of type declarations not nested inside another declaration. */
-function topLevelTypeNames(source: string, language: BraceLanguage): string[] {
+/**
+ * The names declared at the top level of a brace-language file — every one,
+ * and the types alone — or nothing when the declaration pass could not read
+ * it.
+ */
+function topLevelDeclared(
+  source: string,
+  language: BraceLanguage,
+): { names: string[]; types: string[] } | undefined {
   const read = safely(() => braceDeclarations(source, language));
-  if (read === undefined) {
-    return [];
-  }
-  const { declarations } = read;
-  return uniqueStrings(
-    declarations
-      .filter(
-        (declaration) =>
-          declaration.declared === "type" &&
-          !declarations.some(
-            (other) =>
-              other !== declaration &&
-              other.open !== undefined &&
-              other.close !== undefined &&
-              other.open < declaration.start &&
-              other.close > declaration.start,
-          ),
-      )
-      .map((declaration) => declaration.name),
-  );
+  return read === undefined ? undefined : topLevelDeclarations(read.declarations);
 }
 
 function analyzeScannedFile(
@@ -1549,13 +1545,19 @@ export class CodeIntelligenceService {
               const unit = safely(() => readJvmHeader(source, language as JvmLanguage));
               if (unit !== undefined) {
                 recordImports(scanned, unit.imports.map((name) => [undefined, name]));
+                // From the declarations, not the symbol ranges: the ranges
+                // merge same-named declarations into one span, and a class
+                // between two overloads of a top-level function lay inside
+                // it and left the index.
+                const declared = topLevelDeclared(source, language as BraceLanguage);
                 scanned.scan = {
                   ...scanned.scan,
                   packageName: unit.packageName,
                   // The types alone, for the resolver's walk back up a
                   // specifier: a top-level function is a declaration but
                   // not something an import can be truncated onto.
-                  declared: topLevelTypeNames(source, language as BraceLanguage),
+                  declared: declared?.types ?? [],
+                  ...(declared === undefined ? {} : { topLevel: declared.names }),
                 };
               }
             }
@@ -1737,7 +1739,7 @@ export class CodeIntelligenceService {
         });
         jvmDeclared.set(file.path, {
           packageName: scan.packageName,
-          topLevelNames: topLevelNames(file.symbolRanges),
+          topLevelNames: scan.topLevel ?? [],
           typeNames: scan.declared ?? [],
         });
       } else if (file.language === "php") {
@@ -1784,6 +1786,18 @@ export class CodeIntelligenceService {
         ),
         basenames: byBasename(allPaths),
         units: jvmUnits,
+        // A readable header over a body the declaration pass could not
+        // read: the file is in no table, and only its name speaks for it.
+        unreadBodies: new Set(
+          files
+            .filter(
+              (file) =>
+                file.language === "java" &&
+                file.scan?.packageName !== undefined &&
+                file.scan.topLevel === undefined,
+            )
+            .map((file) => file.path),
+        ),
       },
     };
     const edges: DependencyEdge[] = [];
