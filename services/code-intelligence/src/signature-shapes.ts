@@ -27,9 +27,10 @@ import { digestOf, type ShapeKind, type SymbolShape } from "./contract-shape.js"
 import {
   blankBraceLanguage,
   braceDeclarations,
-  rubySymbolRanges,
+  rubyDeclarations,
   type BraceLanguage,
   type PythonShape,
+  type RubyDeclaration,
 } from "./symbol-ranges.js";
 
 /** Languages where a caller passes by position, so a parameter's name is not contract. */
@@ -400,99 +401,198 @@ export function braceShapes(
     .sort((left, right) => left.symbol.localeCompare(right.symbol));
 }
 
+/** Offsets of every `separator` at bracket depth zero. */
+function topLevelOffsets(text: string, separator: string): number[] {
+  const out: number[] = [];
+  let depth = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    const character = text[at] ?? "";
+    if ("([{".includes(character)) {
+      depth += 1;
+    } else if (")]}".includes(character)) {
+      depth -= 1;
+    } else if (character === separator && depth === 0) {
+      out.push(at);
+    }
+  }
+  return out;
+}
+
+/**
+ * A source line with its comment blanked, given the masked line beside it.
+ *
+ * The masker blanks comments and strings alike, and the readable shape
+ * wants the strings back. A blanked run that begins with `#` in the source
+ * was a comment; any other began with a quote, a `%` or a `/` and is kept.
+ * A comment that directly follows a string with nothing but space between
+ * them is one run with the string and survives — in the readable form only.
+ */
+function rubyWithoutComments(raw: string, code: string): string {
+  const out = raw.split("");
+  let at = 0;
+  while (at < raw.length) {
+    if (code[at] !== " " || raw[at] === " ") {
+      at += 1;
+      continue;
+    }
+    let end = at;
+    while (end < raw.length && code[end] === " ") {
+      end += 1;
+    }
+    if (raw[at] === "#") {
+      for (let blank = at; blank < end; blank += 1) {
+        out[blank] = " ";
+      }
+    }
+    at = end;
+  }
+  return out.join("");
+}
+
+/** A Ruby parameter list: as written, and with default values reduced to `?`. */
+function rubySignature(
+  rawRest: string,
+  codeRest: string,
+): { shape: string; comparable: string } {
+  const start = codeRest.search(/\S/u);
+  if (start === -1) {
+    return { shape: "", comparable: "" };
+  }
+  let end = codeRest.length;
+  while (end > start && /\s/u.test(codeRest[end - 1] ?? "")) {
+    end -= 1;
+  }
+  let raw = rawRest.slice(start, end);
+  let code = codeRest.slice(start, end);
+  if (code.startsWith("(") && code.endsWith(")")) {
+    raw = raw.slice(1, -1);
+    code = code.slice(1, -1);
+  }
+  const shapes: string[] = [];
+  const comparables: string[] = [];
+  let from = 0;
+  for (const to of [...topLevelOffsets(code, ","), code.length]) {
+    const parameterRaw = raw.slice(from, to);
+    const parameterCode = code.slice(from, to);
+    from = to + 1;
+    const shape = normalize(parameterRaw);
+    if (shape === "") {
+      continue;
+    }
+    shapes.push(shape);
+    // A default's value is not contract; that there is one is. `size = 20`
+    // and `size = 50` accept the same calls, and so do `currency: "usd"`
+    // and `currency: "eur"`. The parameter list is read from the masked
+    // text, so a `,` or `=` inside the default is not a boundary.
+    const equals = topLevelOffsets(parameterCode, "=")[0];
+    if (equals !== undefined) {
+      comparables.push(`${normalize(parameterRaw.slice(0, equals))}?`);
+      continue;
+    }
+    const keyword = /^\s*([A-Za-z_]\w*[?!]?):/u.exec(parameterCode);
+    if (keyword?.[1] !== undefined) {
+      const given = parameterRaw.slice(keyword[0].length).trim() !== "";
+      comparables.push(`${keyword[1]}:${given ? "?" : ""}`);
+      continue;
+    }
+    comparables.push(shape);
+  }
+  return {
+    shape: `(${shapes.join(", ")})`,
+    comparable: `(${comparables.join(", ")})`,
+  };
+}
+
 /**
  * Ruby: the `def` line is the signature and there are no types to read, so
- * every method is `inferred`. A method under a bare `private` or
- * `protected` line, or written `private def`, is not reachable.
+ * every method is `inferred`. A method the scanner marked unreachable — a
+ * bare `private` or `protected` line in its own scope, or `private def` —
+ * is left out.
+ *
+ * The head is read from the masked text beside the source, so a `#` or a
+ * `;` inside a default string is neither a comment nor the end of the
+ * head, and a parameter list that continues over several lines is read to
+ * its closing parenthesis. Each class is shaped from the defs written
+ * directly inside that occurrence of it, so two classes with one name in
+ * two modules do not lend each other members.
  *
  * Not read: `attr_reader` and friends, and `private :name` after the fact.
  * Both are real contract and both are metaprogramming a line scanner cannot
  * follow; leaving them out under-reports rather than misreports.
  */
 export function rubyShapes(source: string): SymbolShape[] | undefined {
-  const ranges = rubySymbolRanges(source);
-  if (ranges === undefined) {
+  const read = rubyDeclarations(source);
+  if (read === undefined) {
     return undefined;
   }
-  const stripped = source.split("\n").map((line) => line.replace(/#.*$/u, ""));
-  const headOf = (line: number): string => normalize(stripped[line - 1] ?? "");
-  const DECLARATION =
-    /^(?:(private|protected|public)\s+)?(def|class|module)\s+(self\.)?([A-Za-z_][\w?!=]*|[-+*\/%<>=!~^&|\[\]]+)(.*)$/u;
-  const parse = (head: string) => {
-    const match = DECLARATION.exec(head);
-    return match === null
-      ? undefined
-      : {
-          modifier: match[1],
-          keyword: match[2] ?? "",
-          singleton: match[3] !== undefined,
-          rest: (match[5] ?? "").replace(/;.*$/u, ""),
-        };
-  };
-  /** Whether a `def` is reachable, given the bare access lines above it. */
-  const isPublic = (range: (typeof ranges)[number]): boolean => {
-    const head = parse(headOf(range.startLine));
-    if (head === undefined || head.modifier === "private" || head.modifier === "protected") {
-      return false;
-    }
-    const enclosing = ranges.find(
-      (other) =>
-        other !== range &&
-        other.startLine < range.startLine &&
-        other.endLine >= range.endLine,
-    );
-    let access = "public";
-    for (let line = (enclosing?.startLine ?? 0) + 1; line < range.startLine; line += 1) {
-      const marker = /^\s*(private|protected|public)\s*$/u.exec(stripped[line - 1] ?? "");
-      if (marker?.[1] !== undefined) {
-        access = marker[1];
+  const { code, declarations } = read;
+  const text = source
+    .split("\n")
+    .map((line, at) => rubyWithoutComments(line, code[at] ?? ""));
+  /** What follows the name: the parameter list or the heritage, to the body. */
+  const restOf = (declaration: RubyDeclaration): { raw: string; code: string } => {
+    let raw = "";
+    let masked = "";
+    for (let line = declaration.startLine; line <= declaration.endLine; line += 1) {
+      raw += `${raw === "" ? "" : "\n"}${text[line - 1] ?? ""}`;
+      masked += `${masked === "" ? "" : "\n"}${code[line - 1] ?? ""}`;
+      // A `;` at depth zero ends the head; the body follows it.
+      const semicolon = topLevelOffsets(masked.slice(declaration.nameEnd), ";")[0];
+      if (semicolon !== undefined) {
+        raw = raw.slice(0, declaration.nameEnd + semicolon);
+        masked = masked.slice(0, declaration.nameEnd + semicolon);
+        break;
+      }
+      // An open bracket, a trailing comma or a backslash continue the head
+      // on the next line.
+      let depth = 0;
+      for (const character of masked.slice(declaration.nameEnd)) {
+        if ("([{".includes(character)) {
+          depth += 1;
+        } else if (")]}".includes(character)) {
+          depth -= 1;
+        }
+      }
+      if (depth <= 0 && !/[,\\]$/u.test(masked.trimEnd())) {
+        break;
       }
     }
-    return access === "public";
+    return { raw: raw.slice(declaration.nameEnd), code: masked.slice(declaration.nameEnd) };
   };
-  const signatureOf = (rest: string): string => {
-    const parameters = normalize(rest);
-    return parameters === "" || parameters.startsWith("(") ? parameters : `(${parameters})`;
+  const signatureOf = (declaration: RubyDeclaration) => {
+    const rest = restOf(declaration);
+    return rubySignature(rest.raw, rest.code);
   };
   const pieces = new Map<string, Piece[]>();
-  for (const range of ranges) {
-    const head = parse(headOf(range.startLine));
-    if (head === undefined) {
-      continue;
-    }
-    if (head.keyword === "def") {
-      if (!isPublic(range)) {
+  for (const [index, declaration] of declarations.entries()) {
+    if (declaration.keyword === "def") {
+      if (!declaration.reachable) {
         continue;
       }
-      const signature = signatureOf(head.rest);
-      pieces.set(range.name, [
-        ...(pieces.get(range.name) ?? []),
-        { kind: "function", shape: signature, comparable: signature, inferred: true },
+      const signature = signatureOf(declaration);
+      pieces.set(declaration.name, [
+        ...(pieces.get(declaration.name) ?? []),
+        { kind: "function", ...signature, inferred: true },
       ]);
       continue;
     }
-    const members = ranges
+    const members = declarations
       .filter(
-        (other) =>
-          other !== range &&
-          other.startLine > range.startLine &&
-          other.endLine <= range.endLine &&
-          parse(headOf(other.startLine))?.keyword === "def" &&
-          isPublic(other),
+        (other) => other.parent === index && other.keyword === "def" && other.reachable,
       )
       .map((other) => {
-        const member = parse(headOf(other.startLine));
-        return `${member?.singleton === true ? "self." : ""}${other.name}${signatureOf(member?.rest ?? "")}`;
+        const signature = signatureOf(other);
+        const prefix = `${other.singleton ? "self." : ""}${other.name}`;
+        return { shape: prefix + signature.shape, comparable: prefix + signature.comparable };
       })
-      .sort((left, right) => left.localeCompare(right));
-    const heritage = normalize(head.rest);
-    const shape = `${heritage} {${members.join("; ")}}`.trim();
-    pieces.set(range.name, [
-      ...(pieces.get(range.name) ?? []),
+      .sort((left, right) => left.comparable.localeCompare(right.comparable));
+    const heritage = normalize(restOf(declaration).raw);
+    pieces.set(declaration.name, [
+      ...(pieces.get(declaration.name) ?? []),
       {
-        kind: head.keyword === "class" ? "class" : "type",
-        shape,
-        comparable: shape,
+        kind: declaration.keyword === "class" ? "class" : "type",
+        shape: `${heritage} {${members.map((member) => member.shape).join("; ")}}`.trim(),
+        comparable: `${heritage} {${members.map((member) => member.comparable).join("; ")}}`.trim(),
         inferred: false,
       },
     ]);

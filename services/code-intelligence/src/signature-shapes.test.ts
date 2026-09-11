@@ -355,6 +355,136 @@ test("Ruby: the def line, minus whatever a bare private line hides", () => {
   assert.ok(shapes?.filter((entry) => entry.kind === "function").every((entry) => entry.inferred));
 });
 
+test("Ruby: a parameter list that spans lines is read to its closing parenthesis", () => {
+  // Only the def line was read, so a wrapped signature hashed as "(" and
+  // adding or removing a parameter on its own line moved nothing.
+  const wrapped = rubyShapes('class Money\n  def initialize(\n    amount,\n    currency: "usd"\n  )\n    @amount = amount\n  end\nend\n');
+  const added = rubyShapes('class Money\n  def initialize(\n    amount,\n    currency: "usd",\n    precision: 2\n  )\n  end\nend\n');
+  const removed = rubyShapes("class Money\n  def initialize(\n    amount\n  )\n  end\nend\n");
+  const oneLine = rubyShapes('class Money\n  def initialize(amount, currency: "usd")\n  end\nend\n');
+  assert.equal(shapeOf(wrapped, "initialize"), '(amount, currency: "usd")');
+  assert.notEqual(digestOf(wrapped, "initialize"), digestOf(added, "initialize"));
+  assert.notEqual(digestOf(wrapped, "Money"), digestOf(added, "Money"));
+  assert.notEqual(digestOf(wrapped, "initialize"), digestOf(removed, "initialize"));
+  // And wrapping is formatting: the one-line form is the same contract.
+  assert.equal(digestOf(wrapped, "initialize"), digestOf(oneLine, "initialize"));
+  // The paren-less form continues on a trailing comma.
+  assert.equal(digestOf(rubyShapes("def f a,\n      b = 1\nend\n"), "f"), digestOf(rubyShapes("def f(a, b = 1)\nend\n"), "f"));
+});
+
+test("Ruby: a `#` or `;` inside a default is part of the default, not the end of the head", () => {
+  // Comment and statement stripping was done on the raw text, so the head
+  // was cut inside the string and every parameter after it vanished.
+  const url = rubyShapes('def url(path, anchor = "#top")\nend\n');
+  const urlMore = rubyShapes('def url(path, anchor = "#top", scheme)\nend\n');
+  const greet = rubyShapes('def greet(name, tpl = "hi #{name}")\nend\n');
+  const greetMore = rubyShapes('def greet(name, tpl = "hi #{name}", punct)\nend\n');
+  const sep = rubyShapes('def sep(a, s = ";")\nend\n');
+  const sepMore = rubyShapes('def sep(a, s = ";", t)\nend\n');
+  assert.equal(shapeOf(url, "url"), '(path, anchor = "#top")');
+  assert.equal(shapeOf(sepMore, "sep"), '(a, s = ";", t)');
+  assert.notEqual(digestOf(url, "url"), digestOf(urlMore, "url"));
+  assert.notEqual(digestOf(greet, "greet"), digestOf(greetMore, "greet"));
+  assert.notEqual(digestOf(sep, "sep"), digestOf(sepMore, "sep"));
+  // A real comment after the head is still not part of it, and a real `;`
+  // still ends it.
+  assert.equal(digestOf(rubyShapes("def f(a) # (b, c)\nend\n"), "f"), digestOf(rubyShapes("def f(a)\nend\n"), "f"));
+  assert.equal(shapeOf(rubyShapes("def f(a); a; end\n"), "f"), "(a)");
+});
+
+test("Ruby: a bare private applies to its own scope, and never to def self", () => {
+  // The old scan walked every line between the outermost enclosing range
+  // and the def, nested scopes included: a `private` inside a nested class
+  // hid the outer class's later public methods, so adding an Error class
+  // above an unchanged method reported the method as removed.
+  const nested = rubyShapes(
+    [
+      "class Account",
+      "  class Error < StandardError",
+      "    private",
+      "    def detail",
+      "    end",
+      "  end",
+      "  def deposit(amount, memo)",
+      "  end",
+      "end",
+    ].join("\n"),
+  );
+  const plain = rubyShapes("class Account\n  def deposit(amount, memo)\n  end\nend\n");
+  assert.equal(shapeOf(nested, "Account"), "{deposit(amount, memo)}");
+  assert.equal(digestOf(nested, "Account"), digestOf(plain, "Account"));
+  assert.equal(shapeOf(nested, "Error"), "< StandardError {}");
+  assert.equal(symbols(nested)?.includes("detail"), false);
+  // The other direction: an outer `private` does not reach into a nested class.
+  const outer = rubyShapes("class A\n  private\n  class B\n    def pub_in_b(x)\n    end\n  end\n  def priv_in_a\n  end\nend\n");
+  assert.equal(shapeOf(outer, "B"), "{pub_in_b(x)}");
+  assert.equal(shapeOf(outer, "A"), "{}");
+  // `private` in a class body leaves `def self.x` public — only one inside
+  // `class << self` hides a class method, and it hides nothing outside.
+  assert.equal(shapeOf(rubyShapes("class P\n  private\n  def self.build(x)\n  end\nend\n"), "P"), "{self.build(x)}");
+  const singleton = rubyShapes(
+    "class S\n  class << self\n    private\n    def helper\n    end\n    def make(x)\n    end\n    public\n    def shown\n    end\n  end\n  def pub(x)\n  end\nend\n",
+  );
+  assert.equal(shapeOf(singleton, "S"), "{pub(x); self.shown}");
+  // A `private` inside a method body runs when the method does; it says
+  // nothing about the defs after it.
+  assert.equal(shapeOf(rubyShapes("class M\n  def a\n    private\n  end\n  def b(x)\n  end\nend\n"), "M"), "{a; b(x)}");
+});
+
+test("Ruby: two classes with one name are each shaped from their own defs", () => {
+  // Merged into one range, `Client::Error` and `Server::Error` spanned both
+  // modules, and every def between them — Client.get, Server.listen —
+  // became a member of Error. Retyping Server.listen then moved Error.
+  const of = (listen: string) =>
+    rubyShapes(
+      [
+        "module Client",
+        "  class Error < StandardError",
+        "    def code(x)",
+        "    end",
+        "  end",
+        "  def self.get(url)",
+        "  end",
+        "end",
+        "module Server",
+        `  def self.listen(${listen})`,
+        "  end",
+        "  class Error < StandardError",
+        "    def code(y, z)",
+        "    end",
+        "  end",
+        "end",
+      ].join("\n"),
+    );
+  assert.equal(shapeOf(of("port"), "Error"), "< StandardError {code(x)} | < StandardError {code(y, z)}");
+  assert.equal(shapeOf(of("port"), "Client"), "{self.get(url)}");
+  assert.equal(shapeOf(of("port"), "Server"), "{self.listen(port)}");
+  assert.equal(digestOf(of("port"), "Error"), digestOf(of("port, backlog"), "Error"));
+  assert.notEqual(digestOf(of("port"), "Server"), digestOf(of("port, backlog"), "Server"));
+});
+
+test("Ruby: an operator method is a member whose arity is contract", () => {
+  const of = (equals: string) => rubyShapes(`class V\n  def ==(${equals})\n    true\n  end\n  def [](i)\n    i\n  end\n  def <=>(o); 0; end\n  def plain(a)\n  end\nend\n`);
+  assert.equal(shapeOf(of("other"), "V"), "{[](i); <=>(o); ==(other); plain(a)}");
+  assert.notEqual(digestOf(of("other"), "V"), digestOf(of("other, strict"), "V"));
+});
+
+test("Ruby: a default's value is not contract; that there is one is", () => {
+  // The house rule every other reader keeps: `size = 20` and `size = 50`
+  // accept exactly the same calls. The readable shape keeps the value.
+  const twenty = rubyShapes("def page(n, size = 20)\nend\n");
+  assert.equal(shapeOf(twenty, "page"), "(n, size = 20)");
+  assert.equal(digestOf(twenty, "page"), digestOf(rubyShapes("def page(n, size = 50)\nend\n"), "page"));
+  assert.equal(digestOf(twenty, "page"), digestOf(rubyShapes("def page(n, size = [1, 2])\nend\n"), "page"));
+  // Whereas making it required, or optional, changes what a call may be...
+  assert.notEqual(digestOf(twenty, "page"), digestOf(rubyShapes("def page(n, size)\nend\n"), "page"));
+  // ...and the same holds for a keyword parameter, whose value is also a value.
+  const keyword = rubyShapes('def f(k:, o: "a")\nend\n');
+  assert.equal(digestOf(keyword, "f"), digestOf(rubyShapes('def f(k:, o: "b")\nend\n'), "f"));
+  assert.notEqual(digestOf(keyword, "f"), digestOf(rubyShapes('def f(k: 1, o: "a")\nend\n'), "f"));
+  assert.notEqual(digestOf(keyword, "f"), digestOf(rubyShapes('def f(k:, o:)\nend\n'), "f"));
+});
+
 test("Python: the interpreter reads the signature, with defaults as optionality and names kept", async () => {
   const read = await pythonSymbolRanges(
     new Map([

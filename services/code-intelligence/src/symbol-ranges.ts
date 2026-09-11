@@ -25,6 +25,7 @@
 
 // Type-only, so the cycle with `index.ts` is erased at compile time.
 import type { SymbolRange } from "./index.js";
+import { maskRuby } from "./script-imports.js";
 
 /** Languages whose declarations are delimited by braces. */
 export type BraceLanguage =
@@ -623,75 +624,286 @@ function closingBrace(code: string, open: number): number | undefined {
   return undefined;
 }
 
+/** Whether a caller outside the file can reach a Ruby `def`. */
+export type RubyAccess = "public" | "private" | "protected";
+
+/**
+ * One `def`, `class` or `module` as it was written, before same-name
+ * occurrences are merged into a range.
+ *
+ * Kept per occurrence because membership is per occurrence: `Client::Error`
+ * and `Server::Error` are two classes with one name, and a `def` between
+ * them belongs to whichever module it is written in, not to a range that
+ * spans both.
+ */
+export interface RubyDeclaration {
+  name: string;
+  keyword: "def" | "class" | "module";
+  /** `def self.x`, or a `def` inside a `class << self` block. */
+  singleton: boolean;
+  /**
+   * Whether a caller outside the file can reach it: not written `private
+   * def`, not under a bare `private` or `protected` line in its own scope,
+   * and not inside a `class << other` block that reopens some other object.
+   * A class or module is always reachable.
+   */
+  reachable: boolean;
+  startLine: number;
+  endLine: number;
+  /** The column on `startLine` just past the name, where the head begins. */
+  nameEnd: number;
+  /** Index of the innermost enclosing `def`, `class` or `module`, if any. */
+  parent?: number;
+}
+
+export interface RubyRead {
+  /**
+   * The source, line by line, with comments, strings, heredocs, regexes and
+   * percent literals blanked; every position matches the source.
+   */
+  code: string[];
+  declarations: RubyDeclaration[];
+}
+
+const RUBY_IDENTIFIER = String.raw`[A-Za-z_][\w?!=]*`;
+/** The operators a `def` may be named after, longest first. */
+const RUBY_OPERATOR = String.raw`<=>|===?|=~|!~|!=?|\[\]=?|<<|>>|<=|>=|\*\*|[-+]@?|[<>*\/%&|^~]`;
+const RUBY_DEF = new RegExp(
+  String.raw`^[ \t]*(?:(private|protected|public)\s+)?def\s+(self\.)?(${RUBY_IDENTIFIER}|${RUBY_OPERATOR})(?=[\s(;]|$)`,
+  "u",
+);
+const RUBY_TYPE = /^[ \t]*(class|module)\s+(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)\b/u;
+const RUBY_SINGLETON = /^[ \t]*class\s*<<\s*(\S+)/u;
+const RUBY_MARKER = /^[ \t]*(private|protected|public)\s*$/u;
+const RUBY_BLOCK_KEYWORD = /(?:^|\s)(def|class|module|do|begin|case|if|unless|while|until|for)\b/gu;
+const RUBY_CONDITIONAL = new Set(["if", "unless", "while", "until"]);
+const RUBY_CLOSES = /^[ \t]*end\b|(?:^|\s)end\s*$/u;
+
+/**
+ * Where a block-opening keyword sits on a line of masked Ruby, or -1.
+ *
+ * `if`, `unless`, `while` and `until` open a block only in statement
+ * position — first on the line, or after `=`, `(`, `,`, an opening bracket,
+ * `|`, `!`, `then` or `else`. After anything else they are modifiers on the
+ * expression before them: `return nil if x.nil?` is a guard clause, not a
+ * block, and counting it as one left the depth one short and refused nearly
+ * every real Ruby file.
+ */
+function rubyBlockOpener(code: string): number {
+  for (const match of code.matchAll(RUBY_BLOCK_KEYWORD)) {
+    const keyword = match[1] ?? "";
+    const at = match.index + match[0].length - keyword.length;
+    if (!RUBY_CONDITIONAL.has(keyword)) {
+      return at;
+    }
+    const before = code.slice(0, at).trim();
+    if (before === "" || /(?:[=(,[{|!]|\|\||&&|\bthen|\belse)$/u.test(before)) {
+      return at;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Every `def`, `class` and `module` in a Ruby file, as written.
+ *
+ * Counted rather than parsed, over the masked text — so a `#` in a string
+ * is not a comment, an `end` in a heredoc is not a closer, and a file the
+ * masker cannot follow is refused whole. Ruby has more ways to open a block
+ * than are worth enumerating; this recognises the ones that appear in
+ * ordinary declaration bodies and refuses the file when the depth does not
+ * return to zero, since a range that is too small is the one harmful answer.
+ *
+ * Access is tracked per scope. A bare `private` line applies to the class,
+ * module or `class << self` body it is written in and to nothing outside
+ * it: one inside a nested class does not hide the outer class's later
+ * methods, and one in a class body does not hide `def self.x`, which Ruby
+ * leaves public. `private :name` after the fact is metaprogramming a line
+ * scanner cannot follow and is left alone, which over-reports the method as
+ * public rather than hiding one that is not.
+ */
+export function rubyDeclarations(source: string): RubyRead | undefined {
+  const masked = maskRuby(source);
+  if (masked === undefined) {
+    return undefined;
+  }
+  const code = masked.split("\n");
+  const declarations: RubyDeclaration[] = [];
+  interface Scope {
+    kind: "declaration" | "singleton" | "block";
+    index?: number;
+    access: RubyAccess;
+    self?: boolean;
+  }
+  const stack: Scope[] = [];
+  let rootAccess: RubyAccess = "public";
+
+  /** The scope a bare access line applies to: the nearest class-like body. */
+  const markerScope = (): Scope | undefined => {
+    for (let at = stack.length - 1; at >= 0; at -= 1) {
+      const scope = stack[at];
+      if (scope === undefined || scope.kind === "block") {
+        continue;
+      }
+      if (scope.kind === "singleton") {
+        return scope;
+      }
+      const declaration = declarations[scope.index ?? -1];
+      // Inside a method body `private` runs when the method does, not when
+      // the class is defined; it says nothing about the defs that follow.
+      return declaration?.keyword === "def" ? undefined : scope;
+    }
+    return undefined;
+  };
+
+  /** What encloses a declaration opened now: its parent, and the access in force. */
+  const enclosure = (): {
+    parent: number | undefined;
+    access: RubyAccess;
+    singleton: boolean;
+    detached: boolean;
+  } => {
+    let access: RubyAccess | undefined;
+    let singleton = false;
+    let detached = false;
+    for (let at = stack.length - 1; at >= 0; at -= 1) {
+      const scope = stack[at];
+      if (scope === undefined || scope.kind === "block") {
+        continue;
+      }
+      if (scope.kind === "singleton") {
+        access ??= scope.access;
+        if (scope.self === true) {
+          singleton = true;
+        } else {
+          detached = true;
+        }
+        continue;
+      }
+      return { parent: scope.index, access: access ?? scope.access, singleton, detached };
+    }
+    return { parent: undefined, access: access ?? rootAccess, singleton, detached };
+  };
+
+  for (const [offset, line] of code.entries()) {
+    const text = line.trim();
+    if (text === "") {
+      continue;
+    }
+    const marker = RUBY_MARKER.exec(line);
+    if (marker?.[1] !== undefined) {
+      const scope = markerScope();
+      const access = marker[1] as RubyAccess;
+      if (scope !== undefined) {
+        scope.access = access;
+      } else if (stack.every((entry) => entry.kind === "block")) {
+        rootAccess = access;
+      }
+      continue;
+    }
+    const oneLine = /;\s*end\s*$/u.test(text);
+    const singletonClass = RUBY_SINGLETON.exec(line);
+    if (singletonClass !== null) {
+      if (!oneLine) {
+        stack.push({ kind: "singleton", access: "public", self: singletonClass[1] === "self" });
+      }
+      continue;
+    }
+    const def = RUBY_DEF.exec(line);
+    if (def !== null && def[3] !== undefined) {
+      const enclosing = enclosure();
+      const ownSingleton = def[2] !== undefined;
+      // A bare `private` in a class body does not touch `def self.x`; only
+      // one inside `class << self` (or `private def self.x`) does.
+      const access =
+        (def[1] as RubyAccess | undefined) ??
+        (ownSingleton && !enclosing.singleton ? "public" : enclosing.access);
+      declarations.push({
+        name: def[3],
+        keyword: "def",
+        singleton: ownSingleton || enclosing.singleton,
+        reachable: access === "public" && !enclosing.detached,
+        startLine: offset + 1,
+        endLine: offset + 1,
+        nameEnd: def[0].length,
+        ...(enclosing.parent === undefined ? {} : { parent: enclosing.parent }),
+      });
+      if (!oneLine) {
+        stack.push({ kind: "declaration", index: declarations.length - 1, access: "public" });
+      }
+      continue;
+    }
+    const type = RUBY_TYPE.exec(line);
+    if (type !== null && type[2] !== undefined) {
+      const enclosing = enclosure();
+      declarations.push({
+        name: type[2],
+        keyword: type[1] === "class" ? "class" : "module",
+        singleton: false,
+        reachable: true,
+        startLine: offset + 1,
+        endLine: offset + 1,
+        nameEnd: type[0].length,
+        ...(enclosing.parent === undefined ? {} : { parent: enclosing.parent }),
+      });
+      if (!oneLine) {
+        stack.push({ kind: "declaration", index: declarations.length - 1, access: "public" });
+      }
+      continue;
+    }
+    const opened = rubyBlockOpener(line);
+    // A block that opens and closes on one line — `x = if a then b else c
+    // end`, `list.each do |v| v end` — changes nothing.
+    if (opened !== -1 && /\bend\b/u.test(line.slice(opened))) {
+      continue;
+    }
+    if (RUBY_CLOSES.test(line)) {
+      const closed = stack.pop();
+      if (closed === undefined) {
+        return undefined;
+      }
+      if (closed.kind === "declaration" && closed.index !== undefined) {
+        const declaration = declarations[closed.index];
+        if (declaration !== undefined) {
+          declaration.endLine = offset + 1;
+        }
+      }
+      // `end.each do |x|` closes one block and opens the next.
+      if (opened !== -1 && /^[ \t]*end\b/u.test(line)) {
+        stack.push({ kind: "block", access: "public" });
+      }
+      continue;
+    }
+    if (opened !== -1) {
+      stack.push({ kind: "block", access: "public" });
+    }
+  }
+  if (stack.length > 0) {
+    return undefined;
+  }
+  return { code, declarations };
+}
+
 /**
  * Declaration spans for Ruby, whose blocks close with `end`.
  *
- * Counted rather than parsed, and abandoned on the first thing that does not
- * add up. Ruby has more ways to open a block than are worth enumerating —
- * modifiers, blocks passed to methods, heredocs — so this recognises the ones
- * that appear in ordinary declaration bodies and refuses the file when the
- * depth does not return to zero.
+ * The occurrences of {@link rubyDeclarations}, merged by name the way every
+ * other extractor here merges them: a name declared twice is one range from
+ * the first to the last.
  */
 export function rubySymbolRanges(source: string): SymbolRange[] | undefined {
-  const lines = source.split("\n");
-  const opensDeclaration = /^[ \t]*(?:(?:private|public|protected)\s+)?(def|class|module)\s+(?:self\.)?([A-Za-z_][\w?!=]*)/u;
-  const opensBlock =
-    /(?:^|\s)(?:def|class|module|do|begin|case)\b|(?:^|\s)(?:if|unless|while|until|for)\b(?!.*\bend\b)/u;
-  const closesBlock = /^[ \t]*end\b|(?:^|\s)end\s*$/u;
-  const found = new Map<string, SymbolRange>();
-  const open: { name: string; startLine: number; depth: number }[] = [];
-  let depth = 0;
-
-  for (const [offset, raw] of lines.entries()) {
-    const line = raw.replace(/#.*$/u, "");
-    if (line.trim().length === 0) {
-      continue;
-    }
-    const declaration = opensDeclaration.exec(line);
-    // A one-line body (`def size; @n; end`) opens and closes on the same line
-    // and never enters the stack.
-    const oneLine =
-      declaration !== null && /;\s*end\s*$/u.test(line.trim());
-    if (declaration !== null && !oneLine) {
-      const name = declaration[2];
-      if (name === undefined) {
-        return undefined;
-      }
-      open.push({ name, startLine: offset + 1, depth });
-      depth += 1;
-      continue;
-    }
-    if (oneLine && declaration?.[2] !== undefined) {
-      found.set(declaration[2], {
-        name: declaration[2],
-        startLine: offset + 1,
-        endLine: offset + 1,
-      });
-      continue;
-    }
-    if (closesBlock.test(line)) {
-      depth -= 1;
-      if (depth < 0) {
-        return undefined;
-      }
-      const closed = open.at(-1);
-      if (closed !== undefined && closed.depth === depth) {
-        open.pop();
-        const existing = found.get(closed.name);
-        found.set(closed.name, {
-          name: closed.name,
-          startLine: Math.min(existing?.startLine ?? closed.startLine, closed.startLine),
-          endLine: Math.max(existing?.endLine ?? offset + 1, offset + 1),
-        });
-      }
-      continue;
-    }
-    if (opensBlock.test(line)) {
-      depth += 1;
-    }
-  }
-  if (depth !== 0 || open.length > 0) {
+  const read = rubyDeclarations(source);
+  if (read === undefined) {
     return undefined;
+  }
+  const found = new Map<string, SymbolRange>();
+  for (const declaration of read.declarations) {
+    const existing = found.get(declaration.name);
+    found.set(declaration.name, {
+      name: declaration.name,
+      startLine: Math.min(existing?.startLine ?? declaration.startLine, declaration.startLine),
+      endLine: Math.max(existing?.endLine ?? declaration.endLine, declaration.endLine),
+    });
   }
   return [...found.values()].sort((a, b) => a.startLine - b.startLine);
 }

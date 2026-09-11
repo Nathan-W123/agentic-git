@@ -118,6 +118,75 @@ test("ruby refuses a file whose blocks do not close", () => {
   assert.equal(rubySymbolRanges("class Greeter\n  def greet\n"), undefined);
 });
 
+test("ruby: a modifier if, unless, while or until is not a block, and a one-line block is not one either", () => {
+  // A guard clause is in nearly every Ruby method. Counting `return nil if
+  // x.nil?` as a block opener left the depth one short at the end of every
+  // such file, which refused the file — honest, but it made the Ruby shape
+  // path inert for real code.
+  assert.deepEqual(
+    spans(
+      rubySymbolRanges(
+        [
+          "class A",
+          "  def go(x)",
+          "    return nil if x.nil?",
+          "    raise ArgumentError unless x.respond_to?(:to_s)",
+          "    x += 1 while x < 3",
+          "    y = if x then 1 else 2 end",
+          "    [x].each do |v| v end",
+          "    z = if x",
+          "      1",
+          "    end",
+          "    [z].map do |v|",
+          "      v",
+          "    end.each do |v|",
+          "      v",
+          "    end",
+          "    x",
+          "  end",
+          "end",
+        ].join("\n"),
+      ),
+    ),
+    ["A:1-18", "go:2-17"],
+  );
+  // The block form still opens, and a file that never closes it is still refused.
+  assert.deepEqual(spans(rubySymbolRanges("def go(x)\n  if x\n    1\n  end\nend\n")), ["go:1-5"]);
+  assert.equal(rubySymbolRanges("def go(x)\n  if x\n    1\nend\n"), undefined);
+});
+
+test("ruby: an operator method is a declaration, and a string is not code", () => {
+  // `def ==(other)` was not a declaration at all, so the method had no
+  // range and its class shape had no such member; its one-line form
+  // `def <=>(o); 0; end` closed the enclosing class early and refused the
+  // file. The scanner now reads the masked text, so `puts "the end"` and a
+  // heredoc holding `end` are not closers and `# end` is not one either.
+  assert.deepEqual(
+    spans(
+      rubySymbolRanges(
+        [
+          "class V",
+          "  def ==(other)",
+          '    puts "the end"',
+          "  end",
+          "  def <=>(o); 0; end",
+          "  def [](i)",
+          "    <<~SQL",
+          "      end",
+          "    SQL",
+          "  end",
+          "  def -@ # end",
+          "  end",
+          "  def []=(k, v)",
+          "  end",
+          "end",
+        ].join("\n"),
+      ),
+    ),
+    ["V:1-15", "==:2-4", "<=>:5-5", "[]:6-10", "-@:11-12", "[]=:13-14"],
+  );
+});
+
 test("python is read by python, decorators and all", async () => {
   // The reader is the interpreter's own `ast`, so the cases a scanner gets
   // wrong are all covered at once: a `def` inside a docstring is a string, a
