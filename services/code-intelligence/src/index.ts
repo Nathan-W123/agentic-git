@@ -579,14 +579,21 @@ function analyzeScript(
         shape(declaration, node);
       }
       record(declaration, node);
-      if (/(?:Service|Client|Repository|Gateway|Worker)$/u.test(declaration)) {
+      // Capitalised only, and the path rule anchored to a segment: the same
+      // narrowing `resourcesFromNames` applies for every other language, so
+      // a TypeScript `validateInput` is not a schema.
+      if (
+        /^[A-Z]/u.test(declaration) &&
+        /(?:Service|Client|Repository|Gateway|Worker)$/u.test(declaration)
+      ) {
         services.add(declaration);
       }
       if (
-        /(?:Schema|Entity|Model|Record|Payload|Input|Migration)$/u.test(
-          declaration,
-        ) ||
-        /(?:schema|migration|model)/iu.test(filePath)
+        (/^[A-Z]/u.test(declaration) &&
+          /(?:Schema|Entity|Model|Record|Payload|Input|Migration)$/u.test(
+            declaration,
+          )) ||
+        /(?:^|\/)(?:schemas?|migrations?|models?)(?:\/|\.)/iu.test(filePath)
       ) {
         schemas.add(declaration);
       }
@@ -1029,7 +1036,7 @@ function analyzeScannedFile(
   // other two are read from the text, on positions the masker says are code,
   // and are simply absent when the masker could not read the file.
   const named = resourcesFromNames(filePath, symbols);
-  const fromText = resourcesFromText(source, language);
+  const fromText = resourcesFromText(source, language, filePath);
   return {
     path: filePath,
     language,

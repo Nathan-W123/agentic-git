@@ -298,3 +298,143 @@ test("a file the masker cannot read yields nothing, not a guess", () => {
   assert.equal(resourcesFromText('s = "unterminated\n@app.get("/x")', "python"), undefined);
   assert.equal(resourcesFromText("/* open\nr.GET(\"/x\")", "go"), undefined);
 });
+
+/* ------------------------------------------------------------- third pass -- */
+
+test("C# is masked by C#'s rules, and a verbatim path does not hide the routes after it", () => {
+  assert.deepEqual(
+    resourcesFromText(
+      [
+        "using X;",
+        "public class U : ControllerBase {",
+        '  string p = @"C:\\dir\\";',
+        '  [HttpGet("/users")] public IActionResult L() => Ok();',
+        "}",
+      ].join("\n"),
+      "csharp",
+    ),
+    { apis: ["GET /users"], configKeys: [] },
+  );
+});
+
+test("a key or a route inside a string body or a dead group is not one", () => {
+  // A clangd-style test fixture holds source text in a raw string; reading
+  // its `getenv` as a configuration key makes every fixture contend with the
+  // code it is a fixture for.
+  assert.deepEqual(
+    resourcesFromText(
+      [
+        'const char *fixture = R"cpp(',
+        '  const char *h = getenv("PATH");',
+        ')cpp";',
+        'char *m = "use getenv(\'HOME\')";',
+        "#if 0",
+        'char *o = getenv("OLD");',
+        "#endif",
+        'char *real = getenv("REAL");',
+      ].join("\n"),
+      "cpp",
+    ),
+    { apis: [], configKeys: ["REAL"] },
+  );
+});
+
+test("request metadata is not configuration", () => {
+  // Every WSGI middleware reads environ['PATH_INFO'] and every PHP front
+  // controller reads $_SERVER['REQUEST_URI']; nobody configures either.
+  assert.deepEqual(
+    resourcesFromText(
+      'def app(environ, start_response):\n    path = environ["PATH_INFO"]\n    k = os.getenv("REAL")\n    return []\n',
+      "python",
+    ),
+    { apis: [], configKeys: ["REAL"] },
+  );
+  assert.deepEqual(
+    resourcesFromText(
+      '<?php\n$u = $_SERVER["REQUEST_URI"];\n$e = $_ENV["REAL"];\n$g = getenv("ALSO");\n',
+      "php",
+    ),
+    { apis: [], configKeys: ["ALSO", "REAL"] },
+  );
+});
+
+test("a route is registered on a router, not fetched from a client", () => {
+  // `keychain.get`, `redis.get` and an HTTP client are the same shape as a
+  // Vapor route; so are an SDK's `c.Get` and a feature test's `$this->get`.
+  assert.deepEqual(
+    resourcesFromText(
+      [
+        'let t = try keychain.get("token")',
+        'let v = try await req.redis.get("session:x")',
+        'let r = try client.get("https://api.example.com/users")',
+        'app.get("/users") { }',
+      ].join("\n"),
+      "swift",
+    ),
+    { apis: ["GET /users"], configKeys: [] },
+  );
+  assert.deepEqual(
+    resourcesFromText('func (c *Client) Users() { c.Get("/v1/users") }\n', "go", "sdk/client.go")?.apis,
+    [],
+  );
+  assert.deepEqual(
+    resourcesFromText('func main() { r.GET("/v1/users", h) }\n', "go", "cmd/main.go")?.apis,
+    ["GET /v1/users"],
+  );
+  assert.deepEqual(
+    resourcesFromText('<?php\n$r = $this->get("/users");\n$app->get("/orders", $h);\n', "php")?.apis,
+    ["GET /orders"],
+  );
+  // A request spec calls `get "/users"` in exactly the shape routes.rb
+  // registers one; only one of them serves it.
+  assert.deepEqual(
+    resourcesFromText('RSpec.describe "Users" do\n  it "lists" do\n    get "/users"\n  end\nend\n', "ruby", "spec/users_spec.rb")?.apis,
+    [],
+  );
+  assert.deepEqual(
+    resourcesFromText('get "/users", to: "users#index"\n', "ruby", "config/routes.rb")?.apis,
+    ["GET /users"],
+  );
+  // And Django's own `path(...)`, not somebody's method called path.
+  assert.deepEqual(
+    resourcesFromText('p = self.path("assets")\nurlpatterns = [path("users/", v)]\n', "python")?.apis,
+    ["ROUTE /users/"],
+  );
+});
+
+test("an interpolated literal is a run-time value in every spelling", () => {
+  const keys = (source: string, language: Parameters<typeof resourcesFromText>[1]) =>
+    resourcesFromText(source, language)?.configKeys;
+  assert.deepEqual(
+    keys('Environment.GetEnvironmentVariable($"{svc}_TOKEN");\nEnvironment.GetEnvironmentVariable("REAL");\n', "csharp"),
+    ["REAL"],
+  );
+  assert.deepEqual(keys('System.getenv("PREFIX_$name")\nSystem.getenv("REAL")\n', "kotlin"), ["REAL"]);
+  assert.deepEqual(
+    keys('let a = ProcessInfo.processInfo.environment["PREFIX_\\(name)"]\nlet b = ProcessInfo.processInfo.environment["REAL"]\n', "swift"),
+    ["REAL"],
+  );
+  assert.deepEqual(keys('<?php\ngetenv("PREFIX_$name");\ngetenv("{$p}_X");\ngetenv("REAL");\n', "php"), ["REAL"]);
+  // Python's `%` formatting and its adjacent-literal concatenation: the
+  // first half of a key is not the key.
+  assert.deepEqual(keys('os.getenv("%s_TOKEN" % svc)\nos.getenv("A" "B")\nos.getenv("REAL")\n', "python"), ["REAL"]);
+  assert.deepEqual(
+    resourcesFromText('app.MapGet($"/{prefix}/users", h);\napp.MapGet("/real", h);\n', "csharp")?.apis,
+    ["GET /real"],
+  );
+});
+
+test("a schema and a service are types, so their names are capitalised", () => {
+  // `validateInput` is a function and `getClient` is a call; reading them as
+  // a schema and a service put two unrelated branches in contention.
+  assert.deepEqual(resourcesFromNames("src/util.py", ["validateInput", "getClient", "UserSchema", "PaymentService"]), {
+    schemas: ["UserSchema"],
+    services: ["PaymentService"],
+  });
+  // The path rule is not narrowed: a declaration in a migrations directory
+  // is the migration, whatever it is called.
+  assert.deepEqual(
+    resourcesFromNames("db/migrations/0003_add_index.py", ["upgrade"]).schemas,
+    ["upgrade"],
+  );
+});

@@ -40,7 +40,12 @@ export interface ScannedResources {
 /** The same rules the TypeScript indexer applies to a declaration's name. */
 const SERVICE_NAME = /(?:Service|Client|Repository|Gateway|Worker)$/u;
 const SCHEMA_NAME = /(?:Schema|Entity|Model|Record|Payload|Input|Migration)$/u;
-const SCHEMA_PATH = /(?:schema|migration|model)/iu;
+/**
+ * A path *segment*, not a substring. `ml/models/train.py`, `viewmodels/` and
+ * `remodel/` are not data-schema directories, and reading them as such filed
+ * every symbol in them as a schema that two branches then contend over.
+ */
+const SCHEMA_PATH = /(?:^|\/)(?:schemas?|migrations?|models?)(?:\/|\.)/iu;
 
 /** Classifies declarations by name alone, which needs no parser. */
 export function resourcesFromNames(
@@ -50,10 +55,18 @@ export function resourcesFromNames(
   const schemas = new Set<string>();
   const services = new Set<string>();
   for (const name of symbols) {
-    if (SERVICE_NAME.test(name)) {
+    // The suffix rules name a *type*, and a type is capitalised in every
+    // language here: without that, `validateInput` was a schema and
+    // `getClient` a service — two classifications that make unrelated
+    // branches contend over a resource neither of them has.
+    //
+    // The path rule is deliberately not narrowed: a declaration in a
+    // migrations directory is the migration, whatever it is called.
+    const type = /^[A-Z]/u.test(name);
+    if (type && SERVICE_NAME.test(name)) {
       services.add(name);
     }
-    if (SCHEMA_NAME.test(name) || SCHEMA_PATH.test(filePath)) {
+    if ((type && SCHEMA_NAME.test(name)) || SCHEMA_PATH.test(filePath)) {
       schemas.add(name);
     }
   }
@@ -222,14 +235,21 @@ function literalCalls(
       if (
         value.includes("${") ||
         value.includes("#{") ||
-        (/[fF]/u.test(prefix) && value.includes("{"))
+        value.includes("\\(") ||
+        ((/[fF$]/u.test(prefix) || /\$\w/u.test(value)) && /[{]|\$\w/u.test(value))
       ) {
         continue;
       }
       // Concatenated onto something, so also a run-time value. `"PREFIX_" +
       // name` is a real key nobody can name from here.
+      // `"PREFIX_" + name` is a real key nobody can name from here, and so
+      // are Python's `%` formatting and its adjacent-literal concatenation,
+      // which recorded the first half of a key as the key.
       const after = rest.slice(literal[0].length);
-      if (/^\s*[+.]/u.test(after) && !/^\s*\.\s*$/u.test(after)) {
+      if (
+        (/^\s*[+.%]/u.test(after) && !/^\s*\.\s*$/u.test(after)) ||
+        /^[ \t]*["']/u.test(after)
+      ) {
         continue;
       }
       const name = pattern.record(value, head);
@@ -251,8 +271,9 @@ const CONFIG_PATTERNS: Partial<Record<SupportedLanguage, LiteralCall[]>> = {
     { head: /\bos\.environ\s*\[/u, record: (key) => key },
     { head: /\bos\.environ\.get\s*\(/u, record: (key) => key },
     { head: /\bos\.getenv\s*\(/u, record: (key) => key },
-    { head: /\benviron\s*\[/u, record: (key) => key },
-    { head: /\benviron\.get\s*\(/u, record: (key) => key },
+    // `environ[...]` on its own is a WSGI request dictionary — PATH_INFO,
+    // HTTP_HOST, REQUEST_METHOD — which every middleware in the repository
+    // reads and nobody configures. Only the `os.` forms are configuration.
   ],
   go: [
     { head: /\bos\.(?:Getenv|LookupEnv)\s*\(/u, record: (key) => key },
@@ -274,7 +295,9 @@ const CONFIG_PATTERNS: Partial<Record<SupportedLanguage, LiteralCall[]>> = {
   ],
   php: [
     { head: /\bgetenv\s*\(/u, record: (key) => key },
-    { head: /\$_(?:ENV|SERVER)\s*\[/u, record: (key) => key },
+    // `$_SERVER` is per-request metadata — REQUEST_URI, HTTP_HOST — that
+    // every front controller reads; `$_ENV` is configuration.
+    { head: /\$_ENV\s*\[/u, record: (key) => key },
     { head: /\benv\s*\(/u, record: (key) => key },
   ],
   c: [{ head: /\bgetenv\s*\(/u, record: (key) => key }],
@@ -298,14 +321,17 @@ const API_PATTERNS: Partial<Record<SupportedLanguage, LiteralCall[]>> = {
     { head: /@\w+(?:\.\w+)*\.route\s*\(/u, record: asRoute("route") },
     // Django: path("x/", view) — no leading slash by convention.
     {
-      head: /\b(?:re_)?path\s*\(/u,
+      // Django's own `path(...)`, not somebody's `self.path("assets")`.
+      head: /(?<![.\w])(?:re_)?path\s*\(/u,
       record: (path) => (path === "" ? undefined : `ROUTE /${path.replace(/^\//u, "")}`),
     },
   ],
   go: [
     // gin / echo / fiber / chi / gorilla: r.GET("/x"), mux.HandleFunc("/x")
     {
-      head: /\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Any|Get|Post|Put|Patch|Delete|Head|Options)\s*\(/u,
+      // On a router, not on any client: `c.Get("/v1/users")` inside an SDK
+      // is a request this file makes, not a route it serves.
+      head: /\b(?:r|e|g|s|mux|router|routes|app|api|group|engine|srv|server)\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Any|Get|Post|Put|Patch|Delete|Head|Options)\s*\(/u,
       record: (path, head) => asRoute(head[1] ?? "route")(path),
     },
     { head: /\.(?:HandleFunc|Handle)\s*\(/u, record: asRoute("route") },
@@ -364,7 +390,9 @@ const API_PATTERNS: Partial<Record<SupportedLanguage, LiteralCall[]>> = {
     // Symfony / Slim: #[Route('/x')], $app->get('/x')
     { head: /#\[Route\s*\(/u, record: asRoute("route") },
     {
-      head: new RegExp(`->${METHOD}\\s*\\(`, "u"),
+      // `$app->get('/x')`, not `$this->get('/x')` in a feature test or
+      // `$client->post(...)` in an SDK.
+      head: new RegExp(`\\$(?:app|router|routes|group|r)->${METHOD}\\s*\\(`, "u"),
       record: (path, head) => asRoute(head[1] ?? "route")(path),
     },
   ],
@@ -381,11 +409,19 @@ const API_PATTERNS: Partial<Record<SupportedLanguage, LiteralCall[]>> = {
     { head: /\[Route\s*\(/u, record: asRoute("route") },
   ],
   swift: [
-    // Vapor: app.get("x"), routes.post("x") — no leading slash by convention.
+    // Vapor: app.get("x"), routes.post("x"). Anchored on the receiver and
+    // refusing anything with a scheme or a namespace in it: `keychain.get`,
+    // `redis.get("session:x")` and `client.get("https://…")` are the same
+    // shape and are not routes this file serves.
     {
-      head: new RegExp(`\\.${METHOD}\\s*\\(`, "u"),
+      head: new RegExp(
+        `\\b(?:app|routes?|router|group|grouped\\([^)]*\\))\\.${METHOD}\\s*\\(`,
+        "u",
+      ),
       record: (path, head) =>
-        `${(head[1] ?? "route").toUpperCase()} /${path.replace(/^\//u, "")}`,
+        path.includes(":")
+          ? undefined
+          : `${(head[1] ?? "route").toUpperCase()} /${path.replace(/^\//u, "")}`,
     },
   ],
 };
@@ -397,16 +433,31 @@ const API_PATTERNS: Partial<Record<SupportedLanguage, LiteralCall[]>> = {
  * "reads no configuration" from "could not look" — and never invents a
  * resource from a comment or a string.
  */
+/** Paths whose route-shaped calls are requests, not registrations. */
+const TEST_PATH =
+  /(?:^|\/)(?:test|tests|spec|specs|__tests__)(?:\/|$)|[._](?:test|spec)\.|(?:Test|Spec|Tests)\.[A-Za-z]+$/u;
+
 export function resourcesFromText(
   source: string,
   language: SupportedLanguage,
+  /**
+   * Where the file lives. A request spec calls `get "/users"` in exactly the
+   * shape a router registers one, so a test file's routes are read as the
+   * requests they are: none. Optional so a caller with only text still gets
+   * the configuration keys.
+   */
+  filePath = "",
 ): Pick<ScannedResources, "apis" | "configKeys"> | undefined {
   const masked = maskForLanguage(source, language);
   if (masked === undefined) {
     return undefined;
   }
   return {
-    apis: literalCalls(source, masked, API_PATTERNS[language] ?? []),
+    apis: literalCalls(
+      source,
+      masked,
+      TEST_PATH.test(filePath) ? [] : (API_PATTERNS[language] ?? []),
+    ),
     configKeys: literalCalls(source, masked, CONFIG_PATTERNS[language] ?? []),
   };
 }
