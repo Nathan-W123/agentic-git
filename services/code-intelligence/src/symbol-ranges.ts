@@ -458,8 +458,7 @@ export function rubySymbolRanges(source: string): SymbolRange[] | undefined {
 const PYTHON_READER = `
 import ast, json, sys
 
-def spans(source):
-    tree = ast.parse(source)
+def spans(tree):
     found = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -478,23 +477,69 @@ def spans(source):
             previous["endLine"] = max(previous["endLine"], end)
     return sorted(found.values(), key=lambda entry: entry["startLine"])
 
+def imports(tree):
+    # Dotted module names exactly as written, relative ones keeping their
+    # leading dots. A scanner would have to decide whether a line inside a
+    # docstring is an import; the parser already knows it is not.
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                out.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            base = ("." * node.level) + (node.module or "")
+            out.append(base)
+            # \`from pkg import name\` is genuinely ambiguous between an
+            # attribute of pkg/__init__.py and the submodule pkg/name.py.
+            # Both are emitted; the resolver keeps whichever is a real file,
+            # so the guess is made against the tree rather than here.
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                out.append(base + ("" if base.endswith(".") else ".") + alias.name)
+    seen = []
+    for name in out:
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
 payload = json.loads(sys.stdin.read())
 out = {}
 for path, source in payload.items():
     try:
-        out[path] = spans(source)
+        tree = ast.parse(source)
+        found = spans(tree)
+        out[path] = None if found is None else {"ranges": found, "imports": imports(tree)}
     except Exception:
         out[path] = None
+# The standard library's own top-level names, so a single-segment \`import
+# email\` is not matched against a repository file that happens to be called
+# email.py. Free here; guesswork anywhere else.
+out["//stdlib"] = sorted(getattr(sys, "stdlib_module_names", ()))
 sys.stdout.write(json.dumps(out))
 `;
 
 /** How long the whole batch may take before its answers are given up on. */
 const PYTHON_READ_TIMEOUT_MS = 30_000;
 
+/** What one spawn of the reader learned about the whole repository. */
+export interface PythonRead {
+  /** Per file, only for files the interpreter could parse. */
+  files: Map<string, { ranges: SymbolRange[]; imports: string[] }>;
+  /**
+   * The interpreter's own `sys.stdlib_module_names`.
+   *
+   * Read from the running Python rather than written down, because the list
+   * differs by version and a stale copy is the difference between dropping
+   * `import email` and matching it against somebody's `email.py`.
+   */
+  stdlib: ReadonlySet<string>;
+}
+
 export async function pythonSymbolRanges(
   sources: ReadonlyMap<string, string>,
-): Promise<Map<string, SymbolRange[]>> {
-  const answers = new Map<string, SymbolRange[]>();
+): Promise<PythonRead> {
+  const answers: PythonRead = { files: new Map(), stdlib: new Set() };
   if (sources.size === 0) {
     return answers;
   }
@@ -542,16 +587,28 @@ export async function pythonSymbolRanges(
   if (raw === undefined) {
     return answers;
   }
-  let parsed: Record<string, SymbolRange[] | null>;
+  let parsed: Record<
+    string,
+    { ranges: SymbolRange[]; imports: string[] } | string[] | null
+  >;
   try {
-    parsed = JSON.parse(raw) as Record<string, SymbolRange[] | null>;
+    parsed = JSON.parse(raw) as typeof parsed;
   } catch {
     return answers;
   }
-  for (const [filePath, ranges] of Object.entries(parsed)) {
-    if (ranges !== null) {
-      answers.set(filePath, ranges);
+  const stdlib = parsed["//stdlib"];
+  const read: PythonRead = {
+    files: new Map(),
+    stdlib: new Set(Array.isArray(stdlib) ? stdlib : []),
+  };
+  for (const [filePath, answer] of Object.entries(parsed)) {
+    if (filePath === "//stdlib" || answer === null || Array.isArray(answer)) {
+      continue;
     }
+    read.files.set(filePath, {
+      ranges: answer.ranges,
+      imports: answer.imports,
+    });
   }
-  return answers;
+  return read;
 }

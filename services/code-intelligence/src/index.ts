@@ -1,5 +1,7 @@
 import { availableParallelism } from "node:os";
 import path from "node:path";
+
+import { resolvePythonImport } from "./python-imports.js";
 import { Worker } from "node:worker_threads";
 
 import {
@@ -1293,11 +1295,20 @@ export class CodeIntelligenceService {
     // `symbolRangesInFile` reports it as unreadable rather than as empty.
     const pythonAnswers = await pythonSymbolRanges(pythonSources);
     for (const file of files) {
-      const ranges = pythonAnswers.get(file.path);
-      if (ranges !== undefined) {
-        file.symbolRanges = ranges;
-        file.symbols = ranges.map((range) => range.name);
+      const answer = pythonAnswers.files.get(file.path);
+      if (answer !== undefined) {
+        file.symbolRanges = answer.ranges;
+        file.symbols = answer.ranges.map((range) => range.name);
         delete file.symbolRangesUnknown;
+        // The same parse that found the declarations found these, so a line
+        // that looks like an import inside a docstring is not one here — the
+        // interpreter already decided. `dependencies` takes the statement's
+        // own module parts; `imports` carries the submodule probes too,
+        // because only the file set can say which of those is real.
+        file.imports = answer.imports;
+        file.dependencies = answer.imports.filter(
+          (name) => !name.includes("."),
+        );
       }
     }
 
@@ -1309,10 +1320,20 @@ export class CodeIntelligenceService {
     }
 
     const allPaths = new Set(repositoryFiles);
+    const pythonContext = {
+      files: allPaths,
+      stdlib: pythonAnswers.stdlib,
+    };
     const edges: DependencyEdge[] = [];
     for (const file of files) {
       for (const imported of file.imports) {
-        const target = resolveImport(file.path, imported, allPaths);
+        // Resolution is per language, because a specifier means different
+        // things in each. A TypeScript one is a path; a Python one is a
+        // dotted module name that has to be searched for.
+        const target =
+          file.language === "python"
+            ? resolvePythonImport(file.path, imported, pythonContext)
+            : resolveImport(file.path, imported, allPaths);
         edges.push({
           fromFile: file.path,
           ...(target === undefined ? {} : { toFile: target }),

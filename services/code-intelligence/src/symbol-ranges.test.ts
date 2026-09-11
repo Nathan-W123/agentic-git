@@ -150,7 +150,7 @@ test("python is read by python, decorators and all", async () => {
       ],
     ]),
   );
-  assert.deepEqual(spans(answers.get("m.py")), [
+  assert.deepEqual(spans(answers.files.get("m.py")?.ranges), [
     "alpha:4-6",
     "beta:9-14",
     "Gamma:17-19",
@@ -163,9 +163,9 @@ test("python that does not parse is left unanswered", async () => {
   // as "declares nothing" — the difference between withholding the whole file
   // and withholding none of it.
   const answers = await pythonSymbolRanges(new Map([["b.py", "def broken(:\n"]]));
-  assert.equal(answers.has("b.py"), false);
+  assert.equal(answers.files.has("b.py"), false);
 });
 
 test("asking for nothing spawns nothing", async () => {
-  assert.equal((await pythonSymbolRanges(new Map())).size, 0);
+  assert.equal((await pythonSymbolRanges(new Map())).files.size, 0);
 });

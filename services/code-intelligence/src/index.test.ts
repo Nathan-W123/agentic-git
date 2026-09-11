@@ -1035,3 +1035,89 @@ test("what a branch is built on that canonical has moved under it", async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a Python repository has a dependency graph, and consumers can be found in it", async () => {
+  // Until this existed, every non-TypeScript file was indexed with
+  // `imports: []`. The graph was empty, so `consumersOf` — "who am I about
+  // to break" — returned nothing for a Python repository, and the contract
+  // layer above it was inert. Nothing said so: the index set a flag meaning
+  // "I could not read this file's contract" and nothing above it read the
+  // flag.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-pyindex-"));
+  try {
+    const source = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "billing"), { recursive: true });
+    await writeFile(path.join(source, "billing", "__init__.py"), "");
+    await writeFile(
+      path.join(source, "billing", "money.py"),
+      "def charge(amount):\n    return amount\n",
+    );
+    await writeFile(
+      path.join(source, "billing", "api.py"),
+      [
+        "import os",
+        "from .money import charge",
+        "",
+        "def handler(request):",
+        "    return charge(request['amount'])",
+      ].join("\n"),
+    );
+    // A line that looks exactly like an import and is not one. A scanner
+    // would have to decide; the interpreter already did.
+    await writeFile(
+      path.join(source, "billing", "docs.py"),
+      ['"""', "from .money import charge", '"""', "", "VALUE = 1", ""].join("\n"),
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      "pyexample",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+
+    const api = index.files.find((entry) => entry.path === "billing/api.py");
+    assert.ok(api, "billing/api.py should be indexed");
+    // The relative import resolved to the file it names.
+    assert.equal(
+      index.edges.find(
+        (edge) =>
+          edge.fromFile === "billing/api.py" &&
+          edge.toFile === "billing/money.py",
+      )?.kind,
+      "import",
+      "the import edge to money.py should exist",
+    );
+    // And the question the whole graph exists to answer.
+    assert.deepEqual(
+      service.consumersOf(index, { file: "billing/money.py" }),
+      ["billing/api.py"],
+    );
+    // `import os` is the standard library and resolves to nothing, which is
+    // the ordinary case and carries no suspicion.
+    assert.equal(
+      index.edges.some(
+        (edge) => edge.fromFile === "billing/api.py" && edge.toFile === "os",
+      ),
+      false,
+    );
+    // The docstring is not an import. This is the false edge that matters:
+    // it would make a branch editing money.py contend with a file that only
+    // mentions it in prose.
+    assert.equal(
+      index.edges.some(
+        (edge) =>
+          edge.fromFile === "billing/docs.py" &&
+          edge.toFile === "billing/money.py",
+      ),
+      false,
+      "a docstring must not produce a dependency",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
