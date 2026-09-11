@@ -84,7 +84,8 @@ test("Rust: only pub is contract, and a struct with its impl blocks is one shape
     ].join("\n"),
     "rust",
   );
-  assert.deepEqual(symbols(shapes), ["charge", "Kind", "Money", "new", "Store"]);
+  // Code-point order, which no process locale can change.
+  assert.deepEqual(symbols(shapes), ["Kind", "Money", "Store", "charge", "new"]);
   assert.equal(
     shapeOf(shapes, "Money"),
     "impl Money {pub fn new(amount: u32) -> Self} | pub struct Money {pub amount: u32}",
@@ -132,7 +133,7 @@ test("Java: the public surface, with parameter names out of the digest and initi
   );
   assert.equal(
     shapeOf(shapes, "Money"),
-    "public class Money implements Comparable<Money> {public <T> List<T> convert(List<T> in, String... rest) throws IOException; public int getAmount(); public Money(int amount); public static final int MAX}",
+    "public class Money implements Comparable<Money> {public <T> List<T> convert(List<T> in, String... rest) throws IOException; public Money(int amount); public int getAmount(); public static final int MAX}",
   );
   // Enum constants keep their order: an ordinal is a position.
   assert.equal(shapeOf(shapes, "Color"), "public enum Color {RED; GREEN; BLUE; public int code()}");
@@ -204,7 +205,7 @@ test("C#: an Allman brace and an expression body both end the head", () => {
   assert.equal(shapeOf(shapes, "Double"), "public int Double()");
   assert.equal(
     shapeOf(shapes, "Money"),
-    "public class Money : IComparable<Money> {public int Amount; public int Double(); public Money(int amount); public static Money Parse(string text, out bool ok)}",
+    "public class Money : IComparable<Money> {public Money(int amount); public int Amount; public int Double(); public static Money Parse(string text, out bool ok)}",
   );
 });
 
@@ -343,7 +344,7 @@ test("Ruby: the def line, minus whatever a bare private line hides", () => {
       "end",
     ].join("\n"),
   );
-  assert.deepEqual(symbols(shapes), ["format", "helper", "initialize", "Money", "shown", "top_level", "Util"]);
+  assert.deepEqual(symbols(shapes), ["Money", "Util", "format", "helper", "initialize", "shown", "top_level"]);
   assert.equal(shapeOf(shapes, "initialize"), '(amount, currency: "usd")');
   assert.equal(shapeOf(shapes, "format"), "(a, b = 1)");
   assert.equal(
@@ -390,7 +391,7 @@ test("Python: the interpreter reads the signature, with defaults as optionality 
     ]),
   );
   const shapes = pythonShapes(read.files.get("m.py")?.shapes ?? []);
-  assert.deepEqual(symbols(shapes), ["charge", "fetch", "Money", "posonly"]);
+  assert.deepEqual(symbols(shapes), ["Money", "charge", "fetch", "posonly"]);
   assert.equal(shapeOf(shapes, "charge"), "(amount: int, currency: str?, *, force: bool?) -> bool");
   assert.equal(shapes.find((entry) => entry.symbol === "charge")?.inferred, undefined);
   assert.equal(shapeOf(shapes, "fetch"), "async (url)");
@@ -413,4 +414,179 @@ test("a file the masker cannot follow has unknown shapes, not empty ones", () =>
   assert.equal(rubyShapes("class Open\n  def never_closed\nend\n"), undefined);
   // Whereas a file that declares nothing has, honestly, no shapes.
   assert.deepEqual(braceShapes("package empty\n", "go"), []);
+});
+
+/** Whether two sources hash one symbol the same, which is the whole question. */
+function sameDigest(language: Parameters<typeof braceShapes>[1], before: string, after: string, symbol: string): boolean {
+  const left = digestOf(braceShapes(before, language), symbol);
+  const right = digestOf(braceShapes(after, language), symbol);
+  assert.ok(left !== undefined && right !== undefined, `${symbol} must be read on both sides`);
+  return left === right;
+}
+
+test("wrapping a parameter list, a throws clause or an initializer moves nothing", () => {
+  // gofmt, ktfmt and PSR-12 all break a long parameter list one per line
+  // with a trailing comma; the head used to be hashed with that whitespace.
+  assert.ok(sameDigest("go",
+    "package p\n\nfunc Charge(amount int, currency string) (int, error) {\n\treturn 0, nil\n}\n",
+    "package p\n\nfunc Charge(\n\tamount int,\n\tcurrency string,\n) (int, error) {\n\treturn 0, nil\n}\n", "Charge"));
+  assert.ok(sameDigest("kotlin", "fun foo(x: Int): Int {\n    return x\n}\n", "fun foo(x : Int) : Int {\n    return x\n}\n", "foo"));
+  assert.ok(sameDigest("csharp", "public static int F(int x)\n{\n    return x;\n}\n", "public static int F( int x )\n{\n    return x;\n}\n", "F"));
+  // Inside a type body the members used to be split on every newline, so a
+  // wrapped member became several garbage members.
+  assert.ok(sameDigest("java",
+    "public class Money {\n    public int add(int a, int b) throws IOException {\n        return a + b;\n    }\n    public static final List<Integer> P = List.of(2, 3);\n}\n",
+    "public class Money {\n    public int add(\n            int a,\n            int b)\n            throws IOException {\n        return a + b;\n    }\n    public static final List<Integer> P = List.of(\n        2,\n        3);\n}\n", "Money"));
+  assert.equal(
+    shapeOf(braceShapes("package p\ntype Store interface {\n\tGet(\n\t\tid string,\n\t\topts Options,\n\t) (Money, error)\n}\n", "go"), "Store"),
+    "type Store interface {Get(id string, opts Options) (Money, error)}",
+  );
+  assert.ok(sameDigest("kotlin", "class R {\n    fun build(): Foo = Foo(1)\n}\n", "class R {\n    fun build(): Foo =\n        Foo(1)\n}\n", "R"));
+  assert.ok(sameDigest("csharp", "public class C\n{\n    public int X => Compute(1);\n}\n", "public class C\n{\n    public int X =>\n        Compute(1);\n}\n", "C"));
+});
+
+test("members and symbols are ordered by code point, which no process locale can change", () => {
+  // `localeCompare` put `alpha` before `Zeta` under en_US and `aardvark`
+  // after `zebra` under da_DK, so one file had a different digest on each
+  // developer's machine. Code-point order puts upper case first everywhere.
+  const shapes = braceShapes("public class S {\n    public void alpha() {}\n    public void Zeta() {}\n}\n", "java");
+  assert.equal(shapeOf(shapes, "S"), "public class S {public void Zeta(); public void alpha()}");
+  assert.deepEqual(symbols(shapes), ["S", "Zeta", "alpha"]);
+});
+
+test("an = inside an operator name does not cut the member, and = delete is kept", () => {
+  // Every non-enum member was cut at its first `=`, so `bool operator==(...)`
+  // became `bool operator` and deleting a copy constructor was invisible.
+  const cpp = braceShapes(
+    "class NC {\npublic:\n    NC(const NC&) = delete;\n    NC& operator=(const NC&) = default;\n    bool operator==(const NC& o) const;\n    NC& operator+=(int n);\n    virtual int pure() = 0;\n    int n = 0;\n    using Ptr = std::shared_ptr<NC>;\n};\n",
+    "cpp",
+  );
+  // A constructor shares its class's name, so the symbol is both pieces.
+  assert.equal(
+    shapeOf(cpp, "NC"),
+    "NC(const NC&) = delete | class NC {NC& operator+=(int n); NC& operator=(const NC&) = default; NC(const NC&) = delete; bool operator==(const NC& o) const; int n; using Ptr = std::shared_ptr<NC>; virtual int pure() = 0}",
+  );
+  assert.equal(shapeOf(cpp, "pure"), "virtual int pure() = 0");
+  assert.ok(!sameDigest("cpp", "class NC {\npublic:\n    NC(const NC&) = delete;\n};\n", "class NC {\npublic:\n    NC(const NC&);\n};\n", "NC"));
+  assert.ok(!sameDigest("csharp",
+    "public struct M\n{\n    public static bool operator ==(M a, M b) => true;\n}\n",
+    "public struct M\n{\n    public static bool operator ==(M a, object b) => true;\n}\n", "M"));
+  assert.equal(shapeOf(braceShapes("class V {\n  def ==(o: V): Boolean = true\n  def +=(x: Int): this.type = this\n}\n", "scala"), "V"), "class V {def +=(x: Int): this.type; def ==(o: V): Boolean}");
+  assert.equal(shapeOf(braceShapes("public struct P: Equatable {\n    public static func == (lhs: P, rhs: P) -> Bool { true }\n}\n", "swift"), "P"), "public struct P: Equatable {public static func == (lhs: P, rhs: P) -> Bool}");
+});
+
+test("the > of an arrow is not a closing bracket", () => {
+  // Counting it as one drove the depth negative, after which commas stopped
+  // splitting and `=` stopped cutting: a closure parameter's default vanished
+  // and a positional rename after an `impl Fn(..) -> ..` parameter moved.
+  assert.ok(!sameDigest("kotlin",
+    "class L {\n    fun load(onError: (Throwable) -> Unit = {}, retries: Int) {}\n}\n",
+    "class L {\n    fun load(onError: (Throwable) -> Unit, retries: Int) {}\n}\n", "L"));
+  assert.ok(sameDigest("rust",
+    "pub fn fold(f: impl Fn(u8) -> u8, init: u8) -> u8 {\n    init\n}\n",
+    "pub fn fold(f: impl Fn(u8) -> u8, acc: u8) -> u8 {\n    acc\n}\n", "fold"));
+  assert.equal(shapeOf(braceShapes("class Ops {\n  val g: Int => String = _.toString\n  def apply(f: Int => Int): Int = f(1)\n}\n", "scala"), "Ops"), "class Ops {def apply(f: Int => Int): Int; val g: Int => String}");
+});
+
+test("a C parameter keeps its pointer when it loses its name", () => {
+  // Dropping the last whitespace-separated token took `*s` with it, so
+  // `char *s` and `char s` hashed the same, while the spacing styles
+  // `char *s` and `char* s` hashed differently.
+  assert.ok(!sameDigest("c", "int f(char *s, void *ctx) {\n    return 0;\n}\n", "int f(char s, void ctx) {\n    return 0;\n}\n", "f"));
+  assert.ok(!sameDigest("c", "int g(void *ctx) {\n    return 0;\n}\n", "int g(void) {\n    return 0;\n}\n", "g"));
+  assert.ok(!sameDigest("cpp", "int h(const Money &m) {\n    return 0;\n}\n", "int h(const Money m) {\n    return 0;\n}\n", "h"));
+  assert.ok(sameDigest("c", "int f(char *s, unsigned u, int a[]) {\n    return 0;\n}\n", "int f(char* t, unsigned v, int b[]) {\n    return 0;\n}\n", "f"));
+});
+
+test("that a parameter has a default is contract; what it defaults to is not", () => {
+  // The rule the Python reader already kept: a default's value is replaced
+  // by a marker in the comparable form, for every language.
+  assert.ok(sameDigest("kotlin", "fun retry(times: Int = 3) {}\n", "fun retry(times: Int = 5) {}\n", "retry"));
+  assert.ok(!sameDigest("kotlin", "fun retry(times: Int = 3) {}\n", "fun retry(times: Int) {}\n", "retry"));
+  assert.ok(sameDigest("csharp", "public class D\n{\n    public void Retry(int times = 3) {}\n}\n", "public class D\n{\n    public void Retry(int times = 5) {}\n}\n", "D"));
+  assert.ok(sameDigest("php", "<?php\nfunction retry(int $times = 3): void {}\n", "<?php\nfunction retry(int $times = 5): void {}\n", "retry"));
+  assert.ok(sameDigest("cpp", "void f(int x = 5, std::vector<int> v = {}) {\n}\n", "void f(int y = 6, std::vector<int> w = {1}) {\n}\n", "f"));
+  // A property's initializer is a value even when its type has an arrow.
+  assert.ok(sameDigest("kotlin", "class P {\n    val f: (Int) -> Int = ::double\n}\n", "class P {\n    val f: (Int) -> Int = ::triple\n}\n", "P"));
+});
+
+test("a private member is private wherever its modifier sits, and an attribute hides nothing", () => {
+  // Reachability looked at the first word only: `@Inject private`,
+  // `static private` and `[JsonIgnore] private` were hashed as public, and a
+  // Rust `#[serde(default)] pub` field was dropped for not starting with `pub`.
+  assert.equal(shapeOf(braceShapes("public class Svc {\n    @Inject private Repo repo;\n    static private int helper(int x) { return x; }\n    public void run() {}\n}\n", "java"), "Svc"), "public class Svc {public void run()}");
+  assert.equal(shapeOf(braceShapes("public class Dto\n{\n    [JsonIgnore] private string secret;\n    public string Name { get; set; }\n}\n", "csharp"), "Dto"), "public class Dto {public string Name}");
+  assert.equal(shapeOf(braceShapes("pub struct Cfg {\n    #[serde(default)] pub retries: u32,\n    pub name: String,\n}\n", "rust"), "Cfg"), "pub struct Cfg {pub name: String; pub retries: u32}");
+  // Swift's `private(set)` hides only the setter.
+  assert.equal(shapeOf(braceShapes("public struct Counter {\n    private(set) var count: Int = 0\n}\n", "swift"), "Counter"), "public struct Counter {private(set) var count: Int}");
+});
+
+test("preprocessor lines are not members, and a C++ label applies to the rest of its line", () => {
+  assert.ok(sameDigest("csharp",
+    "public class Svc\n{\n    #region Public API\n    public int Get() => 1;\n    #endregion\n}\n",
+    "public class Svc\n{\n    #region Api\n    public int Get() => 1;\n    #endregion\n}\n", "Svc"));
+  assert.equal(shapeOf(braceShapes("public struct Cfg {\n#if DEBUG\n    public let verbose: Bool\n#endif\n}\n", "swift"), "Cfg"), "public struct Cfg {public let verbose: Bool}");
+  // `public: int get() const;` used to leave everything after it private.
+  assert.equal(shapeOf(braceShapes("class W {\npublic: int get() const;\n    int x;\n};\n", "cpp"), "W"), "class W {int get() const; int x}");
+});
+
+test("an enum's raw values are contract even when they are strings", () => {
+  // Strings are blanked before reading, so `case Hearts = 'H'` read as
+  // `case Hearts =` and a change of the serialized value shipped unnoticed.
+  assert.equal(shapeOf(braceShapes("<?php\nenum Suit: string {\n    case Hearts = 'H';\n    case Spades = 'S';\n}\n", "php"), "Suit"), "enum Suit: string {case Hearts = 'H'; case Spades = 'S'}");
+  assert.ok(!sameDigest("swift",
+    "public enum Suit: String {\n    case hearts = \"hearts\"\n}\n",
+    "public enum Suit: String {\n    case hearts = \"H\"\n}\n", "Suit"));
+});
+
+test("names are contract where a caller can write them: a record's components, not a Go parameter", () => {
+  // A Java record's components are its accessor names; Go has no named
+  // arguments at all, and `X, Y int` declares the same two fields as two lines.
+  assert.ok(!sameDigest("java", "public record Point(int x, int y) {}\n", "public record Point(int px, int py) {}\n", "Point"));
+  assert.ok(sameDigest("go", "package p\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n", "package p\n\nfunc Add(x, y int) int {\n\treturn x + y\n}\n", "Add"));
+  assert.ok(sameDigest("go", "package p\n\nfunc (m Money) Add(o Money) Money {\n\treturn m\n}\n", "package p\n\nfunc (money Money) Add(o Money) Money {\n\treturn money\n}\n", "Add"));
+  assert.ok(!sameDigest("go", "package p\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n", "package p\n\nfunc Add(a int, b int64) int {\n\treturn a\n}\n", "Add"));
+  assert.equal(shapeOf(braceShapes("package p\n\ntype Pt struct {\n\tX, Y int\n}\n", "go"), "Pt"), "type Pt struct {X int; Y int}");
+});
+
+test("a type split across blocks in one file is one contract", () => {
+  // An inherent impl in two halves, a method moved into an extension and a
+  // partial class merged all show a caller the same members.
+  assert.ok(sameDigest("rust",
+    "pub struct M;\nimpl M {\n    pub fn a(&self) -> u8 { 1 }\n    pub fn b(&self) -> u8 { 2 }\n}\n",
+    "pub struct M;\nimpl M {\n    pub fn a(&self) -> u8 { 1 }\n}\nimpl M {\n    pub fn b(&self) -> u8 { 2 }\n}\n", "M"));
+  assert.ok(sameDigest("swift",
+    "public struct Money {\n    public let amount: Int\n    public func format() -> String { \"\" }\n}\n",
+    "public struct Money {\n    public let amount: Int\n}\nextension Money {\n    public func format() -> String { \"\" }\n}\n", "Money"));
+  // But a conformance added by an extension is contract of its own.
+  assert.ok(!sameDigest("swift",
+    "public struct Money {\n    public let amount: Int\n}\n",
+    "public struct Money {\n    public let amount: Int\n}\nextension Money: Equatable {}\n", "Money"));
+  assert.ok(sameDigest("csharp",
+    "public partial class P { public void A() {} }\npublic partial class P { public void B() {} }\n",
+    "public partial class P { public void A() {} public void B() {} }\n", "P"));
+});
+
+test("a nested body with no declaration of its own keeps its fields", () => {
+  // A Go field of anonymous struct type, a Rust struct variant, an inline C
+  // struct and a Kotlin companion object were flattened to `{}`, so a change
+  // to their fields hashed identically.
+  assert.equal(shapeOf(braceShapes("package p\n\ntype R struct {\n\tMeta struct {\n\t\tID int\n\t}\n}\n", "go"), "R"), "type R struct {Meta struct {ID int}}");
+  assert.equal(shapeOf(braceShapes("pub enum Ev {\n    Click { x: i32, y: i32 },\n    Key(u8),\n}\n", "rust"), "Ev"), "pub enum Ev {Click {x: i32; y: i32}; Key(u8)}");
+  assert.equal(shapeOf(braceShapes("struct outer { struct inner { int y; } in; int z; };\n", "c"), "outer"), "struct outer {int z; struct inner {int y} in}");
+  assert.equal(shapeOf(braceShapes("class C {\n    companion object {\n        const val LIMIT: Int = 1\n    }\n}\n", "kotlin"), "C"), "class C {companion object {const val LIMIT: Int}}");
+});
+
+test("smaller spellings that are not contract: an annotation line, PHP's implicit public, a Kotlin getter's line", () => {
+  assert.ok(sameDigest("java",
+    "public class O {\n    public String toString() { return \"\"; }\n}\n",
+    "public class O {\n    @Override\n    public String toString() { return \"\"; }\n}\n", "O"));
+  assert.ok(sameDigest("php",
+    "<?php\nclass A {\n    function foo(int $x): int { return $x; }\n}\n",
+    "<?php\nclass A {\n    public function foo(int $x): int { return $x; }\n}\n", "A"));
+  assert.ok(sameDigest("php",
+    "<?php\nclass A {\n    function foo(int $x): int { return $x; }\n}\n",
+    "<?php\nclass A {\n    public function foo(int $x): int { return $x; }\n}\n", "foo"));
+  assert.ok(sameDigest("kotlin", "class G {\n    val x: Int get() = 5\n}\n", "class G {\n    val x: Int\n        get() = 5\n}\n", "G"));
+  assert.equal(shapeOf(braceShapes("class G {\n    val x: Int\n        get() = 5\n}\n", "kotlin"), "G"), "class G {val x: Int}");
 });
