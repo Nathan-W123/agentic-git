@@ -614,8 +614,20 @@ export function rubyShapes(source: string): SymbolShape[] | undefined {
 export function pythonShapes(read: readonly PythonShape[]): SymbolShape[] {
   const pieces = new Map<string, Piece[]>();
   for (const entry of read) {
+    const list = pieces.get(entry.symbol) ?? [];
+    // The same signature written on each branch of a platform switch is one
+    // signature. Kept once per branch it hashed as "() -> str | () -> str",
+    // and dropping a branch moved the digest while a caller saw no change.
+    if (
+      list.some(
+        (piece) =>
+          piece.kind === entry.kind && piece.comparable === entry.comparable,
+      )
+    ) {
+      continue;
+    }
     pieces.set(entry.symbol, [
-      ...(pieces.get(entry.symbol) ?? []),
+      ...list,
       {
         kind: entry.kind,
         shape: entry.shape,

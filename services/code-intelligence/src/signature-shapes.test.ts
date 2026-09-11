@@ -562,6 +562,23 @@ test("Python: an overload set is one contract, so an unchanged file does not dri
   assert.equal(digestOf(of("reordered.py"), "parse"), digestOf(of("a.py"), "parse"));
 });
 
+test("Python: one signature on every branch of a module-level if is one signature, not one per branch", async () => {
+  // A platform switch writes `sep` on both branches with one signature.
+  // Read as a piece per branch it hashed as "() -> str | () -> str", so
+  // dropping the else branch moved the digest while a caller saw nothing
+  // change — and a stale-contract warning showed the signature twice.
+  const of = await pythonShapesOf({
+    "switch.py": "import sys\nif sys.platform == 'win32':\n    def sep() -> str: ...\nelse:\n    def sep() -> str: ...\n",
+    "single.py": "def sep() -> str: ...\n",
+    "differs.py": "import sys\nif sys.platform == 'win32':\n    def sep() -> str: ...\nelse:\n    def sep(joiner: str) -> str: ...\n",
+  });
+  assert.equal(shapeOf(of("switch.py"), "sep"), "() -> str");
+  assert.equal(digestOf(of("switch.py"), "sep"), digestOf(of("single.py"), "sep"));
+  // Branches that disagree are both contract: a caller may be handed either.
+  assert.equal(shapeOf(of("differs.py"), "sep"), "() -> str | (joiner: str) -> str");
+  assert.notEqual(digestOf(of("differs.py"), "sep"), digestOf(of("switch.py"), "sep"));
+});
+
 test("Python: a decorator that changes how a member is called is contract; a route or a cache is not", async () => {
   const of = await pythonShapesOf({
     "decorated.py": "class M:\n    @property\n    def total(self) -> int: ...\n    @staticmethod\n    def parse(text: str) -> 'M': ...\n    @classmethod\n    def make(cls, n: int) -> 'M': ...\n",
