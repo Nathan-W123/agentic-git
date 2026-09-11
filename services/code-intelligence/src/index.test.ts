@@ -1121,3 +1121,75 @@ test("a Python repository has a dependency graph, and consumers can be found in 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a Go repository resolves a package to every file in it", async () => {
+  // A Go import names a directory, so one specifier is several edges — the
+  // reason resolution answers with a list. And none of it works without
+  // go.mod: a module's own import path is written there and nowhere else, so
+  // a repository whose go.mod is never read has no resolvable Go imports at
+  // all.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-goindex-"));
+  try {
+    const source = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await writeFile(path.join(source, "go.mod"), "module example.com/m\n\ngo 1.22\n");
+    await mkdir(path.join(source, "billing"), { recursive: true });
+    await writeFile(
+      path.join(source, "billing", "money.go"),
+      "package billing\n\nfunc Charge(amount int) int {\n\treturn amount\n}\n",
+    );
+    await writeFile(
+      path.join(source, "billing", "doc.go"),
+      "package billing\n\n// Package billing does things.\n",
+    );
+    await writeFile(
+      path.join(source, "billing", "money_test.go"),
+      "package billing\n\nfunc TestCharge(t *testing.T) {}\n",
+    );
+    await mkdir(path.join(source, "cmd", "app"), { recursive: true });
+    await writeFile(
+      path.join(source, "cmd", "app", "main.go"),
+      [
+        "package main",
+        "",
+        "import (",
+        '\t"fmt"',
+        '\t"example.com/m/billing"',
+        ")",
+        "",
+        "func main() { fmt.Println(billing.Charge(1)) }",
+      ].join("\n"),
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      "goexample",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const index = await new CodeIntelligenceService(repositories).index(
+      repository,
+      version.revision,
+    );
+
+    const from = "cmd/app/main.go";
+    const targets = index.edges
+      .filter((edge) => edge.fromFile === from && edge.toFile !== undefined)
+      .map((edge) => edge.toFile)
+      .sort();
+    // Both members of the package, and never the test file: an importer
+    // cannot see a `_test.go`, so an edge to one is always false.
+    assert.deepEqual(targets, ["billing/doc.go", "billing/money.go"]);
+    // `fmt` is the standard library and resolves to nothing, which is the
+    // ordinary answer for anything not in this repository.
+    assert.equal(
+      index.edges.some(
+        (edge) => edge.fromFile === from && edge.toFile?.startsWith("fmt"),
+      ),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

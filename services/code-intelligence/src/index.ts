@@ -1,7 +1,11 @@
 import { availableParallelism } from "node:os";
 import path from "node:path";
 
-import { resolvePythonImport } from "./python-imports.js";
+import {
+  resolveImportedFiles,
+  type ResolutionContext,
+} from "./import-resolution.js";
+import { goModuleRoots, readGoFile, type GoFileFacts } from "./go-imports.js";
 import { Worker } from "node:worker_threads";
 
 import {
@@ -225,6 +229,17 @@ export interface CodeIntelligenceOptions {
   /** Threads used to parse scripts on a cold build. Default 4. */
   maxParseWorkers?: number;
 }
+
+/**
+ * Files read for what they say about the repository rather than for their
+ * own contents.
+ *
+ * A Go module's import path is written in `go.mod` and nowhere else — not in
+ * the source, and not in the clone path either — so a repository whose
+ * `go.mod` is never read has no resolvable Go imports at all. These are not
+ * indexed: they produce no `IndexedFile` and no symbols.
+ */
+const MANIFESTS = new Set(["go.mod"]);
 
 const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".ts", "typescript"],
@@ -455,8 +470,8 @@ function analyzeScript(
     // bare call — so `implements AuditStore` contributed nothing at all. That
     // is fine where the import resolves, because the import edge already says
     // the two files are connected. It is not fine anywhere else:
-    // `resolveImport` gives up on any specifier that does not start with a
-    // dot, so in a repository using path aliases or workspace packages a class
+    // script resolution gives up on any specifier that does not start with
+    // a dot, so in a repository using path aliases or workspace packages a class
     // and the interface it implements have *no* recorded relation of any kind.
     // The decomposer then reads two unrelated modules, splits them into
     // separate tasks, and the conflict detector scores the pair at zero —
@@ -800,32 +815,6 @@ function analyzeDataFile(
   };
 }
 
-function resolveImport(
-  fromFile: string,
-  imported: string,
-  files: ReadonlySet<string>,
-): string | undefined {
-  if (!imported.startsWith(".")) {
-    return undefined;
-  }
-  const base = path.posix.normalize(
-    path.posix.join(path.posix.dirname(fromFile), imported),
-  );
-  const sourceBase = /\.(?:c|m)?jsx?$/u.test(base)
-    ? base.replace(/\.(?:c|m)?jsx?$/u, "")
-    : base;
-  const candidates = [
-    base,
-    ...[".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"].map(
-      (extension) => `${sourceBase}${extension}`,
-    ),
-    ...[".ts", ".tsx", ".js", ".jsx", ".json"].map((extension) =>
-      path.posix.join(base, `index${extension}`),
-    ),
-  ];
-  return candidates.find((candidate) => files.has(candidate));
-}
-
 /**
  * Scripts below this many are parsed on the calling thread.
  *
@@ -1151,7 +1140,12 @@ export class CodeIntelligenceService {
     const candidates = entries.filter(
       (entry) =>
         entry.type === "blob" &&
-        SOURCE_EXTENSIONS.has(path.posix.extname(entry.path).toLowerCase()),
+        (SOURCE_EXTENSIONS.has(path.posix.extname(entry.path).toLowerCase()) ||
+          // Not indexed, but read: a Go module's own import path lives in
+          // `go.mod` and nowhere else — not in the source, not in the clone
+          // path — so without this every Go specifier looks like a
+          // third-party module and no Go edge can ever resolve.
+          MANIFESTS.has(path.posix.basename(entry.path))),
     );
     // Holes while the loop runs: a script's slot is claimed in order and
     // filled once every script has been parsed, so deferring the parse cannot
@@ -1161,6 +1155,10 @@ export class CodeIntelligenceService {
     const scripts: ScriptJob[] = [];
     /** Python sources, answered in one batch once every file has been read. */
     const pythonSources = new Map<string, string>();
+    /** Manifests read for what they say about the repository, not indexed. */
+    const manifests = new Map<string, string>();
+    /** What each Go file says about itself, for resolving a package to files. */
+    const goFacts = new Map<string, GoFileFacts>();
     /** Parsed this time round, remembered once Python has had its turn. */
     const fresh = new Map<string, IndexedFile>();
     let totalBytes = 0;
@@ -1221,6 +1219,9 @@ export class CodeIntelligenceService {
             path.posix.extname(filePath).toLowerCase(),
           );
           if (language === undefined) {
+            if (MANIFESTS.has(path.posix.basename(filePath))) {
+              manifests.set(filePath, source);
+            }
             continue;
           }
           if (cached !== undefined) {
@@ -1252,14 +1253,23 @@ export class CodeIntelligenceService {
               analyzeScannedFile(filePath, source, language, rubySymbolRanges(source)),
             );
           } else if (BRACE_LANGUAGES.has(language)) {
-            slots.push(
-              analyzeScannedFile(
-                filePath,
-                source,
-                language,
-                braceSymbolRanges(source, language as BraceLanguage),
-              ),
+            const scanned = analyzeScannedFile(
+              filePath,
+              source,
+              language,
+              braceSymbolRanges(source, language as BraceLanguage),
             );
+            if (language === "go") {
+              // Only the prologue is read — Go puts the package clause first
+              // and every import before any declaration, so the region has a
+              // defined end and cannot contain a function body.
+              const facts = readGoFile(source);
+              if (facts !== undefined) {
+                goFacts.set(filePath, facts);
+                scanned.imports = facts.imports;
+              }
+            }
+            slots.push(scanned);
           } else {
             slots.push(analyzeDataFile(filePath, source, language));
           }
@@ -1320,26 +1330,48 @@ export class CodeIntelligenceService {
     }
 
     const allPaths = new Set(repositoryFiles);
-    const pythonContext = {
+    // Built once, after every file has been read, because what a specifier
+    // resolves to is a fact about the repository rather than about the file:
+    // a Go import names a directory, a JVM import names a type, and Python
+    // needs the interpreter's own standard-library list.
+    const resolution: ResolutionContext = {
       files: allPaths,
-      stdlib: pythonAnswers.stdlib,
+      pythonStdlib: pythonAnswers.stdlib,
+      goModuleRoots: goModuleRoots(manifests),
+      goFacts,
     };
     const edges: DependencyEdge[] = [];
     for (const file of files) {
       for (const imported of file.imports) {
-        // Resolution is per language, because a specifier means different
-        // things in each. A TypeScript one is a path; a Python one is a
-        // dotted module name that has to be searched for.
-        const target =
-          file.language === "python"
-            ? resolvePythonImport(file.path, imported, pythonContext)
-            : resolveImport(file.path, imported, allPaths);
-        edges.push({
-          fromFile: file.path,
-          ...(target === undefined ? {} : { toFile: target }),
-          resource: target ?? imported,
-          kind: "import",
-        });
+        const targets = resolveImportedFiles(
+          file.language,
+          file.path,
+          imported,
+          resolution,
+        );
+        if (targets.length === 0) {
+          // Unresolved, and that is the ordinary case: the standard library,
+          // an installed package, a language with no resolver yet. The edge
+          // is still recorded against the specifier, because "this file
+          // imports express" is worth knowing even though express is not
+          // here.
+          edges.push({
+            fromFile: file.path,
+            resource: imported,
+            kind: "import",
+          });
+          continue;
+        }
+        // One specifier, several edges: a Go import names a directory, and
+        // every file in it is a real dependency of the importer.
+        for (const target of targets) {
+          edges.push({
+            fromFile: file.path,
+            toFile: target,
+            resource: target,
+            kind: "import",
+          });
+        }
       }
       for (const service of file.services) {
         edges.push({
