@@ -70,7 +70,15 @@ function goFileIsIgnored(file: string): boolean {
  * reader has lost its place, and the whole file is abandoned.
  */
 export function readGoFile(source: string): GoFileFacts | undefined {
-  const text = source.startsWith("\uFEFF") ? source.slice(1) : source;
+  // Line endings are normalised because go/build trims each header line
+  // before reading it, so a CRLF line is a blank line and `// +build` ends
+  // at the `\r`. Read raw, the `+build` regex never matched a body ending
+  // in `\r` and the blank-line test never saw `\n\r\n` as blank, and a
+  // CRLF-saved generator script joined its package.
+  const text = (source.startsWith("\uFEFF") ? source.slice(1) : source).replace(
+    /\r\n/gu,
+    "\n",
+  );
 
   let at = 0;
   // Every line comment the walker steps over before the package clause, with
@@ -154,7 +162,7 @@ export function readGoFile(source: string): GoFileFacts | undefined {
   if (!skipTrivia()) {
     return undefined;
   }
-  const name = /^[A-Za-z_]\w*/u.exec(text.slice(at))?.[0];
+  const name = IDENTIFIER.exec(text.slice(at))?.[0];
   if (name === undefined) {
     return undefined;
   }
@@ -168,10 +176,13 @@ export function readGoFile(source: string): GoFileFacts | undefined {
     if (at >= text.length) {
       break;
     }
-    if (!text.startsWith("import", at) || /\w/u.test(text[at + 6] ?? "")) {
+    if (
+      !text.startsWith("import", at) ||
+      IDENTIFIER_CHARACTER.test(text[at + 6] ?? "")
+    ) {
       // The prologue ends here. Only a declaration may follow it, and
       // anything else means this reader mis-parsed something above.
-      const next = /^[A-Za-z_]\w*/u.exec(text.slice(at))?.[0];
+      const next = IDENTIFIER.exec(text.slice(at))?.[0];
       return next !== undefined &&
         ["func", "type", "const", "var"].includes(next)
         ? { packageName: name, buildIgnored, imports }
@@ -194,7 +205,7 @@ export function readGoFile(source: string): GoFileFacts | undefined {
         break;
       }
       // An optional name: `_`, `.`, or an identifier alias.
-      const alias = /^(?:_|\.|[A-Za-z_]\w*)/u.exec(text.slice(at))?.[0];
+      const alias = text[at] === "." ? "." : IDENTIFIER.exec(text.slice(at))?.[0];
       if (alias !== undefined && text[at] !== '"' && text[at] !== "`") {
         at += alias.length;
         if (!skipTrivia()) {
@@ -215,12 +226,22 @@ export function readGoFile(source: string): GoFileFacts | undefined {
 }
 
 /**
+ * A Go identifier: a letter or underscore, then letters, digits and
+ * underscores — where a letter is any Unicode letter, not an ASCII one. The
+ * first version wrote `[A-Za-z_]\w*`, and a legal file with `π "math"` among
+ * its imports was abandoned whole, indexed as importing nothing.
+ */
+const IDENTIFIER = /^[\p{L}_][\p{L}\p{Nd}_]*/u;
+const IDENTIFIER_CHARACTER = /[\p{L}\p{Nd}_]/u;
+
+/**
  * Whether the constraint comments above the package clause exclude the file
  * from every build.
  *
- * `//go:build` is authoritative when present, and only the expression that is
- * exactly `ignore` is honoured: `!ignore` builds everywhere, and anything with
- * an operator in it depends on tags this cannot see. The older `// +build`
+ * `//go:build` is authoritative when present, and only the expression that
+ * evaluates to the bare `ignore` tag is honoured — `(ignore)` is that tag,
+ * `!ignore` builds everywhere, and anything with an operator in it depends on
+ * tags this cannot see. The older `// +build`
  * form is a list of OR-ed terms, each a comma list of AND-ed tags, and it
  * only counts as a constraint when a blank line separates it from the
  * package clause — without one the go tool reads it as a doc comment.
@@ -235,7 +256,8 @@ function constrainedToIgnore(
   );
   if (goBuild.length > 0) {
     return goBuild.some(
-      (comment) => comment.body.slice("//go:build".length).trim() === "ignore",
+      (comment) =>
+        unparenthesised(comment.body.slice("//go:build".length)) === "ignore",
     );
   }
   return comments.some((comment) => {
@@ -251,6 +273,32 @@ function constrainedToIgnore(
       .split(/\s+/u)
       .some((term) => term.split(",").includes("ignore"));
   });
+}
+
+/**
+ * A build expression with its whitespace and every enclosing pair of
+ * parentheses removed: `( ignore )` and `((ignore))` are the tag `ignore`.
+ * Only a pair that encloses the whole expression is removed — `(a)&&(b)`
+ * begins with `(` and ends with `)` and is not enclosed by either.
+ */
+function unparenthesised(expression: string): string {
+  let text = expression.replace(/\s+/gu, "");
+  while (text.startsWith("(") && text.endsWith(")")) {
+    let depth = 0;
+    let enclosed = true;
+    for (let index = 0; index < text.length - 1; index += 1) {
+      depth += text[index] === "(" ? 1 : text[index] === ")" ? -1 : 0;
+      if (depth === 0) {
+        enclosed = false;
+        break;
+      }
+    }
+    if (!enclosed) {
+      break;
+    }
+    text = text.slice(1, -1);
+  }
+  return text;
 }
 
 /**
