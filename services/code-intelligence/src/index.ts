@@ -2123,11 +2123,17 @@ export class CodeIntelligenceService {
     before: RepositoryIndex,
     after: RepositoryIndex,
   ): Array<ContractChange & { consumers: string[] }> {
+    // A file whose shapes could not be read is handed over as `undefined`,
+    // never dropped: dropped, it is indistinguishable from deleted, and
+    // `contractChanges` would report every contract it had as removed. The
+    // comparison then leaves it out on either side, which is the honest
+    // answer — nothing is known about it at that revision.
     const shapesOf = (index: RepositoryIndex) =>
       new Map(
-        index.files
-          .filter((file) => file.exportedShapesUnknown !== true)
-          .map((file) => [file.path, file.exportedShapes]),
+        index.files.map((file) => [
+          file.path,
+          file.exportedShapesUnknown === true ? undefined : file.exportedShapes,
+        ]),
       );
     return contractChanges(shapesOf(before), shapesOf(after)).map((change) => ({
       ...change,

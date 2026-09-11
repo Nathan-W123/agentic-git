@@ -331,19 +331,32 @@ export interface ContractChange {
  * anybody, because nothing can be depending on a name that did not exist. The
  * asymmetry is the point — a mechanism that treated every new export as a
  * contract change would fire on every feature branch ever opened.
+ *
+ * A file maps to `undefined` when its shapes could not be read at that
+ * revision. That is not an answer, and it is compared as none: a file that is
+ * *absent* from `after` has been deleted and its contracts have gone with it,
+ * while a file that is *unreadable* at `after` — a syntax error, a construct
+ * the scanner refuses — may still publish every one of them. Reporting the
+ * second as the first told every consumer its dependency had been removed
+ * because somebody left a bracket open.
  */
 export function contractChanges(
-  before: ReadonlyMap<string, readonly SymbolShape[]>,
-  after: ReadonlyMap<string, readonly SymbolShape[]>,
+  before: ReadonlyMap<string, readonly SymbolShape[] | undefined>,
+  after: ReadonlyMap<string, readonly SymbolShape[] | undefined>,
 ): ContractChange[] {
   const changes: ContractChange[] = [];
   for (const [file, was] of before) {
-    const now = new Map(
-      (after.get(file) ?? []).map((shape) => [shape.symbol, shape]),
-    );
+    if (was === undefined) {
+      continue;
+    }
+    const current = after.get(file);
+    if (current === undefined && after.has(file)) {
+      continue;
+    }
+    const now = new Map((current ?? []).map((shape) => [shape.symbol, shape]));
     for (const shape of was) {
-      const current = now.get(shape.symbol);
-      if (current === undefined) {
+      const latest = now.get(shape.symbol);
+      if (latest === undefined) {
         changes.push({
           file,
           symbol: shape.symbol,
@@ -353,13 +366,13 @@ export function contractChanges(
         });
         continue;
       }
-      if (current.digest !== shape.digest) {
+      if (latest.digest !== shape.digest) {
         changes.push({
           file,
           symbol: shape.symbol,
-          kind: current.kind,
+          kind: latest.kind,
           before: shape.shape,
-          after: current.shape,
+          after: latest.shape,
         });
       }
     }

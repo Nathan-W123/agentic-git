@@ -1525,10 +1525,67 @@ async function seededRepository(files: Record<string, string>, name: string) {
     repositories,
     repository,
     revision,
+    source,
     advance,
     dispose: () => rm(root, { recursive: true, force: true }),
   };
 }
+
+test("a file the reader refuses at canonical's tip is unknown there, not removed", async () => {
+  // Readable at the merge base, unreadable at the tip: the Python file gains
+  // a syntax error, the Ruby one a construct the scanner does not follow.
+  // The old comparison dropped unreadable files from `after`, which made
+  // "could not read" look exactly like "deleted", and every contract the
+  // file had was reported as removed and pushed to its consumers.
+  const repo = await seededRepository(
+    {
+      "billing/__init__.py": "",
+      "billing/money.py": "class Money:\n    def add(self, other: int) -> 'Money':\n        return self\n\ndef parse(x: int) -> int:\n    return x\n",
+      "billing/app.py": "from billing.money import Money, parse\n",
+      "lib/money.rb": "class Money\n  def initialize(amount)\n    @amount = amount\n  end\nend\n",
+      "lib/app.rb": 'require_relative "money"\n',
+      "lib/gone.rb": "class Gone\n  def away(x)\n  end\nend\n",
+      "lib/keeps.rb": 'require_relative "gone"\n',
+    },
+    "unreadable-after",
+  );
+  try {
+    const service = new CodeIntelligenceService(repo.repositories);
+    const before = await service.index(repo.repository, repo.revision);
+    await rm(path.join(repo.source, "lib", "gone.rb"));
+    const tip = await repo.advance(
+      {
+        "billing/money.py": "class Money:\n    def add(self, other: int) -> 'Money':\n        return self\n\ndef parse(x: int) -> int:\n    return (x\n",
+        "lib/money.rb": "class Money\n  def initialize(amount)\n    while amount\n  end\nend\n",
+      },
+      "break the readers, delete a file",
+    );
+    const after = await service.index(repo.repository, tip);
+    for (const file of ["billing/money.py", "lib/money.rb"]) {
+      assert.equal(after.files.find((entry) => entry.path === file)?.exportedShapesUnknown, true, file);
+    }
+    // Only the file that is actually gone has taken its contracts with it.
+    const drift = service.contractDrift(before, after);
+    assert.deepEqual(
+      drift.map((change) => [change.file, change.symbol, change.after, change.consumers]),
+      [
+        ["lib/gone.rb", "away", "(removed)", ["lib/keeps.rb"]],
+        ["lib/gone.rb", "Gone", "(removed)", ["lib/keeps.rb"]],
+      ],
+    );
+    const stale = await service.staleContracts(repo.repository, {
+      mergeBase: repo.revision,
+      baseHead: tip,
+      files: ["billing/app.py", "lib/app.rb", "lib/keeps.rb"],
+    });
+    assert.deepEqual(stale.map((entry) => entry.file), ["lib/gone.rb", "lib/gone.rb"]);
+    // The mirror image — unreadable at the base, readable at the tip — has
+    // nothing to compare against and reports nothing either.
+    assert.deepEqual(service.contractDrift(after, before), []);
+  } finally {
+    await repo.dispose();
+  }
+});
 
 test("a file the parse cache lost mid-build is unreadable, not empty, and is not remembered", async () => {
   // Two builds overlap and the cache is at capacity, so an entry present at
