@@ -390,7 +390,9 @@ test("Python: the interpreter reads the signature, with defaults as optionality 
     ]),
   );
   const shapes = pythonShapes(read.files.get("m.py")?.shapes ?? []);
-  assert.deepEqual(symbols(shapes), ["charge", "fetch", "Money", "posonly"]);
+  // A public method of a public class is a name a caller reaches, and is
+  // published in its own right the way every other scanned language does.
+  assert.deepEqual(symbols(shapes), ["__init__", "add", "charge", "fetch", "formatted", "Money", "posonly"]);
   assert.equal(shapeOf(shapes, "charge"), "(amount: int, currency: str?, *, force: bool?) -> bool");
   assert.equal(shapes.find((entry) => entry.symbol === "charge")?.inferred, undefined);
   assert.equal(shapeOf(shapes, "fetch"), "async (url)");
@@ -398,13 +400,175 @@ test("Python: the interpreter reads the signature, with defaults as optionality 
   assert.equal(shapeOf(shapes, "posonly"), "(a, b, /, c, *args, d, **kw) -> None");
   assert.equal(
     shapeOf(shapes, "Money"),
-    "(Base, metaclass=Meta) {RATE; __init__(self, amount: int) -> None; add(self, other); amount: int; formatted(self) -> str}",
+    "(Base, metaclass=Meta) {@property formatted(self) -> str; RATE; __init__(self, amount: int) -> None; add(self, other); amount: int}",
   );
   // A default's value and a body are not contract; a parameter's type is.
   const changed = pythonShapes(read.files.get("changed.py")?.shapes ?? []);
   const body = pythonShapes(read.files.get("body.py")?.shapes ?? []);
   assert.equal(digestOf(body, "charge"), digestOf(shapes, "charge"));
   assert.notEqual(digestOf(changed, "charge"), digestOf(shapes, "charge"));
+});
+
+async function pythonShapesOf(files: Record<string, string>) {
+  const read = await pythonSymbolRanges(new Map(Object.entries(files)));
+  return (file: string) => pythonShapes(read.files.get(file)?.shapes ?? []);
+}
+
+test("Python: an overload set is one contract, so an unchanged file does not drift against itself", async () => {
+  // One entry per definition arrived at the differ as three shapes under one
+  // name, and each `before` entry was compared to whichever `after` entry
+  // came last: a module using the standard @overload idiom drifted against
+  // an identical copy of itself on every check.
+  const of = await pythonShapesOf({
+    "a.py": "from typing import overload\n@overload\ndef parse(x: int) -> int: ...\n@overload\ndef parse(x: str) -> str: ...\ndef parse(x):\n    return x\n",
+    "moved.py": "from typing import overload\n@overload\ndef parse(x: int) -> str: ...\n@overload\ndef parse(x: str) -> str: ...\ndef parse(x):\n    return x\n",
+    "reordered.py": "from typing import overload\n@overload\ndef parse(x: str) -> str: ...\n@overload\ndef parse(x: int) -> int: ...\ndef parse(x):\n    return x\n",
+  });
+  assert.deepEqual(symbols(of("a.py")), ["parse"]);
+  assert.equal(shapeOf(of("a.py"), "parse"), "(x: int) -> int | (x: str) -> str | (x)");
+  // The set is one contract: its digest moves when one signature moves and
+  // stays when the overloads are merely written in another order.
+  assert.notEqual(digestOf(of("moved.py"), "parse"), digestOf(of("a.py"), "parse"));
+  assert.equal(digestOf(of("reordered.py"), "parse"), digestOf(of("a.py"), "parse"));
+});
+
+test("Python: a decorator that changes how a member is called is contract; a route or a cache is not", async () => {
+  const of = await pythonShapesOf({
+    "decorated.py": "class M:\n    @property\n    def total(self) -> int: ...\n    @staticmethod\n    def parse(text: str) -> 'M': ...\n    @classmethod\n    def make(cls, n: int) -> 'M': ...\n",
+    "plain.py": "class M:\n    def total(self) -> int: ...\n    def parse(text: str) -> 'M': ...\n    def make(cls, n: int) -> 'M': ...\n",
+    "dc.py": "from dataclasses import dataclass\n@dataclass(frozen=True)\nclass P:\n    x: int\n",
+    "nodc.py": "class P:\n    x: int\n",
+    "route.py": "@app.route('/x')\n@functools.lru_cache(maxsize=8)\ndef handler(q: str) -> str: ...\n",
+    "reroute.py": "@app.route('/y')\n@lru_cache(maxsize=16)\ndef handler(q: str) -> str: ...\n",
+  });
+  // `m.total` stops working when @property goes; `M.parse("x")` when
+  // @staticmethod goes; `P(1)` when @dataclass goes.
+  assert.equal(
+    shapeOf(of("decorated.py"), "M"),
+    "{@classmethod make(cls, n: int) -> M; @property total(self) -> int; @staticmethod parse(text: str) -> M}",
+  );
+  assert.notEqual(digestOf(of("decorated.py"), "M"), digestOf(of("plain.py"), "M"));
+  assert.notEqual(digestOf(of("decorated.py"), "total"), digestOf(of("plain.py"), "total"));
+  assert.equal(shapeOf(of("dc.py"), "P"), "@dataclass(frozen=True) {x: int}");
+  assert.notEqual(digestOf(of("dc.py"), "P"), digestOf(of("nodc.py"), "P"));
+  // Whereas a route's path and a cache's size are values: changing them is
+  // not changing how `handler` is called.
+  assert.equal(shapeOf(of("route.py"), "handler"), "(q: str) -> str");
+  assert.equal(digestOf(of("route.py"), "handler"), digestOf(of("reroute.py"), "handler"));
+});
+
+test("Python: an enum's values and order are contract, and so is a dataclass's or NamedTuple's field order", async () => {
+  const of = await pythonShapesOf({
+    "e1.py": "from enum import Enum\nclass Color(Enum):\n    RED = 1\n    GREEN = 2\n",
+    "e2.py": "from enum import Enum\nclass Color(Enum):\n    RED = 2\n    GREEN = 1\n",
+    "e3.py": "from enum import Enum, auto\nclass Color(Enum):\n    RED = auto()\n    GREEN = auto()\n",
+    "e4.py": "from enum import Enum, auto\nclass Color(Enum):\n    GREEN = auto()\n    RED = auto()\n",
+    "d1.py": "from dataclasses import dataclass\n@dataclass\nclass P:\n    x: int\n    y: str\n",
+    "d2.py": "from dataclasses import dataclass\n@dataclass\nclass P:\n    y: str\n    x: int\n",
+    "k1.py": "from dataclasses import dataclass\n@dataclass(kw_only=True)\nclass P:\n    x: int\n    y: str\n",
+    "k2.py": "from dataclasses import dataclass\n@dataclass(kw_only=True)\nclass P:\n    y: str\n    x: int\n",
+    "n1.py": "from typing import NamedTuple\nclass Row(NamedTuple):\n    id: int\n    name: str\n",
+    "n2.py": "from typing import NamedTuple\nclass Row(NamedTuple):\n    name: str\n    id: int\n",
+    "c1.py": "class C:\n    x: int\n    y: str\n",
+    "c2.py": "class C:\n    y: str\n    x: int\n",
+  });
+  // A member's value is what a caller compares against, and an auto() takes
+  // its value from its position; both are kept, in the order written.
+  assert.equal(shapeOf(of("e1.py"), "Color"), "(Enum) {RED = 1; GREEN = 2}");
+  assert.equal(of("e1.py").find((entry) => entry.symbol === "Color")?.kind, "enum");
+  assert.notEqual(digestOf(of("e1.py"), "Color"), digestOf(of("e2.py"), "Color"));
+  assert.notEqual(digestOf(of("e3.py"), "Color"), digestOf(of("e4.py"), "Color"));
+  // P(1, "a") and Row(1, "a") bind by position, so swapping two fields
+  // changes what a call means...
+  assert.notEqual(digestOf(of("d1.py"), "P"), digestOf(of("d2.py"), "P"));
+  assert.notEqual(digestOf(of("n1.py"), "Row"), digestOf(of("n2.py"), "Row"));
+  // ...but a keyword-only dataclass and a plain class have no positions, and
+  // there moving a field is still not a contract change.
+  assert.equal(digestOf(of("k1.py"), "P"), digestOf(of("k2.py"), "P"));
+  assert.equal(digestOf(of("c1.py"), "C"), digestOf(of("c2.py"), "C"));
+});
+
+test("Python: a nested class is part of its outer class and a contract in its own right", async () => {
+  const of = await pythonShapesOf({
+    "a.py": "class Outer:\n    class Inner:\n        def run(self, a: int) -> None: ...\n    def go(self) -> None: ...\n",
+    "retyped.py": "class Outer:\n    class Inner:\n        def run(self, a: str) -> None: ...\n    def go(self) -> None: ...\n",
+    "gone.py": "class Outer:\n    def go(self) -> None: ...\n",
+  });
+  assert.equal(shapeOf(of("a.py"), "Outer"), "{Inner {run(self, a: int) -> None}; go(self) -> None}");
+  // A caller of Outer.Inner().run(...) is broken by either change.
+  assert.notEqual(digestOf(of("a.py"), "Outer"), digestOf(of("retyped.py"), "Outer"));
+  assert.notEqual(digestOf(of("a.py"), "Outer"), digestOf(of("gone.py"), "Outer"));
+  assert.equal(shapeOf(of("a.py"), "Inner"), "{run(self, a: int) -> None}");
+  assert.equal(shapeOf(of("gone.py"), "Inner"), undefined);
+});
+
+test("Python: what a caller can reach is exported; only underscore names are known and local", async () => {
+  // The interface tier reads a name the index knows but does not export as
+  // branch-local. Public methods, nested classes and defs under a
+  // module-level if or try are all reachable, so leaving them out of the
+  // exported list handed two branches editing one method to Git alone.
+  const read = await pythonSymbolRanges(
+    new Map([
+      [
+        "m.py",
+        [
+          "import sys",
+          "__all__ = ['_published']",
+          "class Money:",
+          "    def add(self, other: int) -> 'Money': ...",
+          "    def _secret(self): ...",
+          "    class Inner:",
+          "        def run(self) -> None: ...",
+          "if sys.platform == 'win32':",
+          "    def sep() -> str: ...",
+          "else:",
+          "    def sep() -> str: ...",
+          "try:",
+          "    from fast import Parser",
+          "except ImportError:",
+          "    class Parser: ...",
+          "def _published(): ...",
+          "def _hidden(): ...",
+        ].join("\n"),
+      ],
+    ]),
+  );
+  const file = read.files.get("m.py");
+  const exported = symbols(pythonShapes(file?.shapes ?? [])) ?? [];
+  const known = file?.ranges.map((range) => range.name) ?? [];
+  for (const name of ["Money", "add", "Inner", "run", "sep", "Parser", "_published"]) {
+    assert.ok(exported.includes(name), `${name} is reachable and must be exported`);
+  }
+  for (const name of ["_secret", "_hidden"]) {
+    assert.ok(known.includes(name) && !exported.includes(name), `${name} is known and local`);
+  }
+});
+
+test("Python: a class with no bases and an async method render as a person would write them", async () => {
+  // Presentation only — the digests were already distinct — but it is what a
+  // stale-contract warning shows somebody, and `fetchasync (` names a method
+  // that does not exist.
+  const of = await pythonShapesOf({
+    "a.py": 'class Empty:\n    """doc"""\nclass S:\n    async def fetch(self, url: str) -> bytes: ...\n',
+  });
+  assert.equal(shapeOf(of("a.py"), "Empty"), "{}");
+  assert.equal(shapeOf(of("a.py"), "S"), "{async fetch(self, url: str) -> bytes}");
+});
+
+test("Python: a quoted forward reference and the bare name are one contract; the strings in a Literal are not", async () => {
+  const of = await pythonShapesOf({
+    "quoted.py": "def f(x: 'Money', xs: 'list[Money]') -> 'Money': ...\n",
+    "bare.py": "from __future__ import annotations\ndef f(x: Money, xs: list[Money]) -> Money: ...\n",
+    "lit_a.py": "from typing import Literal\ndef mode(m: Literal['r', 'w']) -> None: ...\n",
+    "lit_b.py": "from typing import Literal\ndef mode(m: Literal['r', 'a']) -> None: ...\n",
+  });
+  // Moving to `from __future__ import annotations` rewrites every quote in a
+  // module and changes no contract; it must not move every digest.
+  assert.equal(shapeOf(of("quoted.py"), "f"), "(x: Money, xs: list[Money]) -> Money");
+  assert.equal(digestOf(of("quoted.py"), "f"), digestOf(of("bare.py"), "f"));
+  // Whereas 'r' in a Literal is a value the caller passes, and 'a' is another.
+  assert.equal(shapeOf(of("lit_a.py"), "mode"), "(m: Literal['r', 'w']) -> None");
+  assert.notEqual(digestOf(of("lit_a.py"), "mode"), digestOf(of("lit_b.py"), "mode"));
 });
 
 test("a file the masker cannot follow has unknown shapes, not empty ones", () => {

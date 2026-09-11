@@ -502,16 +502,30 @@ export function rubyShapes(source: string): SymbolShape[] | undefined {
     .sort((left, right) => left.symbol.localeCompare(right.symbol));
 }
 
-/** The Python reader's declarations, hashed the way every other shape is. */
+/**
+ * The Python reader's declarations, hashed the way every other shape is.
+ *
+ * Several definitions under one name — an `@overload` set, a def on each
+ * branch of a module-level `if` — are one contract, assembled the way a
+ * brace language's overloads are. Left as several entries they compared
+ * each `before` entry to whichever `after` entry came last, and an
+ * unchanged file drifted against itself.
+ */
 export function pythonShapes(read: readonly PythonShape[]): SymbolShape[] {
-  return read
-    .map((entry) => ({
-      symbol: entry.symbol,
-      kind: entry.kind,
-      shape: entry.shape,
-      digest: digestOf(`${entry.kind} ${entry.comparable}`),
-      ...(entry.inferred ? { inferred: true } : {}),
-    }))
+  const pieces = new Map<string, Piece[]>();
+  for (const entry of read) {
+    pieces.set(entry.symbol, [
+      ...(pieces.get(entry.symbol) ?? []),
+      {
+        kind: entry.kind,
+        shape: entry.shape,
+        comparable: entry.comparable,
+        inferred: entry.inferred,
+      },
+    ]);
+  }
+  return [...pieces]
+    .map(([symbol, list]) => assemble(symbol, list))
     .sort((left, right) => left.symbol.localeCompare(right.symbol));
 }
 

@@ -717,7 +717,7 @@ export function rubySymbolRanges(source: string): SymbolRange[] | undefined {
  * for Python before any of this existed.
  */
 const PYTHON_READER = `
-import ast, json, sys
+import ast, copy, json, sys
 
 def spans(tree):
     found = {}
@@ -738,6 +738,66 @@ def spans(tree):
             previous["endLine"] = max(previous["endLine"], end)
     return sorted(found.values(), key=lambda entry: entry["startLine"])
 
+# The decorators that change how a caller reaches the thing under them: a
+# property is read without a call, a static or class method is called on the
+# class, a dataclass gets a generated constructor. Any other decorator — a
+# route, a cache, a registration — carries values, and a change to its
+# arguments is not a change to how the member is called. \`@overload\` is
+# among the dropped ones on purpose: the overload set is one contract.
+KEPT_DECORATORS = {"property", "cached_property", "setter", "getter", "deleter", "staticmethod", "classmethod", "dataclass"}
+
+def decorator(node):
+    call = node.func if isinstance(node, ast.Call) else node
+    if isinstance(call, ast.Attribute):
+        name = call.attr
+    elif isinstance(call, ast.Name):
+        name = call.id
+    else:
+        return None
+    if name not in KEPT_DECORATORS:
+        return None
+    # \`@total.setter\` names the property it belongs to; a module prefix, as in
+    # \`@functools.cached_property\`, is spelling.
+    text = ast.unparse(call) if name in ("setter", "getter", "deleter") else name
+    if isinstance(node, ast.Call) and (node.args or node.keywords):
+        parts = [ast.unparse(a) for a in node.args]
+        parts += sorted(k.arg + "=" + ast.unparse(k.value) for k in node.keywords if k.arg)
+        text += "(" + ", ".join(parts) + ")"
+    return "@" + text
+
+def decorated(node):
+    return "".join(text + " " for text in map(decorator, node.decorator_list) if text)
+
+def prefix(node):
+    return "async " if isinstance(node, ast.AsyncFunctionDef) else ""
+
+class Unquoted(ast.NodeTransformer):
+    # A quoted annotation names the same type as the bare one; the quotes are
+    # how a forward reference is spelled, and a file that moves to
+    # \`from __future__ import annotations\` has not changed a contract. The
+    # strings inside a Literal[...] are values and stay quoted, as does the
+    # metadata after the type in Annotated[...].
+    def visit_Constant(self, node):
+        if isinstance(node.value, str):
+            try:
+                return ast.parse(node.value.strip(), mode="eval").body
+            except SyntaxError:
+                return node
+        return node
+
+    def visit_Subscript(self, node):
+        head = node.value
+        name = head.attr if isinstance(head, ast.Attribute) else getattr(head, "id", None)
+        if name == "Literal":
+            return node
+        if name == "Annotated" and isinstance(node.slice, ast.Tuple) and node.slice.elts:
+            node.slice.elts[0] = self.visit(node.slice.elts[0])
+            return node
+        return self.generic_visit(node)
+
+def annotation(node):
+    return ast.unparse(Unquoted().visit(copy.deepcopy(node)))
+
 def signature(node):
     # Parameters as a caller sees them: name, annotation, and whether a
     # default makes it optional — but not the default itself, which is a
@@ -750,7 +810,7 @@ def signature(node):
         nonlocal inferred
         text = prefix + arg.arg
         if arg.annotation is not None:
-            text += ": " + ast.unparse(arg.annotation)
+            text += ": " + annotation(arg.annotation)
         elif arg.arg not in ("self", "cls"):
             inferred = True
         if default:
@@ -772,42 +832,117 @@ def signature(node):
         out.append(one(a.kwarg, False, "**"))
     text = "(" + ", ".join(out) + ")"
     if node.returns is not None:
-        text += " -> " + ast.unparse(node.returns)
-    if isinstance(node, ast.AsyncFunctionDef):
-        text = "async " + text
+        text += " -> " + annotation(node.returns)
     return text, inferred
 
 def public(name):
     return not name.startswith("_") or (name.startswith("__") and name.endswith("__"))
 
+def published(tree):
+    # A literal __all__ publishes what it names, underscore or not. It hides
+    # nothing: a name left out of it is still importable by name.
+    names = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets):
+            continue
+        if isinstance(node.value, (ast.List, ast.Tuple)):
+            names.update(e.value for e in node.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    return names
+
+BRANCHING = tuple(getattr(ast, name) for name in ("If", "Try", "TryStar", "With", "AsyncWith", "Match") if hasattr(ast, name))
+
+def declarations(body):
+    # A def or class under a module-level if, try, with or match is declared
+    # on some branch, and a caller cannot tell which, so every branch is read.
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield node
+        elif isinstance(node, BRANCHING):
+            for field in ("body", "orelse", "finalbody"):
+                yield from declarations(getattr(node, field, None) or [])
+            for handler in getattr(node, "handlers", None) or []:
+                yield from declarations(handler.body)
+            for case in getattr(node, "cases", None) or []:
+                yield from declarations(case.body)
+
+def base_name(node):
+    return node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
+
+def function_shape(node, out):
+    text, inferred = signature(node)
+    shape = decorated(node) + prefix(node) + text
+    out.append({"symbol": node.name, "kind": "function", "shape": shape, "comparable": shape, "inferred": inferred})
+    return text, inferred
+
+def class_shape(node, out):
+    # Every public member is published as a symbol of its own as well, the
+    # way the Ruby and brace readers publish each method: a method is a name
+    # a caller reaches, and a name known to the index but not exported by it
+    # is read as branch-local by the interface tier.
+    bases = [annotation(b) for b in node.bases] + [k.arg + "=" + ast.unparse(k.value) for k in node.keywords if k.arg]
+    names = [base_name(b) for b in node.bases]
+    enum = any(name.endswith(("Enum", "Flag")) for name in names)
+    decorators = decorated(node)
+    # A dataclass and a NamedTuple bind positional arguments to their fields
+    # in the order written, so that order is contract. A keyword-only
+    # dataclass does not, and neither does any other class.
+    positional = "NamedTuple" in names or ("@dataclass" in decorators and "kw_only=True" not in decorators)
+    ordered = []
+    unordered = []
+    inferred = False
+    for child in node.body:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not public(child.name):
+                continue
+            text, sub = function_shape(child, out)
+            inferred = inferred or sub
+            unordered.append(decorated(child) + prefix(child) + child.name + text)
+        elif isinstance(child, ast.ClassDef):
+            if not public(child.name):
+                continue
+            text, sub = class_shape(child, out)
+            inferred = inferred or sub
+            unordered.append(decorated(child) + child.name + ("" if text.startswith("(") else " ") + text)
+        elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name) and public(child.target.id):
+            field = child.target.id + ": " + annotation(child.annotation)
+            if enum and child.value is not None:
+                ordered.append(field + " = " + ast.unparse(child.value))
+            elif positional:
+                ordered.append(field)
+            else:
+                unordered.append(field)
+        elif isinstance(child, ast.Assign):
+            for target in child.targets:
+                if isinstance(target, ast.Name) and public(target.id):
+                    # An enum member's value is its contract, and so is its
+                    # position, which is where an auto() takes its value
+                    # from. Any other class attribute's value is a value.
+                    if enum:
+                        ordered.append(target.id + " = " + ast.unparse(child.value))
+                    else:
+                        unordered.append(target.id)
+    unordered.sort()
+    text = ("(" + ", ".join(bases) + ") " if bases else "") + "{" + "; ".join(ordered + unordered) + "}"
+    shape = decorators + text
+    out.append({"symbol": node.name, "kind": "enum" if enum else "class", "shape": shape, "comparable": shape, "inferred": inferred})
+    return text, inferred
+
 def shapes(tree):
     out = []
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if not public(node.name):
-                continue
-            text, inferred = signature(node)
-            out.append({"symbol": node.name, "kind": "function", "shape": text, "comparable": text, "inferred": inferred})
-        elif isinstance(node, ast.ClassDef):
-            if not public(node.name):
-                continue
-            bases = [ast.unparse(b) for b in node.bases] + [k.arg + "=" + ast.unparse(k.value) for k in node.keywords if k.arg]
-            members = []
-            inferred = False
-            for child in node.body:
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and public(child.name):
-                    text, sub = signature(child)
-                    members.append(child.name + text)
-                    inferred = inferred or sub
-                elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name) and public(child.target.id):
-                    members.append(child.target.id + ": " + ast.unparse(child.annotation))
-                elif isinstance(child, ast.Assign):
-                    for target in child.targets:
-                        if isinstance(target, ast.Name) and public(target.id):
-                            members.append(target.id)
-            members.sort()
-            text = ("(" + ", ".join(bases) + ")" if bases else "") + " {" + "; ".join(members) + "}"
-            out.append({"symbol": node.name, "kind": "class", "shape": text, "comparable": text, "inferred": inferred})
+    listed = published(tree)
+    for node in declarations(tree.body):
+        if not (public(node.name) or node.name in listed):
+            continue
+        if isinstance(node, ast.ClassDef):
+            class_shape(node, out)
+        else:
+            function_shape(node, out)
     return out
 
 def imports(tree):
@@ -857,10 +992,16 @@ sys.stdout.write(json.dumps(out))
 /** How long the whole batch may take before its answers are given up on. */
 const PYTHON_READ_TIMEOUT_MS = 30_000;
 
-/** One declaration's contract as the Python reader wrote it; hashed in TS. */
+/**
+ * One declaration's contract as the Python reader wrote it; hashed in TS.
+ *
+ * One entry per definition, so a name defined several times — an
+ * `@overload` set, a def on each branch of an `if` — arrives as several
+ * entries and is assembled into one shape by `pythonShapes`.
+ */
 export interface PythonShape {
   symbol: string;
-  kind: "function" | "class";
+  kind: "function" | "class" | "enum";
   shape: string;
   comparable: string;
   inferred: boolean;
