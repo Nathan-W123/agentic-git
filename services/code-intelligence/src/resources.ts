@@ -25,7 +25,7 @@
  */
 
 import type { SupportedLanguage } from "./index.js";
-import { maskNative } from "./native-imports.js";
+import { excludedLines, maskNative, type NativeDialect } from "./native-imports.js";
 import { maskRust } from "./rust-imports.js";
 import { maskPhp, maskRuby } from "./script-imports.js";
 import { blankBraceLanguage, type BraceLanguage } from "./symbol-ranges.js";
@@ -134,8 +134,11 @@ export function maskForLanguage(
       return maskPhp(source);
     case "c":
     case "cpp":
+      return maskNativeCode(source, "c");
+    // C# has its own strings — verbatim `@"C:\dir\"`, raw `"""` — and read
+    // by C's rules a file with either in it is unreadable, then empty.
     case "csharp":
-      return maskNative(source)?.text;
+      return maskNativeCode(source, "csharp");
     case "go":
     case "java":
     case "kotlin":
@@ -145,6 +148,29 @@ export function maskForLanguage(
     default:
       return undefined;
   }
+}
+
+/**
+ * C-family text with nothing in it but code.
+ *
+ * The include reader keeps string bodies because the header name is in one;
+ * a call reader wants them blanked, or `getenv("PATH")` inside a test
+ * fixture's raw string is a configuration read. A `#if 0` group is blanked
+ * for the same reason: nothing in it is ever called.
+ */
+function maskNativeCode(source: string, dialect: NativeDialect): string | undefined {
+  const masked = maskNative(source, dialect, { blankStrings: true });
+  if (masked === undefined) {
+    return undefined;
+  }
+  const lines = masked.text.split("\n");
+  const excluded = excludedLines(lines, dialect);
+  if (excluded.size === 0) {
+    return masked.text;
+  }
+  return lines
+    .map((line, position) => (excluded.has(position) ? line.replace(/[^\r]/gu, " ") : line))
+    .join("\n");
 }
 
 /* ------------------------------------------------------------ patterns -- */

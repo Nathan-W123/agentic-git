@@ -232,6 +232,56 @@ test("asp.net attributes and minimal apis", () => {
   assert.deepEqual(found?.configKeys, ["HOME"]);
 });
 
+/* ---------------------------------------------------------- c family ---- */
+
+test("c# is read by its own string rules, not c's", () => {
+  // A verbatim path ends in a backslash that is not an escape, and a raw
+  // string opens with three quotes. Read by C's rules either makes the
+  // file unreadable, and an unreadable controller declares no routes.
+  const found = resourcesFromText(
+    [
+      "using Microsoft.AspNetCore.Mvc;",
+      'string p = @"C:\\dir\\";',
+      'string q = """',
+      "  raw text",
+      '  """;',
+      "public class U : ControllerBase {",
+      '  [HttpGet("/users")] public IActionResult L() => Ok();',
+      '  string h = Environment.GetEnvironmentVariable("HOME");',
+      "}",
+    ].join("\n"),
+    "csharp",
+  );
+  assert.deepEqual(found?.apis, ["GET /users"]);
+  assert.deepEqual(found?.configKeys, ["HOME"]);
+});
+
+test("a c string body and a dead group are not code", () => {
+  // A clang-style test fixture carries whole programs inside raw strings,
+  // and `getenv` in one of them is text; so is the `getenv` under `#if 0`,
+  // which nothing ever calls. The one live read beside them is still found.
+  const found = resourcesFromText(
+    [
+      'const char *fixture = R"cpp(',
+      '  const char *h = getenv("PATH");',
+      ')cpp";',
+      "char *m = \"use getenv('HOME')\";",
+      "#if 0",
+      'char *o = getenv("OLD");',
+      "#endif",
+      'char *v = "[Route(\'/ghost\')]";',
+      'char *live = getenv("LIVE");',
+    ].join("\n"),
+    "cpp",
+  );
+  assert.deepEqual(found, { apis: [], configKeys: ["LIVE"] });
+  const cs = resourcesFromText(
+    'var s = @"[HttpGet(""/ghost"")]";\n#if false\napp.MapGet("/dead", h);\n#endif\napp.MapGet("/live", h);\n',
+    "csharp",
+  );
+  assert.deepEqual(cs?.apis, ["GET /live"]);
+});
+
 /* ----------------------------------------------------------- refusals --- */
 
 test("a route that does not start with a slash is not a route", () => {
