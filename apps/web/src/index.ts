@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { access } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 
@@ -48,7 +49,7 @@ import {
 import { AttachmentStore } from "./attachments.js";
 import { GitHubConnectionService } from "./github-connection.js";
 import { OverlayWorkspaceService } from "./overlay.js";
-import { PreviewService } from "./preview.js";
+import { detectInstallCommand, PreviewService } from "./preview.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
 import { pullCanonical } from "./pull-canonical.js";
 import { watchUpstreams } from "./upstream-watch.js";
@@ -60,6 +61,7 @@ import {
 import {
   captureCredentialKey,
   UserCredentialStore,
+  WarmWorkspacePool,
   type UserCredentialKind,
 } from "@coord/workspace-manager";
 
@@ -255,7 +257,20 @@ async function serve(
   // so a canonical that moves misses and rebuilds, and the entry bound still
   // evicts the oldest — now for the first time actually reached, since the
   // instance outlives the call.
-  const intelligence = new CodeIntelligenceService(repositories);
+  //
+  // And kept on disk between restarts, under the project directory rather
+  // than one of the scratch roots crash recovery clears — a restarted control
+  // plane otherwise re-lists and re-parses every repository on the first
+  // task's critical path, for revisions it had already indexed. What comes
+  // back seeds the content-addressed parse cache as well as the index, so
+  // even a canonical that moved while the process was down costs only the
+  // files that changed. `COORD_WARM_INDEX=0` turns it off.
+  const intelligence = new CodeIntelligenceService(
+    repositories,
+    process.env["COORD_WARM_INDEX"] === "0"
+      ? {}
+      : { persistDirectory: project.indexRoot },
+  );
   // Started now, while nothing is waiting on it. The parse threads cannot
   // answer until they have loaded the TypeScript compiler, and paying for that
   // inside the first index build makes that build slower than never threading
@@ -354,8 +369,71 @@ async function serve(
   // the same reason: the gateway that hears the stop and the run that holds
   // the session only meet through this.
   const cancellations = new TaskCancellationRegistry();
+  // Where a landed task's directory goes instead of being destroyed. One per
+  // process for the same reason the registry above is: a coordinator is built
+  // per run, and a warm directory is only worth anything because it outlives
+  // the run that made it.
+  //
+  // The prepare step is decided here because this is the only place that
+  // knows how the project's commands are confined. A Docker sandbox defaults
+  // to `network: none`, so an install inside one cannot reach a registry and
+  // would fail on every single landing — deterministically, and reported as
+  // an error an operator then has to explain. Such a project gets the
+  // checkout hit and `dependencies: "skipped"`; a project that has configured
+  // egress, or no sandbox at all, gets the install.
+  const sandbox = project.sandboxOptions();
+  const sandboxBlocksInstall =
+    sandbox !== undefined &&
+    sandbox.egress === undefined &&
+    (sandbox.network ?? "none") === "none";
+  const warmWorkspaces = new WarmWorkspacePool(
+    sandboxBlocksInstall
+      ? {}
+      : {
+          prepare: async (workspace, run) => {
+            const has = async (name: string): Promise<boolean> => {
+              try {
+                await access(path.join(workspace.path, name));
+                return true;
+              } catch {
+                return false;
+              }
+            };
+            // Asked before `detectInstallCommand`, which answers `undefined`
+            // both for "nothing to install" and for "already installed" —
+            // and the second is the usual case here, since the landed
+            // agent's own `node_modules` is exactly what the scrub keeps.
+            if ((await has("package.json")) && (await has("node_modules"))) {
+              return "present";
+            }
+            const configured =
+              project.config.installCommands?.[workspace.repository.id] ??
+              project.config.installCommand;
+            const command =
+              configured ?? (await detectInstallCommand(workspace.path));
+            if (command === undefined) {
+              return "absent";
+            }
+            const output = await run(
+              {
+                command: command.executable,
+                args: [...command.args],
+                ...(command.env === undefined ? {} : { env: command.env }),
+              },
+              { timeoutMs: 600_000, maxOutputBytes: 1024 * 1024 },
+            );
+            if (output.exitCode !== 0) {
+              throw new Error(
+                `${command.label} exited ${output.exitCode}: ${output.stderr.trim()}`,
+              );
+            }
+            return "installed";
+          },
+        },
+  );
   const conversationSweep = setInterval(() => {
     void conversations.closeIdleSessions().catch(() => undefined);
+    void warmWorkspaces.closeIdle().catch(() => undefined);
   }, 60_000);
   conversationSweep.unref?.();
 
@@ -675,6 +753,7 @@ async function serve(
           conversations,
           cancellations,
           intelligence,
+          warmWorkspaces,
           // What an agent may ask this deployment to do. A fixed list, not a
           // command channel: an agent may only ask for what its submitter could
           // do themselves on this repository, and an open channel would let it
@@ -1330,6 +1409,12 @@ async function serve(
       });
       await runningGateway.close();
     } finally {
+      // Warm directories are worktrees registered against a canonical mirror,
+      // and a process that goes without giving them back leaves registrations
+      // the next boot's crash recovery has to prune. The first per-process
+      // holder this shutdown drains — the conversation registry is still not
+      // ended here, which is a separate gap.
+      await warmWorkspaces.drain().catch(() => undefined);
       // Previews are child processes holding ports and checkouts. Nothing else
       // will reap them if this process goes without saying so.
       await previews.close();

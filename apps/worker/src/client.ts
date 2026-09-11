@@ -803,7 +803,22 @@ export class WorkerClient {
         }
       | { status: "failed"; detail: string },
     tokenUsage: readonly AgentTokenUsage[] = [],
-  ): Promise<{ accepted: boolean; reason?: string }> {
+  ): Promise<{
+    accepted: boolean;
+    reason?: string;
+    /**
+     * What the control plane did with the result — `integrated` when it
+     * reached canonical, and nothing at all from a control plane too old to
+     * say.
+     *
+     * The gateway has relayed the whole acceptance since it was written; this
+     * client simply narrowed it away on the way in, and the worker then had
+     * no way to tell a lease that landed from one that was merely accepted.
+     * Retention needs exactly that distinction, and an absent field reads as
+     * "not landed", which is the safe direction: a warm directory is not kept.
+     */
+    integrationStatus?: string;
+  }> {
     const { json } = await this.request(
       `/api/v1/workers/leases/${leaseId}/result`,
       {
@@ -817,7 +832,13 @@ export class WorkerClient {
         timeoutMs: this.resultTimeoutMs,
       },
     );
-    return (json as { accepted: boolean; reason?: string }) ?? { accepted: true };
+    return (
+      (json as {
+        accepted: boolean;
+        reason?: string;
+        integrationStatus?: string;
+      }) ?? { accepted: true }
+    );
   }
 
   public async release(leaseId: string): Promise<void> {

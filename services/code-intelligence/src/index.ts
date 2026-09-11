@@ -1,3 +1,4 @@
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import path from "node:path";
 
@@ -37,6 +38,7 @@ import {
   uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
+  type CanonicalVersion,
   type PlanResourceRef,
   type SymbolVisibility,
 } from "@coord/shared-types";
@@ -248,6 +250,57 @@ export interface CodeIntelligenceOptions {
   maxParsedFiles?: number;
   /** Threads used to parse scripts on a cold build. Default 4. */
   maxParseWorkers?: number;
+  /**
+   * Where the warm index for each repository is kept between restarts.
+   *
+   * Absent means memory only, which is what every caller did before and what
+   * a short-lived process still wants. When it is set, the promoted revision
+   * of each repository is written there and read back on the first miss, so a
+   * control plane that has just restarted seeds its content-addressed parse
+   * cache instead of re-reading and re-parsing the whole repository on the
+   * first task's critical path.
+   */
+  persistDirectory?: string;
+}
+
+/**
+ * The on-disk shape of a warm index.
+ *
+ * Bumped whenever `IndexedFile`, `RepositoryIndex` or what any analyzer puts
+ * in them changes. A file from an older shape is discarded rather than
+ * migrated: this is a cache of something that can always be rebuilt, and a
+ * wrong index is far worse than a missing one — it would ground plans against
+ * symbols that no longer exist and be believed, because nothing downstream
+ * can tell a stale index from a fresh one.
+ */
+export const INDEX_PERSISTENCE_VERSION = 1;
+
+/** What a persisted file records beside the index itself. */
+interface PersistedIndexFile {
+  version: number;
+  repositoryId: string;
+  /**
+   * The canonical sequence the index was built for. Canonical sequences only
+   * advance, so this is what lets a write refuse to replace a newer file.
+   */
+  sequence: number;
+  revision: string;
+  /** The size bounds in force when it was built; a different set is a different index. */
+  limits: { maxFiles: number; maxFileBytes: number; maxTotalBytes: number };
+  /**
+   * Object id per indexed path. Without it the parse cache cannot be seeded —
+   * a parse is addressed by the blob it came from, not by the file's name.
+   */
+  blobs: Record<string, string>;
+  index: RepositoryIndex;
+}
+
+/** What {@link CodeIntelligenceService.stats} reports about the warm index. */
+export interface CodeIntelligenceStats {
+  builds: number;
+  cacheHits: number;
+  persistedLoads: number;
+  persistedWrites: number;
 }
 
 /**
@@ -975,6 +1028,31 @@ export class CodeIntelligenceService {
    * are two different indexed files.
    */
   private readonly parsed = new Map<string, IndexedFile>();
+  /**
+   * The object id behind every path of a built index, keyed like the cache.
+   *
+   * Kept only so a persisted file can carry it. A parse is addressed by
+   * content, so an index written to disk without the blob ids it was built
+   * from seeds nothing on the way back in: the reader would know which files
+   * existed but not which parses belong to them.
+   */
+  private readonly blobsByKey = new Map<string, Record<string, string>>();
+  /**
+   * The read-from-disk attempt per repository, started at most once.
+   *
+   * Stored as the promise rather than a boolean so two builds arriving
+   * together on a cold process share one read instead of both parsing a
+   * multi-megabyte file.
+   */
+  private readonly loaded = new Map<string, Promise<void>>();
+  /** The highest canonical sequence written for each repository. */
+  private readonly persistedSequence = new Map<string, number>();
+  /** Writes in flight per repository, chained so two never interleave. */
+  private readonly persisting = new Map<string, Promise<void>>();
+  private builds = 0;
+  private cacheHits = 0;
+  private persistedLoads = 0;
+  private persistedWrites = 0;
   /** Started by {@link warmUp}, kept for the service's life, unref'd when idle. */
   private pool: Promise<Worker[]> | undefined;
   /**
@@ -990,11 +1068,25 @@ export class CodeIntelligenceService {
     private readonly repositories = new RepositoryService(),
     private readonly options: CodeIntelligenceOptions = {},
   ) {
-    for (const [name, value] of Object.entries(options)) {
+    // Named one by one rather than walked with `Object.entries`. The loop
+    // used to range-check every option there was, which was fine while they
+    // were all numbers and became a bug the moment one of them was a path:
+    // `persistDirectory` is not a positive integer and would have been
+    // rejected as one.
+    const bounded = [
+      "maxFiles",
+      "maxFileBytes",
+      "maxTotalBytes",
+      "maxCacheEntries",
+      "maxParsedFiles",
+      "maxParseWorkers",
+    ] as const;
+    for (const name of bounded) {
+      const value = options[name];
       if (value === undefined) {
         continue;
       }
-      if (!Number.isSafeInteger(value) || Number(value) < 1) {
+      if (!Number.isSafeInteger(value) || value < 1) {
         throw new RangeError(`${name} must be a positive integer`);
       }
     }
@@ -1129,18 +1221,36 @@ export class CodeIntelligenceService {
     repository: CanonicalRepository,
     revision: string,
   ): Promise<RepositoryIndex> {
-    const key = `${repository.path}\0${revision}`;
+    const key = this.indexKey(repository, revision);
     const cached = this.cache.get(key);
     if (cached !== undefined) {
+      this.cacheHits += 1;
       return structuredClone(cached);
     }
     const running = this.inFlight.get(key);
     if (running !== undefined) {
+      this.cacheHits += 1;
       return structuredClone(await running);
+    }
+    // Only on a miss, and only once per repository. A process that never
+    // indexes a repository never pays to read its file, and one that does
+    // pays before deciding to build rather than after — the whole point is to
+    // not walk a repository whose parses are already on disk.
+    await this.loadPersisted(repository);
+    const seeded = this.cache.get(key);
+    if (seeded !== undefined) {
+      this.cacheHits += 1;
+      return structuredClone(seeded);
+    }
+    const loadedRunning = this.inFlight.get(key);
+    if (loadedRunning !== undefined) {
+      this.cacheHits += 1;
+      return structuredClone(await loadedRunning);
     }
     // Cached inside the build's own continuation, so the entry is in place
     // before the in-flight record is dropped and a caller arriving between the
     // two finds the finished index rather than starting a second build.
+    this.builds += 1;
     const build = this.build(repository, revision).then((index) => {
       // The cache keeps the canonical copy and every caller gets a clone of
       // it, so no caller can mutate what a later one is handed.
@@ -1151,6 +1261,7 @@ export class CodeIntelligenceService {
           break;
         }
         this.cache.delete(oldest);
+        this.blobsByKey.delete(oldest);
       }
       return index;
     });
@@ -1182,6 +1293,13 @@ export class CodeIntelligenceService {
           // path — so without this every Go specifier looks like a
           // third-party module and no Go edge can ever resolve.
           MANIFESTS.has(path.posix.basename(entry.path))),
+    );
+    // Held for {@link persist}, which cannot ask for them afterwards: an
+    // object id is a property of this revision's tree listing, not of the
+    // index the listing produces.
+    this.blobsByKey.set(
+      this.indexKey(repository, revision),
+      Object.fromEntries(candidates.map((entry) => [entry.path, entry.oid])),
     );
     // Holes while the loop runs: a script's slot is claimed in order and
     // filled once every script has been parsed, so deferring the parse cannot
@@ -1874,15 +1992,233 @@ export class CodeIntelligenceService {
     );
   }
 
+  /**
+   * Builds the index for a revision that has just become canonical, and
+   * writes it out.
+   *
+   * Fire-and-forget on purpose: the caller is a promotion, and a promotion
+   * that failed because an index could not be built would be a worse outcome
+   * than a cold start. Nothing waits for it, and every error is swallowed.
+   *
+   * This is called for every live promotion, which is new work rather than
+   * duplicated work: `describeCanonicalAdvance` only builds a new revision
+   * when some task is already waiting on it, so a promotion that lands with
+   * nobody waiting used to stay unindexed until the next run's planning
+   * asked for it — on that run's critical path.
+   *
+   * It is also the *only* writer of the persisted file. Builds for older
+   * revisions run concurrently with builds for newer ones (replans and
+   * replayed results index arbitrary base/current pairs), so "write after
+   * every build" would mean "last build to finish wins", which is not the
+   * same as "latest canonical wins". Writing only from here, with the
+   * promoted `sequence` in hand, is what makes the guard below possible.
+   */
+  public prewarm(
+    repository: CanonicalRepository,
+    version: CanonicalVersion,
+  ): void {
+    void this.index(repository, version.revision)
+      .then(async () => await this.persist(repository, version))
+      .catch(() => {});
+  }
+
+  /**
+   * Whether the next `index` call for this revision would answer without
+   * walking the repository.
+   *
+   * Loads the persisted file first, because "warm" has to mean the same thing
+   * to a process that has just started as to one that has been running: a
+   * revision whose index is on disk is warm even though nothing in memory
+   * knows about it yet.
+   */
+  public async isWarm(
+    repository: CanonicalRepository,
+    revision: string,
+  ): Promise<boolean> {
+    await this.loadPersisted(repository);
+    const key = this.indexKey(repository, revision);
+    return this.cache.has(key) || this.inFlight.has(key);
+  }
+
+  public stats(): CodeIntelligenceStats {
+    return {
+      builds: this.builds,
+      cacheHits: this.cacheHits,
+      persistedLoads: this.persistedLoads,
+      persistedWrites: this.persistedWrites,
+    };
+  }
+
+  private indexKey(repository: CanonicalRepository, revision: string): string {
+    return `${repository.path}\0${revision}`;
+  }
+
+  /**
+   * One file per repository, named by the repository id reduced to characters
+   * every filesystem agrees about — the same rule the remote worker uses for
+   * its bare caches.
+   */
+  private persistPath(repositoryId: string): string | undefined {
+    const directory = this.options.persistDirectory;
+    if (directory === undefined) {
+      return undefined;
+    }
+    const safeId = repositoryId.replaceAll(/[^A-Za-z0-9._-]/gu, "_");
+    return path.join(directory, `${safeId}.json`);
+  }
+
+  /**
+   * Writes the promoted revision's index out, unless a newer one is already
+   * there.
+   *
+   * Two guards, both needed. `persistedSequence` refuses a write for a
+   * sequence at or below what has already been written, so a promotion whose
+   * build finished late cannot replace a newer one. The per-repository
+   * promise chain keeps two writes for the same repository from interleaving
+   * their temp files — and the temp-then-rename means a reader never sees a
+   * half-written file, whichever of them wins.
+   */
+  private async persist(
+    repository: CanonicalRepository,
+    version: CanonicalVersion,
+  ): Promise<void> {
+    const filePath = this.persistPath(repository.id);
+    if (filePath === undefined) {
+      return;
+    }
+    const key = this.indexKey(repository, version.revision);
+    const index = this.cache.get(key);
+    const blobs = this.blobsByKey.get(key);
+    if (index === undefined || blobs === undefined) {
+      return;
+    }
+    await this.loadPersisted(repository);
+    if (version.sequence <= (this.persistedSequence.get(repository.id) ?? -1)) {
+      return;
+    }
+    this.persistedSequence.set(repository.id, version.sequence);
+    const payload: PersistedIndexFile = {
+      version: INDEX_PERSISTENCE_VERSION,
+      repositoryId: repository.id,
+      sequence: version.sequence,
+      revision: version.revision,
+      limits: this.limits(),
+      blobs,
+      index,
+    };
+    const previous = this.persisting.get(repository.id) ?? Promise.resolve();
+    const write = previous
+      .catch(() => {})
+      .then(async () => {
+        await mkdir(path.dirname(filePath), { recursive: true });
+        const temporaryPath = `${filePath}.tmp-${process.pid}`;
+        try {
+          await writeFile(temporaryPath, JSON.stringify(payload), "utf8");
+          await rename(temporaryPath, filePath);
+          this.persistedWrites += 1;
+        } catch (error) {
+          await rm(temporaryPath, { force: true });
+          throw error;
+        }
+      });
+    this.persisting.set(repository.id, write);
+    await write;
+  }
+
+  /** The size bounds in force, as they are written into a persisted file. */
+  private limits(): PersistedIndexFile["limits"] {
+    return {
+      maxFiles: this.options.maxFiles ?? 5_000,
+      maxFileBytes: this.options.maxFileBytes ?? 2 * 1024 * 1024,
+      maxTotalBytes: this.options.maxTotalBytes ?? 50 * 1024 * 1024,
+    };
+  }
+
+  /**
+   * Reads a repository's persisted index back, at most once per repository.
+   *
+   * What comes back is two things, and the second is the more valuable. The
+   * index itself is only useful while canonical has not moved. The *parses*
+   * are useful regardless: they are addressed by blob, so seeding them means
+   * the first build after a restart re-reads only the files that changed
+   * since the file was written, even when canonical moved several times in
+   * between.
+   *
+   * Anything that does not match exactly — a different persistence version, a
+   * different set of size bounds, a truncated or unreadable file — is treated
+   * as absent. A cache that can always be rebuilt is never worth repairing.
+   */
+  private async loadPersisted(repository: CanonicalRepository): Promise<void> {
+    const filePath = this.persistPath(repository.id);
+    if (filePath === undefined) {
+      return;
+    }
+    const existing = this.loaded.get(repository.id);
+    if (existing !== undefined) {
+      await existing;
+      return;
+    }
+    const load = (async () => {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(await readFile(filePath, "utf8"));
+      } catch {
+        return;
+      }
+      if (raw === null || typeof raw !== "object") {
+        return;
+      }
+      const payload = raw as PersistedIndexFile;
+      const limits = this.limits();
+      if (
+        payload.version !== INDEX_PERSISTENCE_VERSION ||
+        payload.repositoryId !== repository.id ||
+        typeof payload.revision !== "string" ||
+        typeof payload.sequence !== "number" ||
+        payload.limits?.maxFiles !== limits.maxFiles ||
+        payload.limits?.maxFileBytes !== limits.maxFileBytes ||
+        payload.limits?.maxTotalBytes !== limits.maxTotalBytes ||
+        !Array.isArray(payload.index?.files) ||
+        payload.blobs === null ||
+        typeof payload.blobs !== "object"
+      ) {
+        return;
+      }
+      for (const file of payload.index.files) {
+        const oid = payload.blobs?.[file.path];
+        if (oid === undefined) {
+          continue;
+        }
+        this.remember(parsedKey({ oid, path: file.path }), file);
+      }
+      const key = this.indexKey(repository, payload.revision);
+      this.cache.set(key, payload.index);
+      this.blobsByKey.set(key, payload.blobs);
+      this.persistedSequence.set(repository.id, payload.sequence);
+      this.persistedLoads += 1;
+    })();
+    this.loaded.set(repository.id, load);
+    await load;
+  }
+
   public clear(repositoryId?: string): void {
     if (repositoryId === undefined) {
       this.cache.clear();
+      this.blobsByKey.clear();
+      this.loaded.clear();
+      this.persistedSequence.clear();
       return;
     }
     for (const [key, index] of this.cache) {
       if (index.repositoryId === repositoryId) {
         this.cache.delete(key);
+        this.blobsByKey.delete(key);
       }
     }
+    // The file itself stays. `clear` drops what this process is holding; a
+    // persisted index belongs to the repository, not to the process, and the
+    // next read re-checks its version and bounds anyway.
+    this.loaded.delete(repositoryId);
+    this.persistedSequence.delete(repositoryId);
   }
 }

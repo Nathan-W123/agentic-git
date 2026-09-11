@@ -10,6 +10,7 @@ import type {
   ChangeSetMetadata,
   CreateWorkspaceInput,
   SandboxLaunchSpec,
+  ScrubResult,
   TaskWorkspace,
   WorkspaceCommandOptions,
   WorkspaceManager,
@@ -44,6 +45,7 @@ class RecordingWorkspaceManager implements WorkspaceManager {
   public readonly created: CreateWorkspaceInput[] = [];
   public readonly destroyed: TaskWorkspace[] = [];
   public readonly collected: TaskWorkspace[] = [];
+  public readonly scrubbed: TaskWorkspace[] = [];
 
   public async create(input: CreateWorkspaceInput): Promise<TaskWorkspace> {
     this.created.push(input);
@@ -52,6 +54,11 @@ class RecordingWorkspaceManager implements WorkspaceManager {
 
   public async destroy(workspace: TaskWorkspace): Promise<void> {
     this.destroyed.push(workspace);
+  }
+
+  public async scrub(workspace: TaskWorkspace): Promise<ScrubResult> {
+    this.scrubbed.push(workspace);
+    return { clean: true };
   }
 
   public async runInWorkspace(
@@ -376,6 +383,42 @@ test("worktree lifecycle is delegated to the host backend", async () => {
 
   await manager.destroy(workspace);
   assert.deepEqual(inner.destroyed, [workspace]);
+});
+
+/**
+ * Scrubbing is git work on the host worktree, and the git mask this class
+ * writes lives beside that directory rather than inside it, so a reset and a
+ * clean never touch it.
+ */
+test("scrub is delegated to the host backend", async () => {
+  const inner = new RecordingWorkspaceManager();
+  const manager = new DockerWorkspaceManager(
+    { image: "coord/agent:1", maskGitMetadata: false },
+    inner,
+  );
+  assert.deepEqual(await manager.scrub(WORKSPACE), { clean: true });
+  assert.deepEqual(inner.scrubbed, [WORKSPACE]);
+
+  // A host backend that cannot scrub refuses rather than claiming a clean
+  // directory it never verified; the pool then destroys it, which costs a
+  // cold start and nothing else.
+  const { scrub: _scrub, ...unableToScrub } = inner as unknown as {
+    scrub: unknown;
+  };
+  const refusing = new DockerWorkspaceManager(
+    { image: "coord/agent:1", maskGitMetadata: false },
+    {
+      ...unableToScrub,
+      create: inner.create.bind(inner),
+      destroy: inner.destroy.bind(inner),
+      runInWorkspace: inner.runInWorkspace.bind(inner),
+      collectChangeSet: inner.collectChangeSet.bind(inner),
+    },
+  );
+  assert.deepEqual(await refusing.scrub(WORKSPACE), {
+    clean: false,
+    reason: "host backend cannot scrub",
+  });
 });
 
 test("runInWorkspace executes the built Docker command", async () => {

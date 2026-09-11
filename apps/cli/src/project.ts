@@ -1141,6 +1141,20 @@ export class CoordinatorProject {
     return path.join(this.directory, "integration");
   }
 
+  /**
+   * Where the warm repository index is kept between restarts.
+   *
+   * Not one of the scratch roots above, and deliberately named apart from
+   * them: crash recovery wipes `workspaceRoot`, `planningRoot` and
+   * `integrationRoot` at boot because each holds a half-finished run's
+   * directories. This holds a cache of something that is still true — the
+   * index of a revision that is still canonical — and clearing it would give
+   * back exactly the cold first task the file exists to avoid.
+   */
+  public get indexRoot(): string {
+    return path.join(this.directory, "index");
+  }
+
   /** Creates the project directory and a starter config if none exists. */
   public static async init(root: string): Promise<CoordinatorProject> {
     // Cloned: DEFAULT_CONFIG is module-level, and a project's config is

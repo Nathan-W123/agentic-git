@@ -156,6 +156,33 @@ export interface CostMetrics {
   settledLeases: number;
 }
 
+/**
+ * How often a task started from something already prepared.
+ *
+ * Counted per *task start*, not per run, because `task_started` is the only
+ * event that carries the fields and there is no run-level event to hang them
+ * on. A five-task run whose starting revision was indexed therefore
+ * contributes five to `indexWarm` — the number answers "how many task starts
+ * were warm", which is the question a throughput argument actually needs, and
+ * nobody should read it as a count of runs.
+ *
+ * A `task_started` recorded before these fields existed counts as neither
+ * warm nor cold. Guessing would make every historical event look like a cold
+ * start and drown the change the numbers exist to show.
+ */
+export interface WarmStartMetrics {
+  /** Task starts handed a directory a landed task left behind. */
+  workspaceWarm: number;
+  /** Task starts that paid for a fresh checkout. */
+  workspaceCold: number;
+  /** Conversational turns that kept their own directory — neither of the above. */
+  workspaceResumed: number;
+  /** Task starts whose run began on an already-indexed revision. */
+  indexWarm: number;
+  /** Task starts whose run had to build the index first. */
+  indexCold: number;
+}
+
 export interface CoordinationMetrics {
   /**
    * How much of the audit chain the numbers cover: how many events were
@@ -169,6 +196,7 @@ export interface CoordinationMetrics {
   throughput: ThroughputMetrics;
   approvals: ApprovalMetrics;
   cost: CostMetrics;
+  warmStarts: WarmStartMetrics;
 }
 
 export interface MetricsFilter {
@@ -240,6 +268,13 @@ export async function computeCoordinationMetrics(
   const failedTasks = new Set<string>();
   const submittedAt = new Map<string, string>();
   const startCounts = new Map<string, number>();
+  const warmStarts: WarmStartMetrics = {
+    workspaceWarm: 0,
+    workspaceCold: 0,
+    workspaceResumed: 0,
+    indexWarm: 0,
+    indexCold: 0,
+  };
   const approvalRequestedAt = new Map<string, string>();
   const integrationDurations: number[] = [];
   const approvalDurations: number[] = [];
@@ -396,6 +431,22 @@ export async function computeCoordinationMetrics(
       case "task_started": {
         if (taskId !== undefined) {
           startCounts.set(taskId, (startCounts.get(taskId) ?? 0) + 1);
+        }
+        // Read off the payload rather than inferred. An event that carries
+        // neither field predates the feature and is counted as neither.
+        const workspaceStart = event.data["workspaceStart"];
+        if (workspaceStart === "warm") {
+          warmStarts.workspaceWarm += 1;
+        } else if (workspaceStart === "cold") {
+          warmStarts.workspaceCold += 1;
+        } else if (workspaceStart === "resumed") {
+          warmStarts.workspaceResumed += 1;
+        }
+        const indexStart = event.data["indexStart"];
+        if (indexStart === "warm") {
+          warmStarts.indexWarm += 1;
+        } else if (indexStart === "cold") {
+          warmStarts.indexCold += 1;
         }
         break;
       }
@@ -590,5 +641,6 @@ export async function computeCoordinationMetrics(
       activeLeases,
       settledLeases,
     },
+    warmStarts,
   };
 }

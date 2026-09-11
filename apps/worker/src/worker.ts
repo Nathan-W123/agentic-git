@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
@@ -54,6 +54,7 @@ import {
 import {
   DockerWorkspaceManager,
   GitWorktreeWorkspaceManager,
+  WarmWorkspacePool,
   type TaskWorkspace,
   type WorkspaceManager,
   type WorkspaceSandbox,
@@ -67,6 +68,13 @@ import {
   type WorkingChange,
 } from "./client.js";
 import { holdHost, hostAttached, signalHost } from "./host-signal.js";
+import {
+  clearWarmSlots,
+  prepareWarmSlot,
+  warmRepositoryRoot,
+  warmSlotPath,
+  WorkerWarmBackend,
+} from "./warm-workspace.js";
 import { stageMcpServers, type StagedMcpServers } from "./mcp-config.js";
 import type { WorkNudge } from "./nudge.js";
 import {
@@ -396,6 +404,31 @@ interface PlannedWork {
 }
 
 /**
+ * What it would take to keep this lease's directory for the next one.
+ *
+ * `slotPath` is where the directory has to be for the pool to own it —
+ * already its own path when this lease started warm, and a slot to move it
+ * into when it started in scratch.
+ *
+ * Deliberately not a field on {@link PlannedWork}, which is where it first
+ * lived and where it leaked. A directory taken out of the pool is the
+ * teardown's problem from the instant `take` resolves, and `PlannedWork`
+ * exists only once `plan` has returned successfully: anything thrown in
+ * between — an unknown agent id, a sandbox that would not start, a lost
+ * lease — left the pool's own entry already spliced out and the directory,
+ * which lives outside the lease's scratch, with nothing anywhere that knew
+ * to remove it. It belongs to the run instead, from the moment there is one
+ * to belong to. See {@link Run.warmRetention}.
+ */
+interface WarmRetention {
+  backend: WorkerWarmBackend;
+  workspace: TaskWorkspace;
+  slotPath: string;
+  /** Set once the pool has taken the directory, so the teardown leaves it. */
+  retained: boolean;
+}
+
+/**
  * Whether this reads as an adapter's "nothing to say" fallback.
  *
  * All three build it the same way — `<agent name> completed <request>`, where
@@ -478,6 +511,17 @@ class Run {
         workspaces: WorkspaceManager;
       }
     | undefined;
+  /**
+   * Where this run's directory would be kept, and whether the pool has it.
+   *
+   * Set inside `plan` as soon as there is a directory at all, because the
+   * teardown is the only thing that can be relied on to run: a warm slot
+   * lives outside this lease's scratch — that is what makes it survive the
+   * `finally` — so removing scratch is not enough, and a run that threw
+   * before `plan` returned had nowhere to read this from. Undefined means
+   * there is nothing outside scratch to account for.
+   */
+  public warmRetention: WarmRetention | undefined;
 
   public constructor(public readonly leaseId: string) {}
 }
@@ -512,6 +556,19 @@ export class Worker {
    * long part and touches only the run's own workspace.
    */
   private readonly cacheChains = new Map<string, Promise<unknown>>();
+  /**
+   * Directories kept warm per repository, across leases.
+   *
+   * One per worker rather than per lease, which is the point: a lease's
+   * scratch is removed in its own `finally`, and a slot has to outlive that
+   * to be worth anything. Bounded by
+   * `COORD_WARM_WORKSPACES_PER_REPOSITORY`, and cleared at start — nothing
+   * durable describes a slot, so a directory left by a previous process is
+   * not something to reason about.
+   */
+  private readonly warm = new WarmWorkspacePool({
+    log: (line) => console.log(line),
+  });
   /** See {@link WorkerOptions.powerSource}. */
   private readonly power: PowerSource;
 
@@ -970,6 +1027,15 @@ export class Worker {
         this.spentSoFar(run),
       );
       laps.mark("report");
+      // Only a lease that reached canonical gives its directory back, which
+      // is why the whole acceptance is read rather than just `accepted`: an
+      // accepted result whose integration conflicted or failed validation
+      // leaves a workspace nobody has verified anything about. A control
+      // plane too old to say sends no `integrationStatus` at all, which reads
+      // as "not landed" and simply costs a cold start.
+      if (accepted.accepted && accepted.integrationStatus === "integrated") {
+        await this.retainWarmWorkspace(run);
+      }
       // One line, on the worker's own output, which the desktop app keeps.
       // Everything above this is where the time actually went; without it
       // "slower than the server was" is an observation with nowhere to go.
@@ -1044,8 +1110,74 @@ export class Worker {
       run.adoptedPlan = undefined;
       run.session = undefined;
       run.cancellation = undefined;
+      // Before the scratch removal, and separate from it: a slot the pool did
+      // not take is outside scratch, so nothing else here would ever reach it.
+      // Read from the run rather than from a planning result, because the
+      // paths that skip one entirely — a question, or anything thrown between
+      // the take and the end of `plan` — are exactly the paths that used to
+      // leave a directory behind.
+      await this.discardWarmSlot(run);
+      run.warmRetention = undefined;
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /**
+   * Gives a landed lease's directory to the pool.
+   *
+   * A directory that started in scratch is moved into its slot first, with
+   * `rename` rather than a copy — the two are under the same workspace root
+   * and therefore the same filesystem, so the move is atomic and costs
+   * nothing, which matters because what is being moved is a checkout plus
+   * whatever the agent installed into it.
+   *
+   * The pool can still refuse (another lease filled the repository's slots
+   * while this one was reporting), and then the directory goes, because by
+   * that point it is no longer anywhere the scratch removal will find it.
+   */
+  private async retainWarmWorkspace(run: Run): Promise<void> {
+    const retention = run.warmRetention;
+    if (retention === undefined) {
+      return;
+    }
+    let workspace = retention.workspace;
+    if (retention.slotPath !== workspace.path) {
+      try {
+        await prepareWarmSlot(retention.slotPath);
+        await rename(workspace.path, retention.slotPath);
+      } catch {
+        return;
+      }
+      workspace = {
+        ...workspace,
+        path: retention.slotPath,
+        rootPath: path.dirname(retention.slotPath),
+        repository: { ...workspace.repository, path: retention.slotPath },
+      };
+      retention.workspace = workspace;
+    }
+    if (this.warm.retain(retention.backend, workspace)) {
+      retention.retained = true;
+      return;
+    }
+    await rm(retention.slotPath, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  }
+
+  /** Removes a slot the pool did not take, which nothing else would. */
+  private async discardWarmSlot(run: Run): Promise<void> {
+    const retention = run.warmRetention;
+    if (
+      retention === undefined ||
+      retention.retained ||
+      retention.workspace.path !== retention.slotPath
+    ) {
+      return;
+    }
+    await rm(retention.slotPath, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
   }
 
   /**
@@ -1755,15 +1887,42 @@ export class Worker {
     // reading every file git writes.
     run.laps?.mark("fetch");
 
-    const workspacePath = path.join(scratch, "workspace");
-    await this.materialise(git, source, source === cache, assignment, workspacePath);
-    run.laps?.mark("checkout");
+    // Asked for after `updateCache`, deliberately: a slot catches up by
+    // fetching from the bare cache, so the cache has to have absorbed this
+    // lease's revision before the slot can be brought to it.
+    const slotRoot = warmRepositoryRoot(
+      this.options.workspaceRoot,
+      assignment.repository.id,
+    );
+    const backend = new WorkerWarmBackend(git, new GitWorktreeWorkspaceManager(git), cache);
+    // A question is never offered a slot, because a question can never give
+    // one back. It reports no changeset, so nothing about it ever reaches
+    // canonical, so `retainWarmWorkspace` is never reached on its path — and
+    // a take it could only discard would spend the repository's one warm
+    // directory on the lease least able to use it, leaving the next real task
+    // to pay for a cold checkout. Asking questions is routine and they are
+    // served first, so this is the common case and not an edge of one.
+    const warm =
+      assignment.task.kind === "question"
+        ? undefined
+        : await this.warm.take({
+            taskId: assignment.task.id,
+            rootPath: slotRoot,
+            repository: {
+              id: assignment.repository.id,
+              path: slotRoot,
+              branch: assignment.repository.branch,
+            },
+            baseVersion: assignment.canonicalVersion,
+          });
+    const workspacePath =
+      warm?.workspace.path ?? path.join(scratch, "workspace");
 
     const workspace: TaskWorkspace = {
       id: assignment.lease.id,
       taskId: assignment.task.id,
       path: workspacePath,
-      rootPath: scratch,
+      rootPath: warm === undefined ? scratch : slotRoot,
       // The worker has no access to the canonical repository. Only the
       // workspace path and base version are read when collecting a changeset.
       repository: {
@@ -1775,6 +1934,41 @@ export class Worker {
       isolation: "git-worktree",
       createdAt: new Date().toISOString(),
     };
+
+    // Where this lease's directory would go if it lands. One that started in
+    // a slot is already in the right place; one that started in scratch is
+    // moved there afterwards, and only once the control plane has said the
+    // result reached canonical — never before, because a lease that failed
+    // may have an agent process still writing into it.
+    //
+    // Recorded on the run before anything else in this method can throw, and
+    // before the checkout below: from the instant `take` resolved, the pool
+    // has spliced its entry out and the only record that the directory exists
+    // is this one. See {@link Run.warmRetention}.
+    const retention: WarmRetention = {
+      backend,
+      workspace,
+      slotPath:
+        warm === undefined
+          ? warmSlotPath(
+              this.options.workspaceRoot,
+              assignment.repository.id,
+              assignment.lease.id,
+            )
+          : workspacePath,
+      retained: false,
+    };
+    run.warmRetention = retention;
+
+    if (warm === undefined) {
+      await this.materialise(git, source, source === cache, assignment, workspacePath);
+      run.laps?.mark("checkout");
+    } else {
+      // Named apart from a cold checkout so the one line a run prints says
+      // which of the two it was. `advance` has already re-based the slot on
+      // this lease's revision, so there is nothing left to materialise.
+      run.laps?.mark("checkout(warm)");
+    }
 
     // Hosted execution runs untrusted agents from different tenants on shared
     // compute, so the worker honours the project's sandbox configuration. With
@@ -2514,6 +2708,12 @@ export class Worker {
    * exactly this reason.
    */
   public async run(): Promise<void> {
+    // Before anything can lease. A slot found on disk belongs to a process
+    // that is gone — the pool is a map in memory and nothing durable
+    // describes a slot — so there is no state here worth reasoning about,
+    // which is the same call crash recovery makes about the control plane's
+    // scratch roots.
+    await clearWarmSlots(this.options.workspaceRoot);
     await this.register();
     // Connected after registering, so a nudge can never arrive for a worker
     // the control plane does not yet know about.
@@ -2619,6 +2819,10 @@ export class Worker {
       })();
       slots.push(slot);
       if (!(await leased) && !this.stopping) {
+        // Swept here rather than on a timer of its own: this is the only
+        // moment the machine is known to be idle, and a directory nobody has
+        // asked for since this morning is disk rather than warmth.
+        await this.warm.closeIdle().catch(() => undefined);
         // Nothing queued that this machine can take. The nudge only ever
         // shortens this; with none supplied it is the same fixed backoff the
         // single-task loop always had.
@@ -2662,6 +2866,11 @@ export class Worker {
         this.options.client.release(run.leaseId).catch(() => undefined),
       ]),
     );
+    // After the runs, so a slot a finishing lease is still scrubbing is not
+    // removed underneath it. A stopped worker leaves no warm directories: the
+    // next process clears the root anyway, and a laptop that has been asked
+    // to shut down should not be holding checkouts.
+    await this.warm.drain().catch(() => undefined);
   }
 
   /**

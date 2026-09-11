@@ -852,7 +852,8 @@ async function runMetrics(json: boolean): Promise<void> {
       console.log(JSON.stringify(metrics, undefined, 2));
       return;
     }
-    const { conflicts, rework, throughput, approvals, sharing } = metrics;
+    const { conflicts, rework, throughput, approvals, sharing, warmStarts } =
+      metrics;
     console.log(`Audit events analysed: ${metrics.window.events}`);
     console.log("");
     console.log("Conflicts");
@@ -907,6 +908,16 @@ async function runMetrics(json: boolean): Promise<void> {
     console.log(`  Mid-run releases:        ${sharing.releases}`);
     console.log(`  Files handed back:       ${sharing.releasedFiles}`);
     console.log(`  Started after release:   ${sharing.pickupsAfterRelease}`);
+    console.log("");
+    // Per task start, not per run — there is no run-level audit event to
+    // count, so a five-task run whose revision was already indexed adds five
+    // to the index lines. Said here so nobody reads them as runs.
+    console.log("Warm starts (per task start)");
+    console.log(`  Workspace warm:          ${warmStarts.workspaceWarm}`);
+    console.log(`  Workspace cold:          ${warmStarts.workspaceCold}`);
+    console.log(`  Workspace resumed:       ${warmStarts.workspaceResumed}`);
+    console.log(`  Index warm:              ${warmStarts.indexWarm}`);
+    console.log(`  Index cold:              ${warmStarts.indexCold}`);
     console.log("");
     console.log("Approvals");
     console.log(`  Requested:               ${approvals.requested}`);

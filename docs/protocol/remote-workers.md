@@ -495,6 +495,28 @@ receive the revision it was *assigned*, not the current tip. The ref name is
 derived from the lease id, so concurrent bundle requests cannot collide, and it
 is returned as `bundleRef` in the assignment.
 
+### Warm slots
+
+A lease that reached canonical does not have to give its directory back. The
+reference daemon keeps a bounded number of them per repository under
+`workspaceRoot/warm/<repository>/<slot>` — outside every lease's scratch, so
+the removal that ends a lease leaves them alone — and hands one to the next
+lease in the same repository instead of cloning again. The point is less the
+checkout, which the bare cache already makes cheap, than what is in it: the
+worker never installs anything, the agent does, and that install used to die
+with the lease.
+
+A slot catches up by fetching from the bare cache and resetting to the
+assigned revision, which is why it is taken *after* the cache has absorbed the
+lease's ref. Every ref is fetched rather than the lease's own: a slot outlives
+the lease that retained it and cannot know the ref name of the lease that will
+take it next. The fetched revision is verified against the assignment before
+anything is reset to it, and the directory is scrubbed back to a verified-clean
+checkout — ignored files included — before the next lease is given it. Slots
+are cleared at daemon start and drained at stop; nothing durable describes one.
+`COORD_WARM_WORKSPACES_PER_REPOSITORY` bounds them per repository per worker,
+and `0` turns them off. See [warm starts](../architecture/warm-starts.md).
+
 ## Returning a result
 
 A completed result must carry a changeset whose `baseRevision` matches the
@@ -505,6 +527,13 @@ later.
 
 A result on a lapsed lease is refused. By then another worker may hold the
 task, and accepting both would let two workers write results for one task.
+
+The response body is the whole acceptance, not merely `{ accepted }`: it also
+carries `integrationStatus`, which is what a worker reads to decide whether to
+keep its directory warm. An accepted result whose integration conflicted or
+failed validation leaves a directory nobody has verified anything about, so
+only `integrated` retains. A control plane too old to send the field reads as
+"not landed", which costs a cold start and nothing else.
 
 ## A session that filled its window
 

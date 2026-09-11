@@ -53,6 +53,7 @@ import {
   type CredentialHome,
   type UserCredentialStore,
   type VendorCliKind,
+  type WarmWorkspacePool,
   type WorkspaceManager,
   type WorkspaceSandbox,
 } from "@coord/workspace-manager";
@@ -1735,6 +1736,16 @@ export interface RunOptions {
    */
   conversations?: ConversationRegistry;
   /**
+   * Where a landed task's directory goes instead of being destroyed.
+   *
+   * Same lifecycle argument as `conversations`: a warm directory is only
+   * worth keeping because it outlives the run that made it, and a coordinator
+   * is built per run. A long-lived host makes one pool per process and passes
+   * it here. The CLI passes nothing and every task creates and destroys its
+   * own workspace, exactly as before.
+   */
+  warmWorkspaces?: WarmWorkspacePool;
+  /**
    * Where a person's "stop" reaches this run's live sessions.
    *
    * Same lifecycle as `conversations`: one per process on a long-lived
@@ -2111,6 +2122,9 @@ export async function runPendingTasks(
       ...(options.conversations === undefined
         ? {}
         : { conversations: options.conversations }),
+      ...(options.warmWorkspaces === undefined
+        ? {}
+        : { warmWorkspaces: options.warmWorkspaces }),
       ...(options.cancellations === undefined
         ? {}
         : { cancellations: options.cancellations }),

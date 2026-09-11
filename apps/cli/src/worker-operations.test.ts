@@ -5003,3 +5003,151 @@ test("a handed_off result with no figures is refused rather than requeued", asyn
     await rm(harness.root, { recursive: true, force: true });
   }
 });
+
+/**
+ * A promotion on the worker path indexes the revision it created, while
+ * nothing is waiting on it — otherwise the next planning read pays for the
+ * walk on somebody's critical path.
+ *
+ * And only when the host supplied its own service. The fallback built inside
+ * `acceptWorkResult` is per call and nobody reads it again, so prewarming it
+ * would spend a full repository build on an object discarded on the next
+ * line; every test above that calls this function without `services` takes
+ * exactly that path.
+ */
+test("a promotion indexes the revision it created, but only into a shared service", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await leaseAndAdmit(harness);
+    const repository = await harness.store.getRepository("repo_worker");
+    assert.ok(repository);
+    const canonical = {
+      id: repository.id,
+      path: repository.path,
+      branch: repository.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId,
+      rootPath: path.join(harness.root, "agent-workspaces"),
+      repository: canonical,
+      baseVersion: assignment.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised the value",
+    });
+    await workspaces.destroy(workspace);
+
+    const intelligence = new CodeIntelligenceService(harness.repositories);
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+        intelligence,
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+    assert.equal(accepted.integrationStatus, "integrated");
+
+    // Asserted on the promoted revision rather than on a build count: replays
+    // and replans index other base/current pairs through `canonicalAdvance`,
+    // and those are not what this is about.
+    const promoted = await harness.repositories.getCanonicalVersion(canonical);
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      if (await intelligence.isWarm(canonical, promoted.revision)) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(await intelligence.isWarm(canonical, promoted.revision), true);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a promotion with no shared index service builds nothing", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await leaseAndAdmit(harness);
+    const repository = await harness.store.getRepository("repo_worker");
+    assert.ok(repository);
+    const canonical = {
+      id: repository.id,
+      path: repository.path,
+      branch: repository.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId,
+      rootPath: path.join(harness.root, "agent-workspaces"),
+      repository: canonical,
+      baseVersion: assignment.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 3;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised the value",
+    });
+    await workspaces.destroy(workspace);
+
+    // Counts the listing every index build starts with, on the harness's own
+    // repository service — the one a throwaway intelligence service would be
+    // built over.
+    let listings = 0;
+    const listEntries = harness.repositories.listFileEntries.bind(
+      harness.repositories,
+    );
+    (
+      harness.repositories as unknown as { listFileEntries: typeof listEntries }
+    ).listFileEntries = async (...args: Parameters<typeof listEntries>) => {
+      listings += 1;
+      return await listEntries(...args);
+    };
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(listings, 0);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});

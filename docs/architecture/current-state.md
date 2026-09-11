@@ -219,6 +219,20 @@ handoffs into a block of its own, computed at read time and never stored.
 Both reach the planning round only. See
 [repository-standing-context.md](repository-standing-context.md).
 
+## Warm Starts
+
+| Requirement | Status | Evidence |
+| --- | --- | --- |
+| A repository's index is not rebuilt on the next task's critical path | Implemented | Every live promotion — in-process and on the worker path — calls `CodeIntelligenceService.prewarm` for the revision it created, and the result is written under `.coordinator/index`, sequence-guarded so an older revision can never replace a newer file. A restart reads it back and seeds the content-addressed parse cache as well as the index, so a canonical that moved while the process was down costs only the files that changed. Control plane only. |
+| A landed task's directory is reused instead of destroyed | Implemented | `WarmWorkspacePool` in `@coord/workspace-manager`, bounded per repository, used by the control plane's in-process runs and by each remote worker. Only a task that reached canonical offers its directory; `WorkspaceManager.scrub` resets it to the base hash, cleans every untracked path including ignored ones except the ephemeral excludes, and verifies with `git status --ignored` — anything that fails is destroyed, never handed out. The next task's revision is applied on take, so a canonical advance needs no invalidation. |
+| Dependencies survive between tasks where they can | Implemented | On a worker the agent's own install survives the scrub, which is the whole of retention there. On the control plane an optional prepare step reuses the preview service's `detectInstallCommand` and runs through the workspace backend, so a sandboxed project installs inside its container; a `network: none` sandbox is skipped rather than failed. |
+| Warm and cold starts are observable | Implemented | `task_started` carries `workspaceStart` (`warm`/`cold`/`resumed`), `indexStart` and `dependencies`; `coord metrics` prints a Warm starts block and `--json` carries `warmStarts`; the control plane logs one `[warm]` line per take and the worker's `Laps` line marks `checkout(warm)`. |
+
+Knobs: `COORD_WARM_WORKSPACES_PER_REPOSITORY`, `COORD_WARM_WORKSPACE_IDLE_MS`,
+`COORD_WARM_INDEX`. Kept directories are process-lifetime only — nothing
+durable describes one, and both hosts clear their root at start. See
+[warm-starts.md](warm-starts.md).
+
 ## Repository Lifecycle
 
 - Greenfield start: `coord repo create` and the web repository form create an
@@ -357,6 +371,14 @@ The following are intentionally not represented as complete:
   workspace/planning/integration worktrees, and prunes their registrations
   from the canonical mirrors. `coord recover` reports resumed tasks alongside
   failed runs.
+- Warm sandbox containers, and a dependency-install step on the remote worker.
+  Every sandboxed command is its own `docker run --rm`, and a kept container
+  would hold a mount of a directory the next task owns — which is the leak the
+  warm-workspace scrub exists to prevent. What the Docker path does gain from
+  warm starts is the mounted worktree itself. A worker-side prepare step is
+  deliberately absent rather than impossible: the agent installs, and its own
+  `node_modules` surviving the scrub is what retention already keeps. See
+  [warm-starts.md](warm-starts.md).
 - Redis/event-bus deployment, high availability, Kubernetes, Terraform,
   hybrid workers, and air-gapped release tooling. (A PostgreSQL storage
   backend exists; the rest of that deployment stack does not.)

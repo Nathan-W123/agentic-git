@@ -812,8 +812,14 @@ export function displayNameOf(repository: {
  * `npm ci` where there is a lockfile, `npm install` where there is not — the
  * first is faster and exact, and it refuses outright without a lockfile, which
  * would otherwise be a confusing way to fail.
+ *
+ * Exported so the warm-workspace pool's prepare step reuses exactly this
+ * detection rather than inventing a second one. A caller that needs to tell
+ * "already installed" from "nothing to install" must make the `node_modules`
+ * check itself first: both answer `undefined` here, and for a directory a
+ * landed agent handed back the first is the usual case.
  */
-async function detectInstallCommand(
+export async function detectInstallCommand(
   workspacePath: string,
 ): Promise<PreviewCommand | undefined> {
   const has = async (name: string): Promise<boolean> => {

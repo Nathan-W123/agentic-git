@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import type { PowerState } from "./power.js";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -83,6 +91,14 @@ const AGENT = [
   "function finish(message) {",
   '  const file = path.join(message.workspacePath, ...target().split("/"));',
   '  fs.writeFileSync(file, "export const " + symbolName() + " = 2;\\n", "utf8");',
+  // What an agent leaves in a directory besides its edit: an install worth
+  // keeping and a secret that must not reach the next lease. Written only
+  // when the objective asks, so every other test is unchanged by it.
+  '  if (started.objective.includes("leave artefacts")) {',
+  '    fs.mkdirSync(path.join(message.workspacePath, "node_modules"), { recursive: true });',
+  '    fs.writeFileSync(path.join(message.workspacePath, "node_modules", "x.js"), "1\\n", "utf8");',
+  '    fs.writeFileSync(path.join(message.workspacePath, ".env"), "SECRET=1\\n", "utf8");',
+  "  }",
   "  send({",
   '    type: "done",',
   "    symbolsChanged: [symbolName()],",
@@ -217,6 +233,14 @@ async function startRuntime(t: TestContext): Promise<Runtime> {
       "utf8",
     );
   }
+  // A real .gitignore, because a warm slot's whole risk is what git does not
+  // see: without one, an agent's `.env` is untracked-but-visible and never
+  // reaches the case the scrub exists for.
+  await writeFile(
+    path.join(sourcePath, ".gitignore"),
+    ".env\nnode_modules/\n",
+    "utf8",
+  );
   await repositories.commitAll(sourcePath, "seed");
   const canonical = await repositories.importLocalRepository(
     sourcePath,
@@ -328,6 +352,49 @@ async function waitFor<T>(
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+/** Every warm slot directory under a worker's workspace root, in any repository. */
+async function warmSlots(runtime: Runtime): Promise<string[]> {
+  const warmRoot = path.join(runtime.root, "w", "warm");
+  const owners = await readdir(warmRoot).catch(() => []);
+  const found: string[] = [];
+  for (const owner of owners) {
+    const slots = await readdir(path.join(warmRoot, owner)).catch(() => []);
+    for (const slot of slots) {
+      found.push(path.join(warmRoot, owner, slot));
+    }
+  }
+  return found.sort();
+}
+
+/**
+ * Lands one task in the repository and answers with the slot it left behind,
+ * scrubbed and ready — the precondition of every test about what the *next*
+ * lease does with it.
+ */
+async function landedWarmSlot(runtime: Runtime, worker: Worker): Promise<string> {
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "edit src/value.js leave artefacts",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const landed = await worker.runOnce();
+  assert.equal(landed.accepted, true, landed.reason);
+  // Waiting on the scrub's own observable effect rather than on a timer: the
+  // pool owns the directory before it has finished settling it.
+  return await waitFor(async () => {
+    const [slot] = await warmSlots(runtime);
+    if (slot === undefined) {
+      return undefined;
+    }
+    const gone = await access(path.join(slot, ".env")).then(
+      () => false,
+      () => true,
+    );
+    return gone ? slot : undefined;
+  }, "the warm slot to be scrubbed");
 }
 
 test("lease ids cannot select or collapse the worker scratch root", () => {
@@ -2811,4 +2878,239 @@ test("a worker whose control plane never mentioned a budget never stops itself",
     false,
     "a control plane that never offered a budget must not be sent a handoff",
   );
+});
+
+/**
+ * The worker is the product's primary executor, so its per-lease cost is the
+ * one that matters most: every lease used to clone into its own scratch and
+ * delete it in a `finally`, which meant the checkout was paid again per task
+ * and whatever the agent installed died with the lease.
+ *
+ * A landed lease's directory is kept instead, outside every scratch, scrubbed
+ * by the same rule the control plane uses.
+ */
+test("a landed lease leaves its directory warm for the next one", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+  const warmRoot = path.join(runtime.root, "w", "warm");
+
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "edit src/value.js leave artefacts",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const first = await worker.runOnce();
+  assert.equal(first.accepted, true, first.reason);
+
+  // The slot appears, and is scrubbed asynchronously once the pool owns it.
+  // Waiting on the scrub's own observable effect rather than on a timer.
+  const slot = await waitFor(async () => {
+    const repositories = await readdir(warmRoot).catch(() => []);
+    const owner = repositories[0];
+    if (owner === undefined) {
+      return undefined;
+    }
+    const slots = await readdir(path.join(warmRoot, owner)).catch(() => []);
+    const candidate = slots[0];
+    if (candidate === undefined) {
+      return undefined;
+    }
+    const slotPath = path.join(warmRoot, owner, candidate);
+    const gone = await access(path.join(slotPath, ".env")).then(
+      () => false,
+      () => true,
+    );
+    return gone ? slotPath : undefined;
+  }, "the warm slot to be scrubbed");
+
+  // The install survived; the secret did not.
+  await access(path.join(slot, "node_modules", "x.js"));
+  await assert.rejects(access(path.join(slot, ".env")));
+
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((entry) => String(entry)).join(" "));
+  };
+  let second;
+  try {
+    await runtime.store.submitTask({
+      repositoryId: runtime.repositoryId,
+      objective: "edit src/extra.js",
+      agentId: "local",
+      validationCommands: [],
+    });
+    second = await worker.runOnce();
+  } finally {
+    console.log = log;
+  }
+  assert.equal(second.accepted, true, second.reason);
+  assert.ok(
+    lines.some((line) => line.includes("workspace hit")),
+    `the second lease did not take the warm slot: ${lines.join(" | ")}`,
+  );
+  assert.ok(
+    lines.some((line) => line.includes("checkout(warm)")),
+    `the run did not name its warm checkout: ${lines.join(" | ")}`,
+  );
+
+  await worker.stop();
+});
+
+test("a lease that does not land leaves no warm slot behind", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "edit src/value.js leave artefacts",
+    agentId: "local",
+    // Accepted by the control plane and then refused by the gate: the worker
+    // reads `integrationStatus` rather than `accepted` for exactly this, and
+    // a directory nobody verified anything about is not one to hand on.
+    validationCommands: [
+      {
+        executable: process.execPath,
+        args: ["-e", "process.exit(1)"],
+        label: "always fails",
+      },
+    ],
+  });
+  await worker.runOnce();
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const warmRoot = path.join(runtime.root, "w", "warm");
+  const owners = await readdir(warmRoot).catch(() => []);
+  const slots = await Promise.all(
+    owners.map(async (owner) =>
+      (await readdir(path.join(warmRoot, owner)).catch(() => [])).length,
+    ),
+  );
+  assert.deepEqual(
+    slots.filter((count) => count > 0),
+    [],
+  );
+  // The scratch went, exactly as it always did.
+  const scratchRoots = (await readdir(path.join(runtime.root, "w"))).filter(
+    (entry) => entry.startsWith("lease-"),
+  );
+  assert.deepEqual(scratchRoots, []);
+
+  await worker.stop();
+});
+
+/**
+ * A question is leased from the same queue as work, ahead of it, and runs the
+ * same planning and execution machinery — so it reached the pool too, took
+ * the repository's slot, and then ended at the `return` in the question
+ * branch, which is before anything that could hand a directory back. The slot
+ * was gone from the pool and still on disk, and only the next worker start
+ * removed it.
+ */
+test("a question leaves the repository's warm slot for the next task", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+  const slot = await landedWarmSlot(runtime, worker);
+
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((entry) => String(entry)).join(" "));
+  };
+  let asked;
+  try {
+    await runtime.store.submitTask({
+      repositoryId: runtime.repositoryId,
+      objective: "what holds the value?",
+      agentId: "local",
+      validationCommands: [],
+      kind: "question",
+      answerTo: "msg_root",
+    });
+    asked = await worker.runOnce();
+  } finally {
+    console.log = log;
+  }
+  assert.equal(asked.accepted, true, asked.reason);
+
+  // Not a miss either: a question that consulted the pool at all would have
+  // been handed the slot, and the only honest outcome for it is to leave the
+  // pool alone.
+  assert.deepEqual(
+    lines.filter((line) => line.includes("[warm]")),
+    [],
+    `the question went to the pool: ${lines.join(" | ")}`,
+  );
+  assert.deepEqual(await warmSlots(runtime), [slot]);
+  // Still the directory the landed task paid for, install and all.
+  await access(path.join(slot, "node_modules", "x.js"));
+
+  await worker.stop();
+});
+
+/**
+ * The take happens near the start of `plan`, and a great deal after it can
+ * throw — the claim request below, a sandbox that will not start, a lost
+ * lease. The pool has already spliced its entry out by then, and the
+ * directory lives outside the lease's scratch, so a teardown that could only
+ * see a planning result it never got left a full checkout on disk forever,
+ * and the pool a slot short, until the process was restarted.
+ */
+test("a lease that fails while planning gives the warm slot back", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new WorkerClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+  });
+  // The first call this lease makes after it has been handed the directory,
+  // failed on the second lease only. A control plane that answers it with a
+  // 500 really does throw here, and everything between the take and the end
+  // of `plan` fails the same way.
+  const realClaim = client.claimRepository.bind(client);
+  let breakPlanning = false;
+  client.claimRepository = async (leaseId) => {
+    if (breakPlanning) {
+      throw new Error("the control plane could not prepare this claim");
+    }
+    return await realClaim(leaseId);
+  };
+  const worker = makeWorker(runtime, { client });
+  await worker.register();
+  await landedWarmSlot(runtime, worker);
+
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((entry) => String(entry)).join(" "));
+  };
+  let second;
+  try {
+    breakPlanning = true;
+    await runtime.store.submitTask({
+      repositoryId: runtime.repositoryId,
+      objective: "edit src/extra.js",
+      agentId: "local",
+      validationCommands: [],
+    });
+    second = await worker.runOnce();
+  } finally {
+    console.log = log;
+  }
+  assert.equal(second.accepted, false, lines.join(" | "));
+
+  assert.ok(
+    lines.some((line) => line.includes("workspace hit")),
+    `the failing lease never took the slot, so this proves nothing: ${lines.join(" | ")}`,
+  );
+  assert.deepEqual(await warmSlots(runtime), []);
+  const scratchRoots = (await readdir(path.join(runtime.root, "w"))).filter(
+    (entry) => entry.startsWith("lease-"),
+  );
+  assert.deepEqual(scratchRoots, []);
+
+  await worker.stop();
 });

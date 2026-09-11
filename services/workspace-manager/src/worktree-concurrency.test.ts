@@ -11,7 +11,11 @@ import {
   type ProcessOutput,
 } from "@coord/repository-service";
 
-import { GitWorktreeWorkspaceManager } from "./index.js";
+import {
+  GitWorktreeWorkspaceManager,
+  WarmWorkspacePool,
+  warmBackendFor,
+} from "./index.js";
 
 /**
  * Worktree bookkeeping must not read a mirror while something is deleting
@@ -349,6 +353,83 @@ test("an add that failed on its own merits is not run again", async () => {
       /invalid reference: deadbeef/u,
     );
     assert.equal(client.adds, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A warm take runs `reset`/`clean`/`status` on a directory the mirror has
+ * registered as a worktree, and a retention runs them while other teardowns
+ * are deleting theirs.
+ *
+ * None of the three enumerates the mirror's registrations, which is why they
+ * take no lock — the same argument `advance` and `collectChangeSet` make. The
+ * point of this test is that the argument holds while deletes are happening:
+ * if any of them ever grew an enumeration, the recorder would see it overlap
+ * a teardown.
+ */
+test("a warm take never runs beside a teardown on its mirror", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-warm-conc-"));
+  const client = new OverlapRecordingGitClient();
+  const repositories = new RepositoryService(client);
+
+  try {
+    const { repository, version } = await seedRepository(
+      repositories,
+      root,
+      "canonical",
+    );
+    const pool = new WarmWorkspacePool({ perRepository: 8, log: () => {} });
+    const managers = Array.from(
+      { length: 8 },
+      () => new GitWorktreeWorkspaceManager(client),
+    );
+    const workspaces = await Promise.all(
+      managers.map((manager, index) =>
+        manager.create({
+          taskId: `task_${index}`,
+          rootPath: path.join(root, "workspaces"),
+          repository,
+          baseVersion: version,
+        }),
+      ),
+    );
+
+    const results = await Promise.allSettled(
+      workspaces.map(async (workspace, index) => {
+        const manager = managers[index];
+        assert.ok(manager !== undefined);
+        const backend = warmBackendFor(manager);
+        assert.ok(backend !== undefined);
+        assert.equal(pool.retain(backend, workspace), true);
+        await pool.settled();
+        const taken = await pool.take({
+          taskId: `task_next_${index}`,
+          rootPath: path.join(root, "workspaces"),
+          repository,
+          baseVersion: version,
+        });
+        if (taken !== undefined) {
+          await manager.destroy(taken.workspace);
+        }
+      }),
+    );
+    assert.deepEqual(
+      results
+        .filter((entry) => entry.status === "rejected")
+        .map((entry) =>
+          entry.status === "rejected" ? String(entry.reason) : "",
+        ),
+      [],
+    );
+
+    await pool.drain();
+    assert.deepEqual(client.violations, []);
+    assert.ok(
+      client.maxConcurrentReads > 1,
+      `workspace creation was serialised (max concurrent: ${client.maxConcurrentReads})`,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

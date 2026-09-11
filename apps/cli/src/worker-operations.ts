@@ -3930,6 +3930,18 @@ export async function acceptWorkResult(
         // it was simply never put on the one event the narration reads.
         agentExplanation: promoted.agentExplanation,
       });
+      // Index the new canonical revision now, while nothing is waiting on it,
+      // so the next planning read on this repository is a cache hit rather
+      // than a full walk on somebody's critical path.
+      //
+      // Only when the host supplied its own service. The fallback built at
+      // the top of this function is per call and nobody reads it again, so
+      // prewarming it would spend a full repository build — seconds, and a
+      // persisted-file write — on an object that is discarded on the next
+      // line.
+      if (services.intelligence !== undefined) {
+        services.intelligence.prewarm(repository, integration.canonicalVersion);
+      }
       // Only now, with the granted half durably in canonical, is the deferred
       // half turned into work of its own. Queueing it earlier would leave a
       // task asking for the remainder of something that never landed.

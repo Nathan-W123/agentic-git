@@ -58,6 +58,13 @@ services:
       COORD_SANDBOX_USER: ${COORD_SANDBOX_USER:-}
       COORD_GITHUB_CLIENT_ID: ${COORD_GITHUB_CLIENT_ID:-}
       COORD_REPOSITORY_PARALLELISM: ${COORD_REPOSITORY_PARALLELISM:-}
+      # Warm starts. Empty means the documented defaults: one kept directory
+      # per repository, a six-hour idle bound, and the persisted index on.
+      # Kept directories are disk under the project volume, which is why an
+      # operator needs to be able to turn them down without a rebuild.
+      COORD_WARM_WORKSPACES_PER_REPOSITORY: ${COORD_WARM_WORKSPACES_PER_REPOSITORY:-}
+      COORD_WARM_WORKSPACE_IDLE_MS: ${COORD_WARM_WORKSPACE_IDLE_MS:-}
+      COORD_WARM_INDEX: ${COORD_WARM_INDEX:-}
       # "1" stops the control plane executing agents itself, leaving every
       # task for a registered worker. The hosted deployment's memory and
       # egress are almost entirely agents, and both belong on the machine the

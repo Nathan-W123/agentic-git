@@ -83,6 +83,9 @@ the web UI.
 | `COORD_CONVERSATION_SESSION_IDLE_MS` | How long a conversation's session may sit idle between turns before it is closed. Same trade as the cap, measured in silence rather than in count, and the conversation survives it either way. | `900000` (15 minutes) |
 | `COORD_OPEN_CONVERSATION_MAX_AGE_MS` | How long a landed conversational task waits for its next message before the waiting ends and the task is settled. The work stays landed — only the thread stops being continuable, and its workspace and session are released. | `21600000` (6 hours) |
 | `COORD_MCP_SESSION_TTL_HOURS` | How long an idle `Mcp-Session-Id` stays accepted on the MCP endpoint. Sliding, so a session in use never lapses. A stale id is answered `404` and the client simply initializes again, which every MCP client already knows how to do — so this is a comfort setting rather than a security one, and the id is not a credential in any case (every request still authenticates with its bearer token). It bounds acceptance only: what a session did is kept regardless, and is what the next handshake is seeded with. Growth is bounded by count instead — the newest forty sessions per person, pruned as each new one is created. See [editor work](protocol/editor-work.md). | `24` |
+| `COORD_WARM_WORKSPACES_PER_REPOSITORY` | How many task directories to keep per repository instead of destroying them, so the next task in that repository starts from a checkout that already exists — and, on a worker, from whatever the last agent installed into it. Read by the control plane and, separately, by every worker, so a fleet of ten machines with this at `1` is holding ten directories per repository, each a full checkout plus its dependencies. `0` turns it off entirely and restores the create-and-destroy behaviour. Kept directories never survive a restart: nothing durable describes one, and both hosts clear their root at start. Only a task that reached canonical offers its directory back, and it is scrubbed to a verified-clean checkout — including ignored files — before anything else is given it. See [warm starts](architecture/warm-starts.md). | `1` |
+| `COORD_WARM_WORKSPACE_IDLE_MS` | How long a kept directory sits unused before it is destroyed. A repository nobody has run since this morning is disk rather than warmth. | `21600000` (6 hours) |
+| `COORD_WARM_INDEX` | Set to `0` to stop the control plane keeping each repository's code index under `.coordinator/index`. With it on, the revision each promotion creates is indexed while nothing is waiting on it and written out, so a restarted control plane reads it back instead of walking and re-parsing the repository on the first task's critical path — and because parses are addressed by content, a canonical that moved while the process was down costs only the files that changed. The file is a cache: a wrong one would be worse than none, so it is discarded rather than migrated whenever the index shape or the size bounds change. | on |
 
 The same variables work without Docker: build with `npm ci && npm run build`,
 then run `node apps/web/dist/index.js` under whatever supervisor you prefer.
@@ -90,8 +93,10 @@ Node.js >= 24 and `git` must be installed.
 
 Under Compose, a variable reaches the control plane only if it is listed in
 the `control-plane` service's `environment:` block — `docker-compose.yml` says
-so where it forwards the optional knobs. The three conversation settings are
-not forwarded there yet, so a Compose deployment that wants one adds the line
+so where it forwards the optional knobs. The three warm-start settings —
+`COORD_WARM_WORKSPACES_PER_REPOSITORY`, `COORD_WARM_WORKSPACE_IDLE_MS` and
+`COORD_WARM_INDEX` — are forwarded. The three conversation settings are not
+forwarded there yet, so a Compose deployment that wants one adds the line
 (`COORD_MAX_CONVERSATION_SESSIONS: ${COORD_MAX_CONVERSATION_SESSIONS:-}`, and
 the same shape for the other two) beside the ones already there. Empty is each
 one's own default, so an unset variable changes nothing.

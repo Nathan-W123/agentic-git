@@ -82,8 +82,11 @@ import {
 import { registerBlanketHolder } from "./blanket-holders.js";
 import {
   GitWorktreeWorkspaceManager,
+  warmBackendFor,
   type AdvanceWorkspaceInput,
   type TaskWorkspace,
+  type WarmDependencies,
+  type WarmWorkspacePool,
   type WorkspaceManager,
 } from "@coord/workspace-manager";
 
@@ -678,6 +681,16 @@ export interface CoordinatorDependencies {
    * which is all a single-invocation caller needs.
    */
   conversations?: ConversationRegistry;
+  /**
+   * Where a landed task's directory goes instead of being destroyed.
+   *
+   * Injectable for the reason the conversation registry is: a coordinator is
+   * built per run, and a warm directory is only worth keeping because it
+   * outlives the run that made it. A long-lived host makes one pool per
+   * process; absent, every task creates and destroys its own workspace
+   * exactly as before.
+   */
+  warmWorkspaces?: WarmWorkspacePool;
   /**
    * Who arbitrates this run's plans against work running *outside* it.
    *
@@ -1327,6 +1340,16 @@ export class Coordinator {
   private readonly questions: QuestionController | undefined;
   private readonly questionDeadlineMs: number;
   private readonly conversations: ConversationRegistry;
+  /** See {@link CoordinatorDependencies.warmWorkspaces}. */
+  private readonly warmWorkspaces: WarmWorkspacePool | undefined;
+  /**
+   * Whether this run's starting revision was already indexed when it began.
+   *
+   * Read once per run and then written onto every `task_started`, because
+   * there is no run-level audit event to hang it on. A five-task run
+   * therefore reports it five times — see the note on `WarmStartMetrics`.
+   */
+  private indexStart: "warm" | "cold" = "cold";
   private readonly planAuthority: PlanAuthority | undefined;
   private readonly actionAuthority: ActionAuthority | undefined;
   private readonly cancellations: TaskCancellationRegistry | undefined;
@@ -1374,6 +1397,7 @@ export class Coordinator {
           ? {}
           : { maxSessions: dependencies.maxConversationSessions }),
       });
+    this.warmWorkspaces = dependencies.warmWorkspaces;
     this.planAuthority = dependencies.planAuthority;
     this.actionAuthority = dependencies.actionAuthority;
     this.cancellations = dependencies.cancellations;
@@ -1398,6 +1422,15 @@ export class Coordinator {
     const initialVersion = await this.repositories.getCanonicalVersion(
       input.repository,
     );
+    // Asked once, before anything is planned, because that is the question:
+    // did this run's first planning read have to walk the repository, or was
+    // the revision already indexed by the promotion that created it?
+    this.indexStart = (await this.intelligence.isWarm(
+      input.repository,
+      initialVersion.revision,
+    ))
+      ? "warm"
+      : "cold";
     const recorder =
       this.store === undefined
         ? undefined
@@ -3763,18 +3796,42 @@ export class Coordinator {
       // most of what makes a second turn faster than a first. The advance
       // lands exactly on waveVersion, so the changeset base check below
       // holds for a continued turn the same way it does for a fresh one.
-      workspace =
-        entry.resumed === undefined
-          ? await this.workspaces.create({
-              taskId: entry.task.id,
-              rootPath: input.workspaceRoot,
-              repository: input.repository,
-              baseVersion: waveVersion,
-            })
-          : await this.advanceWorkspace(entry.resumed.workspace, {
-              taskId: entry.task.id,
-              baseVersion: waveVersion,
-            });
+      //
+      // A task that is not resuming anything asks the pool first. What comes
+      // back is a directory a task that landed left behind, scrubbed to a
+      // verified-clean checkout and re-based on this wave's canonical, so it
+      // is the same starting point `create` would have produced minus the
+      // checkout — and, where the host prepares them, minus the install too.
+      let workspaceStart: "warm" | "cold" | "resumed";
+      let dependencies: WarmDependencies | undefined;
+      if (entry.resumed === undefined) {
+        const warm = await this.warmWorkspaces?.take({
+          taskId: entry.task.id,
+          rootPath: input.workspaceRoot,
+          repository: input.repository,
+          baseVersion: waveVersion,
+        });
+        workspace =
+          warm?.workspace ??
+          (await this.workspaces.create({
+            taskId: entry.task.id,
+            rootPath: input.workspaceRoot,
+            repository: input.repository,
+            baseVersion: waveVersion,
+          }));
+        workspaceStart = warm === undefined ? "cold" : "warm";
+        dependencies = warm?.dependencies;
+      } else {
+        workspace = await this.advanceWorkspace(entry.resumed.workspace, {
+          taskId: entry.task.id,
+          baseVersion: waveVersion,
+        });
+        // Not "warm": a conversation keeping its own directory between turns
+        // is a different mechanism with different rules — it keeps untracked
+        // files on purpose — and counting it as a pool hit would make the
+        // pool look like it was working on a deployment where it is off.
+        workspaceStart = "resumed";
+      }
       entry.decision.workspaceId = workspace.id;
       this.taskWorkspacePaths.set(entry.task.id, workspace.path);
       this.taskWorkspaces.set(entry.task.id, workspace);
@@ -3792,6 +3849,9 @@ export class Coordinator {
         workspaceId: workspace.id,
         baseRevision: waveVersion.revision,
         planRevision: entry.planRevision,
+        workspaceStart,
+        indexStart: this.indexStart,
+        ...(dependencies === undefined ? {} : { dependencies }),
       });
 
       const eventErrors: unknown[] = [];
@@ -5481,6 +5541,14 @@ export class Coordinator {
             files: result.changeSet.patches.map((patch) => patch.path),
           },
         );
+        // Index the revision that has just become canonical, now, while
+        // nothing is waiting on it. The next run's planning is its first
+        // reader and reads it on the critical path; `describeCanonicalAdvance`
+        // only builds it when some task is already waiting, so for a
+        // promotion that lands with nobody waiting this build is new work
+        // rather than a duplicate of work already happening. Nothing waits
+        // for it — see {@link CodeIntelligenceService.prewarm}.
+        this.intelligence.prewarm(input.repository, integration.canonicalVersion);
         await this.holdOnBranch(input, result, integration);
         // Only now, with the granted half durably in canonical, does the half
         // that was withheld become work of its own. Queued earlier it would
@@ -5680,6 +5748,10 @@ export class Coordinator {
         result.workspace,
         recorder,
         runAudit,
+        // The one settlement that knows the task landed. `empty` settles as
+        // integrated too — a task that found nothing to do still leaves a
+        // directory nobody has damaged.
+        { retainWorkspace: taskResult.status === "integrated" },
       );
     }
     if (cleanupFailure !== undefined) {
@@ -6391,6 +6463,7 @@ export class Coordinator {
     workspace: TaskWorkspace | undefined,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
+    options: { retainWorkspace?: boolean } = {},
   ): Promise<string | undefined> {
     const taskId = entry.task.id;
     const failures: string[] = [];
@@ -6414,7 +6487,23 @@ export class Coordinator {
     } catch (error) {
       failures.push(`agent session: ${errorMessage(error)}`);
     }
-    if (workspace !== undefined) {
+    // Only a task that landed offers its directory back, and only the caller
+    // that knows the outcome asks for it. Every other caller of this method
+    // is a failure path — a planning refusal, an execution failure, the park
+    // fallback — and a failed task's agent process can outlive the cancel
+    // above, so its directory may still be being written to. `retain` is
+    // synchronous about ownership: false means the pool declined and this
+    // teardown still owns the directory.
+    const backend =
+      this.warmWorkspaces === undefined
+        ? undefined
+        : warmBackendFor(this.workspaces);
+    const retained =
+      options.retainWorkspace === true &&
+      workspace !== undefined &&
+      backend !== undefined &&
+      this.warmWorkspaces?.retain(backend, workspace) === true;
+    if (workspace !== undefined && !retained) {
       try {
         await this.workspaces.destroy(workspace);
       } catch (error) {

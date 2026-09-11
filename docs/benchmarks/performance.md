@@ -123,5 +123,14 @@ run.
 - **Cached indexes are deep-cloned on every read.** Immaterial at twelve files,
   real on a large repository. Removing the clone hands callers a shared mutable
   index.
-- **Workspaces are created and destroyed per task.** About 3.6 s of a scripted
-  run. Reuse trades away isolation.
+- **Workspaces are created and destroyed per task — partly addressed.** About
+  3.6 s of a scripted run. A task that reaches canonical now offers its
+  directory to a per-repository pool instead of destroying it, and the next
+  task in that repository is given it after a scrub back to a verified-clean
+  checkout; the isolation that reuse would otherwise trade away is bought back
+  by that scrub rather than by rebuilding. See
+  [warm starts](../architecture/warm-starts.md) for the rules and the knobs.
+  Not yet measured here: the before/after belongs in the table above, taken by
+  the interleaved method, with two runs in one repository so the second hits
+  the pool. The scripted benchmark builds its own coordinator and passes no
+  pool, so it measures the cold path until it is given one.
