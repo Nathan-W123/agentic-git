@@ -117,3 +117,74 @@ test("a using names a namespace, and only #load names a file", () => {
   ]);
   assert.deepEqual(resolveCSharpLoad("src/Script.csx", "missing.csx", context), []);
 });
+
+/* ------------------------------------------------------------ second pass -- */
+
+test("a line spliced onto the one above it cannot begin a directive", () => {
+  // C splices a backslash-newline before it looks for directives, so the
+  // `#include` under a comment ending in a Windows path is comment text.
+  assert.deepEqual(
+    readIncludes('// path C:\\dir\\\n#include "ghost.h"\n#include "real.h"\n'),
+    ["real.h"],
+  );
+  assert.deepEqual(readIncludes('// c \\ \n#include "ghost.h"\n'), []);
+  assert.deepEqual(readIncludes('// c\\\r\n#include "ghost.h"\r\n'), []);
+  assert.deepEqual(readIncludes('#define STAMP \\\n#include "ghost.h"\nint x;\n'), []);
+  assert.deepEqual(readIncludes('#include "real.h" \\\n#include "ghost.h"\n'), ["real.h"]);
+  // C# has no such splice, and a `#load` after a backslash line is live.
+  assert.deepEqual(readCSharpLoads('var p = "x\\\\";\n#load "a.csx"\n'), ["a.csx"]);
+});
+
+test("an #if 0 group is dead, and what comes after its #else is not", () => {
+  assert.deepEqual(readIncludes('#if 0\n#include "dead.h"\n#endif\n#include "real.h"\n'), ["real.h"]);
+  assert.deepEqual(
+    readIncludes('#if 0\n#include "dead.h"\n#else\n#include "live.h"\n#endif\n'),
+    ["live.h"],
+  );
+  assert.deepEqual(
+    readIncludes('#if 0\n#ifdef X\n#include "deeper.h"\n#endif\n#endif\n#include "real.h"\n'),
+    ["real.h"],
+  );
+  // Any other condition is somebody's flag, and left alone.
+  assert.deepEqual(readIncludes('#ifdef DEBUG\n#include "debug.h"\n#endif\n'), ["debug.h"]);
+  assert.deepEqual(readCSharpLoads('#if false\n#load "ghost.csx"\n#endif\n#load "real.csx"\n'), ["real.csx"]);
+});
+
+test("an absolute path is not in the repository, whatever it happens to match", () => {
+  const context = repo("src/a.c", "src/abs.h", "s/a.csx", "s/x.csx");
+  assert.deepEqual(resolveInclude("src/a.c", "/abs.h", context), []);
+  assert.deepEqual(resolveInclude("src/a.c", "C:\\abs.h", context), []);
+  assert.deepEqual(resolveCSharpLoad("s/a.csx", "/x.csx", context), []);
+});
+
+test("a byte-order mark does not hide the first directive", () => {
+  assert.deepEqual(readIncludes('\uFEFF#include "first.h"\n#include "second.h"\n'), ["first.h", "second.h"]);
+  assert.deepEqual(readCSharpLoads('\uFEFF#load "a.csx"\n'), ["a.csx"]);
+});
+
+test("directive prose and a stray apostrophe do not abandon the file", () => {
+  assert.deepEqual(readIncludes("#warning don't\n#include \"a.h\"\n"), ["a.h"]);
+  assert.deepEqual(readIncludes("#if 0\nthis doesn't work\n#endif\n#include \"a.h\"\n"), ["a.h"]);
+  assert.deepEqual(readCSharpLoads("#region Don't touch\n#load \"a.csx\"\n#endregion\n"), ["a.csx"]);
+});
+
+test("C# verbatim and raw strings are read by their own rules", () => {
+  // A verbatim path ending in a backslash is not an escape.
+  assert.deepEqual(readCSharpLoads('var p = @"C:\\dir\\";\n#load "a.csx"\n'), ["a.csx"]);
+  // A verbatim string spans lines, and a `#load` inside it is text.
+  assert.deepEqual(readCSharpLoads('var s = @"line one\n#load ""ghost.csx""\nline two";\n#load "a.csx"\n'), ["a.csx"]);
+  assert.deepEqual(readCSharpLoads('var s = $@"x{y}""z";\n#load "a.csx"\n'), ["a.csx"]);
+  assert.deepEqual(readCSharpLoads('var r = """\n#load "ghost.csx"\n""";\n#load "a.csx"\n'), ["a.csx"]);
+});
+
+test("a #load must be the first thing on its line as written", () => {
+  assert.deepEqual(readCSharpLoads('/* a */ #load "ghost.csx"\n'), []);
+  assert.deepEqual(readCSharpLoads('/*\n#load "ghost.csx"\n*/\n#load "real.csx"\n'), ["real.csx"]);
+});
+
+test("a large file is read in linear time and memory", () => {
+  const started = Date.now();
+  const includes = readIncludes(`${"x".repeat(3 * 1024 * 1024)}\n#include "end.h"\n`);
+  assert.deepEqual(includes, ["end.h"]);
+  assert.ok(Date.now() - started < 3000);
+});

@@ -45,7 +45,7 @@ export function readJvmHeader(
   source: string,
   language: JvmLanguage,
 ): JvmUnit | undefined {
-  const text = source.startsWith("﻿") ? source.slice(1) : source;
+  const text = source.startsWith("\uFEFF") ? source.slice(1) : source;
   let at = 0;
   let depth = 0;
   const packages: string[] = [];
@@ -53,45 +53,53 @@ export function readJvmHeader(
 
   const lines = text.split("\n");
   for (const raw of lines) {
-    const line = raw.trim();
+    // A trailing line comment is not part of the clause, and a `"""`
+    // anywhere in the header is a shape this does not model at all.
+    let line = raw.replace(/\/\/.*$/u, "").trim();
     if (line === "") {
       continue;
     }
-    // A block comment spanning lines is tracked crudely and conservatively:
-    // anything that opens one and does not close it on the same line puts the
-    // reader inside a comment, and a `"""` anywhere in the header is a shape
-    // this does not model at all.
     if (line.includes('"""')) {
       return undefined;
     }
-    if (depth > 0) {
-      const closes = (line.match(/\*\//gu) ?? []).length;
-      const opens = (line.match(/\/\*/gu) ?? []).length;
-      depth += opens - closes;
-      if (depth < 0) {
-        return undefined;
+    // A block comment spanning lines is tracked crudely and conservatively.
+    // The text after the `*/` that closes it is still a line of the header:
+    // `*/ package com.acme;` is a licence block ending on the clause.
+    if (depth > 0 || line.startsWith("/*")) {
+      for (const token of line.matchAll(/\/\*|\*\//gu)) {
+        depth += token[0] === "/*" ? 1 : -1;
+        if (depth < 0) {
+          return undefined;
+        }
       }
-      continue;
-    }
-    if (line.startsWith("//")) {
-      continue;
-    }
-    if (line.startsWith("/*")) {
-      const opens = (line.match(/\/\*/gu) ?? []).length;
-      const closes = (line.match(/\*\//gu) ?? []).length;
-      depth = opens - closes;
-      if (depth < 0) {
-        return undefined;
+      if (depth > 0) {
+        continue;
       }
-      continue;
+      const closed = line.lastIndexOf("*/");
+      line = closed === -1 ? "" : line.slice(closed + 2).trim();
+      if (line === "") {
+        continue;
+      }
     }
     // An annotation or a Kotlin file-level target sits in the header and says
-    // nothing this needs.
+    // nothing this needs — unless a clause is glued to it, which is a line
+    // this cannot split.
     if (line.startsWith("@")) {
+      if (/\b(?:package|import)\b/u.test(line)) {
+        return undefined;
+      }
       continue;
     }
+    // Scala's `package object` opens a declaration, not a package clause.
+    if (language === "scala" && /^package\s+object\b/u.test(line)) {
+      break;
+    }
 
-    const pkg = /^package\s+([\w.`\s]+?)\s*;?\s*$/u.exec(line);
+    // Interior whitespace is collapsed first: the earlier pattern let two
+    // whitespace quantifiers overlap, and a `package` followed by a run of
+    // spaces and a stray brace took seconds per kilobyte to reject.
+    const compact = line.replace(/\s+/gu, " ");
+    const pkg = /^package ([\w`]+(?: ?\. ?[\w`]+)*) ?;?$/u.exec(compact);
     if (pkg !== null) {
       const name = normalizeName(pkg[1] ?? "");
       if (name === "") {
@@ -104,14 +112,28 @@ export function readJvmHeader(
       packages.push(name);
       continue;
     }
-    const imported = /^import\s+(?:static\s+)?(.+?)\s*;?\s*$/u.exec(line);
+    const imported = /^import (?:static )?(.+?) ?;?$/u.exec(compact);
     if (imported !== null) {
-      const specifier = (imported[1] ?? "").trim();
+      let specifier = (imported[1] ?? "").trim();
       // Several directives on one line is legal, and a pattern that reaches
       // to end-of-line swallows them all into one specifier that names
       // nothing. A surviving separator means this line holds more than the
       // one clause this understood.
       if (specifier === "" || /;|\bimport\b/u.test(specifier)) {
+        return undefined;
+      }
+      // `import a.B as C` names `a.B`; the alias is local to this file.
+      if (language === "kotlin") {
+        specifier = specifier.replace(/\s+as\s+[\w`]+$/u, "");
+      }
+      // A specifier that ends in a dot is the first line of a directive
+      // that continues on the next, and a slash is not a name at all: both
+      // mean this reader has lost its place.
+      if (
+        /\.$/u.test(specifier) ||
+        specifier.includes("/") ||
+        !/^[\w.`{},=> *_]+$/u.test(specifier)
+      ) {
         return undefined;
       }
       imports.push(specifier);
@@ -142,6 +164,15 @@ function normalizeName(raw: string): string {
 export interface JvmContext {
   /** Fully-qualified top-level name to the files declaring it. */
   declarations: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The subset of {@link declarations} that are types. A truncated
+   * specifier — `a.b.C.MEMBER` read as `a.b.C` — may only land on one of
+   * these: walking `com.acme.ui.theme.Typography` back onto a Kotlin
+   * top-level `fun theme()` in `com.acme.ui` was a confident wrong answer.
+   * Absent means every declaration counts, for callers that never read
+   * kinds.
+   */
+  types?: ReadonlyMap<string, readonly string[]>;
   /** Every repository path by basename, for the Java filename convention. */
   basenames: ReadonlyMap<string, readonly string[]>;
   units: ReadonlyMap<string, JvmUnit>;
@@ -236,6 +267,18 @@ export function resolveJvmImport(
   );
 }
 
+/** Every proper prefix of a declared name is a package, and not a type. */
+function packagesOf(declarations: ReadonlyMap<string, readonly string[]>): Set<string> {
+  const packages = new Set<string>();
+  for (const fqn of declarations.keys()) {
+    const parts = fqn.split(".");
+    for (let length = 1; length < parts.length; length += 1) {
+      packages.add(parts.slice(0, length).join("."));
+    }
+  }
+  return packages;
+}
+
 function lookUp(
   fromFile: string,
   names: readonly string[],
@@ -243,22 +286,40 @@ function lookUp(
   context: JvmContext,
 ): readonly string[] {
   const hits = new Set<string>();
-  for (const name of names) {
-    for (const file of context.declarations.get(name) ?? []) {
+  const types = context.types ?? context.declarations;
+  const packages = packagesOf(context.declarations);
+  for (const [position, name] of names.entries()) {
+    // The specifier as written may name anything; a truncation of it may
+    // only name a type, and never a package.
+    const table = position === 0 ? context.declarations : types;
+    if (position > 0 && packages.has(name)) {
+      continue;
+    }
+    for (const file of table.get(name) ?? []) {
       hits.add(file);
     }
   }
-  if (hits.size === 0 && language === "java") {
+  const written = names[0];
+  if (hits.size === 0 && language === "java" && written !== undefined) {
     // Java alone requires a public type to live in a file of its own name,
     // so a repository whose package layout this could not read still has one
-    // reliable clue. Only when the basename is unique: two `Money.java` under
-    // different packages is exactly the case where guessing is wrong.
-    for (const name of names) {
-      const tail = name.split(".").at(-1);
-      const paths = context.basenames.get(`${tail ?? ""}.java`) ?? [];
-      if (paths.length === 1 && paths[0] !== undefined) {
-        hits.add(paths[0]);
-      }
+    // reliable clue. Only for a file whose header could not be read — one
+    // that could be read is in the declarations, under its real package —
+    // only where the path ends in the package as directories, and only when
+    // that leaves one file: `import java.util.List` must never land on the
+    // repository's own `com/acme/ui/List.java`.
+    const parts = written.split(".");
+    const tail = parts.at(-1) ?? "";
+    const suffix = `${parts.join("/")}.java`;
+    const paths = (context.basenames.get(`${tail}.java`) ?? []).filter((path) => {
+      const unit = context.units.get(path);
+      return (
+        (unit === undefined || unit.packageName === "") &&
+        (path === suffix || path.endsWith(`/${suffix}`))
+      );
+    });
+    if (paths.length === 1 && paths[0] !== undefined) {
+      hits.add(paths[0]);
     }
   }
   hits.delete(fromFile);

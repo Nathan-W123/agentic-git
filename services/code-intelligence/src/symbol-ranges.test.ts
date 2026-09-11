@@ -176,3 +176,38 @@ test("a byte-order mark does not make a Python file unreadable", async () => {
   );
   assert.deepEqual(spans(read.files.get("bom.py")?.ranges), ["f:2-3"]);
 });
+
+test("a body-less declaration ends at the next declaration, not at the next brace in the file", () => {
+  // `data class Ok(...) : Result()` has no body. Taking the next `{` in the
+  // file for it swallowed `class Repo`, so Repo read as nested and vanished
+  // from the top level.
+  const sealed = braceSymbolRanges(
+    [
+      "package com.acme",
+      "sealed class Result {",
+      "  data class Ok(val v: Int) : Result()",
+      "  object Loading : Result()",
+      "}",
+      "class Repo {",
+      "  fun load(): Result = Loading",
+      "}",
+    ].join("\n"),
+    "kotlin",
+  );
+  assert.deepEqual(spans(sealed), ["Result:2-5", "Ok:3-3", "Loading:4-5", "Repo:6-8", "load:7-7"]);
+  // A lambda as a default value is not the class body.
+  assert.deepEqual(
+    spans(
+      braceSymbolRanges(
+        "class Widget(val onClick: () -> Unit = {}) {\n  class State {\n    val x = 1\n  }\n}\n",
+        "kotlin",
+      ),
+    ),
+    ["Widget:1-5", "State:2-4"],
+  );
+  // An expression body runs to the next declaration, never shorter.
+  assert.deepEqual(
+    spans(braceSymbolRanges("fun a(x: Int) =\n    x +\n    1\nfun b() {\n}\n", "kotlin")),
+    ["a:1-3", "b:4-5"],
+  );
+});

@@ -193,3 +193,83 @@ test("a workspace member resolves inside its own crate", () => {
     [],
   );
 });
+
+/* ------------------------------------------------------------ second pass -- */
+
+test("a binary target is its own crate, and crate:: inside it never reaches the library", () => {
+  // Bins and libraries share module names like `config` and `cli` all the
+  // time; `src/bin/tool.rs` saying `crate::config` means `src/bin/config.rs`.
+  const context = repo("Cargo.toml", "src/lib.rs", "src/config.rs", "src/bin/tool.rs", "src/bin/config.rs");
+  assert.deepEqual(resolveRustModule("src/bin/tool.rs", "config", context), ["src/bin/config.rs"]);
+  assert.deepEqual(resolveRustUse("src/bin/tool.rs", "crate::config::Settings", context), [
+    "src/bin/config.rs",
+  ]);
+  const nested = repo("Cargo.toml", "src/lib.rs", "src/cli.rs", "src/bin/tool/main.rs", "src/bin/tool/cli.rs");
+  assert.deepEqual(resolveRustUse("src/bin/tool/main.rs", "crate::cli::Args", nested), [
+    "src/bin/tool/cli.rs",
+  ]);
+});
+
+test("inside an inline module, super is the file and self is the module", () => {
+  const context = repo(
+    "Cargo.toml", "src/lib.rs", "src/main.rs", "src/error.rs", "src/helpers.rs",
+    "src/parser.rs", "src/parser/error.rs", "src/tests/helpers.rs",
+  );
+  // `mod tests { use super::error::E }` in parser.rs means parser's own
+  // `error` — parser/error.rs — not the crate's error.rs beside it.
+  const parser = readRustFile("mod error;\n#[cfg(test)]\nmod tests {\n    use super::error::ParseError;\n    use super::*;\n}\n");
+  assert.deepEqual(parser?.uses, ["self::error::ParseError", "self"]);
+  assert.deepEqual(resolveRustUse("src/parser.rs", "self::error::ParseError", context), ["src/parser/error.rs"]);
+  // And `mod helpers;` inside it names tests/helpers.rs.
+  const lib = readRustFile("#[cfg(test)]\nmod tests {\n    mod helpers;\n    use self::helpers::fixture;\n}\n");
+  assert.deepEqual(lib?.modules, ["tests/helpers"]);
+  assert.deepEqual(resolveRustModule("src/lib.rs", "tests/helpers", context), ["src/tests/helpers.rs"]);
+  // Two levels down, one `super` is the outer inline module.
+  const deep = readRustFile("mod a {\n    mod b {\n        use super::x::Y;\n        use super::super::z::W;\n    }\n}\n");
+  assert.deepEqual(deep?.uses, ["self::a::x::Y", "self::z::W"]);
+});
+
+test("a #[path] attribute names the file itself", () => {
+  const context = repo("Cargo.toml", "src/lib.rs", "src/sys.rs", "src/unix.rs", "src/windows.rs");
+  const facts = readRustFile(
+    '#[cfg(unix)] #[path = "unix.rs"] mod sys;\n#[cfg(windows)]\n#[path = "windows.rs"]\nmod sys;\n#[path = "../escape.rs"] mod bad;\n',
+  );
+  // The stale sys.rs is not what either declaration means, and a literal
+  // that walks out of the directory is dropped rather than followed.
+  assert.deepEqual(facts?.modules, ["path:unix.rs", "path:windows.rs"]);
+  assert.deepEqual(resolveRustModule("src/lib.rs", "path:unix.rs", context), ["src/unix.rs"]);
+  assert.deepEqual(resolveRustModule("src/lib.rs", "path:windows.rs", context), ["src/windows.rs"]);
+});
+
+test("a use tree nobody would write is dropped, not a stack overflow", () => {
+  const depth = 8000;
+  assert.deepEqual(
+    readRustFile(`use a::${"{".repeat(depth)}b${"}".repeat(depth)};\nmod real;\n`),
+    { modules: ["real"], uses: [] },
+  );
+});
+
+test("a char literal the masker does not recognise is still a literal", () => {
+  // `'\u{1_F600}'` is valid Rust; read as a lifetime it left the `'"'` after
+  // it to open a string that swallowed `mod real;`.
+  const facts = readRustFile("let x = ('\\u{1_F600}','\"');\nlet s = \"mod fake;\";\nlet q = '\"';\nmod real;\n");
+  assert.deepEqual(facts, { modules: ["real"], uses: [] });
+});
+
+test("adjacent declarations are each read, and a repeated one is recorded once", () => {
+  assert.deepEqual(
+    readRustFile("mod g;mod h;\nuse x::a;use x::b;\npub(crate)mod c;\n#[cfg(test)]mod d;\n#[allow(unused)]use crate::a::B;\n"),
+    { modules: ["g", "h", "c", "d"], uses: ["x::a", "x::b", "crate::a::B"] },
+  );
+  assert.deepEqual(readRustFile("#[cfg(unix)] mod sys;\n#[cfg(windows)] mod sys;\n"), {
+    modules: ["sys"],
+    uses: [],
+  });
+});
+
+test("super never climbs past the crate root", () => {
+  // build.rs is a different crate, and rustc refuses the path anyway.
+  const context = repo("Cargo.toml", "build.rs", "src/lib.rs", "src/foo.rs", "src/mod.rs");
+  assert.deepEqual(resolveRustUse("src/foo.rs", "super::super::build::X", context), []);
+  assert.deepEqual(resolveRustUse("src/mod.rs", "super::build::X", context), []);
+});

@@ -248,3 +248,84 @@ test("Java's filename convention is a fallback, and only when it is unique", () 
     [],
   );
 });
+
+/* ------------------------------------------------------------ second pass -- */
+
+test("the filename fallback never lands a library import on a repository file", () => {
+  // `com/acme/ui/List.java` declares com.acme.ui.List, readably. It is not
+  // java.util.List, whatever its basename says.
+  const ctx = context({
+    "src/main/java/com/acme/ui/List.java": { packageName: "com.acme.ui", topLevelNames: ["List"] },
+    "src/test/java/com/acme/Assert.java": { packageName: "com.acme", topLevelNames: ["Assert"] },
+  });
+  assert.deepEqual(resolveJvmImport("src/main/java/com/acme/app/Main.java", "java.util.List", "java", ctx), []);
+  assert.deepEqual(
+    resolveJvmImport("src/main/java/com/acme/app/Main.java", "org.junit.Assert.assertEquals", "java", ctx),
+    [],
+  );
+  assert.deepEqual(
+    resolveJvmImport("src/main/java/com/acme/app/Main.java", "com.acme.ui.List", "java", ctx),
+    ["src/main/java/com/acme/ui/List.java"],
+  );
+  // Unreadable header, but the path does not end in the package: no clue.
+  const elsewhere = context({ "lib/Money.java": { packageName: "", topLevelNames: [] } });
+  assert.deepEqual(resolveJvmImport("a/Use.java", "org.joda.money.Money", "java", elsewhere), []);
+});
+
+test("a truncated specifier may land on a type, never on a function or a package", () => {
+  // `fun theme()` in com.acme.ui declares com.acme.ui.theme; the import
+  // names something inside the *package* com.acme.ui.theme.
+  const declared = new Map([
+    ["ui/Theme.kt", { packageName: "com.acme.ui", topLevelNames: ["theme"] }],
+  ]);
+  const ctx = {
+    declarations: jvmDeclarations(declared),
+    types: jvmDeclarations(new Map([["ui/Theme.kt", { packageName: "com.acme.ui", topLevelNames: [] }]])),
+    basenames: new Map(),
+    units: new Map(),
+  };
+  assert.deepEqual(resolveJvmImport("app/Main.kt", "com.acme.ui.theme.Typography", "kotlin", ctx), []);
+  // Whereas a member of a type still walks up to the type.
+  const typed = {
+    ...ctx,
+    declarations: jvmDeclarations(new Map([["m/Money.kt", { packageName: "com.acme", topLevelNames: ["Money"] }]])),
+    types: jvmDeclarations(new Map([["m/Money.kt", { packageName: "com.acme", topLevelNames: ["Money"] }]])),
+  };
+  assert.deepEqual(resolveJvmImport("app/Main.kt", "com.acme.Money.Companion", "kotlin", typed), ["m/Money.kt"]);
+});
+
+test("a header with a run of whitespace is rejected in no time", () => {
+  const started = Date.now();
+  assert.equal(readJvmHeader(`package ${" ".repeat(2000)}{\n`, "java"), undefined);
+  assert.ok(Date.now() - started < 200, "no catastrophic backtracking");
+});
+
+test("a Kotlin alias names the type, and a trailing comment is not part of the specifier", () => {
+  assert.deepEqual(readJvmHeader("package a\nimport com.acme.Money as M\nclass X\n", "kotlin"), {
+    packageName: "a",
+    imports: ["com.acme.Money"],
+  });
+  assert.deepEqual(readJvmHeader("package a\nimport b.C // used below\nclass X\n", "kotlin"), {
+    packageName: "a",
+    imports: ["b.C"],
+  });
+});
+
+test("a directive the reader cannot finish abandons the file rather than inventing a name", () => {
+  // `import b.` continued on the next line used to become the specifier `b.`.
+  assert.equal(readJvmHeader("package a;\nimport b.\n    C;\nimport d.E;\nclass X {}\n", "java"), undefined);
+  // A clause glued to a file annotation is one line this cannot split.
+  assert.equal(readJvmHeader('@file:JvmName("U") package com.acme\nimport a.B\nclass X\n', "kotlin"), undefined);
+});
+
+test("the clause after a licence block's closing line is still the header", () => {
+  assert.deepEqual(readJvmHeader("/* licence\n */ package com.acme;\nimport a.B;\nclass X {}\n", "java"), {
+    packageName: "com.acme",
+    imports: ["a.B"],
+  });
+  // Scala's `package object` opens a declaration and ends the header.
+  assert.deepEqual(readJvmHeader("package com.acme\npackage object billing\n{\n  def x = 1\n}\n", "scala"), {
+    packageName: "com.acme",
+    imports: [],
+  });
+});

@@ -168,6 +168,26 @@ const DIALECTS: Record<BraceLanguage, BraceDialect> = {
 };
 
 /**
+ * What each dialect's declaration patterns declare, in the same order.
+ *
+ * A shape reads a function's head and a type's members, so the reader of a
+ * match has to know which it found — and the C function pattern can contain
+ * the word `struct` in a return type, so the keyword is not enough.
+ */
+const DECLARED: Record<BraceLanguage, readonly ("function" | "type")[]> = {
+  go: ["function", "type"],
+  rust: ["function", "type", "type"],
+  java: ["type", "function"],
+  csharp: ["type", "function"],
+  c: ["function", "type"],
+  cpp: ["function", "type", "type"],
+  php: ["function", "type"],
+  swift: ["function", "type"],
+  kotlin: ["function", "type"],
+  scala: ["function", "type"],
+};
+
+/**
  * Replaces every string and comment body with spaces, keeping line structure.
  *
  * Brace matching and declaration matching both have to happen on code rather
@@ -327,32 +347,26 @@ export function braceSymbolRanges(
       if (name === undefined || match.index === undefined) {
         continue;
       }
-      const open = code.indexOf("{", match.index);
-      if (open === -1) {
-        continue;
-      }
-      // A brace further away than the end of the declaration's own statement
-      // belongs to something else — an interface method with no body, a
-      // forward declaration, an abstract member.
-      const semicolon = code.indexOf(";", match.index);
-      if (semicolon !== -1 && semicolon < open) {
-        continue;
-      }
-      let inner = 0;
-      let close = -1;
-      for (let at = open; at < code.length; at += 1) {
-        if (code[at] === "{") {
-          inner += 1;
-        } else if (code[at] === "}") {
-          inner -= 1;
-          if (inner === 0) {
-            close = at;
-            break;
-          }
+      // Where the head ends decides what the body is. A `{` opens one; an
+      // `=` opens an expression body that runs to the next declaration; a
+      // `;`, a newline before another declaration, or the `}` of the
+      // enclosing block means there is no body at all. The first version
+      // took the next `{` in the file, so a body-less Kotlin declaration
+      // swallowed whatever braced declaration came after it — a nested
+      // type surfaced as top level, a real top-level type vanished, and the
+      // duplicate-name refusal that depends on both was defeated.
+      const headEnd = headEndOf(code, match.index, dialect);
+      let close: number;
+      if (code[headEnd] === "{") {
+        const found = closingBrace(code, headEnd);
+        if (found === undefined) {
+          continue;
         }
-      }
-      if (close === -1) {
-        continue;
+        close = found;
+      } else if (code[headEnd] === "=") {
+        close = expressionBodyEnd(code, headEnd + 1, dialect);
+      } else {
+        close = Math.min(headEnd, code.length - 1);
       }
       let startLine = lineOf(starts, match.index);
       while (
@@ -374,6 +388,239 @@ export function braceSymbolRanges(
     }
   }
   return [...found.values()].sort((a, b) => a.startLine - b.startLine);
+}
+
+/** One declaration as the shape reader needs it: where its head and body are. */
+export interface BraceDeclaration {
+  name: string;
+  declared: "function" | "type";
+  /** Offset of the first keyword, in the masked code. */
+  start: number;
+  /** Offset the head stops at: the body's `{`, a `;`, an `=`, or a newline. */
+  headEnd: number;
+  /** The character at `headEnd`: `{`, `;`, `=`, `}` or `\n`. */
+  terminator: string;
+  open?: number;
+  close?: number;
+  /** C++ only: the access section this sits in. `public` everywhere else. */
+  access: "public" | "private" | "protected";
+}
+
+/**
+ * Where a declaration's head ends.
+ *
+ * The first, at bracket depth zero, of: the `{` that opens its body; a `;`
+ * (a prototype, an abstract member); an `=` (an expression body, `fun f() =
+ * 1`); a `}` closing the block it sits in; or a newline whose next
+ * non-blank line begins another declaration or an annotation — a Kotlin
+ * interface method has no terminator of its own. Angle brackets count as
+ * depth so `Iterator<Item = u8>` does not end a Rust head, and the `>` of an
+ * arrow does not close one.
+ */
+function headEndOf(code: string, start: number, dialect: BraceDialect): number {
+  // A stack rather than a counter, so a `<` that was a comparison inside a
+  // default value is discarded when the parenthesis around it closes.
+  const openers: string[] = [];
+  for (let at = start; at < code.length; at += 1) {
+    const character = code[at];
+    if (character === "(" || character === "[") {
+      openers.push(character);
+      continue;
+    }
+    if (character === "<" && looksLikeTypeArgument(code, at)) {
+      openers.push("<");
+      continue;
+    }
+    if (character === ")" || character === "]") {
+      const wanted = character === ")" ? "(" : "[";
+      while (openers.length > 0 && openers.pop() !== wanted) {
+        // Unclosed angle brackets inside are not brackets.
+      }
+      continue;
+    }
+    if (character === ">") {
+      if (openers.at(-1) === "<" && code[at - 1] !== "-" && code[at - 1] !== "=") {
+        openers.pop();
+      }
+      continue;
+    }
+    if (openers.length !== 0) {
+      continue;
+    }
+    if (character === "{" || character === ";" || character === "}") {
+      return at;
+    }
+    if (character === "=" && code[at + 1] !== "=" && code[at - 1] !== "=") {
+      return at;
+    }
+    if (character === "\n" && startsDeclaration(code, at + 1, dialect)) {
+      return at;
+    }
+  }
+  return code.length;
+}
+
+/** `<` opens a type argument when a type could follow it; `<<` and `<(` do not. */
+function looksLikeTypeArgument(code: string, at: number): boolean {
+  return /^<[ \t]*(?:[A-Za-z_?*&'\[]|>)/u.test(code.slice(at, at + 3));
+}
+
+/** Whether the next non-blank line begins a declaration or an annotation. */
+function startsDeclaration(code: string, from: number, dialect: BraceDialect): boolean {
+  const rest = code.slice(from).replace(/^(?:[ \t]*\n)*/u, "");
+  return (
+    dialect.attached.test(rest) ||
+    dialect.declarations.some((pattern) => new RegExp(pattern.source, "u").test(rest))
+  );
+}
+
+/**
+ * Where an expression body ends: the next declaration, or the brace that
+ * closes the block this sits in. Everything up to there belongs to the
+ * declaration, which is the reading the ranges need — never too small.
+ */
+function expressionBodyEnd(code: string, from: number, dialect: BraceDialect): number {
+  let depth = 0;
+  for (let at = from; at < code.length; at += 1) {
+    const character = code[at];
+    if (character === "(" || character === "[" || character === "{") {
+      depth += 1;
+    } else if (character === ")" || character === "]") {
+      depth = Math.max(0, depth - 1);
+    } else if (character === "}") {
+      if (depth === 0) {
+        return Math.max(from, at - 1);
+      }
+      depth -= 1;
+    } else if (character === "\n" && depth === 0 && startsDeclaration(code, at + 1, dialect)) {
+      return at;
+    }
+  }
+  return code.length - 1;
+}
+
+/**
+ * Every declaration in a brace-delimited file, with its head and body
+ * located, for the shape reader.
+ *
+ * Kept beside {@link braceSymbolRanges} rather than folded into it: the two
+ * agree on what a declaration is and differ on what they need from it, and
+ * a span that is too small is the one wrong answer the ranges must never
+ * give, so their walk is left exactly as it is.
+ */
+export function braceDeclarations(
+  source: string,
+  language: BraceLanguage,
+): { code: string; declarations: BraceDeclaration[] } | undefined {
+  const dialect = DIALECTS[language];
+  const code = blankNonCode(source, dialect);
+  if (code === undefined || !bracesBalance(code)) {
+    return undefined;
+  }
+  const byStart = new Map<number, BraceDeclaration>();
+  for (const [position, pattern] of dialect.declarations.entries()) {
+    const declared = DECLARED[language][position] ?? "type";
+    pattern.lastIndex = 0;
+    for (const match of code.matchAll(pattern)) {
+      const name = match[1];
+      if (name === undefined || match.index === undefined) {
+        continue;
+      }
+      // Two patterns can match one declaration — a Java `record` is both a
+      // type and, to the method pattern, a name followed by a parenthesis.
+      // The type reading wins because it was listed first.
+      if (byStart.has(match.index)) {
+        continue;
+      }
+      const headEnd = headEndOf(code, match.index, dialect);
+      const declaration: BraceDeclaration = {
+        name,
+        declared,
+        start: match.index,
+        headEnd,
+        terminator: code[headEnd] ?? "",
+        access: "public",
+      };
+      if (code[headEnd] === "{") {
+        const close = closingBrace(code, headEnd);
+        if (close === undefined) {
+          continue;
+        }
+        declaration.open = headEnd;
+        declaration.close = close;
+      }
+      byStart.set(match.index, declaration);
+    }
+  }
+  const declarations = [...byStart.values()].sort((a, b) => a.start - b.start);
+  if (language === "cpp") {
+    for (const declaration of declarations) {
+      const enclosing = declarations
+        .filter(
+          (other) =>
+            other.declared === "type" &&
+            other.open !== undefined &&
+            other.close !== undefined &&
+            other.open < declaration.start &&
+            other.close > declaration.start,
+        )
+        .sort((a, b) => b.start - a.start)[0];
+      if (enclosing?.open === undefined) {
+        continue;
+      }
+      const head = code.slice(enclosing.start, enclosing.headEnd);
+      declaration.access = /^(?:template\s*<[^>]*>\s*)?class\b/u.test(head.trim())
+        ? "private"
+        : "public";
+      // Labels at the body's own depth only: a `protected:` inside a nested
+      // class's body says nothing about what follows that class.
+      let depth = 0;
+      for (let at = enclosing.open + 1; at < declaration.start; at += 1) {
+        const character = code[at];
+        if (character === "{") {
+          depth += 1;
+        } else if (character === "}") {
+          depth -= 1;
+        } else if (depth === 0 && /[\s;{}]/u.test(code[at - 1] ?? "")) {
+          const label = /^(public|private|protected)\s*:(?!:)/u.exec(code.slice(at, at + 12));
+          if (label?.[1] !== undefined) {
+            declaration.access = label[1] as BraceDeclaration["access"];
+          }
+        }
+      }
+    }
+  }
+  return { code, declarations };
+}
+
+function bracesBalance(code: string): boolean {
+  let depth = 0;
+  for (const character of code) {
+    if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth < 0) {
+        return false;
+      }
+    }
+  }
+  return depth === 0;
+}
+
+function closingBrace(code: string, open: number): number | undefined {
+  let inner = 0;
+  for (let at = open; at < code.length; at += 1) {
+    if (code[at] === "{") {
+      inner += 1;
+    } else if (code[at] === "}") {
+      inner -= 1;
+      if (inner === 0) {
+        return at;
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -491,6 +738,78 @@ def spans(tree):
             previous["endLine"] = max(previous["endLine"], end)
     return sorted(found.values(), key=lambda entry: entry["startLine"])
 
+def signature(node):
+    # Parameters as a caller sees them: name, annotation, and whether a
+    # default makes it optional — but not the default itself, which is a
+    # value and not a contract. Names are kept because a keyword caller
+    # depends on them.
+    a = node.args
+    out = []
+    inferred = node.returns is None
+    def one(arg, default, prefix=""):
+        nonlocal inferred
+        text = prefix + arg.arg
+        if arg.annotation is not None:
+            text += ": " + ast.unparse(arg.annotation)
+        elif arg.arg not in ("self", "cls"):
+            inferred = True
+        if default:
+            text += "?"
+        return text
+    positional = a.posonlyargs + a.args
+    defaults = [None] * (len(positional) - len(a.defaults)) + list(a.defaults)
+    for arg, default in zip(positional, defaults):
+        out.append(one(arg, default is not None))
+    if a.posonlyargs:
+        out.insert(len(a.posonlyargs), "/")
+    if a.vararg is not None:
+        out.append(one(a.vararg, False, "*"))
+    elif a.kwonlyargs:
+        out.append("*")
+    for arg, default in zip(a.kwonlyargs, a.kw_defaults):
+        out.append(one(arg, default is not None))
+    if a.kwarg is not None:
+        out.append(one(a.kwarg, False, "**"))
+    text = "(" + ", ".join(out) + ")"
+    if node.returns is not None:
+        text += " -> " + ast.unparse(node.returns)
+    if isinstance(node, ast.AsyncFunctionDef):
+        text = "async " + text
+    return text, inferred
+
+def public(name):
+    return not name.startswith("_") or (name.startswith("__") and name.endswith("__"))
+
+def shapes(tree):
+    out = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not public(node.name):
+                continue
+            text, inferred = signature(node)
+            out.append({"symbol": node.name, "kind": "function", "shape": text, "comparable": text, "inferred": inferred})
+        elif isinstance(node, ast.ClassDef):
+            if not public(node.name):
+                continue
+            bases = [ast.unparse(b) for b in node.bases] + [k.arg + "=" + ast.unparse(k.value) for k in node.keywords if k.arg]
+            members = []
+            inferred = False
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and public(child.name):
+                    text, sub = signature(child)
+                    members.append(child.name + text)
+                    inferred = inferred or sub
+                elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name) and public(child.target.id):
+                    members.append(child.target.id + ": " + ast.unparse(child.annotation))
+                elif isinstance(child, ast.Assign):
+                    for target in child.targets:
+                        if isinstance(target, ast.Name) and public(target.id):
+                            members.append(target.id)
+            members.sort()
+            text = ("(" + ", ".join(bases) + ")" if bases else "") + " {" + "; ".join(members) + "}"
+            out.append({"symbol": node.name, "kind": "class", "shape": text, "comparable": text, "inferred": inferred})
+    return out
+
 def imports(tree):
     # Dotted module names exactly as written, relative ones keeping their
     # leading dots. A scanner would have to decide whether a line inside a
@@ -525,7 +844,7 @@ for path, source in payload.items():
         # strip it the way the tokenizer does for bytes.
         tree = ast.parse(source[1:] if source.startswith("\\ufeff") else source)
         found = spans(tree)
-        out[path] = None if found is None else {"ranges": found, "imports": imports(tree)}
+        out[path] = None if found is None else {"ranges": found, "imports": imports(tree), "shapes": shapes(tree)}
     except Exception:
         out[path] = None
 # The standard library's own top-level names, so a single-segment \`import
@@ -538,10 +857,22 @@ sys.stdout.write(json.dumps(out))
 /** How long the whole batch may take before its answers are given up on. */
 const PYTHON_READ_TIMEOUT_MS = 30_000;
 
+/** One declaration's contract as the Python reader wrote it; hashed in TS. */
+export interface PythonShape {
+  symbol: string;
+  kind: "function" | "class";
+  shape: string;
+  comparable: string;
+  inferred: boolean;
+}
+
 /** What one spawn of the reader learned about the whole repository. */
 export interface PythonRead {
   /** Per file, only for files the interpreter could parse. */
-  files: Map<string, { ranges: SymbolRange[]; imports: string[] }>;
+  files: Map<
+    string,
+    { ranges: SymbolRange[]; imports: string[]; shapes: PythonShape[] }
+  >;
   /**
    * The interpreter's own `sys.stdlib_module_names`.
    *
@@ -605,7 +936,9 @@ export async function pythonSymbolRanges(
   }
   let parsed: Record<
     string,
-    { ranges: SymbolRange[]; imports: string[] } | string[] | null
+    | { ranges: SymbolRange[]; imports: string[]; shapes: PythonShape[] }
+    | string[]
+    | null
   >;
   try {
     parsed = JSON.parse(raw) as typeof parsed;
@@ -624,6 +957,7 @@ export async function pythonSymbolRanges(
     read.files.set(filePath, {
       ranges: answer.ranges,
       imports: answer.imports,
+      shapes: answer.shapes,
     });
   }
   return read;

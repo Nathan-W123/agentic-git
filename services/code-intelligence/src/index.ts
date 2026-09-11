@@ -13,6 +13,7 @@ import {
 } from "./native-imports.js";
 import { pythonLayout } from "./python-imports.js";
 import { resourcesFromNames, resourcesFromText } from "./resources.js";
+import { braceShapes, pythonShapes, rubyShapes } from "./signature-shapes.js";
 import { readRustFile } from "./rust-imports.js";
 import {
   phpTypes,
@@ -52,6 +53,7 @@ import {
 } from "./contract-shape.js";
 
 import {
+  braceDeclarations,
   braceSymbolRanges,
   pythonSymbolRanges,
   rubySymbolRanges,
@@ -316,13 +318,23 @@ const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".rs", "rust"],
   [".java", "java"],
   [".cs", "csharp"],
+  // A C# script is the one kind of C# file with a path in it: `#load`.
+  [".csx", "csharp"],
   [".c", "c"],
   [".h", "c"],
   [".cc", "cpp"],
   [".cpp", "cpp"],
   [".cxx", "cpp"],
+  [".c++", "cpp"],
   [".hpp", "cpp"],
   [".hh", "cpp"],
+  [".hxx", "cpp"],
+  [".h++", "cpp"],
+  [".inl", "cpp"],
+  [".ipp", "cpp"],
+  [".tpp", "cpp"],
+  [".cu", "cpp"],
+  [".cuh", "cpp"],
   [".php", "php"],
   [".swift", "swift"],
   [".kt", "kotlin"],
@@ -776,11 +788,50 @@ const BRACE_LANGUAGES = new Set<string>([
  * `undefined` from the scanner means it could not read the file, and is
  * recorded here as an unparsed file so `symbolRangesInFile` says "no idea".
  */
+/**
+ * An extractor that throws answers "no idea", which is what every extractor
+ * here answers when it is unsure. A stack overflow on one pathological file
+ * must not take the whole index build with it.
+ */
+function safely<T>(read: () => T): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The names of type declarations not nested inside another declaration. */
+function topLevelTypeNames(source: string, language: BraceLanguage): string[] {
+  const read = safely(() => braceDeclarations(source, language));
+  if (read === undefined) {
+    return [];
+  }
+  const { declarations } = read;
+  return uniqueStrings(
+    declarations
+      .filter(
+        (declaration) =>
+          declaration.declared === "type" &&
+          !declarations.some(
+            (other) =>
+              other !== declaration &&
+              other.open !== undefined &&
+              other.close !== undefined &&
+              other.open < declaration.start &&
+              other.close > declaration.start,
+          ),
+      )
+      .map((declaration) => declaration.name),
+  );
+}
+
 function analyzeScannedFile(
   filePath: string,
   source: string,
   language: SupportedLanguage,
   ranges: SymbolRange[] | undefined,
+  shapes: SymbolShape[] | undefined,
 ): IndexedFile {
   const symbols = (ranges ?? []).map((range) => range.name);
   // Two of the four resources are questions about names, and a name is a
@@ -796,15 +847,17 @@ function analyzeScannedFile(
     symbols,
     symbolRanges: ranges ?? [],
     ...(ranges === undefined ? { symbolRangesUnknown: true } : {}),
-    // Located, but not shaped. A scanner can find where a declaration starts
-    // and cannot read what it publishes, so this says so rather than
-    // reporting an unchanging contract through every rewrite the file gets.
-    exportedShapes: [],
-    exportedShapesUnknown: true,
+    // Located and, where the signature reader could follow the file, shaped.
+    // Where it could not, this says so rather than reporting an unchanging
+    // contract through every rewrite the file gets.
+    exportedShapes: shapes ?? [],
+    ...(shapes === undefined ? { exportedShapesUnknown: true } : {}),
     symbolCalls: [],
     imports: [],
     dependencies: [],
-    exportedSymbols: [],
+    // The reachable declarations are what other files can depend on; the
+    // shape reader is what decided reachability, so the two lists agree.
+    exportedSymbols: (shapes ?? []).map((shape) => shape.symbol),
     referencedSymbols: [],
     apis: fromText?.apis ?? [],
     schemas: named.schemas,
@@ -1320,19 +1373,22 @@ export class CodeIntelligenceService {
             // Held back for the batch: one interpreter answers for every Python
             // file in the repository rather than one per file.
             pythonSources.set(filePath, source);
-            slots.push(analyzeScannedFile(filePath, source, language, undefined));
+            slots.push(
+              analyzeScannedFile(filePath, source, language, undefined, undefined),
+            );
           } else if (language === "ruby") {
             const scanned = analyzeScannedFile(
               filePath,
               source,
               language,
-              rubySymbolRanges(source),
+              safely(() => rubySymbolRanges(source)),
+              safely(() => rubyShapes(source)),
             );
             // A `require` inside a heredoc is a sentence, not a dependency,
             // which is why this reads from the masked text rather than the
             // raw source. `require_relative` measures from a different base
             // than `require`, so the two are marked apart on the way in.
-            const requires = readRubyRequires(source);
+            const requires = safely(() => readRubyRequires(source));
             if (requires !== undefined) {
               scanned.imports = requires.map((request) =>
                 `${request.relative ? "rel:" : "lib:"}${request.specifier}`,
@@ -1344,24 +1400,31 @@ export class CodeIntelligenceService {
               filePath,
               source,
               language,
-              braceSymbolRanges(source, language as BraceLanguage),
+              safely(() => braceSymbolRanges(source, language as BraceLanguage)),
+              safely(() => braceShapes(source, language as BraceLanguage)),
             );
             if (JVM_LANGUAGES.has(language)) {
               // An import here names a type, so nothing resolves until every
               // file has said which type it declares. The header is read for
               // the same reason Go's prologue is: small, bounded, and unable
               // to contain a method body.
-              const unit = readJvmHeader(source, language as JvmLanguage);
+              const unit = safely(() => readJvmHeader(source, language as JvmLanguage));
               if (unit !== undefined) {
                 scanned.imports = unit.imports;
-                scanned.scan = { packageName: unit.packageName };
+                scanned.scan = {
+                  packageName: unit.packageName,
+                  // The types alone, for the resolver's walk back up a
+                  // specifier: a top-level function is a declaration but
+                  // not something an import can be truncated onto.
+                  declared: topLevelTypeNames(source, language as BraceLanguage),
+                };
               }
             }
             if (C_LANGUAGES.has(language)) {
               // Only a quoted include names a path. An angled one names a
               // search-path header, and the search path is a compiler flag
               // there is nothing here to read.
-              const includes = readIncludes(source);
+              const includes = safely(() => readIncludes(source));
               if (includes !== undefined) {
                 scanned.imports = includes;
               }
@@ -1370,7 +1433,7 @@ export class CodeIntelligenceService {
               // `using A.B` names a namespace, which is spread across as
               // many files as anybody likes and so has no file to point at.
               // `#load` is a real path.
-              const loads = readCSharpLoads(source);
+              const loads = safely(() => readCSharpLoads(source));
               if (loads !== undefined) {
                 scanned.imports = loads;
               }
@@ -1379,7 +1442,7 @@ export class CodeIntelligenceService {
               // Two kinds of dependency and `mod` is the valuable one: it
               // literally names a file. A `use` path is a walk through a
               // module tree, and only the anchored forms are resolvable.
-              const facts = readRustFile(source);
+              const facts = safely(() => readRustFile(source));
               if (facts !== undefined) {
                 scanned.imports = [
                   ...facts.modules.map((name) => `mod:${name}`),
@@ -1391,7 +1454,7 @@ export class CodeIntelligenceService {
               // Only the prologue is read — Go puts the package clause first
               // and every import before any declaration, so the region has a
               // defined end and cannot contain a function body.
-              const facts = readGoFile(source);
+              const facts = safely(() => readGoFile(source));
               if (facts !== undefined) {
                 scanned.imports = facts.imports;
                 scanned.scan = {
@@ -1405,7 +1468,7 @@ export class CodeIntelligenceService {
               // language for the scanner, so a sibling `else if` after this
               // one was dead code, and every PHP file indexed with no
               // imports at all while the unit tests for the reader passed.
-              const unit = readPhpFile(source);
+              const unit = safely(() => readPhpFile(source));
               if (unit !== undefined) {
                 scanned.imports = [
                   ...unit.uses.map((name) => `use:${name}`),
@@ -1458,6 +1521,9 @@ export class CodeIntelligenceService {
         file.symbolRanges = answer.ranges;
         file.symbols = answer.ranges.map((range) => range.name);
         delete file.symbolRangesUnknown;
+        file.exportedShapes = pythonShapes(answer.shapes);
+        file.exportedSymbols = file.exportedShapes.map((shape) => shape.symbol);
+        delete file.exportedShapesUnknown;
         // The name-based resources could not be classified until the names
         // existed, which for Python is now.
         const named = resourcesFromNames(file.path, file.symbols);
@@ -1504,7 +1570,11 @@ export class CodeIntelligenceService {
     const jvmUnits = new Map<string, JvmUnit>();
     const jvmDeclared = new Map<
       string,
-      { packageName: string; topLevelNames: readonly string[] }
+      {
+        packageName: string;
+        topLevelNames: readonly string[];
+        typeNames: readonly string[];
+      }
     >();
     for (const file of files) {
       const scan = file.scan;
@@ -1525,6 +1595,7 @@ export class CodeIntelligenceService {
         jvmDeclared.set(file.path, {
           packageName: scan.packageName,
           topLevelNames: topLevelNames(file.symbolRanges),
+          typeNames: scan.declared ?? [],
         });
       } else if (file.language === "php") {
         phpUnits.set(file.path, {
@@ -1553,6 +1624,14 @@ export class CodeIntelligenceService {
       phpTypes: phpTypes(phpUnits),
       jvm: {
         declarations: jvmDeclarations(jvmDeclared),
+        types: jvmDeclarations(
+          new Map(
+            [...jvmDeclared].map(([file, unit]) => [
+              file,
+              { packageName: unit.packageName, topLevelNames: unit.typeNames },
+            ]),
+          ),
+        ),
         basenames: byBasename(allPaths),
         units: jvmUnits,
       },

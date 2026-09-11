@@ -897,13 +897,13 @@ test("a language whose shapes cannot be read says so rather than reporting stabi
     const source = path.join(root, "source");
     const repositories = new RepositoryService();
     await repositories.initializeWorkingRepository(source);
-    // Scanned, not parsed. Its declarations can be located and its contracts
-    // cannot be read, and those are different facts: an empty shape list read
-    // as "no contracts here" would report this file as unchanging through
-    // every rewrite it ever gets.
+    // Unreadable — a syntax error the interpreter refuses — so its contracts
+    // cannot be read, and that is a different fact from "declares nothing":
+    // an empty shape list read as "no contracts here" would report this file
+    // as unchanging through every rewrite it ever gets.
     await writeFile(
       path.join(source, "service.py"),
-      "def sign(password: str) -> str:\n    return password\n",
+      "def sign(password: str -> str:\n    return password\n",
     );
     await repositories.commitAll(source, "seed");
     const repository = await repositories.importLocalRepository(

@@ -187,7 +187,14 @@ function members(entries: readonly string[]): string {
   return [...entries].sort((left, right) => left.localeCompare(right)).join("; ");
 }
 
-function digestOf(shape: string): string {
+/**
+ * The digest every shape is compared by, wherever it was read.
+ *
+ * Exported so the scanned languages hash the same way: a `kind` and a
+ * comparable form, so a Go function and a TypeScript one that happened to
+ * spell the same contract would still be different digests.
+ */
+export function digestOf(shape: string): string {
   return createHash("sha256").update(shape).digest("hex").slice(0, 16);
 }
 
