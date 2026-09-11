@@ -1060,6 +1060,12 @@ test("a Python repository has a dependency graph, and consumers can be found in 
         "import os",
         "from .money import charge",
         "",
+        'KEY = os.environ["STRIPE_KEY"]',
+        "",
+        "class PaymentService:",
+        "    pass",
+        "",
+        '@app.post("/charge")',
         "def handler(request):",
         "    return charge(request['amount'])",
       ].join("\n"),
@@ -1117,6 +1123,16 @@ test("a Python repository has a dependency graph, and consumers can be found in 
       false,
       "a docstring must not produce a dependency",
     );
+
+    // And the resources the cross-branch guard reads. This is the whole
+    // point: `claimCrossesBranches` compares routes, schemas, config keys and
+    // services, so a language that produced none of them had a branch that
+    // never crossed — a blanket claim that was never refused on its account,
+    // however far it reached into another branch's contract.
+    const changed = service.changedResources(["billing/api.py"], index);
+    assert.deepEqual(changed.apis, ["POST /charge"]);
+    assert.deepEqual(changed.configKeys, ["STRIPE_KEY"]);
+    assert.deepEqual(changed.services, ["PaymentService"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

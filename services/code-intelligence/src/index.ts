@@ -11,6 +11,7 @@ import {
   readCSharpLoads,
   readIncludes,
 } from "./native-imports.js";
+import { resourcesFromNames, resourcesFromText } from "./resources.js";
 import { readRustFile } from "./rust-imports.js";
 import {
   phpTypes,
@@ -760,11 +761,18 @@ function analyzeScannedFile(
   language: SupportedLanguage,
   ranges: SymbolRange[] | undefined,
 ): IndexedFile {
+  const symbols = (ranges ?? []).map((range) => range.name);
+  // Two of the four resources are questions about names, and a name is a
+  // name in any language: the same rule the TypeScript side applies. The
+  // other two are read from the text, on positions the masker says are code,
+  // and are simply absent when the masker could not read the file.
+  const named = resourcesFromNames(filePath, symbols);
+  const fromText = resourcesFromText(source, language);
   return {
     path: filePath,
     language,
     bytes: Buffer.byteLength(source),
-    symbols: (ranges ?? []).map((range) => range.name),
+    symbols,
     symbolRanges: ranges ?? [],
     ...(ranges === undefined ? { symbolRangesUnknown: true } : {}),
     // Located, but not shaped. A scanner can find where a declaration starts
@@ -777,11 +785,11 @@ function analyzeScannedFile(
     dependencies: [],
     exportedSymbols: [],
     referencedSymbols: [],
-    apis: [],
-    schemas: [],
-    configKeys: [],
+    apis: fromText?.apis ?? [],
+    schemas: named.schemas,
+    configKeys: fromText?.configKeys ?? [],
     tests: [],
-    services: [],
+    services: named.services,
   };
 }
 
@@ -1424,6 +1432,11 @@ export class CodeIntelligenceService {
         file.symbolRanges = answer.ranges;
         file.symbols = answer.ranges.map((range) => range.name);
         delete file.symbolRangesUnknown;
+        // The name-based resources could not be classified until the names
+        // existed, which for Python is now.
+        const named = resourcesFromNames(file.path, file.symbols);
+        file.schemas = named.schemas;
+        file.services = named.services;
         // The same parse that found the declarations found these, so a line
         // that looks like an import inside a docstring is not one here — the
         // interpreter already decided. `dependencies` takes the statement's

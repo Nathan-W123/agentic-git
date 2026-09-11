@@ -277,6 +277,20 @@ function lineOf(starts: readonly number[], offset: number): number {
  * lines immediately above. A declaration whose body cannot be found is
  * skipped; a file whose braces do not balance is abandoned entirely.
  */
+/**
+ * The blanker, for a caller that needs code rather than ranges.
+ *
+ * Same contract as everything above it: `undefined` means the dialect
+ * guessed wrong about how this file is quoted, and nothing read from it can
+ * be trusted.
+ */
+export function blankBraceLanguage(
+  source: string,
+  language: BraceLanguage,
+): string | undefined {
+  return blankNonCode(source, DIALECTS[language]);
+}
+
 export function braceSymbolRanges(
   source: string,
   language: BraceLanguage,

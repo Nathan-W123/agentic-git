@@ -309,7 +309,12 @@ export function maskPhp(source: string): string | undefined {
       index += 2;
       continue;
     }
-    if (source.startsWith("//", index) || source[index] === "#") {
+    // `#[` opens a PHP 8 attribute, not a comment — and `#[Route('/x')]` is
+    // exactly the line a route reader needs to see.
+    if (
+      source.startsWith("//", index) ||
+      (source[index] === "#" && !source.startsWith("#[", index))
+    ) {
       const end = source.indexOf("\n", index);
       blank(index, end === -1 ? source.length : end);
       index = end === -1 ? source.length : end;
