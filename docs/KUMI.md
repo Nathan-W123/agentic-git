@@ -320,12 +320,18 @@ Add one line to Claude Code or Codex, then type *"have Kumi fix the login
 redirect"* in your editor. It lands in a Kumi channel thread, gets coordinated
 like anything else, and runs.
 
-Eleven tools. Five to file and follow work — `list_repositories`, `submit_task`,
-`task_status`, `cancel_task`, `answer_question`; two for the repository's
-standing context, the note every agent planning there is handed —
-`get_repository_context`, `set_repository_context`; and four for an editor
-doing the work itself — `take_task`, `report_task`, `extend_task`,
-`task_progress`.
+Twelve tools. Five to file and follow work — `list_repositories`,
+`submit_task`, `task_status`, `cancel_task`, `answer_question`; two for the
+repository's standing context, the note every agent planning there is handed —
+`get_repository_context`, `set_repository_context`; one for what this account
+has been doing — `session_context`; and four for an editor doing the work
+itself — `take_task`, `report_task`, `extend_task`, `task_progress`.
+
+A client that reconnects does not start from nothing: the endpoint issues an
+`Mcp-Session-Id`, and `initialize` answers with `instructions` carrying the
+repository that connection was last working in, the tasks it filed or took and
+how they ended, and that repository's handoffs and standing context. See
+[editor work](protocol/editor-work.md).
 
 Hand-rolled JSON-RPC 2.0 — no SDK dependency.
 

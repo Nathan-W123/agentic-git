@@ -97,6 +97,9 @@ import type {
   McpServerRecord,
   McpServerScope,
   McpServerSecrets,
+  McpSessionFocus,
+  McpSessionRecord,
+  McpSessionTask,
   MergeSubChannelInput,
   Organization,
   OrganizationMembership,
@@ -151,6 +154,7 @@ import {
   applyMcpSecretsPatch,
   directPairKey,
   mcpSecretNames,
+  mergeMcpSessionTasks,
   normalizeMcpRepositoryIds,
   parseChangedFiles,
   repositoryConflicts,
@@ -2469,6 +2473,139 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const result = await this.query(
       "DELETE FROM auth_sessions WHERE expires_at <= $1",
       [now],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  public async createMcpSession(
+    session: McpSessionRecord,
+    options: { keepPerUser?: number } = {},
+  ): Promise<void> {
+    await this.query(
+      `INSERT INTO mcp_sessions
+         (id, user_id, token_id, editor_vendor, client_name, client_version,
+          protocol_version, focus_json, tasks_json, created_at, last_seen_at,
+          expires_at, ended_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        session.id,
+        session.userId,
+        session.tokenId ?? null,
+        session.editorVendor ?? null,
+        session.clientName ?? null,
+        session.clientVersion ?? null,
+        session.protocolVersion,
+        session.focus === undefined ? null : JSON.stringify(session.focus),
+        JSON.stringify(session.tasks),
+        session.createdAt,
+        session.lastSeenAt,
+        session.expiresAt,
+        session.endedAt ?? null,
+      ],
+    );
+    const keep = options.keepPerUser;
+    if (keep === undefined || keep <= 0) {
+      return;
+    }
+    // See the SQLite copy for why the prune happens on the way in. Ordered by
+    // `created_at` after `last_seen_at` because Postgres has no rowid to break
+    // the tie between two sessions minted in the same millisecond.
+    await this.query(
+      `DELETE FROM mcp_sessions
+        WHERE user_id = $1
+          AND id NOT IN (
+            SELECT id FROM mcp_sessions
+             WHERE user_id = $1
+             ORDER BY last_seen_at DESC, created_at DESC
+             LIMIT $2)`,
+      [session.userId, keep],
+    );
+  }
+
+  public async getMcpSession(
+    id: string,
+  ): Promise<McpSessionRecord | undefined> {
+    const row = await this.row("SELECT * FROM mcp_sessions WHERE id = $1", [id]);
+    return row === undefined ? undefined : this.toMcpSession(row);
+  }
+
+  public async listMcpSessions(
+    userId: string,
+    options: { limit?: number; editorVendor?: string } = {},
+  ): Promise<McpSessionRecord[]> {
+    // See the SQLite copy: the vendor orders rather than filters, and NULL
+    // matches nothing, which leaves plain recency.
+    const rows = await this.rows(
+      `SELECT * FROM mcp_sessions
+        WHERE user_id = $1
+        ORDER BY CASE WHEN editor_vendor = $2 THEN 0 ELSE 1 END,
+                 last_seen_at DESC, created_at DESC
+        LIMIT $3`,
+      [userId, options.editorVendor ?? null, options.limit ?? 20],
+    );
+    return rows.map((row) => this.toMcpSession(row));
+  }
+
+  public async updateMcpSession(
+    id: string,
+    patch: {
+      lastSeenAt: string;
+      expiresAt: string;
+      focus?: McpSessionFocus | undefined;
+      noteTasks?: { tasks: readonly McpSessionTask[]; max: number };
+      endedAt?: string;
+    },
+  ): Promise<void> {
+    await this.transaction(async (client) => {
+      const assignments = ["last_seen_at = $1", "expires_at = $2"];
+      const values: unknown[] = [patch.lastSeenAt, patch.expiresAt];
+      if ("focus" in patch) {
+        values.push(
+          patch.focus === undefined ? null : JSON.stringify(patch.focus),
+        );
+        assignments.push(`focus_json = $${values.length}`);
+      }
+      if (patch.endedAt !== undefined) {
+        values.push(patch.endedAt);
+        assignments.push(`ended_at = $${values.length}`);
+      }
+      if (patch.noteTasks !== undefined) {
+        // Locked, merged and written in one transaction. The caller sends only
+        // what it added: an editor issues parallel tool calls, and two
+        // requests each writing a whole list computed from their own read
+        // would each persist their own stale copy and lose a task id.
+        const existing = (
+          await client.query(
+            "SELECT tasks_json FROM mcp_sessions WHERE id = $1 FOR UPDATE",
+            [id],
+          )
+        ).rows[0] as Row | undefined;
+        if (existing === undefined) {
+          return;
+        }
+        values.push(
+          JSON.stringify(
+            mergeMcpSessionTasks(
+              parseJson<McpSessionTask[]>(existing, "tasks_json"),
+              patch.noteTasks.tasks,
+              patch.noteTasks.max,
+            ),
+          ),
+        );
+        assignments.push(`tasks_json = $${values.length}`);
+      }
+      values.push(id);
+      await client.query(
+        `UPDATE mcp_sessions SET ${assignments.join(", ")} WHERE id = $${values.length}`,
+        values,
+      );
+    });
+  }
+
+  public async deleteStaleMcpSessions(before: string): Promise<number> {
+    const result = await this.query(
+      "DELETE FROM mcp_sessions WHERE last_seen_at < $1",
+      [before],
     );
     return result.rowCount ?? 0;
   }
@@ -6096,6 +6233,24 @@ public async recordBranchClaim(
       lastSeenAt: text(row, "last_seen_at"),
       ipAddress: text(row, "ip_address"),
       userAgent: text(row, "user_agent"),
+    };
+  }
+
+  private toMcpSession(row: Row): McpSessionRecord {
+    return {
+      id: text(row, "id"),
+      userId: text(row, "user_id"),
+      tokenId: optionalText(row, "token_id"),
+      editorVendor: optionalText(row, "editor_vendor"),
+      clientName: optionalText(row, "client_name"),
+      clientVersion: optionalText(row, "client_version"),
+      protocolVersion: text(row, "protocol_version"),
+      focus: optionalJson<McpSessionFocus>(row, "focus_json"),
+      tasks: parseJson<McpSessionTask[]>(row, "tasks_json"),
+      createdAt: text(row, "created_at"),
+      lastSeenAt: text(row, "last_seen_at"),
+      expiresAt: text(row, "expires_at"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 

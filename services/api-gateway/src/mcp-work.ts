@@ -1,9 +1,9 @@
 /**
  * The tools an editor uses to do the work itself.
  *
- * The five tools in `mcp-tools.ts` are about *filing* work: somebody in an
- * editor wants Kumi to do something, and a machine somewhere picks it up.
- * These three are the other half. The person is already in Claude Code or
+ * The tools in `mcp-tools.ts` are about *filing* work: somebody in an editor
+ * wants Kumi to do something, and a machine somewhere picks it up. These are
+ * the other half. The person is already in Claude Code or
  * Cursor with the repository checked out, and the agent in front of them is
  * perfectly capable of doing the task itself. What it lacks is everything
  * Kumi holds: which task is next, what revision to start from, permission to
@@ -28,6 +28,7 @@
 
 import type { FilePatch, FilePatchStatus } from "@coord/shared-types";
 
+import type { McpSessionHandle } from "./mcp-session.js";
 import {
   McpArgumentError,
   mcpRefusal,
@@ -111,6 +112,22 @@ export interface McpTakenTask {
    * only place an editor gets to read the room.
    */
   readonly context?: string;
+  /**
+   * Which project leased it. Required rather than optional: it is what a
+   * session focus is keyed on and what `authorizeProject` is asked about, and
+   * a producer that forgot it would otherwise hand back a focus with no
+   * project rather than failing to compile.
+   */
+  readonly projectId: string;
+  /**
+   * The repository's id, which is the key a focus is stored under.
+   *
+   * The same string as {@link McpTakenTask.repository} today, because a
+   * repository's id is the name people use for it. Named separately anyway, so
+   * that what the brief prints to a person and what a session focus resolves
+   * on are two facts rather than one field doing both jobs.
+   */
+  readonly repositoryId: string;
   readonly repository: string;
   readonly branch: string;
   readonly baseRevision: string;
@@ -162,6 +179,14 @@ export interface McpWorkDeps {
     taskId: string;
     message: string;
   }): Promise<"recorded" | "not_held">;
+  /**
+   * The session this client presented, when it presented one.
+   *
+   * Optional because the endpoint still serves a client that sends no
+   * `Mcp-Session-Id` exactly as it always did — see `mcp-session.ts` — and
+   * because every unit fixture for these tools predates sessions.
+   */
+  readonly session?: McpSessionHandle;
 }
 
 /**
@@ -401,7 +426,13 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
             `editor set to one of: ${EDITOR_VENDORS.join(", ")}.`,
         );
       }
-      const repository = optionalString(args, "repository", 200);
+      // The session's focus when the model named nothing: a client that asked
+      // about one repository a moment ago meant that one, and searching the
+      // whole account instead is how somebody in `payments` is handed work
+      // from a repository they have not opened today.
+      const repository =
+        optionalString(args, "repository", 200) ??
+        deps.session?.focus?.repositoryId;
       const taken = await deps.take({
         vendor,
         label: `${EDITOR_LABELS[vendor]} (editor)`,
@@ -412,6 +443,24 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
           "Nothing is waiting for you right now. Anything filed for this " +
             "agent will be here next time you ask.",
         );
+      }
+      deps.session?.noteTask({
+        taskId: taken.taskId,
+        objective: taken.objective,
+        repositoryId: taken.repositoryId,
+        channel: undefined,
+        via: "take_task",
+      });
+      // Only when there was none. A take must not silently move a focus the
+      // person set: `session_context payments` followed by a take that found
+      // work in some other repository would leave every later `submit_task`
+      // filing somewhere nobody asked for.
+      if (deps.session !== undefined && deps.session.focus === undefined) {
+        deps.session.setFocus({
+          projectId: taken.projectId,
+          repositoryId: taken.repositoryId,
+          channel: undefined,
+        });
       }
       return mcpText(takenTaskBrief(taken));
     },

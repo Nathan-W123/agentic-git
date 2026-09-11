@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { McpSessionRecord } from "@coord/persistence";
+
 import { McpArgumentError } from "./mcp.js";
+import { McpSessionHandle } from "./mcp-session.js";
 import {
   createMcpWorkTools,
   editorBehind,
@@ -294,6 +297,8 @@ test("a task that was taken comes back with the revision and how to reach it", a
     take: async () => ({
       taskId: "task-9",
       objective: "Fix the login redirect",
+      projectId: "project_local",
+      repositoryId: "payments",
       repository: "payments",
       branch: "main",
       baseRevision: "a".repeat(40),
@@ -322,6 +327,8 @@ test("a taken task's brief carries the conversation it was asked inside, between
   const bare: McpTakenTask = {
     taskId: "task-9",
     objective: "now the same for the config loader",
+    projectId: "project_local",
+    repositoryId: "payments",
     repository: "payments",
     branch: "main",
     baseRevision: "a".repeat(40),
@@ -439,6 +446,8 @@ test("take_task tells the agent the thread is empty unless it speaks", async () 
     take: async () => ({
       taskId: "task-9",
       objective: "Fix the login redirect",
+      projectId: "project_local",
+      repositoryId: "payments",
       repository: "payments",
       branch: "main",
       baseRevision: "a".repeat(40),
@@ -462,6 +471,8 @@ test("a taken task's brief carries the repository's standing context after the v
   const bare: McpTakenTask = {
     taskId: "task-9",
     objective: "Fix the login redirect",
+    projectId: "project_local",
+    repositoryId: "payments",
     repository: "payments",
     branch: "main",
     baseRevision: "a".repeat(40),
@@ -495,6 +506,8 @@ test("a taken task in a repository with a note is briefed with it through the to
     take: async () => ({
       taskId: "task-9",
       objective: "Fix the login redirect",
+      projectId: "project_local",
+      repositoryId: "payments",
       repository: "payments",
       branch: "main",
       baseRevision: "a".repeat(40),
@@ -509,4 +522,85 @@ test("a taken task in a repository with a note is briefed with it through the to
   const text = String(answer.content[0]?.text);
   assert.match(text, /The retry ceiling is in src\/retry\.ts/u);
   assert.ok(text.indexOf("npm test") < text.indexOf("Standing context"), text);
+});
+
+/** A session as a request would have loaded it, with an optional focus. */
+function session(focus?: McpSessionRecord["focus"]): McpSessionHandle {
+  return new McpSessionHandle({
+    id: "mcps_1",
+    userId: "user_nathan",
+    tokenId: "tok_1",
+    editorVendor: "claude",
+    clientName: "Claude Code",
+    clientVersion: "1.2.3",
+    protocolVersion: "2025-06-18",
+    focus,
+    tasks: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastSeenAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: "2026-01-02T00:00:00.000Z",
+    endedAt: undefined,
+  });
+}
+
+const TAKEN: McpTakenTask = {
+  taskId: "task-9",
+  objective: "Fix the login redirect",
+  projectId: "project_local",
+  repositoryId: "payments",
+  repository: "payments",
+  branch: "main",
+  baseRevision: "a".repeat(40),
+  expiresAt: "2026-01-01T00:30:00.000Z",
+  bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+  validationCommands: [],
+};
+
+test("take_task searches the session's focus repository when none is named", async () => {
+  // Without this, somebody who said "the payments repo" a moment ago is
+  // handed work from a repository they have not opened today.
+  const asked: Array<string | undefined> = [];
+  const { deps } = harness({
+    session: session({
+      projectId: "project_local",
+      repositoryId: "payments",
+      channel: "general",
+    }),
+    take: async (input) => {
+      asked.push(input.repository);
+      return TAKEN;
+    },
+  });
+  await toolNamed(deps, "take_task").run({});
+  assert.deepEqual(asked, ["payments"]);
+});
+
+test("a taken task is remembered on the session, and does not move an existing focus", async () => {
+  // A take must not silently move a focus the person set: every later
+  // submit_task would file somewhere nobody asked for.
+  const held = session({
+    projectId: "project_local",
+    repositoryId: "billing",
+    channel: "general",
+  });
+  const { deps } = harness({
+    session: held,
+    take: async () => TAKEN,
+  });
+  await toolNamed(deps, "take_task").run({ repository: "payments" });
+  assert.equal(held.newNotes[0]?.taskId, "task-9");
+  assert.equal(held.newNotes[0]?.via, "take_task");
+  assert.equal(held.focus?.repositoryId, "billing");
+  assert.equal(held.focusChanged, false);
+});
+
+test("a take sets the focus when the session had none", async () => {
+  const held = session();
+  const { deps } = harness({ session: held, take: async () => TAKEN });
+  await toolNamed(deps, "take_task").run({});
+  assert.deepEqual(held.focus, {
+    projectId: "project_local",
+    repositoryId: "payments",
+    channel: undefined,
+  });
 });

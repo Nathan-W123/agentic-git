@@ -4,6 +4,7 @@ export * from "./authorization.js";
 export * from "./rate-limiter.js";
 export * from "./collab-websocket.js";
 export * from "./mailer.js";
+export * from "./mcp-session.js";
 export * from "./server.js";
 export * from "./stripe.js";
 export * from "./billing.js";

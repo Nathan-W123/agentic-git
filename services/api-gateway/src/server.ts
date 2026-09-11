@@ -30,6 +30,8 @@ import type {
   CoordinationStore,
   McpServerRecord,
   McpServerScope,
+  McpSessionRecord,
+  McpSessionTask,
   SubChannel,
   SubChannelVisibility,
   Organization,
@@ -146,13 +148,34 @@ import {
   permissionsForRole,
   type Permission,
 } from "./authorization.js";
-import { handleMcpMessage, mcpRefusal, type McpTool } from "./mcp.js";
+import {
+  handleMcpMessage,
+  mcpRefusal,
+  MCP_PROTOCOL_VERSION,
+  type McpTool,
+} from "./mcp.js";
 import {
   createMcpTools,
+  taskBelongsTo,
   type McpAgent,
   type McpRepository,
   type McpToolDeps,
 } from "./mcp-tools.js";
+import {
+  McpBriefSeedCache,
+  McpSessionHandle,
+  MCP_BRIEF_HANDOFFS,
+  MCP_BRIEF_RECENT_TASKS,
+  MCP_CONTEXT_HANDOFFS,
+  MCP_CONTEXT_MAX_CHARS,
+  MCP_INSTRUCTIONS_MAX_CHARS,
+  MCP_SESSION_IDLE_MS,
+  newMcpSessionId,
+  renderSessionBrief,
+  STANDING_INSTRUCTIONS,
+  type McpBriefSeed,
+  type SessionBriefTask,
+} from "./mcp-session.js";
 import {
   createMcpWorkTools,
   editorBehind,
@@ -1561,6 +1584,17 @@ export class ApiGateway {
    * infrastructure in front of every one of them.
    */
   private readonly manifests = new McpManifestCache();
+  /**
+   * The gathered half of an MCP client's handshake brief, held for a minute.
+   *
+   * `initialize` is the one method here that reads the store, and a CLI client
+   * opens a session per task. The reads that make that expensive — the whole
+   * handoff log for one repository — are cached per person and repository; see
+   * `mcp-session.ts` for why a store-level limit would not do instead.
+   */
+  private readonly mcpBriefSeeds = new McpBriefSeedCache();
+  /** How long an idle `Mcp-Session-Id` stays accepted. See the option's doc. */
+  private readonly mcpSessionTtlMs: number;
   /** Delivers password-reset links and registration confirmation codes. */
   readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
@@ -1686,6 +1720,17 @@ export class ApiGateway {
         positiveInteger(process.env["COORD_MCP_RATE_LIMIT_PER_MINUTE"]) ??
         240,
     });
+    // Read into a variable first rather than multiplied inside the `??` chain
+    // above it: `positiveInteger` answers `undefined` for an unset or
+    // mistyped value, `undefined * 3_600_000` does not compile, and the `NaN`
+    // a looser expression would produce is not something `??` rescues — the
+    // default would silently never apply.
+    const ttlHours = positiveInteger(
+      process.env["COORD_MCP_SESSION_TTL_HOURS"],
+    );
+    this.mcpSessionTtlMs =
+      options.mcpSessionTtlMs ??
+      (ttlHours === undefined ? MCP_SESSION_IDLE_MS : ttlHours * 3_600_000);
     this.server = createServer((request, response) => {
       void this.handle(request, response);
     });
@@ -2584,13 +2629,21 @@ export class ApiGateway {
   /**
    * The tools this caller may drive over MCP.
    *
-   * Built per request because every one of them closes over the principal: a
-   * tool has no session and no state of its own, so the token that arrived is
-   * the only thing that says who is asking.
+   * Built per request because every one of them closes over the principal. A
+   * tool now has a *session* when the client presented one — a focus and a
+   * short list of what it did — but the token that arrived is still the only
+   * thing that says who is asking: the session id is not a credential and is
+   * refused outright unless it belongs to this principal. See `mcp-session.ts`.
    */
-  mcpTools(principal: AuthenticatedPrincipal): McpTool[] {
+  mcpTools(
+    principal: AuthenticatedPrincipal,
+    session?: McpSessionHandle,
+  ): McpTool[] {
     const deps: McpToolDeps = {
       store: this.options.store,
+      ...(session === undefined ? {} : { session }),
+      sessionBrief: async ({ full }) =>
+        await this.mcpSessionBrief(principal, session, { full }),
       assertScope: (permission) => {
         assertTokenScope(principal, permission as Permission);
       },
@@ -2836,20 +2889,290 @@ export class ApiGateway {
         }
         return saved;
       },
-      outcomeFor: async (taskId) => {
-        const events = await this.options.store
-          .listAuditEvents({
-            taskId,
-            types: ["canonical_promoted", "task_reported", "task_failed"],
-          })
-          .catch(() => []);
-        const last = events.at(-1);
-        return last === undefined
-          ? undefined
-          : narrateTaskEvent(last.event.type, last.event.data);
-      },
+      outcomeFor: async (taskId) => await this.mcpTaskOutcome(taskId),
     };
-    return [...createMcpTools(deps), ...createMcpWorkTools(this.workDeps(principal))];
+    return [
+      ...createMcpTools(deps),
+      ...createMcpWorkTools(this.workDeps(principal, session)),
+    ];
+  }
+
+  /**
+   * How a task ended, in the words the rest of the control plane uses.
+   *
+   * One copy, read by `task_status` and by the brief a returning client is
+   * handed. Two would drift, and the half that drifted would be the one
+   * telling somebody their work landed when it had not.
+   */
+  private async mcpTaskOutcome(taskId: string): Promise<string | undefined> {
+    const events = await this.options.store
+      .listAuditEvents({
+        taskId,
+        types: ["canonical_promoted", "task_reported", "task_failed"],
+      })
+      .catch(() => []);
+    const last = events.at(-1);
+    return last === undefined
+      ? undefined
+      : narrateTaskEvent(last.event.type, last.event.data);
+  }
+
+  /**
+   * A fresh MCP session for a client that has just handshaken.
+   *
+   * Built but not stored: the route writes the row only once
+   * `handleMcpMessage` has actually answered the `initialize` with a result,
+   * because a malformed handshake is refused inside that function and must not
+   * leave a session id in a client's hands that this server never recorded.
+   * What it writes is `handle.row` rather than this literal, because the brief
+   * runs in between and may have adopted the focus an earlier session left.
+   */
+  openMcpSession(
+    principal: AuthenticatedPrincipal,
+    params: {
+      protocolVersion?: string;
+      clientName?: string;
+      clientVersion?: string;
+    },
+  ): McpSessionHandle {
+    const now = new Date();
+    const record: McpSessionRecord = {
+      id: newMcpSessionId(),
+      userId: principal.user.id,
+      // Recorded for diagnostics only. Continuity is looked up by person, so
+      // rotating a token keeps somebody's history rather than starting it over.
+      tokenId: principal.token?.id,
+      editorVendor: editorBehind(principal.token),
+      clientName: params.clientName,
+      clientVersion: params.clientVersion,
+      protocolVersion: params.protocolVersion ?? MCP_PROTOCOL_VERSION,
+      // Empty here rather than seeded from the last session: continuity is
+      // `mcpSessionBrief`'s decision, because that is the one place the
+      // earlier focus is re-authorized before anything is told to rely on it.
+      focus: undefined,
+      tasks: [],
+      createdAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + this.mcpSessionTtlMs).toISOString(),
+      endedAt: undefined,
+    };
+    return new McpSessionHandle(record);
+  }
+
+  /**
+   * The session an `Mcp-Session-Id` names, when this caller may continue it.
+   *
+   * Answers `undefined` for missing, ended, lapsed and somebody else's alike,
+   * and the route turns every one of them into the same 404. Telling those
+   * cases apart would confirm to a stranger that an id exists, and the client's
+   * move is identical in all four: initialize again.
+   */
+  async resolveMcpSession(
+    principal: AuthenticatedPrincipal,
+    id: string,
+  ): Promise<McpSessionHandle | undefined> {
+    const record = await this.options.store
+      .getMcpSession(id)
+      .catch(() => undefined);
+    if (
+      record === undefined ||
+      record.endedAt !== undefined ||
+      record.userId !== principal.user.id ||
+      record.expiresAt <= new Date().toISOString()
+    ) {
+      return undefined;
+    }
+    return new McpSessionHandle(record);
+  }
+
+  /** Writes back what a session-bearing request changed, and slides its expiry. */
+  async touchMcpSession(handle: McpSessionHandle): Promise<void> {
+    await this.options.store.updateMcpSession(
+      handle.id,
+      handle.patch(new Date(), this.mcpSessionTtlMs),
+    );
+  }
+
+  /**
+   * Ends a session on the client's own `DELETE`. False when there was nothing
+   * of this caller's to end.
+   *
+   * The row stays. Ending means "this client is done", not "forget this": the
+   * next handshake is still seeded from what this session did.
+   */
+  async endMcpSession(
+    principal: AuthenticatedPrincipal,
+    id: string,
+  ): Promise<boolean> {
+    const handle = await this.resolveMcpSession(principal, id);
+    if (handle === undefined) {
+      return false;
+    }
+    const now = new Date();
+    await this.options.store.updateMcpSession(id, {
+      ...handle.patch(now, this.mcpSessionTtlMs),
+      endedAt: now.toISOString(),
+    });
+    return true;
+  }
+
+  /**
+   * What a returning MCP client is told: the handshake's `instructions`, and
+   * what `session_context` answers.
+   *
+   * Every line is projected from rows this caller can already read, and each
+   * of them is re-checked here rather than trusted because it was recorded:
+   * the project is re-authorized, so a focus from last week cannot outlive a
+   * revoked grant, and each task is re-checked against its submitter.
+   */
+  async mcpSessionBrief(
+    principal: AuthenticatedPrincipal,
+    current?: McpSessionHandle,
+    options: { full?: boolean } = {},
+  ): Promise<string> {
+    const full = options.full === true;
+    const vendor = editorBehind(principal.token);
+    // Three rows. A brief is a reminder rather than an archive, and the vendor
+    // orders them so a returning Codex client is seeded from what Codex did.
+    const previous = await this.options.store
+      .listMcpSessions(principal.user.id, {
+        limit: 3,
+        ...(vendor === undefined ? {} : { editorVendor: vendor }),
+      })
+      .catch(() => []);
+    const earlier = previous.filter((row) => row.id !== current?.id);
+    // The focus this client set, or the one the last session left behind.
+    const inherited =
+      current?.focus === undefined
+        ? earlier.find((row) => row.focus !== undefined)
+        : undefined;
+    const candidate = current?.focus ?? inherited?.focus;
+    // Re-authorized before it is printed, not only before it is read from: a
+    // focus from last week must not outlive a revoked grant, and a brief that
+    // names a repository this account can no longer reach would have every
+    // defaulted tool call refused by `findRepository` a moment later.
+    const reachable =
+      candidate === undefined
+        ? false
+        : await authorizeProject(
+            this.options.store,
+            principal,
+            candidate.projectId,
+            "view",
+          ).then(
+            () => true,
+            () => false,
+          );
+    const focus = reachable ? candidate : undefined;
+    // Adopted, not merely rendered. The brief tells the client its tools
+    // default to this repository, and on a reconnect the session being told
+    // that is a row created seconds ago with nothing in it — so without this
+    // the very next `submit_task` refuses for want of a repository the client
+    // has just been told it has. The handle carries it into the row the route
+    // writes, and into every later request on the same id.
+    if (
+      focus !== undefined &&
+      current !== undefined &&
+      current.focus === undefined
+    ) {
+      current.setFocus(focus);
+    }
+
+    // Newest first, this session before older ones, deduped, and cut to the
+    // handful that will be printed *before* anything is looked up: each line
+    // costs a task read and an audit read, and a brief is on the path a client
+    // takes at the start of every task.
+    const candidates: McpSessionTask[] = [];
+    const seen = new Set<string>();
+    for (const tasks of [
+      ...(current === undefined ? [] : [current.tasks]),
+      ...earlier.map((row) => row.tasks),
+    ]) {
+      for (const note of [...tasks].reverse()) {
+        if (seen.has(note.taskId)) {
+          continue;
+        }
+        seen.add(note.taskId);
+        candidates.push(note);
+      }
+    }
+    const recentTasks: SessionBriefTask[] = [];
+    for (const note of candidates.slice(0, MCP_BRIEF_RECENT_TASKS)) {
+      const task = await this.options.store
+        .getSubmittedTask(note.taskId)
+        .catch(() => undefined);
+      if (task === undefined) {
+        continue;
+      }
+      // Owned by this person, or unowned and taken by this session. An
+      // unowned task is one the CLI filed (`claimableBy` lets an editor lease
+      // those), and somebody who was leased it was meant to run it and is
+      // meant to be reminded of it. A task owned by somebody *else* stays
+      // hidden however this session came across it: a session row is never a
+      // way to read another person's work.
+      if (
+        !taskBelongsTo(task, principal.user.id) &&
+        !(note.via === "take_task" && task.submittedBy === undefined)
+      ) {
+        continue;
+      }
+      const outcome = await this.mcpTaskOutcome(task.id);
+      recentTasks.push({
+        taskId: task.id,
+        objective: note.objective,
+        repositoryId: note.repositoryId,
+        state: describeTaskState(task.status),
+        ...(outcome === undefined ? {} : { outcome }),
+      });
+    }
+
+    let seed: McpBriefSeed = { handoffContext: "", standingContext: "" };
+    if (focus !== undefined) {
+      const load = async (): Promise<McpBriefSeed> => ({
+        handoffContext:
+          (await this.options.operations
+            .handoffContextFor?.({
+              projectId: focus.projectId,
+              repositoryId: focus.repositoryId,
+              limit: full ? MCP_CONTEXT_HANDOFFS : MCP_BRIEF_HANDOFFS,
+            })
+            .catch(() => undefined)) ?? "",
+        standingContext: renderRepositoryContext(
+          await this.options.store
+            .getRepositoryContext(focus.repositoryId)
+            .catch(() => undefined),
+        ),
+      });
+      // Cached for the handshake, which a client performs once per task and
+      // which must stay cheap; read fresh for `session_context`, which is a
+      // deliberate call asking for what is true now.
+      seed = full
+        ? await load()
+        : await this.mcpBriefSeeds.get(
+            principal.user.id,
+            focus.repositoryId,
+            load,
+          );
+    }
+
+    return renderSessionBrief({
+      standing: STANDING_INSTRUCTIONS,
+      ...(focus === undefined ? {} : { focus }),
+      ...(inherited === undefined
+        ? {}
+        : {
+            resumedFrom: {
+              ...(inherited.clientName === undefined
+                ? {}
+                : { clientName: inherited.clientName }),
+              lastSeenAt: inherited.lastSeenAt,
+            },
+          }),
+      recentTasks,
+      handoffContext: seed.handoffContext,
+      standingContext: seed.standingContext,
+      maxChars: full ? MCP_CONTEXT_MAX_CHARS : MCP_INSTRUCTIONS_MAX_CHARS,
+    });
   }
 
   /**
@@ -2966,7 +3289,10 @@ export class ApiGateway {
    * that admits worker registration, and a token handed to an editor to do
    * one task must not be able to take everybody else's.
    */
-  private workDeps(principal: AuthenticatedPrincipal): McpWorkDeps {
+  private workDeps(
+    principal: AuthenticatedPrincipal,
+    session?: McpSessionHandle,
+  ): McpWorkDeps {
     const operation = (): EditorWorkOperations => {
       const editorWork = this.options.operations.editorWork;
       if (editorWork === undefined) {
@@ -3031,6 +3357,7 @@ export class ApiGateway {
       assertScope: (permission) => {
         assertTokenScope(principal, permission as Permission);
       },
+      ...(session === undefined ? {} : { session }),
       // From the token this request arrived on, never from the model. See
       // `editorBehind`: the connection already knows, and asking the caller
       // to tell us was asking it to repeat something it could get wrong.
@@ -3239,6 +3566,11 @@ export class ApiGateway {
             objective: taken.objective,
             ...(taken.context === undefined ? {} : { context: taken.context }),
             ...(standingContext === "" ? {} : { standingContext }),
+            // Carried out of this loop rather than recovered later: a session
+            // focus is a project and a repository, and this is the one place
+            // that knows which project the lease came from.
+            projectId,
+            repositoryId: taken.repositoryId,
             repository: taken.repositoryId,
             branch: taken.branch,
             baseRevision: taken.baseRevision,

@@ -263,11 +263,115 @@ server never costs the others their tools.
 Every proxied call is audited as `mcp_tool_called`, so "was Linear reachable
 during that afternoon" is answerable afterwards.
 
+## Sessions, and what a returning client is told
+
+A CLI client opens a connection per task, makes a few calls and goes away.
+Before sessions, every one of those connections started from nothing: the model
+asked which repositories exist, the person named the repository again, and
+whatever the last connection filed was invisible. The session id the MCP spec
+already defines is the hook that fixes it.
+
+**Three headers.** `initialize` answers with `Mcp-Session-Id` when — and only
+when — the handshake actually succeeded, and the client sends that id back on
+every later request. An id that is unknown, ended, lapsed, or belongs to
+somebody else is answered **404** with a JSON-RPC-shaped body, which is what
+makes a client re-`initialize`; 403 is deliberately never used, because it
+would confirm to a stranger that the id exists. `DELETE /api/v1/mcp` ends a
+session: no header is a 400, an id that cannot be resolved is a 404, and a
+success is 200 with an empty body. `MCP-Protocol-Version` is read when present
+and refused with a 400 if it is malformed or newer than this server's
+revision — the same rule `initialize` applies when it echoes a version back.
+
+**A request with no session id is served exactly as it always was.** The spec
+permits demanding one; this endpoint does not, because every client and every
+test written before sessions sends none and breaking them buys nothing. No
+header means no session, and the tools behave as they did.
+
+**The id is not a credential.** It is stored in plain text and compared as
+plain text. Every request still authenticates with its bearer token; the id
+only selects which record that principal is continuing, and is worth nothing
+without the token. It is never forwarded to a proxied server: leaking a
+per-person identifier to somebody else's infrastructure would be new exposure,
+and the proxy is not session-scoped in either direction.
+
+**What a session remembers.** A focus — `{projectId, repositoryId, channel}` —
+and up to twenty tasks it filed or took, each with the objective cut to 200
+characters and whether it arrived through `submit_task` or `take_task`. It
+deliberately remembers **no outcomes**: how a task ended is read live from
+`submitted_tasks` and the audit log when a brief is written, so the record can
+never contradict the run it describes. The notes one request added are merged
+into the row **inside the store** rather than written as a whole list, because
+an editor issues parallel tool calls and two whole-list writes would each
+persist a stale copy and lose a task id. A focus is last-writer-wins: it is one
+value, and the later call is the better guess.
+
+**The brief.** `initialize` answers with an `instructions` string, ordered so
+that the tail is what truncation cuts: the standing instructions, then the
+focus, then up to five recent tasks with their state and outcome, then the
+focus repository's handoffs from earlier work, then its standing context. It is
+capped at 6,000 characters on the handshake and at 20,000 for the
+`session_context` tool, and a cut brief says so and names the tool that has the
+rest. Nothing in it is summarised by a model — every line is projected from
+rows the caller can already read, and each is re-checked at render time: the
+project is re-authorized (so a focus from last week cannot outlive a revoked
+grant) and each task is re-checked against its submitter. A task is listed when
+the caller submitted it, **or** when it has no submitter and this session took
+it — an unowned task is one the CLI filed, and whoever was leased it was meant
+to run it. A task owned by somebody else is never listed, however this session
+came across it.
+
+The expensive half of the brief — the repository's handoffs, which are read out
+of the whole live and archived handoff log — is cached per person and
+repository for one minute. A store-level limit would not do instead:
+`listAuditEvents` returns events ascending by sequence, so a limit keeps the
+*oldest* handoffs, the opposite of what a successor wants.
+
+**Continuity is by person.** The lookup is `listMcpSessions(userId)`, so
+rotating a token keeps somebody's history. The editor the token was minted for
+orders the rows rather than filtering them — a returning Codex client is seeded
+from what Codex did, and somebody whose only history is Claude Code still gets
+it.
+
+**A focus is adopted, not only printed.** When the handshake finds no focus on
+the new session it takes the one the last session left, and the row the
+handshake writes carries it. The brief tells the client its tools default to
+that repository, so the row has to agree: a focus that was rendered and not
+stored would leave the first `submit_task` after every reconnect refused for
+want of a repository the client had just been told it had. Both happen only
+once the project behind the focus is re-authorized — a focus left by a grant
+that has since been revoked is neither printed nor adopted, because every
+defaulted call against it would be refused by `findRepository` a moment later
+anyway. Task notes are *not* inherited: they are the ledger of what one
+connection did, which is why `task_status` without a `task_id` means "the last
+task this connection filed or took" and the brief's task list is headed with
+what the *account* has been doing.
+
+**Bounds.** An idle id stays accepted for `COORD_MCP_SESSION_TTL_HOURS` hours
+(default 24), sliding on each request and checked on read. That governs
+acceptance only: the row is still read for history afterwards, and ending a
+session means "this client is done", not "forget this". Growth is bounded by
+count rather than by time — creating a session prunes that person's oldest rows
+beyond the newest 40 in the same statement, so no timer is held open for the
+life of the process.
+
+**Defaults from the focus.** `submit_task`'s `repository` is optional and falls
+back to the focus (with a refusal that names `list_repositories` when there is
+none), `take_task` searches the focus repository when none is named, and
+`task_status` defaults to the last task this session touched. `cancel_task`
+still insists on a `task_id`: stopping work is irreversible from here, and
+"whatever was last" is exactly the guess that stops the wrong run. A take never
+moves a focus that was already set. The `session_context` tool shows the long
+form of the brief and, given a repository, moves the focus — refusing with a
+sentence when the client presented no session id, because a focus with nowhere
+to live would be forgotten the moment the call returned.
+
 ## Where the code is
 
 | Concern | File |
 | --- | --- |
 | The three tools, and the diff parser | `services/api-gateway/src/mcp-work.ts` |
+| The session record, the brief, and the seed cache | `services/api-gateway/src/mcp-session.ts` |
+| The session header, `DELETE`, and the handshake brief | `services/api-gateway/src/routes/session.ts` |
 | Presence and bundle tickets | `services/api-gateway/src/editor-sessions.ts` |
 | Taking, extending, admitting, reporting | `apps/cli/src/editor-work.ts` |
 | The manifest cache and the tool proxy | `services/api-gateway/src/mcp-proxy.ts` |

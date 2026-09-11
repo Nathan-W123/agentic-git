@@ -1458,4 +1458,30 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
        )`,
     ],
   },
+  {
+    // See the SQLite copy for why.
+    version: 68,
+    name: "mcp-sessions",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS mcp_sessions (
+         id TEXT PRIMARY KEY,
+         user_id TEXT NOT NULL REFERENCES users(id),
+         token_id TEXT,
+         editor_vendor TEXT,
+         client_name TEXT,
+         client_version TEXT,
+         protocol_version TEXT NOT NULL,
+         focus_json TEXT,
+         tasks_json TEXT NOT NULL DEFAULT '[]',
+         created_at TEXT NOT NULL,
+         last_seen_at TEXT NOT NULL,
+         expires_at TEXT NOT NULL,
+         ended_at TEXT
+       )`,
+      `CREATE INDEX IF NOT EXISTS mcp_sessions_by_user
+         ON mcp_sessions(user_id, last_seen_at)`,
+      `CREATE INDEX IF NOT EXISTS mcp_sessions_by_expiry
+         ON mcp_sessions(expires_at)`,
+    ],
+  },
 ];

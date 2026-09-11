@@ -96,6 +96,9 @@ import type {
   McpServerRecord,
   McpServerScope,
   McpServerSecrets,
+  McpSessionFocus,
+  McpSessionRecord,
+  McpSessionTask,
   MergeSubChannelInput,
   Organization,
   OrganizationMembership,
@@ -150,6 +153,7 @@ import {
   applyMcpSecretsPatch,
   directPairKey,
   mcpSecretNames,
+  mergeMcpSessionTasks,
   normalizeMcpRepositoryIds,
   parseChangedFiles,
   repositoryConflicts,
@@ -2358,6 +2362,142 @@ export class SqliteCoordinationStore implements CoordinationStore {
       this.db
         .prepare("DELETE FROM auth_sessions WHERE expires_at <= ?")
         .run(now).changes,
+    );
+  }
+
+  public async createMcpSession(
+    session: McpSessionRecord,
+    options: { keepPerUser?: number } = {},
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO mcp_sessions
+           (id, user_id, token_id, editor_vendor, client_name, client_version,
+            protocol_version, focus_json, tasks_json, created_at, last_seen_at,
+            expires_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        session.id,
+        session.userId,
+        session.tokenId ?? null,
+        session.editorVendor ?? null,
+        session.clientName ?? null,
+        session.clientVersion ?? null,
+        session.protocolVersion,
+        session.focus === undefined ? null : JSON.stringify(session.focus),
+        JSON.stringify(session.tasks),
+        session.createdAt,
+        session.lastSeenAt,
+        session.expiresAt,
+        session.endedAt ?? null,
+      );
+    const keep = options.keepPerUser;
+    if (keep === undefined || keep <= 0) {
+      return;
+    }
+    // Pruned on the way in rather than on a timer. A CLI client opens a
+    // session per task, so this table grows with the work somebody does; a
+    // sweep would be a handle held open for the life of the process to tidy
+    // rows only the next handshake will ever read.
+    this.db
+      .prepare(
+        `DELETE FROM mcp_sessions
+          WHERE user_id = ?
+            AND id NOT IN (
+              SELECT id FROM mcp_sessions
+               WHERE user_id = ?
+               ORDER BY last_seen_at DESC, rowid DESC
+               LIMIT ?)`,
+      )
+      .run(session.userId, session.userId, keep);
+  }
+
+  public async getMcpSession(
+    id: string,
+  ): Promise<McpSessionRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM mcp_sessions WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toMcpSession(row);
+  }
+
+  public async listMcpSessions(
+    userId: string,
+    options: { limit?: number; editorVendor?: string } = {},
+  ): Promise<McpSessionRecord[]> {
+    // The vendor orders rather than filters, and binds as NULL when there is
+    // none: NULL matches nothing under `=`, so every row falls into the same
+    // bucket and the ordering collapses to plain recency. Somebody whose only
+    // history is Claude Code still gets it when Codex connects.
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM mcp_sessions
+          WHERE user_id = ?
+          ORDER BY CASE WHEN editor_vendor = ? THEN 0 ELSE 1 END,
+                   last_seen_at DESC, rowid DESC
+          LIMIT ?`,
+      )
+      .all(userId, options.editorVendor ?? null, options.limit ?? 20) as Row[];
+    return rows.map((row) => this.toMcpSession(row));
+  }
+
+  public async updateMcpSession(
+    id: string,
+    patch: {
+      lastSeenAt: string;
+      expiresAt: string;
+      focus?: McpSessionFocus | undefined;
+      noteTasks?: { tasks: readonly McpSessionTask[]; max: number };
+      endedAt?: string;
+    },
+  ): Promise<void> {
+    const assignments = ["last_seen_at = ?", "expires_at = ?"];
+    const values: unknown[] = [patch.lastSeenAt, patch.expiresAt];
+    if ("focus" in patch) {
+      assignments.push("focus_json = ?");
+      values.push(patch.focus === undefined ? null : JSON.stringify(patch.focus));
+    }
+    if (patch.endedAt !== undefined) {
+      assignments.push("ended_at = ?");
+      values.push(patch.endedAt);
+    }
+    if (patch.noteTasks !== undefined) {
+      // Read, merged and written inside this method, which SQLite runs to
+      // completion before anything else touches the row. The caller sends
+      // only what it added: an editor issues parallel tool calls, and two
+      // requests each writing a whole list computed from their own read
+      // would each persist their own stale copy and lose a task id.
+      const existing = this.db
+        .prepare("SELECT tasks_json FROM mcp_sessions WHERE id = ?")
+        .get(id) as Row | undefined;
+      if (existing === undefined) {
+        return;
+      }
+      assignments.push("tasks_json = ?");
+      values.push(
+        JSON.stringify(
+          mergeMcpSessionTasks(
+            parseJson<McpSessionTask[]>(existing, "tasks_json"),
+            patch.noteTasks.tasks,
+            patch.noteTasks.max,
+          ),
+        ),
+      );
+    }
+    values.push(id);
+    this.db
+      .prepare(
+        `UPDATE mcp_sessions SET ${assignments.join(", ")} WHERE id = ?`,
+      )
+      .run(...(values as never[]));
+  }
+
+  public async deleteStaleMcpSessions(before: string): Promise<number> {
+    return Number(
+      this.db
+        .prepare("DELETE FROM mcp_sessions WHERE last_seen_at < ?")
+        .run(before).changes,
     );
   }
 
@@ -6304,6 +6444,24 @@ public async recordBranchClaim(
       lastSeenAt: text(row, "last_seen_at"),
       ipAddress: text(row, "ip_address"),
       userAgent: text(row, "user_agent"),
+    };
+  }
+
+  private toMcpSession(row: Row): McpSessionRecord {
+    return {
+      id: text(row, "id"),
+      userId: text(row, "user_id"),
+      tokenId: optionalText(row, "token_id"),
+      editorVendor: optionalText(row, "editor_vendor"),
+      clientName: optionalText(row, "client_name"),
+      clientVersion: optionalText(row, "client_version"),
+      protocolVersion: text(row, "protocol_version"),
+      focus: optionalJson<McpSessionFocus>(row, "focus_json"),
+      tasks: parseJson<McpSessionTask[]>(row, "tasks_json"),
+      createdAt: text(row, "created_at"),
+      lastSeenAt: text(row, "last_seen_at"),
+      expiresAt: text(row, "expires_at"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 

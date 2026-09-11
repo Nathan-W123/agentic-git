@@ -839,6 +839,25 @@ export interface ApiOperations {
    * Absent on a deployment that cannot push anywhere.
    */
   githubCredential?: GitHubCredentialOperations;
+  /**
+   * What earlier work in a repository handed on, rendered as the coordinator's
+   * `seedContextForTask` renders it for a planning prompt.
+   *
+   * Optional because the gateway does not depend on the coordinator — this is
+   * the seam that keeps it that way — and because a deployment that runs no
+   * tasks has no handoffs to read. A returning MCP client is seeded with it;
+   * absent simply means that half of the brief is empty.
+   *
+   * The implementation reads the whole live and archived handoff log per call
+   * by design (a `limit` bounds the answer, not the read), so the gateway
+   * caches what it gets back per person and repository for a minute rather
+   * than asking on every handshake.
+   */
+  handoffContextFor?(input: {
+    projectId?: string;
+    repositoryId: string;
+    limit?: number;
+  }): Promise<string>;
 }
 
 /**
@@ -1158,6 +1177,16 @@ export interface ApiGatewayOptions {
    * are different clients doing different work and they get different budgets.
    */
   mcpRateLimitPerMinute?: number;
+  /**
+   * How long an idle MCP session id stays accepted, from
+   * `COORD_MCP_SESSION_TTL_HOURS` (default 24 hours).
+   *
+   * Sliding, and about acceptance only: a lapsed id is answered 404 so the
+   * client re-initializes, while the row it named is still read for the
+   * history the next handshake is seeded with. Injected by tests, which
+   * cannot wait out a day to watch an id lapse.
+   */
+  mcpSessionTtlMs?: number;
   authRateLimitPerMinute?: number;
   /** Event poll cadence; exposed for deterministic embedded runtimes/tests. */
   webSocketPollIntervalMs?: number;

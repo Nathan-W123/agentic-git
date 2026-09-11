@@ -59,6 +59,40 @@ test("initialize answers with this server's tools capability", async () => {
   assert.deepEqual(body.result.serverInfo, { name: "kumi", version: "1.0.0" });
 });
 
+test("initialize carries instructions when the server has some", async () => {
+  // The continuity hook: what a reconnecting client's model is told before it
+  // has asked anything. Computed by the route, which has the store; this file
+  // only has to put it where the client reads it.
+  const reply = await handleMcpMessage({
+    payload: { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    tools: tools(),
+    serverName: "kumi",
+    serverVersion: "1.0.0",
+    instructions: "You were last working in payments.",
+  });
+  assert.equal(
+    (reply.body as { result: { instructions?: string } }).result.instructions,
+    "You were last working in payments.",
+  );
+});
+
+test("initialize omits instructions when there are none", async () => {
+  // Absent rather than empty, both for nothing to say and for a brief that
+  // came back as "": a client that shows the person its instructions would
+  // otherwise show them a blank one.
+  for (const instructions of [undefined, ""]) {
+    const reply = await handleMcpMessage({
+      payload: { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      tools: tools(),
+      serverName: "kumi",
+      serverVersion: "1.0.0",
+      ...(instructions === undefined ? {} : { instructions }),
+    });
+    const result = (reply.body as { result: Record<string, unknown> }).result;
+    assert.equal("instructions" in result, false);
+  }
+});
+
 test("initialize speaks the client's revision when it can", async () => {
   // Echoed rather than corrected: a client on an older revision this server
   // still speaks should not be told to upgrade for nothing.

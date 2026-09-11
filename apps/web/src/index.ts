@@ -14,6 +14,7 @@ import {
   ConversationRegistry,
   TaskCancellationRegistry,
   computeCoordinationMetrics,
+  seedContextForTask,
 } from "@coord/coordinator";
 import {
   cancelTasks,
@@ -377,6 +378,16 @@ async function serve(
   // read from inside a call, which cannot happen before it is serving.
   let servingGateway: ApiGateway | undefined;
   const operations: ApiOperations = {
+    // The seam that keeps the gateway free of a coordinator dependency: the
+    // same projection every planning prompt is seeded with, handed to a
+    // returning MCP client. The gateway bounds how often it asks, because this
+    // reads the whole live and archived handoff log per call.
+    handoffContextFor: async (input) =>
+      await seedContextForTask(store, {
+        repositoryId: input.repositoryId,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+        limit: input.limit ?? 2,
+      }),
     chatProviders: {
       list: (input) => providerChat.list(input),
       signIn: (input) =>

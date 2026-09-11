@@ -782,6 +782,92 @@ export interface AuthSessionRecord {
 }
 
 /**
+ * Where an MCP client was last working.
+ *
+ * The repository is held as its *id*, because that is the key both MCP tools
+ * already resolve a name down to and what an editor's brief carries, so there
+ * is no second label here to drift out of step with the row it names.
+ */
+export interface McpSessionFocus {
+  projectId: ProjectId;
+  repositoryId: string;
+  /** The room, when the client named one. Undefined means the default room. */
+  channel: string | undefined;
+}
+
+/**
+ * One task an MCP session started or took, as the session remembers it.
+ *
+ * Deliberately no outcome. How a task ended is read live from
+ * `submitted_tasks` and the audit log when a brief is written, so a session
+ * record cannot contradict the run it describes — the same reason a handoff
+ * carries what happened rather than a verdict about it.
+ */
+export interface McpSessionTask {
+  taskId: TaskId;
+  /** The objective, cut short: this is a reminder, not a second copy of it. */
+  objective: string;
+  repositoryId: string;
+  channel: string | undefined;
+  /** Whether this client filed the task or picked it up to do itself. */
+  via: "submit_task" | "take_task";
+  at: string;
+}
+
+/**
+ * One MCP client's connection, as `Mcp-Session-Id` names it.
+ *
+ * Store-backed rather than held in memory the way editor presence is, because
+ * a focus and a task list are the record this exists to keep: they have to
+ * outlive a deploy — which is exactly the moment a client reconnects — and in
+ * a Postgres deployment the store is the one component every process shares.
+ *
+ * The id is not a credential and is stored in plain text. Every request still
+ * authenticates with its bearer token; the id only selects which record that
+ * principal is continuing, and is worth nothing without the token.
+ */
+export interface McpSessionRecord {
+  id: string;
+  userId: UserId;
+  /** The token this session was opened on, kept for diagnostics only. */
+  tokenId: string | undefined;
+  /** Which editor opened it, when the token says. See `editorBehind`. */
+  editorVendor: string | undefined;
+  clientName: string | undefined;
+  clientVersion: string | undefined;
+  protocolVersion: string;
+  focus: McpSessionFocus | undefined;
+  tasks: McpSessionTask[];
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  /** Set when the client sent `DELETE`. An ended session still reads as history. */
+  endedAt: string | undefined;
+}
+
+/**
+ * Folds the notes one request added into the list a session already had.
+ *
+ * Shared by both backends so the rule cannot be implemented twice and drift.
+ * A task noted a second time keeps the newer note *and* moves to the end,
+ * because the end is where "the last thing this session touched" is read
+ * from, and a client that re-files the same task has just touched it again.
+ */
+export function mergeMcpSessionTasks(
+  existing: readonly McpSessionTask[],
+  added: readonly McpSessionTask[],
+  max: number,
+): McpSessionTask[] {
+  const byTask = new Map<string, McpSessionTask>();
+  for (const task of [...existing, ...added]) {
+    byTask.delete(task.taskId);
+    byTask.set(task.taskId, task);
+  }
+  const merged = [...byTask.values()];
+  return max > 0 ? merged.slice(Math.max(0, merged.length - max)) : [];
+}
+
+/**
  * A task's lifecycle before, during, and after the run that executes it.
  *
  * `claimed` exists so a crashed run leaves evidence that a task was taken,
@@ -2573,6 +2659,60 @@ export interface CoordinationStore {
   revokeAuthSession(id: string): Promise<void>;
   revokeUserSessions(userId: UserId): Promise<void>;
   deleteExpiredAuthSessions(now: string): Promise<number>;
+
+  /**
+   * Records an MCP client's session.
+   *
+   * `keepPerUser` prunes that person's oldest rows beyond the given count in
+   * the same call. A CLI client opens a session per task, so the table is
+   * bounded by count rather than by time: an idle sweep would have to run on a
+   * timer, and the rows are wanted for their history long after the id they
+   * carry has stopped being accepted.
+   */
+  createMcpSession(
+    session: McpSessionRecord,
+    options?: { keepPerUser?: number },
+  ): Promise<void>;
+  /** One session by id, whether or not it has ended or lapsed. */
+  getMcpSession(id: string): Promise<McpSessionRecord | undefined>;
+  /**
+   * A person's sessions, newest last-seen first.
+   *
+   * Rows whose `editorVendor` matches come first, so a returning Codex client
+   * is seeded from what Codex did rather than from what Claude Code did. A
+   * preference, not a filter: somebody whose only history is Claude Code still
+   * gets it when they connect from something else.
+   *
+   * Ended and lapsed sessions are included. The history is what a returning
+   * client is told; only the id stops being accepted.
+   */
+  listMcpSessions(
+    userId: UserId,
+    options?: { limit?: number; editorVendor?: string },
+  ): Promise<McpSessionRecord[]>;
+  /**
+   * Moves a session on after a request that used it.
+   *
+   * `noteTasks` carries only the notes this request added, and the append,
+   * the dedupe by task id and the cap to `max` all happen *here*, against the
+   * row as it stands. A caller that sent a whole list computed from its own
+   * read would lose a note whenever two of a client's parallel tool calls
+   * landed together — which is the ordinary shape of an editor session, not a
+   * rare race. `focus` is last-writer-wins: a focus is one value and the later
+   * call is the better guess.
+   */
+  updateMcpSession(
+    id: string,
+    patch: {
+      lastSeenAt: string;
+      expiresAt: string;
+      focus?: McpSessionFocus | undefined;
+      noteTasks?: { tasks: readonly McpSessionTask[]; max: number };
+      endedAt?: string;
+    },
+  ): Promise<void>;
+  /** Drops sessions last seen before `before`. For an operator sweep. */
+  deleteStaleMcpSessions(before: string): Promise<number>;
 
   saveRepository(repository: StoredRepository): Promise<void>;
   /**

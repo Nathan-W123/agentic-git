@@ -72,6 +72,16 @@ The local Phase 1 product surface is complete:
   `POST /projects/{id}/catch-up/seen`; a first visit and a quiet interval both
   answer with nothing, so the popup only appears when there is news and the
   model is never woken to say there is none.
+- MCP session continuity: `POST /api/v1/mcp` issues an `Mcp-Session-Id` on a
+  handshake that succeeded, accepts it on later requests, and ends it on
+  `DELETE`; a client that sends none is served exactly as before. The session
+  is a store row — a focus and up to twenty tasks it filed or took — and
+  `initialize` answers with `instructions` projected from the coordination
+  record: where that account was last working, how its recent tasks ended
+  (read live, never stored), and that repository's handoffs and standing
+  context. `submit_task`, `take_task` and `task_status` default from the
+  focus; `cancel_task` deliberately does not; `session_context` shows the long
+  form and moves the focus. See [editor work](../protocol/editor-work.md).
 
 The web product is still a control room rather than a collaborative IDE.
 Presence, shared cursors, PTY terminal streams, and projection of agents'

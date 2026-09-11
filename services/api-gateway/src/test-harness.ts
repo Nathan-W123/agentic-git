@@ -563,6 +563,20 @@ export async function startRuntime(
     rateLimitPerMinute?: number;
     /** The MCP endpoint's own per-minute budget, which must be separate. */
     mcpRateLimitPerMinute?: number;
+    /**
+     * How long an idle MCP session id stays accepted. A test about a lapsed
+     * id cannot wait out the day the deployment default gives it.
+     */
+    mcpSessionTtlMs?: number;
+    /**
+     * Stands in for the coordinator's handoff seed, which the gateway cannot
+     * import. Defaults to one that answers nothing, which is also what a
+     * deployment with no handoffs on record looks like.
+     */
+    handoffContext?: (input: {
+      repositoryId: string;
+      projectId?: string;
+    }) => Promise<string>;
     /** Consecutive direct push results, for a conflict followed by its retry. */
     pushOutcomes?: Array<{
       outcome: "done" | "refused";
@@ -755,6 +769,15 @@ export async function startRuntime(
   };
 
   const operations: ApiOperations = {
+    handoffContextFor: async (input) =>
+      options.handoffContext === undefined
+        ? ""
+        : await options.handoffContext({
+            repositoryId: input.repositoryId,
+            ...(input.projectId === undefined
+              ? {}
+              : { projectId: input.projectId }),
+          }),
     chatProviders: {
       // Faithful in the one respect the gateway acts on: the route decides,
       // per provider, whether an agent exists at all, and it reads
@@ -1528,6 +1551,9 @@ export async function startRuntime(
     ...(options.mcpRateLimitPerMinute === undefined
       ? {}
       : { mcpRateLimitPerMinute: options.mcpRateLimitPerMinute }),
+    ...(options.mcpSessionTtlMs === undefined
+      ? {}
+      : { mcpSessionTtlMs: options.mcpSessionTtlMs }),
     chatterFilter: {
       readsAsChatter: async (text: string) => localChatter(text),
       // The mirror the local-agents path reads. Anything the stub does not
@@ -1929,16 +1955,30 @@ export async function bareRequest(
   };
 }
 
-/** A bare fetch with no cookies, standing in for a CLI, worker, or agent. */
+/**
+ * A bare fetch with no cookies, standing in for a CLI, worker, or agent.
+ *
+ * `headers` and the returned `headers` are what the MCP session tests need:
+ * the protocol puts the session id in a request header and hands it back in a
+ * response one, and neither is reachable through a body. Additive, so every
+ * caller that destructures `status` and `data` is untouched.
+ */
 export async function bearer(
   origin: string,
   path: string,
   token: string,
-  options: { method?: string; body?: unknown } = {},
-): Promise<{ status: number; data: any }> {
+  options: {
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+  } = {},
+): Promise<{ status: number; data: any; headers: Headers }> {
   const headers = new Headers({ Authorization: `Bearer ${token}` });
   if (options.body !== undefined) {
     headers.set("Content-Type", "application/json");
+  }
+  for (const [name, value] of Object.entries(options.headers ?? {})) {
+    headers.set(name, value);
   }
   const response = await fetch(`${origin}${path}`, {
     method: options.method ?? "GET",
@@ -1951,6 +1991,7 @@ export async function bearer(
   return {
     status: response.status,
     data: text.length === 0 ? undefined : JSON.parse(text),
+    headers: response.headers,
   };
 }
 
@@ -2312,8 +2353,12 @@ export async function upgradeEvents(
   });
 }
 
-export async function mcpRuntime(t: TestContext, scopes: string[] = ["view", "submit_task"]) {
-  const runtime = await startRuntime(t);
+export async function mcpRuntime(
+  t: TestContext,
+  scopes: string[] = ["view", "submit_task"],
+  runtimeOptions: Parameters<typeof startRuntime>[1] = {},
+) {
+  const runtime = await startRuntime(t, runtimeOptions);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
   const repositoryId = await invitableRepository(owner, "payments");
@@ -2342,6 +2387,63 @@ export async function rpc(
   return await bearer(origin, "/api/v1/mcp", token, {
     method: "POST",
     body: message,
+  });
+}
+
+/** The same, continuing a session the way a client that handshook does. */
+export async function rpcWithSession(
+  origin: string,
+  token: string,
+  sessionId: string | undefined,
+  message: Record<string, unknown>,
+) {
+  return await bearer(origin, "/api/v1/mcp", token, {
+    method: "POST",
+    body: message,
+    ...(sessionId === undefined
+      ? {}
+      : { headers: { "Mcp-Session-Id": sessionId } }),
+  });
+}
+
+/** A well-formed handshake, and what came back on it. */
+export async function initializeSession(
+  origin: string,
+  token: string,
+  id = 1,
+): Promise<{
+  sessionId: string | undefined;
+  instructions: string;
+  status: number;
+}> {
+  const hello = await rpc(origin, token, {
+    jsonrpc: "2.0",
+    id,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "Claude Code", version: "1.2.3" },
+    },
+  });
+  return {
+    sessionId: hello.headers.get("mcp-session-id") ?? undefined,
+    instructions: String(hello.data?.result?.instructions ?? ""),
+    status: hello.status,
+  };
+}
+
+/** The client saying it is finished with a session. */
+export async function endSession(
+  origin: string,
+  token: string,
+  sessionId?: string,
+) {
+  return await bearer(origin, "/api/v1/mcp", token, {
+    method: "DELETE",
+    ...(sessionId === undefined
+      ? {}
+      : { headers: { "Mcp-Session-Id": sessionId } }),
   });
 }
 

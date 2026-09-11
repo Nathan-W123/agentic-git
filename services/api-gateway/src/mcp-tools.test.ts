@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { CoordinationStore, SubmittedTask } from "@coord/persistence";
+import type {
+  CoordinationStore,
+  McpSessionRecord,
+  SubmittedTask,
+} from "@coord/persistence";
 
 import {
   REPOSITORY_CONTEXT_MAX_CHARS,
@@ -9,6 +13,7 @@ import {
 } from "@coord/shared-types";
 
 import { McpArgumentError } from "./mcp.js";
+import { McpSessionHandle } from "./mcp-session.js";
 import { createMcpTools, type McpAgent, type McpToolDeps } from "./mcp-tools.js";
 
 /**
@@ -357,6 +362,8 @@ test("an editor's own prompt goes to its own agent, unasked", async () => {
       return {
         taskId,
         objective: "fix the login redirect",
+        projectId: "project_local",
+        repositoryId: "payments",
         repository: "payments",
         branch: "main",
         baseRevision: "a".repeat(40),
@@ -479,6 +486,8 @@ test("an editor with no agent of its own files the work for itself", async () =>
       return {
         taskId,
         objective: "fix the redirect",
+        projectId: "project_local",
+        repositoryId: "payments",
         repository: "payments",
         branch: "main",
         baseRevision: "abc123",
@@ -647,4 +656,174 @@ test("set_repository_context refuses in sentences: forbidden, stale, and too lon
     McpArgumentError,
   );
   assert.equal(asked, 0);
+});
+
+/**
+ * A session in the state a request would have loaded it in.
+ *
+ * Built from a record rather than mutated into place, because that is how the
+ * route builds one: every request loads its own handle and writes back only
+ * what it added.
+ */
+function session(overrides: Partial<McpSessionRecord> = {}): McpSessionHandle {
+  return new McpSessionHandle({
+    id: "mcps_1",
+    userId: "user_nathan",
+    tokenId: "tok_1",
+    editorVendor: "claude",
+    clientName: "Claude Code",
+    clientVersion: "1.2.3",
+    protocolVersion: "2025-06-18",
+    focus: undefined,
+    tasks: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastSeenAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: "2026-01-02T00:00:00.000Z",
+    endedAt: undefined,
+    ...overrides,
+  });
+}
+
+test("submit_task falls back to the session's focus repository and channel", async () => {
+  // The person said "the payments repo" once. Making them say it again on
+  // every call is the friction sessions exist to remove.
+  const held = session({
+    focus: {
+      projectId: "project_local",
+      repositoryId: "payments",
+      channel: "billing",
+    },
+  });
+  const { run, posted } = tool("submit_task", { session: held });
+  const said = await run({
+    agent: "Codex (Sam)",
+    objective: "raise the retry ceiling",
+  });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  assert.equal(posted[0]?.channel, "billing");
+  assert.match(posted[0]?.content ?? "", /^@Codex \(Sam\) /u);
+});
+
+test("submit_task with no focus and no repository is refused by name", async () => {
+  // Named tools rather than a bare complaint: a model told only that a field
+  // is missing fills it in with a guess, and the guess is a repository
+  // somebody else's work lands in.
+  const { run } = tool("submit_task");
+  await assert.rejects(
+    async () => await run({ objective: "raise the retry ceiling" }),
+    (error: unknown) =>
+      error instanceof McpArgumentError &&
+      /list_repositories/u.test(error.message),
+  );
+});
+
+test("a filed task and its room are remembered on the session", async () => {
+  const held = session();
+  const { run } = tool("submit_task", { session: held });
+  const said = await run({
+    repository: "payments",
+    agent: "Codex (Sam)",
+    objective: "raise the retry ceiling",
+  });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  assert.equal(held.newNotes[0]?.taskId, "task_1");
+  assert.equal(held.newNotes[0]?.via, "submit_task");
+  assert.equal(held.focus?.repositoryId, "payments");
+  // The room the message actually landed in, which is where a later
+  // unqualified post would go anyway.
+  assert.equal(held.focus?.channel, "general");
+});
+
+test("task_status defaults to the last task this session touched", async () => {
+  const held = session({
+    tasks: [
+      {
+        taskId: "task_old",
+        objective: "older work",
+        repositoryId: "payments",
+        channel: undefined,
+        via: "submit_task",
+        at: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        taskId: "task_1",
+        objective: "raise the retry ceiling",
+        repositoryId: "payments",
+        channel: undefined,
+        via: "submit_task",
+        at: "2026-01-01T00:01:00.000Z",
+      },
+    ],
+  });
+  const asked: string[] = [];
+  const { run } = tool("task_status", {
+    session: held,
+    store: {
+      getSubmittedTask: async (taskId: string) => {
+        asked.push(taskId);
+        return {
+          id: taskId,
+          objective: "raise the retry ceiling",
+          status: "running",
+        };
+      },
+    } as unknown as CoordinationStore,
+  });
+  const said = await run({});
+  assert.deepEqual(asked, ["task_1"]);
+  assert.match(String(said.content[0]?.text), /raise the retry ceiling/u);
+});
+
+test("cancel_task still insists on a task id", async () => {
+  // Stopping work is destructive and irreversible from here, and "whatever
+  // was last" is exactly the guess that stops the wrong run.
+  const held = session({
+    tasks: [
+      {
+        taskId: "task_1",
+        objective: "raise the retry ceiling",
+        repositoryId: "payments",
+        channel: undefined,
+        via: "submit_task",
+        at: "2026-01-01T00:01:00.000Z",
+      },
+    ],
+  });
+  const { run } = tool("cancel_task", { session: held });
+  await assert.rejects(async () => await run({}), McpArgumentError);
+});
+
+test("session_context sets the focus it is asked for and reads the brief back", async () => {
+  const held = session();
+  const { run } = tool("session_context", {
+    session: held,
+    sessionBrief: async ({ full }) =>
+      full ? "the long brief" : "the short brief",
+  });
+  const said = await run({ repository: "payments", channel: "#billing" });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  assert.deepEqual(held.focus, {
+    projectId: "project_local",
+    repositoryId: "payments",
+    channel: "billing",
+  });
+  // The deliberate call gets the long form; the handshake takes the short one.
+  assert.equal(String(said.content[0]?.text), "the long brief");
+});
+
+test("session_context without a session says a focus cannot be kept", async () => {
+  // A focus with nowhere to live would be forgotten the moment the call
+  // returned, and reporting it as set is what makes a model file the next
+  // task into the wrong repository.
+  const { run } = tool("session_context");
+  const said = await run({ repository: "payments" });
+  assert.equal(said.isError, true);
+  assert.match(String(said.content[0]?.text), /session id/u);
+});
+
+test("session_context with nothing on record says so rather than answering blank", async () => {
+  const { run } = tool("session_context", { sessionBrief: async () => "" });
+  const said = await run({});
+  assert.equal(said.isError, undefined);
+  assert.match(String(said.content[0]?.text), /Nothing is on record/u);
 });
