@@ -14,7 +14,7 @@ import {
 import { pythonLayout } from "./python-imports.js";
 import { resourcesFromNames, resourcesFromText } from "./resources.js";
 import { braceShapes, pythonShapes, rubyShapes } from "./signature-shapes.js";
-import { readRustFile } from "./rust-imports.js";
+import { cargoTargets, readRustFile } from "./rust-imports.js";
 import {
   phpTypes,
   readPhpFile,
@@ -295,10 +295,13 @@ export interface CodeIntelligenceOptions {
  *
  * A Go module's import path is written in `go.mod` and nowhere else — not in
  * the source, and not in the clone path either — so a repository whose
- * `go.mod` is never read has no resolvable Go imports at all. These are not
- * indexed: they produce no `IndexedFile` and no symbols.
+ * `go.mod` is never read has no resolvable Go imports at all. A Cargo
+ * manifest is where a crate root that does not follow the layout convention
+ * is named (`[[bin]] path = "src/tools/tool.rs"`), and without it that root's
+ * `crate::` resolved into the library beside it. These are not indexed: they
+ * produce no `IndexedFile` and no symbols.
  */
-const MANIFESTS = new Set(["go.mod"]);
+const MANIFESTS = new Set(["go.mod", "Cargo.toml"]);
 
 /** The languages whose imports name a type rather than a path. */
 const JVM_LANGUAGES = new Set<SupportedLanguage>(["java", "kotlin", "scala"]);
@@ -1799,6 +1802,7 @@ export class CodeIntelligenceService {
             .map((file) => file.path),
         ),
       },
+      rustTargets: cargoTargets(manifests),
     };
     const edges: DependencyEdge[] = [];
     // One edge per (from, to, resource, kind): a target imported four ways

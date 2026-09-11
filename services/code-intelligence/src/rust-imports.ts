@@ -182,19 +182,21 @@ export function readRustFile(source: string): RustFileFacts | undefined {
   found.sort((left, right) => left.at - right.at);
 
   // One pass over the code, keeping the stack of inline modules open at each
-  // recorded match.
-  const stack: Array<{ name: string; depth: number }> = [];
+  // recorded match. A `macro_rules!` body is a frame of its own: what it
+  // says is said at the expansion site, not here.
+  const stack: Array<{ name: string; depth: number; macro: boolean }> = [];
   let depth = 0;
   let cursor = 0;
   for (const entry of found) {
     for (; cursor < entry.at; cursor += 1) {
       const character = code[cursor];
       if (character === "{") {
-        const opener = /(?<![\w#$])mod\s+([A-Za-z_]\w*)\s*$/u.exec(
-          code.slice(Math.max(0, cursor - 80), cursor),
-        );
+        const window = code.slice(Math.max(0, cursor - 80), cursor);
+        const opener = /(?<![\w#$])mod\s+([A-Za-z_]\w*)\s*$/u.exec(window);
         if (opener?.[1] !== undefined) {
-          stack.push({ name: opener[1], depth });
+          stack.push({ name: opener[1], depth, macro: false });
+        } else if (/(?<![\w#$])macro_rules!\s*[A-Za-z_]\w*\s*$/u.test(window)) {
+          stack.push({ name: "", depth, macro: true });
         }
         depth += 1;
       } else if (character === "}") {
@@ -204,7 +206,14 @@ export function readRustFile(source: string): RustFileFacts | undefined {
         }
       }
     }
-    const inline = stack.map((frame) => frame.name);
+    // A literal `mod generated;` inside a macro definition declares a file
+    // only where the macro is invoked, which may be another file, or
+    // nowhere: recording it here resolved to a stale `generated.rs` whether
+    // or not anything expanded the macro.
+    if (stack.some((frame) => frame.macro)) {
+      continue;
+    }
+    const inline = stack.filter((frame) => !frame.macro).map((frame) => frame.name);
     if (entry.kind === "mod") {
       const name = entry.match[1];
       if (name === undefined) {
@@ -380,6 +389,84 @@ function splitTop(input: string): string[] {
 
 export interface RustContext {
   files: ReadonlySet<string>;
+  /**
+   * The crate roots the manifests name explicitly — see {@link cargoTargets}.
+   * Absent means no manifest was read, and only the conventional roots count.
+   */
+  rustTargets?: ReadonlySet<string>;
+}
+
+/** The tables of a Cargo manifest whose `path` names a crate root. */
+const TARGET_TABLES = new Set(["lib", "bin", "example", "test", "bench"]);
+
+/**
+ * The target files the Cargo manifests name explicitly, repository-relative.
+ *
+ * Cargo's layout is a convention, not a rule. `[lib] path = "src/acme.rs"`
+ * and `[[bin]] path = "src/tools/tool.rs"` put a crate root wherever the
+ * manifest says, and a file the convention reads as an ordinary module of
+ * the library is then a root whose `crate::` is its own directory. Nothing
+ * on disk says so; only the manifest does, which is why it is read.
+ *
+ * A deliberately small reading of TOML: table headers, and a `path` key on a
+ * line of its own under one of the target tables, or `build` under
+ * `[package]`. An inline-table array (`bin = [{ path = ".." }]`) is not read,
+ * and a root it would have named is treated as the convention treats it — a
+ * missed root, never a wrong one.
+ */
+export function cargoTargets(manifests: ReadonlyMap<string, string>): Set<string> {
+  const targets = new Set<string>();
+  for (const [file, source] of manifests) {
+    if (posixBasename(file) !== "Cargo.toml") {
+      continue;
+    }
+    const dir = posixDirname(file);
+    let table = "";
+    for (const raw of source.split("\n")) {
+      const line = withoutTomlComment(raw).trim();
+      if (line.startsWith("[")) {
+        // Every header changes the table, including one this cannot read
+        // (`[target.'cfg(unix)'.dependencies]`): a `path` under it must not
+        // be charged to the target table before it.
+        table = /^\[\[?\s*([\w-]+)\s*\]\]?$/u.exec(line)?.[1] ?? "";
+        continue;
+      }
+      const key = /^(path|build)\s*=\s*(?:"([^"\\]*)"|'([^']*)')\s*$/u.exec(line);
+      if (key === null) {
+        continue;
+      }
+      const wanted = key[1] === "path" ? TARGET_TABLES.has(table) : table === "package";
+      const value = key[2] ?? key[3] ?? "";
+      if (!wanted || !value.endsWith(".rs")) {
+        continue;
+      }
+      const target = posixJoin(dir, value);
+      if (target !== "") {
+        targets.add(target);
+      }
+    }
+  }
+  return targets;
+}
+
+/** A TOML line up to its `#`, which is a comment only outside a string. */
+function withoutTomlComment(line: string): string {
+  let quote: string | undefined;
+  for (let at = 0; at < line.length; at += 1) {
+    const character = line[at];
+    if (quote !== undefined) {
+      if (character === "\\" && quote === '"') {
+        at += 1;
+      } else if (character === quote) {
+        quote = undefined;
+      }
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "#") {
+      return line.slice(0, at);
+    }
+  }
+  return line;
 }
 
 function crateManifestDir(file: string, files: ReadonlySet<string>): string | undefined {
@@ -400,9 +487,14 @@ function crateManifestDir(file: string, files: ReadonlySet<string>): string | un
  *
  * Anchored on a sibling `Cargo.toml` rather than on the file's name, which is
  * what keeps `src/utils/lib.rs` — an ordinary module that happens to be
- * called `lib` — from being read as a crate root.
+ * called `lib` — from being read as a crate root. A file the manifest names
+ * as a target is one wherever it sits.
  */
-function isTargetRoot(file: string, files: ReadonlySet<string>): boolean {
+function isTargetRoot(file: string, context: RustContext): boolean {
+  if (context.rustTargets?.has(file) === true) {
+    return true;
+  }
+  const { files } = context;
   const crate = crateManifestDir(file, files);
   if (crate === undefined) {
     return false;
@@ -420,8 +512,8 @@ function isTargetRoot(file: string, files: ReadonlySet<string>): boolean {
 }
 
 /** Where this file's own child modules live. */
-function childDir(file: string, files: ReadonlySet<string>): string {
-  if (posixBasename(file) === "mod.rs" || isTargetRoot(file, files)) {
+function childDir(file: string, context: RustContext): string {
+  if (posixBasename(file) === "mod.rs" || isTargetRoot(file, context)) {
     return posixDirname(file);
   }
   return posixJoin(posixDirname(file), posixBasename(file).replace(/\.rs$/u, ""));
@@ -461,7 +553,7 @@ export function resolveRustModule(
   }
   const segments = name.split("/");
   const leaf = segments.pop() ?? "";
-  const dir = [childDir(fromFile, context.files), ...segments].filter((part) => part !== "").join("/");
+  const dir = [childDir(fromFile, context), ...segments].filter((part) => part !== "").join("/");
   const hit = moduleFile(dir, leaf, context.files);
   return hit === undefined || hit === fromFile ? [] : [hit];
 }
@@ -488,15 +580,15 @@ export function resolveRustUse(
   let dir: string | undefined;
   let remaining = rest;
   if (head === "crate") {
-    dir = crateRootDir(fromFile, files);
+    dir = crateRootDir(fromFile, context);
   } else if (head === "self") {
-    dir = childDir(fromFile, files);
+    dir = childDir(fromFile, context);
   } else if (head === "super") {
-    dir = parentDir(fromFile, files);
+    dir = parentDir(fromFile, context);
     // Each further `super` climbs one more module, which is one directory —
     // and never above the crate root, where `build.rs` is a different crate
     // and rustc would have refused the path anyway.
-    const root = crateRootDir(fromFile, files);
+    const root = crateRootDir(fromFile, context);
     const inside = (candidate: string | undefined): boolean =>
       candidate !== undefined &&
       (root === undefined
@@ -516,6 +608,14 @@ export function resolveRustUse(
   if (dir === undefined) {
     return [];
   }
+  if (head === "super" && remaining.length === 0) {
+    // `use super::*` names the parent module itself, and the file that
+    // holds it is a real dependency of this one — the walk below needs a
+    // segment to land on, so without this the commonest `use` in a Rust
+    // module tree recorded nothing.
+    const owner = moduleOwner(dir, fromFile, context);
+    return owner === undefined || owner === fromFile ? [] : [owner];
+  }
   // Walk while each segment is a module; the first that is not is the item
   // being imported, and the file holding it is the answer.
   let current = dir;
@@ -534,8 +634,8 @@ export function resolveRustUse(
   return landed === undefined || landed === fromFile ? [] : [landed];
 }
 
-function parentDir(file: string, files: ReadonlySet<string>): string | undefined {
-  if (isTargetRoot(file, files)) {
+function parentDir(file: string, context: RustContext): string | undefined {
+  if (isTargetRoot(file, context)) {
     return undefined;
   }
   return posixBasename(file) === "mod.rs"
@@ -543,11 +643,85 @@ function parentDir(file: string, files: ReadonlySet<string>): string | undefined
     : posixDirname(file);
 }
 
-function crateRootDir(file: string, files: ReadonlySet<string>): string | undefined {
+/**
+ * The file whose module has `dir` as its child directory: the crate root
+ * when `dir` is the root's own directory, else `<dir>.rs` or `<dir>/mod.rs`.
+ * Nothing when more than one file could be it — a crate with both `lib.rs`
+ * and `main.rs` may declare `mod foo;` in either.
+ */
+function moduleOwner(dir: string, fromFile: string, context: RustContext): string | undefined {
+  const root = crateRootDir(fromFile, context);
+  if (root === undefined) {
+    return undefined;
+  }
+  if (dir !== root) {
+    return moduleFile(posixDirname(dir), posixBasename(dir), context.files);
+  }
+  const candidates = new Set<string>();
+  for (const name of ["lib.rs", "main.rs"]) {
+    const candidate = posixJoin(root, name);
+    if (context.files.has(candidate) && isTargetRoot(candidate, context)) {
+      candidates.add(candidate);
+    }
+  }
+  for (const target of context.rustTargets ?? []) {
+    if (posixDirname(target) === root && context.files.has(target)) {
+      candidates.add(target);
+    }
+  }
+  return candidates.size === 1 ? [...candidates][0] : undefined;
+}
+
+/**
+ * The directory `crate::` names from this file.
+ *
+ * A declared target is its own root. For any other file the conventional
+ * root and the directory of every declared target above the file are the
+ * candidates: `src/tools/config.rs` beside a `[[bin]] path = "src/tools/
+ * tool.rs"` may be the library's `tools::config` or the tool's `config`,
+ * and the file set cannot say which, so two candidates is no answer.
+ */
+function crateRootDir(file: string, context: RustContext): string | undefined {
+  const { files } = context;
+  if (context.rustTargets?.has(file) === true) {
+    return posixDirname(file);
+  }
   const crate = crateManifestDir(file, files);
   if (crate === undefined) {
     return undefined;
   }
+  const candidates = new Set<string>();
+  const conventional = conventionalRootDir(file, crate, files);
+  if (conventional !== undefined) {
+    candidates.add(conventional);
+  }
+  for (const target of context.rustTargets ?? []) {
+    const dir = posixDirname(target);
+    // A target's directory competes only from within the conventional
+    // root: a `build.rs` or a `main.rs` at the crate's own directory holds
+    // every file of the crate, and `src/foo.rs` is the library's for all
+    // that.
+    const above =
+      conventional !== undefined &&
+      conventional !== dir &&
+      (dir === "" || conventional.startsWith(`${dir}/`));
+    if (
+      !above &&
+      (dir === "" || file.startsWith(`${dir}/`)) &&
+      crateManifestDir(target, files) === crate
+    ) {
+      candidates.add(dir);
+    }
+  }
+  return candidates.size === 1 ? [...candidates][0] : undefined;
+}
+
+/** The root Cargo's layout convention gives a file, by its path alone. */
+function conventionalRootDir(
+  file: string,
+  crate: string,
+  files: ReadonlySet<string>,
+): string | undefined {
   const rel = crate === "" ? file : file.slice(crate.length + 1);
   if (rel === "build.rs") {
     return crate;

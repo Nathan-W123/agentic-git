@@ -1436,6 +1436,55 @@ test("a build served from the parse cache resolves what a cold build resolves", 
   assert.deepEqual(edgeLines(warm), expected);
 });
 
+test("the declaration index is built from bodies, manifests and filenames, warm or cold", async () => {
+  // Three things the front door has to carry that the unit suites cannot:
+  // the top-level names ride on the file (`scan.topLevel`), so a cached
+  // build must resolve what a cold one does; a Cargo manifest is read as a
+  // manifest and not as a file; and a Java file whose body the scanner
+  // could not read is still reachable by its name.
+  const { warm, cold } = await warmAndCold(
+    {
+      // Two overloads around a class: read from merged symbol ranges, the
+      // class lay inside the overloads' span and left the index.
+      "lib/Money.kt":
+        'package com.acme.money\n\nfun format(m: Money): String = ""\n\nclass Money(val cents: Long)\n\nfun format(m: Money, locale: String): String = ""\n',
+      "app/Main.kt": "package com.acme.app\nimport com.acme.money.Money\nclass Main\n",
+      // Two nested Builders merged into a phantom top-level one that made
+      // the real Builder ambiguous.
+      "src/main/java/com/acme/Models.java":
+        "package com.acme;\npublic class Models {\n}\nclass A {\n    public static class Builder {}\n}\nclass B {\n    public static class Builder {}\n}\n",
+      "src/main/java/com/acme/Builder.java": "package com.acme;\npublic class Builder {}\n",
+      // A text block the scanner cannot read: the header still names the
+      // package, and the filename is the clue.
+      "src/main/java/com/acme/db/Queries.java":
+        'package com.acme.db;\npublic class Queries {\n    static final String ALL = """\n        SELECT 1\n        """;\n}\n',
+      "src/main/java/com/acme/app/Main.java":
+        "package com.acme.app;\nimport com.acme.Builder;\nimport com.acme.db.Queries;\npublic class Main {}\n",
+      // A declared bin target beside the library that shares its module
+      // names: `crate::config` from the tool is the tool's own.
+      "rs/Cargo.toml": '[package]\nname = "acme"\n\n[[bin]]\nname = "tool"\npath = "src/tools/tool.rs"\n',
+      "rs/src/lib.rs": "pub mod config;\n",
+      "rs/src/config.rs": "pub struct Settings;\n",
+      "rs/src/tools/tool.rs": "mod config;\nuse crate::config::Settings;\nfn main() { let _ = Settings; }\n",
+      "rs/src/tools/config.rs": "pub struct Settings;\n",
+    },
+    "declared",
+  );
+  const expected = [
+    "app/Main.kt -> lib/Money.kt",
+    "rs/src/lib.rs -> rs/src/config.rs",
+    "rs/src/tools/tool.rs -> rs/src/tools/config.rs",
+    "src/main/java/com/acme/app/Main.java -> src/main/java/com/acme/Builder.java",
+    "src/main/java/com/acme/app/Main.java -> src/main/java/com/acme/db/Queries.java",
+  ];
+  assert.deepEqual(edgeLines(cold), expected);
+  assert.deepEqual(edgeLines(warm), expected);
+  const queries = cold.files.find((file) => file.path === "src/main/java/com/acme/db/Queries.java");
+  assert.equal(queries?.symbolRangesUnknown, true, "the body really is unreadable");
+  assert.equal(queries?.scan?.topLevel, undefined, "and says so, rather than declaring nothing");
+  assert.equal(cold.files.some((file) => file.path === "rs/Cargo.toml"), false, "a manifest is read, not indexed");
+});
+
 test("a transient interpreter failure is not cached as a file's contract", async () => {
   // The first build runs with a python3 that fails; the second, with the
   // interpreter back, touches no Python file. The placeholder from the first

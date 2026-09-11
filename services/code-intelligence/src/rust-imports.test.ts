@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  cargoTargets,
   maskRust,
   readRustFile,
   resolveRustModule,
@@ -272,4 +273,96 @@ test("super never climbs past the crate root", () => {
   const context = repo("Cargo.toml", "build.rs", "src/lib.rs", "src/foo.rs", "src/mod.rs");
   assert.deepEqual(resolveRustUse("src/foo.rs", "super::super::build::X", context), []);
   assert.deepEqual(resolveRustUse("src/mod.rs", "super::build::X", context), []);
+});
+
+test("a target the manifest names is a crate root wherever it sits", () => {
+  // `[[bin]] path = "src/tools/tool.rs"` puts a root where the convention
+  // sees an ordinary module of the library; read by path alone, its
+  // `crate::config` landed on the library's `src/config.rs`.
+  const manifests = new Map([
+    [
+      "Cargo.toml",
+      [
+        "[package]",
+        'name = "acme"',
+        'build = "build.rs" # the default, spelt out',
+        "",
+        "[lib]",
+        'path = "src/acme.rs"',
+        "",
+        "[[bin]]",
+        'name = "tool"',
+        'path = "src/tools/tool.rs"',
+        "",
+        "[target.'cfg(unix)'.dependencies.foo]",
+        'path = "../foo.rs"',
+        "",
+        "[[example]]",
+        "path = 'examples/demo/run.rs'",
+      ].join("\n"),
+    ],
+    ["notes/Cargo.toml.bak", '[[bin]]\npath = "stale.rs"\n'],
+  ]);
+  // A dependency's `path` is not a target, and neither is a manifest that is
+  // not one.
+  assert.deepEqual(
+    [...cargoTargets(manifests)],
+    ["build.rs", "src/acme.rs", "src/tools/tool.rs", "examples/demo/run.rs"],
+  );
+  const context = {
+    files: new Set(["Cargo.toml", "src/lib.rs", "src/config.rs", "src/tools/tool.rs", "src/tools/config.rs"]),
+    rustTargets: new Set(["src/tools/tool.rs"]),
+  };
+  assert.deepEqual(resolveRustModule("src/tools/tool.rs", "config", context), ["src/tools/config.rs"]);
+  assert.deepEqual(resolveRustUse("src/tools/tool.rs", "crate::config::Settings", context), [
+    "src/tools/config.rs",
+  ]);
+  // `src/tools/config.rs` may be the library's `tools::config` or the
+  // tool's `config`, and the file set cannot say which: no answer.
+  assert.deepEqual(resolveRustUse("src/tools/config.rs", "crate::config::Settings", context), []);
+  // A `[lib] path` root makes `crate::` its directory for the whole crate.
+  const custom = {
+    files: new Set(["Cargo.toml", "src/acme.rs", "src/config.rs", "src/net.rs"]),
+    rustTargets: new Set(["src/acme.rs"]),
+  };
+  assert.deepEqual(resolveRustModule("src/acme.rs", "config", custom), ["src/config.rs"]);
+  assert.deepEqual(resolveRustUse("src/net.rs", "crate::config::Settings", custom), ["src/config.rs"]);
+  // A build script at the crate's own directory holds every file of the
+  // crate; it must not make the library's modules ambiguous.
+  const build = {
+    files: new Set(["Cargo.toml", "build.rs", "src/lib.rs", "src/foo.rs", "src/bar.rs"]),
+    rustTargets: new Set(["build.rs"]),
+  };
+  assert.deepEqual(resolveRustUse("src/foo.rs", "crate::bar::X", build), ["src/bar.rs"]);
+});
+
+test("use super::* names the parent module's file", () => {
+  // The commonest `use` in a module tree, and it recorded nothing: the walk
+  // needed a segment to land on. The parent is a real dependency.
+  const context = repo(
+    "Cargo.toml", "src/lib.rs", "src/foo.rs", "src/billing.rs", "src/billing/money.rs",
+    "src/store/mod.rs", "src/store/item.rs",
+  );
+  assert.deepEqual(resolveRustUse("src/foo.rs", "super", context), ["src/lib.rs"]);
+  assert.deepEqual(resolveRustUse("src/billing/money.rs", "super", context), ["src/billing.rs"]);
+  assert.deepEqual(resolveRustUse("src/store/item.rs", "super", context), ["src/store/mod.rs"]);
+  assert.deepEqual(resolveRustUse("src/billing/money.rs", "super::super", context), ["src/lib.rs"]);
+  // With both `lib.rs` and `main.rs`, either may have declared `mod foo;`.
+  const both = repo("Cargo.toml", "src/lib.rs", "src/main.rs", "src/foo.rs");
+  assert.deepEqual(resolveRustUse("src/foo.rs", "super", both), []);
+  // `tests/common/mod.rs` is declared by any of the test targets beside it.
+  const tests = repo("Cargo.toml", "src/lib.rs", "tests/it.rs", "tests/common/mod.rs");
+  assert.deepEqual(resolveRustUse("tests/common/mod.rs", "super", tests), []);
+});
+
+test("a mod inside a macro_rules! body declares nothing here", () => {
+  // The expansion site decides what a macro's `mod generated;` means, and it
+  // may be another file or nowhere; recorded here it resolved to a stale
+  // `generated.rs` whether or not anything invoked the macro.
+  assert.deepEqual(
+    readRustFile(
+      "macro_rules! m {\n    () => {\n        mod generated;\n        use crate::generated::X;\n    };\n}\nmod real;\nuse crate::real::Y;\n",
+    ),
+    { modules: ["real"], uses: ["crate::real::Y"] },
+  );
 });
