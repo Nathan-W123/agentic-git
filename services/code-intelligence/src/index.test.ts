@@ -1679,6 +1679,100 @@ test("a manifest is not charged against the budgets that bound the index", async
   }
 });
 
+test("a go.mod sorted past the first read chunk is read whatever the budget", async () => {
+  // The manifest branch sat ahead of the per-file budget checks, and the
+  // loop still stopped at a chunk boundary once the budget was spent — so a
+  // go.mod behind more than a chunk's worth of earlier-sorting files was
+  // never fetched, and a truncated index had Go edges or none depending on
+  // what the directory holding the bulk of the code was called.
+  const bulk = Object.fromEntries(
+    Array.from({ length: 300 }, (_, i) => [
+      `a/f${String(i).padStart(3, "0")}.go`,
+      `package a\n\nfunc F${i}() {}\n`,
+    ]),
+  );
+  const repo = await seededRepository(
+    {
+      "0main.go": 'package main\n\nimport "example.com/m/a"\n\nfunc main() { a.F0() }\n',
+      "go.mod": "module example.com/m\n\ngo 1.22\n",
+      ...bulk,
+    },
+    "late-gomod",
+  );
+  try {
+    const index = await new CodeIntelligenceService(repo.repositories, { maxFiles: 10 }).index(
+      repo.repository,
+      repo.revision,
+    );
+    assert.equal(index.truncated, true);
+    assert.ok(
+      index.edges.some((edge) => edge.fromFile === "0main.go" && edge.toFile === "a/f000.go"),
+      "go.mod must still be read",
+    );
+  } finally {
+    await repo.dispose();
+  }
+});
+
+test("a Go file whose prologue could not be read says so, rather than importing nothing", async () => {
+  // A Unicode alias is legal Go, and the reader abandoned the file over it:
+  // indexed with `imports: []` and nothing to tell it from a file that
+  // imports nothing, so a change to billing's contract was attributed to
+  // nobody. The alias is read now; and a file the reader genuinely cannot
+  // follow is marked, so a plan over it is blind rather than independent.
+  const repo = await seededRepository(
+    {
+      "go.mod": "module example.com/m\n",
+      "calc/calc.go":
+        'package calc\n\nimport (\n\tπ "math"\n\t"example.com/m/billing"\n)\n\nfunc Area(r float64) float64 { billing.Charge(); return π.Pi * r * r }\n',
+      "broken/broken.go": 'package broken\n\nimport (\n\t"unterminated\n)\n\nfunc F() {}\n',
+      "billing/money.go": "package billing\n\nfunc Charge() {}\n",
+    },
+    "go-unknown",
+  );
+  try {
+    const service = new CodeIntelligenceService(repo.repositories);
+    const index = await service.index(repo.repository, repo.revision);
+    const calc = index.files.find((file) => file.path === "calc/calc.go");
+    assert.deepEqual(calc?.imports, ["math", "example.com/m/billing"]);
+    assert.equal(calc?.importsUnknown, undefined);
+    assert.ok(
+      index.edges.some(
+        (edge) => edge.fromFile === "calc/calc.go" && edge.toFile === "billing/money.go",
+      ),
+    );
+    const broken = index.files.find((file) => file.path === "broken/broken.go");
+    assert.deepEqual(broken?.imports, []);
+    assert.equal(broken?.importsUnknown, true);
+    const base = {
+      taskId: "task_1",
+      objective: "edit",
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low" as const,
+    };
+    assert.equal(
+      service.enrichPlan({ ...base, expectedFiles: ["broken/broken.go"] }, index).dependenciesUnknown,
+      true,
+    );
+    assert.equal(
+      service.enrichPlan({ ...base, expectedFiles: ["calc/calc.go"] }, index).dependenciesUnknown,
+      undefined,
+    );
+    // The marker survives being served from memory: the second index of the
+    // same revision is a copy of the first, and must still say so.
+    const again = await service.index(repo.repository, repo.revision);
+    assert.equal(
+      again.files.find((file) => file.path === "broken/broken.go")?.importsUnknown,
+      true,
+    );
+  } finally {
+    await repo.dispose();
+  }
+});
+
 test("one dependency imported several ways is one edge, and a specifier is shown as written", async () => {
   const repo = await seededRepository(
     {

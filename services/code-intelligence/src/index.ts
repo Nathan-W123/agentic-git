@@ -197,6 +197,18 @@ export interface IndexedFile {
   /** Call edges inside this file, attributed to the calling symbol. */
   symbolCalls: SymbolCall[];
   imports: string[];
+  /**
+   * Set when this file's language has imports worth reading and this file's
+   * could not be read — the reader lost its place in a prologue or header
+   * and abandoned the file.
+   *
+   * The distinction {@link symbolRangesUnknown} draws, for the edges: a
+   * file that imports nothing is safe to leave out of every dependency, a
+   * file whose imports could not be read is not. Without it a Go file with
+   * an unreadable prologue was indexed as importing nothing, and a change to
+   * a package it depended on was attributed to nobody.
+   */
+  importsUnknown?: boolean;
   dependencies: string[];
   referencedSymbols: string[];
   apis: string[];
@@ -849,6 +861,7 @@ function unreadableFile(filePath: string, language: SupportedLanguage): IndexedF
     exportedShapesUnknown: true,
     symbolCalls: [],
     imports: [],
+    importsUnknown: true,
     dependencies: [],
     exportedSymbols: [],
     referencedSymbols: [],
@@ -1368,14 +1381,15 @@ export class CodeIntelligenceService {
       seenPaths.add(entry.path);
     }
     const candidates = entries.filter(
+      (entry) => entry.type === "blob" && languageOf(entry.path) !== undefined,
+    );
+    // Not indexed, but read: a Go module's own import path lives in `go.mod`
+    // and nowhere else — not in the source, not in the clone path — so
+    // without this every Go specifier looks like a third-party module and no
+    // Go edge can ever resolve.
+    const manifestEntries = entries.filter(
       (entry) =>
-        entry.type === "blob" &&
-        (languageOf(entry.path) !== undefined ||
-          // Not indexed, but read: a Go module's own import path lives in
-          // `go.mod` and nowhere else — not in the source, not in the clone
-          // path — so without this every Go specifier looks like a
-          // third-party module and no Go edge can ever resolve.
-          MANIFESTS.has(path.posix.basename(entry.path))),
+        entry.type === "blob" && MANIFESTS.has(path.posix.basename(entry.path)),
     );
     // Holes while the loop runs: a script's slot is claimed in order and
     // filled once every script has been parsed, so deferring the parse cannot
@@ -1404,8 +1418,26 @@ export class CodeIntelligenceService {
     // had already started, which is what the sequential version did by never
     // issuing them; the resulting index is identical either way.
     const reader = this.repositories.openBatchReader(repository, revision);
+    const readAhead = 256;
     try {
-      const readAhead = 256;
+      // Manifests first, in a pass of their own, because they are exempt from
+      // the budgets and the loop below is not. The first version read them
+      // inside that loop, ahead of the budget checks for each file — and the
+      // loop still stopped at a chunk boundary once the budget was spent, so
+      // a `go.mod` that sorted after two hundred and fifty-six other files
+      // was never fetched, and whether a truncated index had any Go edge at
+      // all depended on the name of the directory the bulk of the code sat
+      // in.
+      for (let offset = 0; offset < manifestEntries.length; offset += readAhead) {
+        const chunk = manifestEntries.slice(offset, offset + readAhead);
+        const fetched = await reader.read(chunk.map((entry) => entry.path));
+        chunk.forEach((entry, position) => {
+          const blob = fetched[position];
+          if (blob !== undefined) {
+            manifests.set(entry.path, blob.toString("utf8"));
+          }
+        });
+      }
       for (let offset = 0; offset < candidates.length; offset += readAhead) {
         if (slots.length >= maxFiles || totalBytes >= maxTotalBytes) {
           skippedFiles += candidates.length - offset;
@@ -1449,13 +1481,7 @@ export class CodeIntelligenceService {
           const source = sources.get(filePath);
           const language = languageOf(filePath);
           if (language === undefined) {
-            // A manifest is read for what it says about the repository and
-            // occupies no slot, so it is not charged against the budgets
-            // that bound the index: a go.mod that did not fit would have
-            // silently unresolved every Go import.
-            if (MANIFESTS.has(path.posix.basename(filePath)) && source !== undefined) {
-              manifests.set(filePath, source);
-            }
+            // Every candidate has one; this narrows the type.
             continue;
           }
           if (duplicated.has(filePath)) {
@@ -1608,6 +1634,11 @@ export class CodeIntelligenceService {
                   packageName: facts.packageName,
                   buildIgnored: facts.buildIgnored,
                 };
+              } else {
+                // Abandoned, not empty. The reader refuses a whole file over
+                // one thing it cannot place, and "imports nothing" is the
+                // one answer that file must not give.
+                scanned.importsUnknown = true;
               }
             }
             if (language === "php") {
@@ -1990,7 +2021,13 @@ export class CodeIntelligenceService {
     const couldHaveDependencies = plan.expectedFiles.some(
       (file) => languageOf(file) !== undefined,
     );
-    const blind = couldHaveDependencies && files.length === 0;
+    // And a plan over a file that is in the index but whose imports could not
+    // be read is blind in the same way: its read set is whatever the reader
+    // managed before it gave up, which is nothing, and nothing is not what
+    // the file depends on.
+    const blind =
+      couldHaveDependencies &&
+      (files.length === 0 || files.some((file) => file.importsUnknown === true));
     const enriched: AgentPlan = {
       ...structuredClone(plan),
       ...(blind ? { dependenciesUnknown: true } : {}),
