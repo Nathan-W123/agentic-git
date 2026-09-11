@@ -4,6 +4,7 @@ import {
   type PushBranchNamer,
   type PushToRemoteResult,
   type RemoteRepositoryCredentials,
+  type SyncConflictResolution,
   type SyncFromRemoteResult,
 } from "@coord/repository-service";
 
@@ -133,8 +134,13 @@ export interface RepoSyncOptions {
   projectId?: string;
   /** Who asked, for the audit trail. */
   actorId?: string;
-  /** A person's answer to "which side wins" when both changed one file. */
-  conflictResolution?: "refuse" | "prefer-remote" | "prefer-local";
+  /**
+   * A person's answer to "which side wins" when both changed one file.
+   *
+   * A `{ perFile }` map answers each clashing file separately, which is what
+   * a person who has read the diffs usually wants.
+   */
+  conflictResolution?: SyncConflictResolution;
   /**
    * The task asking for this sync, exempted from the executing-work guard.
    * A sync requested as an agent action arrives from inside a run, so the

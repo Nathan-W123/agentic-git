@@ -829,6 +829,39 @@ async function commitOnCanonical(
   return (await git.run(["-C", work, "rev-parse", "HEAD"])).stdout.trim();
 }
 
+/** Deletes a file on canonical, from canonical's own tip. */
+async function removeOnCanonical(
+  fixture: PushFixture,
+  file: string,
+): Promise<void> {
+  const git = new GitClient();
+  const work = path.join(
+    fixture.root,
+    `del-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  await git.run(["clone", "--branch", "main", fixture.canonical.path, work]);
+  await git.run(["-C", work, "rm", "--quiet", "--", file]);
+  await git.run([
+    "-C",
+    work,
+    "-c",
+    "user.name=Kumi",
+    "-c",
+    "user.email=kumi@example.invalid",
+    "commit",
+    "--no-gpg-sign",
+    "-m",
+    "remove it here",
+  ]);
+  await git.run([
+    `--git-dir=${fixture.canonical.path}`,
+    "fetch",
+    work,
+    "HEAD:refs/heads/main",
+    "--force",
+  ]);
+}
+
 /** Diverges canonical and the origin from a shared multi-region base. */
 async function divergeOverRegions(
   fixture: PushFixture,
@@ -858,6 +891,335 @@ async function fileAt(
     ])
   ).stdout;
 }
+
+/** Runs arbitrary git in a clone of canonical and pushes the result back. */
+async function reshapeCanonical(
+  fixture: PushFixture,
+  steps: (work: string, git: GitClient) => Promise<void>,
+): Promise<void> {
+  const git = new GitClient();
+  const work = path.join(
+    fixture.root,
+    `shape-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  await git.run(["clone", "--branch", "main", fixture.canonical.path, work]);
+  await steps(work, git);
+  await git.run([
+    "-C",
+    work,
+    "-c",
+    "user.name=Kumi",
+    "-c",
+    "user.email=kumi@example.invalid",
+    "commit",
+    "--no-gpg-sign",
+    "-m",
+    "reshape here",
+  ]);
+  await git.run([
+    `--git-dir=${fixture.canonical.path}`,
+    "fetch",
+    work,
+    "HEAD:refs/heads/main",
+    "--force",
+  ]);
+}
+
+/** The same, against the origin, as a merged pull request would. */
+async function reshapeRemote(
+  fixture: PushFixture,
+  steps: (work: string, git: GitClient) => Promise<void>,
+): Promise<void> {
+  const git = new GitClient();
+  const work = path.join(
+    fixture.root,
+    `rshape-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  await git.run(["clone", "--branch", "main", fixture.remotePath, work]);
+  await steps(work, git);
+  await git.run([
+    "-C",
+    work,
+    "-c",
+    "user.name=GitHub",
+    "-c",
+    "user.email=github@example.invalid",
+    "commit",
+    "--no-gpg-sign",
+    "-m",
+    "reshape there",
+  ]);
+  await git.run(["-C", work, "push", "origin", "main"]);
+}
+
+test("a file both sides renamed and edited takes the chosen side's real content", async () => {
+  // The shape that makes reading the *index* unsafe, and the reason the
+  // chosen side is read out of its own commit instead.
+  //
+  // When both sides rename one file and edit it, git's merge strategy runs a
+  // content merge first and stores the conflicted result — markers and all —
+  // in BOTH index stages, under the two new names. Taking "theirs" out of
+  // the index there writes `<<<<<<<<` into canonical and commits it, having
+  // told somebody their chosen version won. A commit's tree cannot contain a
+  // marker, because nothing merged anything to build it.
+  const fixture = await pushFixture();
+  try {
+    await advanceRemote(fixture, "moved.txt", "one\ntwo\nthree\n");
+    await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+    });
+    await reshapeCanonical(fixture, async (work, git) => {
+      await git.run(["-C", work, "mv", "moved.txt", "kumi.txt"]);
+      await writeFile(path.join(work, "kumi.txt"), "KUMI\ntwo\nthree\n", "utf8");
+      await git.run(["-C", work, "add", "-A"]);
+    });
+    await reshapeRemote(fixture, async (work, git) => {
+      await git.run(["-C", work, "mv", "moved.txt", "github.txt"]);
+      await writeFile(
+        path.join(work, "github.txt"),
+        "GITHUB\ntwo\nthree\n",
+        "utf8",
+      );
+      await git.run(["-C", work, "add", "-A"]);
+    });
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-remote",
+    });
+    assert.equal(synced.status, "merged");
+    const landed = await fileAt(fixture, synced.revision, "github.txt");
+    // GitHub's file, exactly. Not a merge of the two, and above all not a
+    // file with conflict markers in it.
+    assert.equal(landed, "GITHUB\ntwo\nthree\n");
+    assert.doesNotMatch(landed, /<<<<<<</u);
+    assert.doesNotMatch(landed, />>>>>>>/u);
+    assert.doesNotMatch(landed, /KUMI/u);
+    // And the name this side never used is gone, because taking a side means
+    // taking what that side did.
+    const listed = await fixture.repositories.listFiles(
+      fixture.canonical,
+      synced.revision,
+    );
+    assert.equal(listed.includes("kumi.txt"), false);
+    assert.equal(listed.includes("github.txt"), true);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a directory that became a file is refused, not committed under a made-up name", async () => {
+  // There is no file-level answer to "a directory became a file", and git
+  // does not offer one: it moves the losing entry aside to a name it invents
+  // — `<path>~HEAD`, or `<path>~` plus this service's own internal ref name
+  // — and reports that in the conflicted index. Acting on it would commit a
+  // file called `p~refs_coord_upstream_main` to canonical, push it to
+  // GitHub, and lose the real path entirely.
+  const fixture = await pushFixture();
+  try {
+    await reshapeRemote(fixture, async (work, git) => {
+      await mkdir(path.join(work, "p"), { recursive: true });
+      await writeFile(path.join(work, "p", "child.txt"), "child\n", "utf8");
+      await git.run(["-C", work, "add", "-A"]);
+    });
+    await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+    });
+    await reshapeCanonical(fixture, async (work, git) => {
+      await writeFile(path.join(work, "p", "child.txt"), "edited here\n", "utf8");
+      await git.run(["-C", work, "add", "-A"]);
+    });
+    await reshapeRemote(fixture, async (work, git) => {
+      await git.run(["-C", work, "rm", "-r", "--quiet", "--", "p"]);
+      await writeFile(path.join(work, "p"), "now a file\n", "utf8");
+      await git.run(["-C", work, "add", "-A"]);
+    });
+    // Read after the divergence is built, so this is what a refusal has to
+    // leave untouched.
+    const before = (
+      await fixture.repositories.getCanonicalVersion(fixture.canonical)
+    ).revision;
+
+    await assert.rejects(
+      fixture.repositories.syncFromRemote(fixture.canonical, {
+        remoteUrl: LOOPBACK_HOST,
+        workspaceRoot: fixture.root,
+        conflictResolution: "prefer-remote",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SyncDivergedError);
+        return true;
+      },
+    );
+    // Refused, and canonical is exactly where it was — no invented path
+    // anywhere in it.
+    assert.equal(
+      (await fixture.repositories.getCanonicalVersion(fixture.canonical)).revision,
+      before,
+    );
+    const listed = await fixture.repositories.listFiles(
+      fixture.canonical,
+      before,
+    );
+    assert.equal(
+      listed.some((file) => file.includes("~")),
+      false,
+      "no path the merge invented should reach canonical",
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a refusal hands back what each clashing file looks like from both sides", async () => {
+  // The refusal used to be a sentence and a list of names. Somebody was then
+  // asked to pick a side for files they could not see, which is the reason
+  // "keep GitHub's version" was frightening enough to be worth avoiding —
+  // the cost of getting it wrong was unknown and unbounded.
+  const fixture = await pushFixture();
+  try {
+    await divergeOverRegions(fixture);
+    await assert.rejects(
+      fixture.repositories.syncFromRemote(fixture.canonical, {
+        remoteUrl: LOOPBACK_HOST,
+        workspaceRoot: fixture.root,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SyncDivergedError);
+        assert.deepEqual(error.conflicts, ["a.txt"]);
+        assert.equal(error.files.length, 1);
+        const [file] = error.files;
+        assert.equal(file?.path, "a.txt");
+        assert.equal(file?.status, "both-changed");
+        // A real unified diff, headed with the path rather than with the two
+        // object ids git names a blob-to-blob diff after.
+        assert.match(file?.patch ?? "", /^diff --git a\/a\.txt b\/a\.txt\n/u);
+        assert.match(file?.patch ?? "", /^--- a\/a\.txt$/mu);
+        assert.match(file?.patch ?? "", /^@@ /mu);
+        // Local on the left, GitHub on the right — the direction the buttons
+        // are labelled in.
+        assert.match(file?.patch ?? "", /^-kumi header$/mu);
+        assert.match(file?.patch ?? "", /^\+github header$/mu);
+        // And the footer, which git merged cleanly on its own. It belongs in
+        // this diff precisely because it merged: taking GitHub's copy of the
+        // file discards that line too, and the whole reason to show somebody
+        // the difference before they choose is so that the cost of choosing
+        // is the thing on the screen.
+        assert.match(file?.patch ?? "", /^-kumi footer$/mu);
+        return true;
+      },
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a deletion against an edit is described rather than diffed", async () => {
+  // There is no diff to show for a file one side deleted, and inventing one
+  // against an empty file would say "every line was removed", which reads as
+  // a change somebody made rather than as the file being gone.
+  const fixture = await pushFixture();
+  try {
+    await advanceRemote(fixture, "gone.txt", "from github\n");
+    await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+    });
+    await removeOnCanonical(fixture, "gone.txt");
+    await advanceRemote(fixture, "gone.txt", "changed on github\n");
+
+    await assert.rejects(
+      fixture.repositories.syncFromRemote(fixture.canonical, {
+        remoteUrl: LOOPBACK_HOST,
+        workspaceRoot: fixture.root,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SyncDivergedError);
+        const [file] = error.files;
+        assert.equal(file?.path, "gone.txt");
+        assert.equal(file?.status, "deleted-here");
+        assert.equal(file?.patch, undefined);
+        assert.match(file?.note ?? "", /Deleted here/u);
+        return true;
+      },
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("each file can be answered on its own", async () => {
+  // The whole point. Somebody who has read two diffs wants their version of
+  // the file they spent the afternoon in and GitHub's of the one that got a
+  // one-line fix, and being made to answer once for both is how the first of
+  // those gets thrown away to accept the second.
+  const fixture = await pushFixture();
+  try {
+    await advanceRemote(fixture, "a.txt", REGIONS_BASE);
+    await advanceRemote(fixture, "b.txt", "base b\n");
+    await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+    });
+    await commitOnCanonical(fixture, {
+      "a.txt": REGIONS_LOCAL,
+      "b.txt": "kumi b\n",
+    });
+    await advanceRemote(fixture, "a.txt", REGIONS_REMOTE);
+    await advanceRemote(fixture, "b.txt", "github b\n");
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: { perFile: { "a.txt": "local", "b.txt": "remote" } },
+    });
+    assert.equal(synced.status, "merged");
+    assert.equal(synced.resolved?.side, "mixed");
+    assert.equal(await fileAt(fixture, synced.revision, "a.txt"), REGIONS_LOCAL);
+    assert.equal(await fileAt(fixture, synced.revision, "b.txt"), "github b\n");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("an answer that misses a clashing file settles nothing", async () => {
+  // The race: somebody pushes again between being shown the collision and
+  // answering it, so the answer is about a question that has changed. The
+  // honest response is to refuse and describe it afresh — applying a partial
+  // answer would resolve the files it names and silently guess the rest.
+  const fixture = await pushFixture();
+  try {
+    await divergeOverRegions(fixture);
+    const before = (
+      await fixture.repositories.getCanonicalVersion(fixture.canonical)
+    ).revision;
+    await assert.rejects(
+      fixture.repositories.syncFromRemote(fixture.canonical, {
+        remoteUrl: LOOPBACK_HOST,
+        workspaceRoot: fixture.root,
+        conflictResolution: { perFile: { "somewhere-else.txt": "remote" } },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SyncDivergedError);
+        // Described again, so the screen can re-ask about what is actually
+        // in question now.
+        assert.deepEqual(error.conflicts, ["a.txt"]);
+        assert.equal(error.files.length, 1);
+        return true;
+      },
+    );
+    // And canonical is exactly where it was.
+    assert.equal(
+      (await fixture.repositories.getCanonicalVersion(fixture.canonical)).revision,
+      before,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
 
 test("taking a side takes the whole file, not the hunks that clashed", async () => {
   const fixture = await pushFixture();

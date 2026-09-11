@@ -190,6 +190,40 @@ export const IMPORT_REF_PREFIX = "refs/coord/imported/";
  */
 export const LEASE_REF_PREFIX = "refs/coord/leases/";
 
+/**
+ * How much of one file's difference is worth sending to a browser, and how
+ * much of a whole conflict is.
+ *
+ * A diff exists to be read. Past a screenful or two nobody is reading it,
+ * and a sync that collided on a generated lockfile would otherwise put
+ * megabytes through the response, the parser and the DOM to render something
+ * a person scrolls past. The file still gets its choice — it gets a sentence
+ * instead of a picture.
+ */
+const MAX_CONFLICT_PATCH_BYTES = 96 * 1024;
+const TOTAL_CONFLICT_PATCH_BYTES = 1024 * 1024;
+
+/**
+ * What to do when the two sides have both changed the same files.
+ *
+ * `refuse` changes nothing and reports the collision with each file's
+ * difference attached, which is what makes the other answers informed ones.
+ * The two blanket answers are a shortcut for "all of them, this way". The
+ * map is the real answer: a person who has read the diffs almost never wants
+ * the same side of every file, and being made to choose once for all of them
+ * is how somebody discards an afternoon's work on one file to accept a
+ * one-line fix on another.
+ *
+ * A map that does not name every clashing file settles nothing. The
+ * collision it was written against has moved, and applying it would answer
+ * a question nobody was asked.
+ */
+export type SyncConflictResolution =
+  | "refuse"
+  | "prefer-remote"
+  | "prefer-local"
+  | { readonly perFile: Readonly<Record<string, "local" | "remote">> };
+
 export class UpstreamChangedError extends Error {
   public constructor(
     public readonly branch: string,
@@ -208,10 +242,46 @@ export class UpstreamChangedError extends Error {
   }
 }
 
+/**
+ * One file two sides both changed, and enough to decide about it.
+ *
+ * The patch is between the two *sides*, not against their common base: the
+ * question being asked is "which of these two do you want", so what a reader
+ * needs to see is how they differ from each other. `note` replaces it where
+ * a patch would say nothing useful — a binary file, one too large to be
+ * worth shipping to a browser, or a collision that is about the file
+ * existing rather than about its contents.
+ */
+export interface SyncConflictFile {
+  path: string;
+  /**
+   * What kind of collision it is, in the terms the person answering has to
+   * think in — not git's stage numbers.
+   */
+  status:
+    | "both-changed"
+    | "both-added"
+    | "deleted-here"
+    | "deleted-on-remote";
+  /** Unified diff, local to remote, headed with the real path. */
+  patch?: string;
+  /** Why there is no patch, when there is not one. */
+  note?: string;
+}
+
 export class SyncDivergedError extends Error {
   public constructor(
     public readonly branch: string,
     public readonly conflicts: readonly string[],
+    /**
+     * The same files with their differences attached, so the answer can be
+     * given by somebody who has seen what they are choosing between.
+     *
+     * Empty when the conflict could not be described — which is a reason to
+     * offer the choice with less information, never a reason to refuse to
+     * offer it.
+     */
+    public readonly files: readonly SyncConflictFile[] = [],
   ) {
     super(
       `Canonical and the remote ${branch} branch have both changed the same ` +
@@ -245,8 +315,14 @@ export interface SyncFromRemoteOptions {
    * history and in the diff. Files that did *not* collide merge normally
    * either way — a resolution decides only the overlap, and the result
    * names exactly which files it decided.
+   *
+   * A `{ perFile }` map answers each file on its own, which is what somebody
+   * who has actually read the diffs almost always wants: their version of
+   * the file they spent the afternoon in, GitHub's of the one that got a
+   * one-line fix. One answer for all of them is a shortcut, not the shape of
+   * the question.
    */
-  conflictResolution?: "refuse" | "prefer-remote" | "prefer-local";
+  conflictResolution?: SyncConflictResolution;
   /**
    * Where the merge worktree is created when both sides moved. Defaults to
    * the system temp directory; callers with a project scratch area pass it
@@ -269,7 +345,7 @@ export interface SyncFromRemoteResult {
    * `conflictResolution`, with the side that won. Absent when nothing
    * collided — a clean merge decides nothing and should not imply it did.
    */
-  resolved?: { side: "remote" | "local"; files: string[] };
+  resolved?: { side: "remote" | "local" | "mixed"; files: string[] };
 }
 
 export interface PeekRemoteOptions {
@@ -1345,10 +1421,10 @@ export class RepositoryService {
     upstreamRevision: string,
     upstreamBranch: string,
     workspaceRoot: string | undefined,
-    conflictResolution: "refuse" | "prefer-remote" | "prefer-local",
+    conflictResolution: SyncConflictResolution,
   ): Promise<{
     revision: string;
-    resolved?: { side: "remote" | "local"; files: string[] };
+    resolved?: { side: "remote" | "local" | "mixed"; files: string[] };
   }> {
     assertIdentity(this.identity);
     const scratchRoot = workspaceRoot ?? os.tmpdir();
@@ -1434,29 +1510,67 @@ export class RepositoryService {
         await abort();
         throw new GitCommandError(plain, merge);
       }
-      if (conflictResolution === "refuse") {
+      // Described before anything is decided, and described from the merge
+      // that is already standing — which is the only moment the two sides'
+      // versions of each file exist side by side anywhere. Doing it later
+      // would mean merging a second time to ask a question about the first.
+      const stages = await this.unmergedStages(worktreePath);
+      const described =
+        stages === undefined
+          ? []
+          : await this.describeUnmergedPaths(worktreePath, stages).catch(
+              (): SyncConflictFile[] => [],
+            );
+      const refuse = async (): Promise<never> => {
         await abort();
-        throw new SyncDivergedError(upstreamBranch, conflicts);
+        throw new SyncDivergedError(upstreamBranch, conflicts, described);
+      };
+      if (conflictResolution === "refuse") {
+        return await refuse();
       }
       // The merge is left in progress rather than aborted and re-run: the
       // conflicted index is the only thing that knows which side's version
       // of each file is which, and settling it in place is what makes the
       // answer a file-level one.
-      const strategy =
-        conflictResolution === "prefer-remote" ? "theirs" : "ours";
+      const perFile =
+        typeof conflictResolution === "string"
+          ? undefined
+          : conflictResolution.perFile;
+      const choose = (file: string): "theirs" | "ours" | undefined => {
+        if (perFile === undefined) {
+          return conflictResolution === "prefer-remote" ? "theirs" : "ours";
+        }
+        const answer = perFile[file];
+        return answer === undefined
+          ? undefined
+          : answer === "remote"
+            ? "theirs"
+            : "ours";
+      };
+      const sides = new Set(conflicts.map((file) => choose(file)));
+      const side: "remote" | "local" | "mixed" =
+        sides.size === 1
+          ? sides.has("theirs")
+            ? "remote"
+            : "local"
+          : "mixed";
       const settled = await this.settleUnmergedPaths(
         worktreePath,
         emptyHooks,
-        strategy,
+        choose,
         `Sync ${upstreamBranch} from origin: merge ` +
           `${upstreamRevision.slice(0, 12)} into canonical, taking ` +
-          `${strategy === "theirs" ? "GitHub's" : "canonical's"} side of ` +
-          `${String(conflicts.length)} clashing file` +
+          `${
+            side === "remote"
+              ? "GitHub's side"
+              : side === "local"
+                ? "canonical's side"
+                : "a side per file"
+          } of ${String(conflicts.length)} clashing file` +
           `${conflicts.length === 1 ? "" : "s"}`,
       );
       if (!settled) {
-        await abort();
-        throw new SyncDivergedError(upstreamBranch, conflicts);
+        return await refuse();
       }
       const merged = await this.git.run([
         "-C",
@@ -1466,10 +1580,7 @@ export class RepositoryService {
       ]);
       return {
         revision: merged.stdout.trim(),
-        resolved: {
-          side: strategy === "theirs" ? "remote" : "local",
-          files: conflicts,
-        },
+        resolved: { side, files: conflicts },
       };
     } finally {
       if (worktreeAdded) {
@@ -1520,69 +1631,300 @@ export class RepositoryService {
    * Returns false rather than throwing: the caller aborts and refuses, which
    * is the right answer for a collision nothing here understood.
    */
-  private async settleUnmergedPaths(
+  /**
+   * The conflicted index, as paths and the blobs each side holds for them.
+   *
+   * One reader for both of the things that need it — describing a collision
+   * to whoever has to answer it, and settling it once they have. Reading it
+   * twice, two different ways, is how the description and the resolution
+   * come to disagree about which files are even in question.
+   *
+   * `ls-files --unmerged -z` prints "<mode> <sha> <stage>\t<path>" per
+   * record, NUL separated: a path is allowed to contain a newline, and
+   * splitting on lines would report one such file as two that do not exist.
+   * Stage 1 is the common base, 2 is ours, 3 is theirs, and a stage that is
+   * absent is that side having deleted the file.
+   */
+  private async unmergedStages(
     worktreePath: string,
-    emptyHooks: string,
-    strategy: "theirs" | "ours",
-    /** Names the side that won, because the plain merge's message cannot. */
-    message: string,
-  ): Promise<boolean> {
-    assertIdentity(this.identity);
+  ): Promise<Map<string, Map<number, string>> | undefined> {
     const listed = await this.git.run(
       ["-C", worktreePath, "ls-files", "--unmerged", "-z"],
-      { allowFailure: true },
+      { allowFailure: true, maxOutputBytes: 8 * 1024 * 1024 },
     );
     if (listed.exitCode !== 0) {
-      return false;
+      return undefined;
     }
-    // Each record is "<mode> <sha> <stage>\t<path>", NUL separated so a path
-    // with a newline in it cannot split one record into two.
-    const stages = new Map<string, Set<number>>();
+    const stages = new Map<string, Map<number, string>>();
     for (const entry of listed.stdout.split("\0")) {
       if (entry.length === 0) {
         continue;
       }
       const tab = entry.indexOf("\t");
       if (tab < 0) {
-        return false;
+        return undefined;
       }
-      const stage = Number(entry.slice(0, tab).trim().split(/\s+/u)[2]);
-      if (!Number.isInteger(stage)) {
-        return false;
+      const fields = entry.slice(0, tab).trim().split(/\s+/u);
+      const sha = fields[1] ?? "";
+      const stage = Number(fields[2]);
+      if (!Number.isInteger(stage) || sha.length === 0) {
+        return undefined;
       }
       const file = entry.slice(tab + 1);
-      stages.set(file, (stages.get(file) ?? new Set<number>()).add(stage));
+      const byStage = stages.get(file) ?? new Map<number, string>();
+      byStage.set(stage, sha);
+      stages.set(file, byStage);
     }
-    if (stages.size === 0) {
-      return false;
-    }
-    const wanted = strategy === "theirs" ? 3 : 2;
-    for (const [file, present] of stages) {
-      if (present.has(wanted)) {
-        const taken = await this.git.run(
-          ["-C", worktreePath, "checkout", `--${strategy}`, "--", file],
-          { allowFailure: true },
-        );
-        if (taken.exitCode !== 0) {
-          return false;
-        }
-        const staged = await this.git.run(
-          ["-C", worktreePath, "add", "--", file],
-          { allowFailure: true },
-        );
-        if (staged.exitCode !== 0) {
-          return false;
-        }
+    return stages;
+  }
+
+  /**
+   * What each clashing file looks like from both sides, for a person.
+   *
+   * The diff is between the two sides rather than against their base,
+   * because the question is "which of these two", and a pair of diffs
+   * against a base a reader never saw is a worse way to answer it than one
+   * diff that puts the two candidates next to each other.
+   *
+   * Best effort throughout. Every failure here costs a picture of a choice
+   * that can still be made without one, so a file that cannot be described
+   * carries a sentence saying so and the choice is still offered. Refusing
+   * to answer at all because a diff would not render is the behaviour this
+   * replaces.
+   */
+  private async describeUnmergedPaths(
+    worktreePath: string,
+    stages: Map<string, Map<number, string>>,
+  ): Promise<SyncConflictFile[]> {
+    const files: SyncConflictFile[] = [];
+    let budget = TOTAL_CONFLICT_PATCH_BYTES;
+    for (const [file, byStage] of stages) {
+      const ours = byStage.get(2);
+      const theirs = byStage.get(3);
+      if (ours === undefined || theirs === undefined) {
+        files.push({
+          path: file,
+          // Named from the answering side: "deleted-here" means canonical
+          // deleted it and the remote went on editing it.
+          status: ours === undefined ? "deleted-here" : "deleted-on-remote",
+          note:
+            ours === undefined
+              ? "Deleted here, changed on GitHub."
+              : "Changed here, deleted on GitHub.",
+        });
         continue;
       }
-      // The chosen side deleted it, so the deletion is the choice.
-      const removed = await this.git.run(
-        ["-C", worktreePath, "rm", "--force", "--quiet", "--", file],
-        { allowFailure: true },
+      const status = byStage.has(1) ? "both-changed" : "both-added";
+      if (budget <= 0) {
+        files.push({
+          path: file,
+          status,
+          note: "Too many changes to show them all here.",
+        });
+        continue;
+      }
+      const diffed = await this.git.run(
+        [
+          "-C",
+          worktreePath,
+          "diff",
+          "--no-color",
+          "--no-ext-diff",
+          "--end-of-options",
+          ours,
+          theirs,
+        ],
+        { allowFailure: true, maxOutputBytes: MAX_CONFLICT_PATCH_BYTES * 2 },
       );
-      if (removed.exitCode !== 0) {
+      // Git heads a blob-to-blob diff with the two object ids, which name
+      // nothing a reader recognises. The hunks are what matter; the header
+      // is rewritten to the path they belong to.
+      const hunkAt = diffed.stdout.indexOf("\n@@");
+      if (diffed.exitCode !== 0 || hunkAt < 0) {
+        files.push({
+          path: file,
+          status,
+          note:
+            diffed.stdout.includes("Binary files") ||
+            diffed.stderr.includes("Binary files")
+              ? "Binary file — both sides changed it."
+              : "Both sides changed it; the difference could not be shown.",
+        });
+        continue;
+      }
+      const body = diffed.stdout.slice(hunkAt + 1);
+      if (body.length > MAX_CONFLICT_PATCH_BYTES) {
+        files.push({
+          path: file,
+          status,
+          note: "Both sides changed it, too much to show here.",
+        });
+        continue;
+      }
+      budget -= body.length;
+      files.push({
+        path: file,
+        status,
+        patch:
+          `diff --git a/${file} b/${file}\n` +
+          `--- a/${file}\n+++ b/${file}\n` +
+          body,
+      });
+    }
+    return files;
+  }
+
+  /**
+   * One path as the chosen side's own commit records it, or nothing.
+   *
+   * Read from the side's tree rather than from the conflicted index, and
+   * that distinction is the whole of this method's reason to exist. The
+   * index's stage 2 and stage 3 are *not* reliably "our file" and "their
+   * file": for a rename/rename collision git's merge strategy runs a content
+   * merge first and stores the **conflicted result** — `<<<<<<<<`, `========`,
+   * `>>>>>>>>` and all — in both stages, under the two new names. Checking a
+   * side out of the index there writes those markers to canonical and
+   * commits them, having told the person their chosen version had won.
+   *
+   * A commit's tree cannot contain a merge marker, because nobody merged
+   * anything to build it. `HEAD` is ours and `MERGE_HEAD` is theirs, and
+   * what they hold is exactly what that side's branch holds.
+   */
+  private async treeEntry(
+    worktreePath: string,
+    ref: string,
+    file: string,
+  ): Promise<{ mode: string; type: string; sha: string } | undefined> {
+    const listed = await this.git.run(
+      [
+        "-C",
+        worktreePath,
+        "ls-tree",
+        "-z",
+        "--full-name",
+        "--end-of-options",
+        ref,
+        "--",
+        file,
+      ],
+      { allowFailure: true },
+    );
+    if (listed.exitCode !== 0) {
+      return undefined;
+    }
+    // "<mode> SP <type> SP <sha> TAB <path>", NUL terminated.
+    const record = listed.stdout.split("\0").find((entry) => entry.length > 0);
+    const tab = record?.indexOf("\t") ?? -1;
+    if (record === undefined || tab < 0) {
+      return undefined;
+    }
+    const [mode, type, sha] = record.slice(0, tab).split(/\s+/u);
+    if (mode === undefined || type === undefined || sha === undefined) {
+      return undefined;
+    }
+    // Exactly this path, never a prefix match on a directory of the same
+    // name — `ls-tree -- p` on a tree entry answers about the directory.
+    return record.slice(tab + 1) === file ? { mode, type, sha } : undefined;
+  }
+
+  private async settleUnmergedPaths(
+    worktreePath: string,
+    emptyHooks: string,
+    /**
+     * Which side wins for one path, or nothing when the caller has no
+     * answer for it — which refuses the whole merge rather than guessing at
+     * the one file nobody decided.
+     */
+    choose: (path: string) => "theirs" | "ours" | undefined,
+    /** Names the side that won, because the plain merge's message cannot. */
+    message: string,
+  ): Promise<boolean> {
+    assertIdentity(this.identity);
+    const stages = await this.unmergedStages(worktreePath);
+    if (stages === undefined || stages.size === 0) {
+      return false;
+    }
+    for (const [file, byStage] of stages) {
+      const strategy = choose(file);
+      if (strategy === undefined) {
+        // A path nobody answered for. It happens when the collision moved
+        // between being described and being settled — somebody pushed again
+        // — and the honest response is to refuse and describe it afresh
+        // rather than apply an answer to a question that changed.
         return false;
       }
+      const [mineRef, otherRef] =
+        strategy === "theirs" ? ["MERGE_HEAD", "HEAD"] : ["HEAD", "MERGE_HEAD"];
+      const mine = await this.treeEntry(worktreePath, mineRef, file);
+      const drop = async (): Promise<boolean> =>
+        (
+          await this.git.run(
+            ["-C", worktreePath, "rm", "--force", "--quiet", "--", file],
+            { allowFailure: true },
+          )
+        ).exitCode === 0;
+
+      if (mine === undefined) {
+        const other = await this.treeEntry(worktreePath, otherRef, file);
+        if (other !== undefined) {
+          // The chosen side deleted it, so the deletion is the choice.
+          if (!(await drop())) {
+            return false;
+          }
+          continue;
+        }
+        if (!byStage.has(2) && !byStage.has(3)) {
+          // Base only: a path both sides renamed away from. It belongs in
+          // neither result, and the entry exists purely to record where the
+          // rename started. Clearing it is what makes the rename resolve.
+          if (!(await drop())) {
+            return false;
+          }
+          continue;
+        }
+        // In neither side's tree, yet carrying a side's content. This is a
+        // path the *merge* invented: a file/directory collision moves the
+        // losing entry aside to `<path>~HEAD` or `<path>~<ref>` and reports
+        // that made-up name here. Committing it would put a file called
+        // `p~refs_coord_upstream_main` on canonical — and then on GitHub —
+        // while the real path went missing entirely.
+        //
+        // There is no honest file-level answer to "a directory became a
+        // file", so this refuses, which is what the old strategy merge did
+        // for the same shapes. A person resolves it in a clone.
+        return false;
+      }
+      if (mine.type !== "blob" && mine.type !== "commit") {
+        // A directory on the chosen side. Nothing can be staged for a path
+        // that is a tree, and pretending otherwise is the same collision
+        // the case above refuses.
+        return false;
+      }
+      const staged = await this.git.run(
+        [
+          "-C",
+          worktreePath,
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          `${mine.mode},${mine.sha},${file}`,
+        ],
+        { allowFailure: true },
+      );
+      if (staged.exitCode !== 0) {
+        return false;
+      }
+    }
+    // The index now holds the answer; the worktree still holds git's
+    // conflicted rendering of it. Brought into line so the commit below sees
+    // a clean tree and so nothing downstream can read a marker off a file
+    // that was resolved.
+    const written = await this.git.run(
+      ["-C", worktreePath, "checkout-index", "--force", "--all"],
+      { allowFailure: true },
+    );
+    if (written.exitCode !== 0) {
+      return false;
     }
     // Written here rather than inherited from the merge. The merge that is
     // in progress was run plainly, before anybody knew it would clash, so

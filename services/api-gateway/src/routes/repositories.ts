@@ -318,30 +318,92 @@ export async function routeRepositories(
         "resolve must be refuse, prefer-remote, or prefer-local",
       );
     }
+    // The answer worth having: one side per clashing file, from somebody who
+    // has read the differences the refusal handed them. `resolve` stays for
+    // the two blanket shortcuts and for anything already calling this.
+    const perFileBody = body["resolveFiles"];
+    let perFile: Record<string, "local" | "remote"> | undefined;
+    if (perFileBody !== undefined) {
+      if (
+        typeof perFileBody !== "object" ||
+        perFileBody === null ||
+        Array.isArray(perFileBody)
+      ) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "resolveFiles must be an object of path to local or remote",
+        );
+      }
+      const entries = Object.entries(perFileBody as Record<string, unknown>);
+      // Bounded, because this arrives from a browser and every key becomes a
+      // decision the merge has to honour. A collision wide enough to exceed
+      // this is one nobody is resolving file by file anyway.
+      if (entries.length > 2000) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "resolveFiles names too many files",
+        );
+      }
+      perFile = {};
+      for (const [file, side] of entries) {
+        if (side !== "local" && side !== "remote") {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            `resolveFiles["${file}"] must be local or remote`,
+          );
+        }
+        perFile[file] = side;
+      }
+    }
+    if (perFile !== undefined && resolve !== undefined && resolve !== "refuse") {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        "send either resolve or resolveFiles, not both",
+      );
+    }
     let synced;
     try {
       synced = await syncRepository({
         projectId,
         repositoryId,
         actorId: principal.user.id,
-        ...(resolve === undefined
-          ? {}
-          : {
-              conflictResolution: resolve as
-                | "refuse"
-                | "prefer-remote"
-                | "prefer-local",
-            }),
+        ...(perFile !== undefined
+          ? { conflictResolution: { perFile } }
+          : resolve === undefined
+            ? {}
+            : {
+                conflictResolution: resolve as
+                  | "refuse"
+                  | "prefer-remote"
+                  | "prefer-local",
+              }),
       });
     } catch (error) {
       // A collision is not a malfunction: it is a question for the person
       // who asked, and the screen can only offer them the choice if the
       // refusal is distinguishable from a sync that actually broke.
       if ((error as { name?: unknown }).name === "SyncDivergedError") {
+        // The differences travel with the refusal. They were produced from
+        // the merge that just refused — the one moment both sides' version
+        // of each file exists side by side — so asking for them separately
+        // would mean merging a second time to describe the first, and the
+        // second merge could describe a different collision.
+        const diverged = error as {
+          conflicts?: readonly string[];
+          files?: readonly unknown[];
+        };
         throw new HttpError(
           409,
           "sync_conflict",
           error instanceof Error ? error.message : String(error),
+          {
+            conflicts: [...(diverged.conflicts ?? [])],
+            files: [...(diverged.files ?? [])],
+          },
         );
       }
       throw error;

@@ -17851,3 +17851,135 @@ dialog.modal[open]::backdrop {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* ------------------------------------------------- sync conflict dialog -- */
+
+/* Wider than an ordinary modal, because the thing being read in it is a diff
+   and a diff wrapped at 448px is a diff nobody reads. Still capped in vw, so
+   a phone gets the same dialog rather than a horizontally scrolling one. */
+.modal-card:has(.conflict-list) {
+  width: 880px;
+}
+
+.conflict-list {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.conflict-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.conflict-files {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  /* The list scrolls, not the dialog: the two shortcut buttons above and the
+     Sync button below have to stay reachable while somebody reads forty
+     files, and a dialog that scrolls as one puts both off screen. */
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+}
+
+.conflict-file {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.conflict-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.conflict-path {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  /* The end of a path is the part that identifies it. A long one truncates
+     from the left so `.../src/charge.ts` survives rather than the repository
+     name every row shares. */
+  direction: rtl;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.conflict-sides {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.conflict-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+/* Checked is the answer, and has to be visible at a glance down a list of
+   forty rows — a bare radio dot is not. */
+.conflict-side:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  font-weight: 600;
+}
+
+.conflict-side:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.conflict-diff > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.conflict-diff .code-body {
+  margin-top: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.conflict-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* Disabled until every file has been answered. Nothing is pre-selected on
+   purpose, so this is the state the dialog opens in and the label says what
+   is still missing rather than leaving a dead button. */
+.modal-actions .btn[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .conflict-head {
+    align-items: flex-start;
+  }
+  .conflict-path {
+    flex-basis: 100%;
+  }
+}

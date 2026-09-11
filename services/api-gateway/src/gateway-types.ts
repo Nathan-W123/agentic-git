@@ -210,8 +210,19 @@ export interface ApiOperations {
     projectId: string;
     repositoryId: string;
     actorId: string;
-    /** A person's answer to "which side wins" for files that collide. */
-    conflictResolution?: "refuse" | "prefer-remote" | "prefer-local";
+    /**
+     * A person's answer to "which side wins" for files that collide.
+     *
+     * The map is the answer worth having: somebody who has read the diffs
+     * usually wants their version of one file and GitHub's of another, and
+     * one answer for all of them is how an afternoon's work gets discarded
+     * to accept a one-line fix somewhere else.
+     */
+    conflictResolution?:
+      | "refuse"
+      | "prefer-remote"
+      | "prefer-local"
+      | { readonly perFile: Readonly<Record<string, "local" | "remote">> };
   }): Promise<{
     status: "already_current" | "fast_forwarded" | "merged";
     remoteUrl: string;
@@ -219,7 +230,7 @@ export interface ApiOperations {
     upstreamRevision: string;
     previousRevision: string;
     revision: string;
-    resolved?: { side: "remote" | "local"; files: string[] };
+    resolved?: { side: "remote" | "local" | "mixed"; files: string[] };
   }>;
   /**
    * Publishes canonical directly for the authenticated caller. This is a

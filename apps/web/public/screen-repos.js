@@ -25,7 +25,10 @@ import {
   state,
   uploadRepositoryArchive,
 } from "./data.js";
+import { parsePatch, renderUnified } from "./code-view.js";
 import {
+  $,
+  $$,
   addTile,
   avatarStack,
   esc,
@@ -496,12 +499,27 @@ export async function syncRepositoryFromGitHub(
   rerender,
   resolve,
   afterSync,
+  /**
+   * `perFile` is the answer a person gave after reading the differences, one
+   * side per clashing file. `force` says an answer was already given and a
+   * second refusal must not reopen the dialog — the loop that used to be.
+   */
+  { perFile, force } = {},
 ) {
   toast("Syncing from GitHub…");
+  const answered = resolve !== undefined || perFile !== undefined || force === true;
   try {
     const result = await api(
       `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/sync`,
-      { method: "POST", body: resolve === undefined ? {} : { resolve } },
+      {
+        method: "POST",
+        body:
+          perFile !== undefined
+            ? { resolveFiles: perFile }
+            : resolve === undefined
+              ? {}
+              : { resolve },
+      },
     );
     const sync = result.sync ?? {};
     const moved = `${String(sync.previousRevision ?? "").slice(0, 8)} → ${String(
@@ -515,7 +533,13 @@ export async function syncRepositoryFromGitHub(
           ? `Synced from GitHub (${moved})`
           : settled > 0
             ? `Synced — ${settled} clashing file${settled === 1 ? "" : "s"} took ` +
-              `${sync.resolved.side === "remote" ? "GitHub's" : "this project's"} side (${moved})`
+              `${
+                sync.resolved.side === "remote"
+                  ? "GitHub's"
+                  : sync.resolved.side === "local"
+                    ? "this project's"
+                    : "the side you picked for each"
+              } side (${moved})`
             : `Synced from GitHub — local work and GitHub's merged (${moved})`,
       "ok",
     );
@@ -532,19 +556,27 @@ export async function syncRepositoryFromGitHub(
     // not the same question again, it is that answer failing, and reopening
     // the dialog on it is an infinite loop with no way out — which is
     // exactly what it was: the same files, the same two buttons, forever.
-    if (error.code === "sync_conflict" && resolve === undefined) {
+    if (error.code === "sync_conflict" && !answered) {
+      // The refusal carries each clashing file and how the two sides differ,
+      // read from the merge that just refused. That is what turns "pick a
+      // side" from a gamble into a decision.
       await chooseSyncSide(
         repositoryId,
         rerender,
-        error.message,
+        { message: error.message, files: error.details?.files ?? [] },
         afterSync,
       );
       return;
     }
     if (error.code === "sync_conflict") {
+      // A refusal *after* an answer is that answer failing, not the same
+      // question again — most often because somebody pushed between the
+      // dialog opening and Sync being pressed, so the answer no longer
+      // covers what clashes. Reopening on it is the loop with no way out
+      // that this used to be, so it is said once and left to the person.
       toast(
-        `That did not settle it: ${error.message} Resolve these files in a ` +
-          "clone and push, then sync again.",
+        `That did not settle it — what clashes has changed since you chose. ` +
+          `${error.message} Sync again to see it.`,
         "error",
       );
       return;
@@ -560,44 +592,154 @@ export async function syncRepositoryFromGitHub(
  * discovers the collision while trying to synchronize, then resumes its push
  * through `afterSync` once this choice has made the merge possible.
  */
-async function chooseSyncSide(repositoryId, rerender, message, afterSync) {
-  const choice = await showModal({
-    title: "Both sides changed the same files",
-    subtitle:
-      "Pick which version wins for those files. Everything else merges " +
-      "normally, and the version you don't pick stays in the history.",
-    confirm: "Take GitHub's version",
-    cancel: "Keep Kumi's version",
-    body: `<p class="modal-hint">${esc(message)}</p>`,
-  });
-  if (choice === undefined) {
-    // Cancel is the second answer here, not a way out — the dialog's two
-    // buttons are the two sides. Confirm once more because Escape and the
-    // Kumi button share the native dialog's cancel result.
-    const keep = await showModal({
-      title: "Keep Kumi's version?",
-      subtitle: "For the clashing files only.",
-      confirm: "Keep Kumi's version",
-      body: `<p class="modal-hint">GitHub's version of those files stays
-        in the history and in the merge, but Kumi's content is what the files
-        hold afterwards.</p>`,
+async function chooseSyncSide(repositoryId, rerender, conflict, afterSync) {
+  const files = Array.isArray(conflict?.files) ? conflict.files : [];
+  if (files.length === 0) {
+    // Nothing to show. The server could not describe the collision — an old
+    // deployment, or a describe that failed — and the choice is still worth
+    // offering, just without the pictures. One answer for all of them is all
+    // that can honestly be asked for when nobody can see them.
+    const blanket = await showModal({
+      title: "Both sides changed the same files",
+      subtitle:
+        "The differences could not be read. Pick which side wins for the " +
+        "files that clash; everything else merges normally, and the side " +
+        "you do not pick stays in the history.",
+      confirm: "Take GitHub's version",
+      cancel: "Keep Kumi's version",
+      body: `<p class="modal-hint">${esc(conflict?.message ?? "")}</p>`,
     });
-    if (keep !== undefined) {
-      await syncRepositoryFromGitHub(
-        repositoryId,
-        rerender,
-        "prefer-local",
-        afterSync,
-      );
-    }
+    await syncRepositoryFromGitHub(
+      repositoryId,
+      rerender,
+      blanket === undefined ? "prefer-local" : "prefer-remote",
+      afterSync,
+      { force: true },
+    );
     return;
   }
-  await syncRepositoryFromGitHub(
-    repositoryId,
-    rerender,
-    "prefer-remote",
-    afterSync,
-  );
+
+  const answer = showModal({
+    title: `${String(files.length)} file${files.length === 1 ? "" : "s"} changed on both sides`,
+    subtitle:
+      "Pick which version wins for each one. Everything else merges " +
+      "normally, and the version you do not pick stays in the history.",
+    confirm: "Sync",
+    cancel: "Cancel",
+    body: conflictBody(files),
+  });
+  // `showModal` builds its DOM before it returns, so the rows exist by the
+  // time this runs. The shortcuts and the diffs have to be wired here rather
+  // than written into the markup: the body is an HTML string, and a page
+  // whose script-src carries no 'unsafe-inline' runs no handler written into
+  // an attribute.
+  wireConflictBody(files);
+  const values = await answer;
+  if (values === undefined) {
+    toast("Nothing was changed", "ok");
+    return;
+  }
+  const perFile = {};
+  files.forEach((file, index) => {
+    const side = values[`conflict-${String(index)}`];
+    if (side === "local" || side === "remote") {
+      perFile[file.path] = side;
+    }
+  });
+  if (Object.keys(perFile).length !== files.length) {
+    // Cannot happen while Sync stays disabled until every row is answered,
+    // and is checked anyway: a partial map is refused by the server, and a
+    // refusal a person cannot act on is worse than a sentence saying what is
+    // missing.
+    toast("Pick a side for every file first", "error");
+    return;
+  }
+  await syncRepositoryFromGitHub(repositoryId, rerender, undefined, afterSync, {
+    perFile,
+  });
+}
+
+/** What each clashing file is, and the two ways it can go. */
+function conflictBody(files) {
+  const rows = files
+    .map((file, index) => {
+      const name = `conflict-${String(index)}`;
+      const rendered =
+        typeof file.patch === "string" && file.patch.length > 0
+          ? `<details class="conflict-diff">
+               <summary>See the difference</summary>
+               <div class="code-body">${renderUnified(parsePatch(file.patch))}</div>
+             </details>`
+          : `<p class="conflict-note">${esc(
+              file.note ?? "Both sides changed this file.",
+            )}</p>`;
+      return `<li class="conflict-file" data-conflict-row="${String(index)}">
+          <div class="conflict-head">
+            <span class="conflict-path" title="${esc(file.path)}">${esc(file.path)}</span>
+            <span class="conflict-sides">
+              <label class="conflict-side">
+                <input type="radio" name="${name}" value="local">
+                <span>Kumi</span>
+              </label>
+              <label class="conflict-side">
+                <input type="radio" name="${name}" value="remote">
+                <span>GitHub</span>
+              </label>
+            </span>
+          </div>
+          ${rendered}
+        </li>`;
+    })
+    .join("");
+  return `<div class="conflict-list">
+      <div class="conflict-bulk">
+        <button type="button" class="btn" data-conflict-all="local">Keep Kumi's for all</button>
+        <button type="button" class="btn" data-conflict-all="remote">Take GitHub's for all</button>
+      </div>
+      <ul class="conflict-files">${rows}</ul>
+    </div>`;
+}
+
+/**
+ * The dialog's behaviour: the two shortcuts, and a Sync that stays out of
+ * reach until every file has been answered.
+ *
+ * Nothing is pre-selected on purpose. A default is an answer given on
+ * somebody's behalf to the one question this whole screen exists to stop
+ * being answered blindly — and whichever way it defaulted would be the way
+ * most files went.
+ */
+function wireConflictBody(files) {
+  const dialog = $("#modal");
+  if (dialog === null) {
+    return;
+  }
+  const confirm = $('button[value="confirm"]', dialog);
+  const settle = () => {
+    if (confirm === null) {
+      return;
+    }
+    const answered = files.filter(
+      (_file, index) =>
+        $(`input[name="conflict-${String(index)}"]:checked`, dialog) !== null,
+    ).length;
+    confirm.disabled = answered !== files.length;
+    confirm.textContent =
+      answered === files.length
+        ? `Sync ${String(files.length)} file${files.length === 1 ? "" : "s"}`
+        : `${String(files.length - answered)} still to choose`;
+  };
+  for (const button of $$("[data-conflict-all]", dialog)) {
+    button.addEventListener("click", () => {
+      const side = button.dataset.conflictAll;
+      for (const input of $$(`input[type="radio"][value="${side}"]`, dialog)) {
+        input.checked = true;
+      }
+      settle();
+    });
+  }
+  dialog.addEventListener("change", settle);
+  settle();
 }
 
 /** Completes the push whose first synchronization opened the choice above. */

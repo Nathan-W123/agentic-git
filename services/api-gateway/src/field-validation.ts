@@ -20,6 +20,21 @@ export class HttpError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    /**
+     * Structured detail the caller needs in order to *act* on the refusal,
+     * as opposed to read it.
+     *
+     * A sentence is enough for a 404. It is not enough for a refusal whose
+     * whole purpose is to ask a question — a sync collision has to hand back
+     * which files clashed and how, or the only answer a screen can offer is
+     * a guess. Serialized as `error.details`; absent on every error that
+     * does not set it, so nothing existing changes shape.
+     *
+     * Never put anything here that the caller is not already entitled to:
+     * this travels on an error path, which is exactly where a leak is least
+     * likely to be noticed.
+     */
+    public readonly details?: Readonly<Record<string, unknown>>,
   ) {
     super(message);
     this.name = "HttpError";

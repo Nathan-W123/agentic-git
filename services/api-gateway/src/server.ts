@@ -14247,6 +14247,9 @@ export class ApiGateway {
               status: error.status,
               code: error.code,
               message: error.message,
+              ...(error.details === undefined
+                ? {}
+                : { details: error.details }),
             }
           : error instanceof StripeError
             ? {
@@ -14289,6 +14292,12 @@ export class ApiGateway {
     }
     this.sendJson(response, normalized.status, {
       error: {
+        // Spread first, so the three keys every error carries always win.
+        // A route's own detail is data about the refusal; it must never be
+        // able to rewrite what the refusal *is*.
+        ...("details" in normalized && normalized.details !== undefined
+          ? normalized.details
+          : {}),
         code: normalized.code,
         message: normalized.message,
         requestId,

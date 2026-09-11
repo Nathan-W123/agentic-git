@@ -4453,16 +4453,72 @@ test("the sync question is asked once, never in a loop", async () => {
   // A refusal that arrives *after* an answer was given is that answer
   // failing, not the same question again. Reopening the dialog on it is an
   // infinite loop with no way out — which is exactly what it was: the same
-  // files, the same two buttons, forever, because `-X` cannot settle a file
-  // deleted on one side and edited on the other.
+  // files, the same two buttons, forever.
   const sync = repos.slice(repos.indexOf("export async function syncRepositoryFromGitHub"));
   const body = sync.slice(0, sync.indexOf("\n}"));
-  assert.match(body, /error\.code === "sync_conflict" && resolve === undefined/u);
+  // Every shape an answer can take counts as one. The guard used to read
+  // only the blanket `resolve`, so the per-file answer — the one anybody
+  // actually gives now — would have reopened the dialog on its own refusal.
+  assert.match(body, /error\.code === "sync_conflict" && !answered/u);
+  assert.match(
+    body,
+    /answered =\s*resolve !== undefined \|\| perFile !== undefined \|\| force === true/u,
+  );
   // And the second time it says so, rather than going quiet.
   const asked = body.indexOf("chooseSyncSide");
   const told = body.indexOf("That did not settle it");
   assert.notEqual(told, -1);
   assert.ok(asked < told, "the ask must come before the give-up");
+});
+
+test("a sync collision is answered one file at a time, with the diffs shown", async () => {
+  const repos = await publicFile("screen-repos.js");
+
+  // The whole point of the dialog. Before this, a person was asked to pick a
+  // side for files they could not see, once, for all of them — so the cost
+  // of choosing was unknown and the same answer was forced onto a file
+  // somebody had spent an afternoon in and one that got a one-line fix.
+  assert.match(repos, /import \{ parsePatch, renderUnified \} from "\.\/code-view\.js"/u);
+  const body = repos.slice(repos.indexOf("function conflictBody("));
+  // One radio group per file, so each is answered on its own.
+  assert.match(body, /name="\$\{name\}" value="local"/u);
+  assert.match(body, /name="\$\{name\}" value="remote"/u);
+  // The difference between the two sides, rendered by the same diff view the
+  // Code screen uses rather than a second one written for this.
+  assert.match(body, /renderUnified\(parsePatch\(file\.patch\)\)/u);
+  // A file with no readable diff still gets its choice, with a sentence
+  // instead of a picture — refusing to ask is what this replaced.
+  assert.match(body, /file\.note \?\? "Both sides changed this file\."/u);
+  // And the shortcuts, for a collision too wide to answer row by row.
+  assert.match(body, /data-conflict-all="local"/u);
+  assert.match(body, /data-conflict-all="remote"/u);
+});
+
+test("nothing is preselected, and Sync waits until every file is answered", async () => {
+  const repos = await publicFile("screen-repos.js");
+  const wiring = repos.slice(repos.indexOf("function wireConflictBody("));
+
+  // A default is an answer given on somebody's behalf to the one question
+  // this dialog exists to stop being answered blindly — and whichever way it
+  // defaulted is the way most files would go.
+  const markup = repos.slice(
+    repos.indexOf("function conflictBody("),
+    repos.indexOf("function wireConflictBody("),
+  );
+  assert.doesNotMatch(markup, /type="radio"[^>]*checked/u);
+  // So the button cannot be pressed until each one has been decided, and
+  // says how many are left rather than sitting there dead.
+  assert.match(wiring, /confirm\.disabled = answered !== files\.length/u);
+  assert.match(wiring, /still to choose/u);
+});
+
+test("the per-file answer is what the browser sends", async () => {
+  const repos = await publicFile("screen-repos.js");
+  const sync = repos.slice(repos.indexOf("export async function syncRepositoryFromGitHub"));
+  const body = sync.slice(0, sync.indexOf("\n}"));
+  // `resolveFiles`, not `resolve`: one side per path. The blanket answers
+  // stay for the fallback where the diffs could not be read at all.
+  assert.match(body, /perFile !== undefined\s*\?\s*\{ resolveFiles: perFile \}/u);
 });
 
 test("anything the interface can hide, it can also bring back", async () => {
