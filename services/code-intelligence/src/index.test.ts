@@ -1193,3 +1193,67 @@ test("a Go repository resolves a package to every file in it", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a Kotlin repository resolves an import to the file declaring the type", async () => {
+  // A JVM import names a type, and the package is a namespace rather than a
+  // directory — Kotlin especially, where a file's name and location have
+  // nothing to do with what it declares. The only honest way to resolve one
+  // is to read every file first and look the name up.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-jvmindex-"));
+  try {
+    const source = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "app", "money"), { recursive: true });
+    // Deliberately not `Money.kt`, and deliberately not under a directory
+    // matching its package.
+    await writeFile(
+      path.join(source, "app", "money", "helpers.kt"),
+      [
+        "package com.acme.util",
+        "",
+        "class Money(val amount: Int) {",
+        "    class Builder {",
+        "        fun build() = Money(0)",
+        "    }",
+        "}",
+      ].join("\n"),
+    );
+    await mkdir(path.join(source, "app", "main"), { recursive: true });
+    await writeFile(
+      path.join(source, "app", "main", "Entry.kt"),
+      [
+        "package com.acme.app",
+        "",
+        "import com.acme.util.Money",
+        "",
+        "class Entry {",
+        "    fun run() = Money(1)",
+        "}",
+      ].join("\n"),
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      "kotlinexample",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+
+    assert.equal(
+      index.edges.find(
+        (edge) =>
+          edge.fromFile === "app/main/Entry.kt" && edge.toFile !== undefined,
+      )?.toFile,
+      "app/money/helpers.kt",
+    );
+    assert.deepEqual(
+      service.consumersOf(index, { file: "app/money/helpers.kt" }),
+      ["app/main/Entry.kt"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

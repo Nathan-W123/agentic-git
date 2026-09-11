@@ -6,6 +6,13 @@ import {
   type ResolutionContext,
 } from "./import-resolution.js";
 import { goModuleRoots, readGoFile, type GoFileFacts } from "./go-imports.js";
+import {
+  jvmDeclarations,
+  readJvmHeader,
+  topLevelNames,
+  type JvmLanguage,
+  type JvmUnit,
+} from "./jvm-imports.js";
 import { Worker } from "node:worker_threads";
 
 import {
@@ -240,6 +247,19 @@ export interface CodeIntelligenceOptions {
  * indexed: they produce no `IndexedFile` and no symbols.
  */
 const MANIFESTS = new Set(["go.mod"]);
+
+/** The languages whose imports name a type rather than a path. */
+const JVM_LANGUAGES = new Set<SupportedLanguage>(["java", "kotlin", "scala"]);
+
+/** Every path by its file name, for Java's one reliable layout convention. */
+function byBasename(files: ReadonlySet<string>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const file of files) {
+    const name = path.posix.basename(file);
+    out.set(name, [...(out.get(name) ?? []), file]);
+  }
+  return out;
+}
 
 const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".ts", "typescript"],
@@ -1159,6 +1179,12 @@ export class CodeIntelligenceService {
     const manifests = new Map<string, string>();
     /** What each Go file says about itself, for resolving a package to files. */
     const goFacts = new Map<string, GoFileFacts>();
+    /** What each JVM file declares and imports, for the declaration index. */
+    const jvmUnits = new Map<string, JvmUnit>();
+    const jvmDeclared = new Map<
+      string,
+      { packageName: string; topLevelNames: readonly string[] }
+    >();
     /** Parsed this time round, remembered once Python has had its turn. */
     const fresh = new Map<string, IndexedFile>();
     let totalBytes = 0;
@@ -1259,6 +1285,21 @@ export class CodeIntelligenceService {
               language,
               braceSymbolRanges(source, language as BraceLanguage),
             );
+            if (JVM_LANGUAGES.has(language)) {
+              // An import here names a type, so nothing resolves until every
+              // file has said which type it declares. The header is read for
+              // the same reason Go's prologue is: small, bounded, and unable
+              // to contain a method body.
+              const unit = readJvmHeader(source, language as JvmLanguage);
+              if (unit !== undefined) {
+                jvmUnits.set(filePath, unit);
+                scanned.imports = unit.imports;
+                jvmDeclared.set(filePath, {
+                  packageName: unit.packageName,
+                  topLevelNames: topLevelNames(scanned.symbolRanges),
+                });
+              }
+            }
             if (language === "go") {
               // Only the prologue is read — Go puts the package clause first
               // and every import before any declaration, so the region has a
@@ -1339,6 +1380,11 @@ export class CodeIntelligenceService {
       pythonStdlib: pythonAnswers.stdlib,
       goModuleRoots: goModuleRoots(manifests),
       goFacts,
+      jvm: {
+        declarations: jvmDeclarations(jvmDeclared),
+        basenames: byBasename(allPaths),
+        units: jvmUnits,
+      },
     };
     const edges: DependencyEdge[] = [];
     for (const file of files) {

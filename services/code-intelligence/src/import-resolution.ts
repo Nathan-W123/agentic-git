@@ -32,6 +32,11 @@
 
 import type { SupportedLanguage } from "./index.js";
 import { resolveGoImport, type GoFileFacts } from "./go-imports.js";
+import {
+  resolveJvmImport,
+  type JvmContext,
+  type JvmLanguage,
+} from "./jvm-imports.js";
 import { resolvePythonImport } from "./python-imports.js";
 
 /**
@@ -51,6 +56,8 @@ export interface ResolutionContext {
   goModuleRoots: ReadonlyMap<string, string>;
   /** What each `.go` file says about itself: its package, and its imports. */
   goFacts: ReadonlyMap<string, GoFileFacts>;
+  /** Qualified name to declaring file, for the languages that import types. */
+  jvm: JvmContext;
 }
 
 /** A resolver answers with every file the specifier names. Empty is normal. */
@@ -100,6 +107,12 @@ const RESOLVERS: Partial<Record<SupportedLanguage, ImportResolver>> = {
       moduleRoots: context.goModuleRoots,
       facts: context.goFacts,
     }),
+  java: (fromFile, specifier, context) =>
+    resolveJvmImport(fromFile, specifier, "java" as JvmLanguage, context.jvm),
+  kotlin: (fromFile, specifier, context) =>
+    resolveJvmImport(fromFile, specifier, "kotlin" as JvmLanguage, context.jvm),
+  scala: (fromFile, specifier, context) =>
+    resolveJvmImport(fromFile, specifier, "scala" as JvmLanguage, context.jvm),
   python: (fromFile, specifier, context) => {
     const hit = resolvePythonImport(fromFile, specifier, {
       files: context.files,
