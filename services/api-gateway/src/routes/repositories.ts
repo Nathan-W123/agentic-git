@@ -13,6 +13,7 @@
 import type {
   OrganizationRole,
 } from "@coord/persistence";
+import { REPOSITORY_CONTEXT_MAX_CHARS } from "@coord/shared-types";
 import {
   authorizeProject,
   authorizeRepository,
@@ -646,6 +647,100 @@ export async function routeRepositories(
     });
     const repository = await gw.options.store.getRepository(repositoryId);
     gw.sendJson(response, 200, { repository: publicRepository(repository) });
+    return true;
+  }
+
+  // The standing context: what every agent that plans in this repository is
+  // told before it reads a file. Read by anyone who can see the repository,
+  // because it is injected into every run in the room and there is nothing
+  // to gain by hiding from a developer what their own tasks are being told.
+  // Written under the rename/picture gate — `manage_project`, or the
+  // creator — because it *is* injected into every run in the room, which
+  // makes setting it repository administration, not a per-task steer.
+  //
+  // `expectedVersion` is optional and, when given, pins the write: a save
+  // that lands after somebody else's is refused as 409 `stale_version`
+  // rather than quietly overwriting theirs. Absent, the save is
+  // unconditional, which is what a slash command wants.
+  const repositoryContextMatch = matchPath(
+    path,
+    new RegExp(
+      `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/context$`,
+      "u",
+    ),
+  );
+  if (repositoryContextMatch !== undefined && method === "GET") {
+    const [projectId = "", repositoryId = ""] = repositoryContextMatch;
+    await authorizeRepository(
+      gw.options.store,
+      principal,
+      projectId,
+      repositoryId,
+      "view",
+    );
+    if (
+      !(await gw.options.store.projectHasRepository(projectId, repositoryId))
+    ) {
+      throw new HttpError(404, "not_found", "Repository was not found");
+    }
+    const found = await gw.options.store.getRepositoryContext(repositoryId);
+    gw.sendJson(response, 200, { context: found ?? null });
+    return true;
+  }
+  if (repositoryContextMatch !== undefined && method === "PUT") {
+    const [projectId = "", repositoryId = ""] = repositoryContextMatch;
+    await gw.authorizeRepositoryOwnerAction(
+      principal,
+      projectId,
+      repositoryId,
+      "manage_project",
+    );
+    const body = objectBody(await gw.readJson(request));
+    // `min: 0` because clearing is expressed as an empty note rather than as
+    // a second route, exactly as rename and picture express it.
+    const content =
+      stringField(body["content"], "content", {
+        min: 0,
+        max: REPOSITORY_CONTEXT_MAX_CHARS,
+      }) ?? "";
+    const rawVersion = body["expectedVersion"];
+    if (
+      rawVersion !== undefined &&
+      (typeof rawVersion !== "number" ||
+        !Number.isInteger(rawVersion) ||
+        rawVersion < 0)
+    ) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        "expectedVersion must be a non-negative integer",
+      );
+    }
+    const saved = await gw.options.store.saveRepositoryContext({
+      repositoryId,
+      content,
+      updatedBy: principal.user.id,
+      ...(rawVersion === undefined ? {} : { expectedVersion: rawVersion }),
+    });
+    if (saved.outcome === "stale") {
+      throw new HttpError(
+        409,
+        "stale_version",
+        "Somebody changed the standing context since you read it; reload and try again",
+      );
+    }
+    await gw.options.store.appendAudit(undefined, {
+      type: "repository_context_changed",
+      data: {
+        projectId,
+        repositoryId,
+        version: saved.context.version,
+        cleared: content === "",
+        chars: content.length,
+        actorId: principal.user.id,
+      },
+    });
+    gw.sendJson(response, 200, { context: saved.context });
     return true;
   }
 

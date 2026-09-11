@@ -24,6 +24,7 @@ import {
   addColleague,
   agentSpeech,
   autoClaim,
+  bearer,
   bootstrap,
   decodeTextFrames,
   invitableRepository,
@@ -579,6 +580,279 @@ test("/dnc still answers on an org-wide agent", async (t) => {
   const [answer] = agentSpeech(after.data.messages);
   assert.match(String(answer?.content), /caps at five attempts/u);
   assert.equal(runtime.submittedTasks.length, 0, "/dnc files no task");
+});
+
+/**
+ * `/context`: the repository's standing context, from the room.
+ *
+ * Answered in the channel like `/help`, gated like a rename. Every branch is
+ * asserted through what the room can see — the system message and the stored
+ * row — because a command whose only effect was silence would be typed again.
+ */
+test("/context shows, sets and clears the standing context from the channel, under the rename gate", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "context-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const lastSystemMessage = async (): Promise<string> => {
+    const after = await owner.request(`${base}/messages`);
+    const system = (after.data.messages as any[]).filter(
+      (message) => message.kind === "system",
+    );
+    return String(system.at(-1)?.content ?? "");
+  };
+  const post = async (client: TestClient, content: string): Promise<void> => {
+    const posted = await client.request(`${base}/messages`, {
+      method: "POST",
+      body: { content },
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  };
+
+  // Nothing set yet: bare `/context` says so and how to set one.
+  await post(owner, "/context");
+  assert.match(await lastSystemMessage(), /Nothing is set/u);
+
+  // The owner sets it; the room is told which version and by whom, and the
+  // store has it with the line breaks the note was written with.
+  await post(owner, "/context Run `npm test` before reporting\n- the retry ceiling is in src/retry.ts");
+  assert.match(await lastSystemMessage(), /Standing context v1 set by Owner/u);
+  const stored = await runtime.store.getRepositoryContext(repositoryId);
+  assert.equal(
+    stored?.content,
+    "Run `npm test` before reporting\n- the retry ceiling is in src/retry.ts",
+  );
+  assert.equal(stored?.version, 1);
+  assert.equal(
+    (await runtime.store.listAuditEvents({ types: ["repository_context_changed"] }))
+      .length,
+    1,
+  );
+
+  // A plain developer is refused with the rule named, and nothing changes.
+  const colleague = await addColleague(runtime, "colleague-ctx@example.com");
+  await post(colleague.client, "/context nope");
+  assert.match(await lastSystemMessage(), /manage_project/u);
+  assert.equal(
+    (await runtime.store.getRepositoryContext(repositoryId))?.content,
+    "Run `npm test` before reporting\n- the retry ceiling is in src/retry.ts",
+  );
+
+  // Bare `/context` shows the rendered block — the same one a planning
+  // prompt sees, attribution and all — to anyone in the room.
+  await post(colleague.client, "/context");
+  const shown = await lastSystemMessage();
+  assert.match(shown, /## Standing context for this repository/u);
+  assert.match(shown, /version 1/u);
+  assert.match(shown, /the retry ceiling is in src\/retry\.ts/u);
+
+  // `clear` empties it and keeps counting.
+  await post(owner, "/context clear");
+  assert.match(await lastSystemMessage(), /cleared by Owner \(v2\)/u);
+  assert.equal((await runtime.store.getRepositoryContext(repositoryId))?.content, "");
+  assert.equal((await runtime.store.getRepositoryContext(repositoryId))?.version, 2);
+  assert.equal(runtime.submittedTasks.length, 0, "/context files no task");
+});
+
+test("the slash gate and the route gate admit exactly the same people to the standing context", async (t) => {
+  // `/context` and `PUT .../context` reach the same call —
+  // `authorizeRepositoryOwnerAction` — and this is what says so out loud.
+  // Five actors are driven through both gates, in an entitled organization,
+  // then a lapsed one, then an archived project: an org admin, the developer
+  // who created the repository, a developer who did neither, and two of the
+  // owner's API tokens, one scoped to `view` alone and one scoped to
+  // `manage_project` as well.
+  //
+  // The tokens are the reason this is not a formality. The channel gate was
+  // once a by-user-id restatement of the route's, which no bare user id can
+  // make complete: it folded the role through billing and it checked
+  // archival, but it could not see the credential's scopes, so a token
+  // scoped to `view` set from the room what `PUT .../context` refuses it
+  // with `token_scope_missing`. A restatement is one gate away from drifting
+  // by construction; calling the route's own gate is not.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const admin = await runtime.store.createUser({
+    email: "ctx-admin@example.com",
+    displayName: "Admin",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: admin.id,
+    role: "admin",
+  });
+  const adminClient = new TestClient(runtime.origin);
+  const adminLogin = await adminClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: admin.email, password: PASSWORD },
+  });
+  assert.equal(adminLogin.status, 200);
+  const creator = await addColleague(runtime, "ctx-creator@example.com");
+  const bystander = await addColleague(runtime, "ctx-bystander@example.com");
+  // Created by a developer, so the creator path is the one that admits them.
+  const repositoryId = await invitableRepository(creator.client, "gated-repo");
+  const contextPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/context`;
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // A token can never be scoped wider than its owner's role, so both of
+  // these are the owner's: the developer who created the repository gets in
+  // through the creator door, not through a role, and could not mint a
+  // `manage_project` token at all.
+  const mintToken = async (
+    name: string,
+    scopes: readonly string[],
+  ): Promise<string> => {
+    const created = await owner.request("/api/v1/auth/tokens", {
+      method: "POST",
+      body: { name, scopes },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    return created.data.token as string;
+  };
+  const viewOnlyToken = await mintToken("read-only machine", ["view"]);
+  const curatingToken = await mintToken("curating machine", [
+    "view",
+    "manage_project",
+  ]);
+  type Send = (
+    path: string,
+    options?: { method?: string; body?: unknown },
+  ) => Promise<{ status: number; data: any }>;
+  const actors: Array<{ name: string; send: Send }> = [
+    { name: "admin", send: (path, options) => adminClient.request(path, options) },
+    {
+      name: "creator",
+      send: (path, options) => creator.client.request(path, options),
+    },
+    {
+      name: "bystander",
+      send: (path, options) => bystander.client.request(path, options),
+    },
+    {
+      name: "view-only token",
+      send: (path, options) =>
+        bearer(runtime.origin, path, viewOnlyToken, options),
+    },
+    {
+      name: "curating token",
+      send: (path, options) =>
+        bearer(runtime.origin, path, curatingToken, options),
+    },
+  ];
+  // What the route answers each actor in each phase. The creator's door is
+  // the route's second path, consulted only when the role falls short and
+  // asking for reach alone, which is why it stays open where the admin's
+  // role is folded to viewer or the project is read-only.
+  const phases: Array<{
+    name: string;
+    arrange: () => Promise<void>;
+    expected: Record<string, number>;
+  }> = [
+    {
+      name: "entitled",
+      arrange: async () => undefined,
+      expected: {
+        admin: 200,
+        creator: 200,
+        bystander: 403,
+        "view-only token": 403,
+        "curating token": 200,
+      },
+    },
+    {
+      name: "lapsed",
+      arrange: async () => {
+        await runtime.store.saveSubscription({
+          organizationId: DEFAULT_ORGANIZATION_ID,
+          status: "canceled",
+        });
+      },
+      // The tokens are the bootstrap owner's, and the person who bootstraps
+      // a deployment is its system administrator, whom `entitledRole`
+      // exempts from the billing fold on purpose — their access is how a
+      // billing problem gets fixed. So the wider one is still admitted where
+      // the plain admin is folded to `viewer`, and the `view`-scoped one is
+      // still refused: scope is a ceiling, never a grant.
+      expected: {
+        admin: 403,
+        creator: 200,
+        bystander: 403,
+        "view-only token": 403,
+        "curating token": 200,
+      },
+    },
+    {
+      name: "archived",
+      arrange: async () => {
+        await runtime.store.saveSubscription({
+          organizationId: DEFAULT_ORGANIZATION_ID,
+          status: "active",
+        });
+        await runtime.store.updateProject(DEFAULT_PROJECT_ID, { archived: true });
+      },
+      expected: {
+        admin: 409,
+        creator: 200,
+        bystander: 403,
+        "view-only token": 403,
+        "curating token": 409,
+      },
+    },
+  ];
+  for (const phase of phases) {
+    await phase.arrange();
+    for (const actor of actors) {
+      const label = `${actor.name}, ${phase.name}`;
+      const put = await actor.send(contextPath, {
+        method: "PUT",
+        body: { content: `set over HTTP by ${label}` },
+      });
+      assert.equal(
+        put.status,
+        phase.expected[actor.name],
+        `${label} over HTTP: ${JSON.stringify(put.data)}`,
+      );
+      // While the organization is entitled the owner's role is intact, so
+      // the only thing standing in the `view`-scoped token's way is the
+      // boundary its owner drew — named, so a role refusal cannot pass for
+      // it. (Once the subscription lapses the role goes first and the answer
+      // is an ordinary `forbidden`.)
+      if (actor.name === "view-only token" && phase.name === "entitled") {
+        assert.equal(put.data?.error?.code, "token_scope_missing", label);
+      }
+      const admitted = put.status === 200;
+
+      const versionBefore =
+        (await runtime.store.getRepositoryContext(repositoryId))?.version ?? 0;
+      const posted = await actor.send(`${base}/messages`, {
+        method: "POST",
+        body: { content: `/context set from the channel by ${label}` },
+      });
+      assert.equal(posted.status, 201, `${label}: ${JSON.stringify(posted.data)}`);
+      const after = await runtime.store.getRepositoryContext(repositoryId);
+      if (admitted) {
+        assert.equal(after?.content, `set from the channel by ${label}`, label);
+        assert.equal(after?.version, versionBefore + 1, label);
+      } else {
+        assert.equal(after?.version, versionBefore, label);
+        assert.notEqual(after?.content, `set from the channel by ${label}`, label);
+      }
+      if (actor.name === "view-only token" && phase.name === "entitled") {
+        // And the room is told which rule turned it away, since a token that
+        // holds the permission would read "ask for manage_project" as
+        // nonsense and go looking for a role it already has.
+        const seen = await owner.request(`${base}/messages`);
+        const system = (seen.data.messages as any[]).filter(
+          (message) => message.kind === "system",
+        );
+        assert.match(String(system.at(-1)?.content), /API token/u, label);
+      }
+    }
+  }
 });
 
 test("an org-wide agent accepts a stranger's @mention and dispatches under the owner's credential", async (t) => {

@@ -28,7 +28,7 @@ import {
   type TaskDefinition,
 } from "@coord/shared-types";
 import { SqliteCoordinationStore } from "@coord/persistence";
-import type { CoordinationStore } from "@coord/persistence";
+import type { AuditEventFilter, CoordinationStore } from "@coord/persistence";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -44,8 +44,9 @@ import {
   Coordinator,
   type DeferredScopeRequest,
 } from "./coordinator.js";
-import { buildTaskHandoff } from "./handoff.js";
+import { buildTaskHandoff, HANDOFF_AUDIT_TYPE } from "./handoff.js";
 import { recordTaskHandoff } from "./handoff-store.js";
+import { DERIVED_PITFALLS_HEADING } from "./repository-context.js";
 import { TaskCancellationRegistry } from "./task-cancellation.js";
 
 interface TestSession {
@@ -1548,6 +1549,171 @@ test("a task's own context leads the handoffs it is seeded with", async () => {
   }
 });
 
+test("the repository's standing context sits between the thread and the handoffs", async () => {
+  // Three kinds of background reach one planning prompt, ordered nearest
+  // first: the thread is about this request, the standing context is what
+  // the repository's people wrote for every task, and a handoff is what one
+  // earlier task left behind. The curated, current note leads the older
+  // per-task projections.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = SqliteCoordinationStore.open(":memory:");
+    await store.saveRepositoryContext({
+      repositoryId: fixture.repository.id,
+      content: "Run `npm test` before reporting; the loader lives in src/.",
+      updatedBy: "user_nathan",
+    });
+    await recordTaskHandoff(
+      store,
+      buildTaskHandoff({
+        taskId: "task_earlier",
+        objective: "Rename the config loader",
+        repositoryId: fixture.repository.id,
+        canonicalRevision: "b".repeat(40),
+        reason: "completed",
+        now: () => new Date("2026-07-29T12:00:00.000Z"),
+      }),
+    );
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: {
+            ...task("task_a"),
+            context: "In the thread so far:\n- update the endpoint file too",
+          },
+          adapter: agent,
+        },
+      ],
+    });
+
+    const prior = agent.startInputs[0]?.priorContext ?? "";
+    const thread = prior.indexOf("update the endpoint file too");
+    const standing = prior.indexOf("Standing context for this repository");
+    const handoff = prior.indexOf("Handoff from earlier work");
+    assert.ok(thread >= 0 && standing >= 0 && handoff >= 0, prior);
+    assert.ok(thread < standing && standing < handoff, prior);
+    assert.match(prior, /Run `npm test` before reporting/u);
+    // The block that was executed is the one the shared renderer writes, not
+    // the raw note: it names who wrote it and which version.
+    assert.match(prior, /last updated by user_nathan/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validation commands that keep failing are derived into a block after the handoffs, from one audit read", async () => {
+  // The tallies come out of the same handoff array the seed does, so the
+  // audit log is read once per planning round rather than twice; and they
+  // land under their own heading after the handoffs, because nobody wrote
+  // them and a reader must not mistake them for the note somebody did.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const real = SqliteCoordinationStore.open(":memory:");
+    // Counts reads of the handoff type only: a run reads the audit log for
+    // other reasons, and the claim under test is about the handoffs.
+    let handoffReads = 0;
+    const store = new Proxy(real, {
+      get(target, property, receiver) {
+        if (property === "listAuditEvents") {
+          return (filter?: AuditEventFilter) => {
+            if (filter?.types?.includes(HANDOFF_AUDIT_TYPE) === true) {
+              handoffReads += 1;
+            }
+            return target.listAuditEvents(filter);
+          };
+        }
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    }) as CoordinationStore;
+    const failing = (taskId: string) =>
+      buildTaskHandoff({
+        taskId,
+        objective: `objective of ${taskId}`,
+        repositoryId: fixture.repository.id,
+        canonicalRevision: "b".repeat(40),
+        reason: "completed",
+        integration: {
+          taskId,
+          changeSetId: "changeset_1",
+          status: "integrated",
+          previousVersion: {
+            sequence: 1,
+            revision: "a".repeat(40),
+            branch: "main",
+            createdAt: "2026-07-29T00:00:00.000Z",
+          },
+          canonicalVersion: {
+            sequence: 2,
+            revision: "b".repeat(40),
+            branch: "main",
+            createdAt: "2026-07-29T00:00:00.000Z",
+          },
+          validation: [
+            {
+              command: { executable: "npm", args: ["test"], label: "tests" },
+              exitCode: 1,
+              stdout: "",
+              stderr: "boom",
+              startedAt: "2026-07-29T00:00:00.000Z",
+              durationMs: 10,
+            },
+          ],
+          explanation: "promoted",
+        },
+        now: () => new Date("2026-07-29T12:00:00.000Z"),
+      });
+    await recordTaskHandoff(store, failing("task_one"));
+    await recordTaskHandoff(store, failing("task_two"));
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    handoffReads = 0;
+    await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    const prior = agent.startInputs[0]?.priorContext ?? "";
+    const handoff = prior.indexOf("Handoff from earlier work");
+    const derived = prior.indexOf(DERIVED_PITFALLS_HEADING);
+    assert.ok(handoff >= 0 && derived >= 0, prior);
+    assert.ok(handoff < derived, prior);
+    assert.match(prior, /`tests` failed in 2 of the last 2 tasks that ran it/u);
+    // The seed and the tallies came out of one read, not one each.
+    assert.equal(handoffReads, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a task with no context is seeded with the handoffs alone", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
 
@@ -1572,8 +1738,9 @@ test("a task with no context is seeded with the handoffs alone", async () => {
       tasks: [{ task: task("task_a"), adapter: agent }],
     });
 
-    // Nothing on either side: the adapter must be given no field at all
-    // rather than a heading with nothing under it.
+    // Nothing on any side — no thread, no standing context, no handoffs:
+    // the adapter must be given no field at all rather than a heading with
+    // nothing under it.
     assert.equal(agent.startInputs[0]?.priorContext, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -102,6 +102,71 @@ test("a worker registers, leases exclusively, and heartbeats", async (t) => {
   assert.ok(beat.data.expiresAt > leased.data.lease.expiresAt);
 });
 
+test("the claim route answers 200 for a standing context alone, and 204 only when it has nothing of any kind", async (t) => {
+  // A 204 used to mean "no plan and no planning hints". The repository's
+  // standing context now rides the same answer, claim or no claim, so a call
+  // that used to be a 204 answers 200 with only that field — and a 200
+  // without `plan` is not a claim.
+  const answers: Array<{ plan?: unknown; planningContext?: string; standingContext?: string }> =
+    [];
+  const runtime = await startRuntime(t, {
+    claimWorkRepository: async () => answers.shift() ?? {},
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "fleet", scopes: ["view", "run_task"] },
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.data.token as string;
+  const registered = await bearer(runtime.origin, "/api/v1/workers/register", token, {
+    method: "POST",
+    body: { organizationId: DEFAULT_ORGANIZATION_ID, name: "w", adapters: ["codex"], version: "1" },
+  });
+  assert.equal(registered.status, 201);
+  await runtime.store.saveRepository({
+    id: "repo_claim",
+    path: "/canonical/claim.git",
+    branch: "main",
+  });
+  await runtime.store.submitTask({
+    repositoryId: "repo_claim",
+    objective: "cap the value",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId: registered.data.id, projectId: DEFAULT_PROJECT_ID },
+  });
+  assert.equal(leased.status, 200, JSON.stringify(leased.data));
+  const claimPath = `/api/v1/workers/leases/${leased.data.lease.id}/claim`;
+  const claim = async () =>
+    await bearer(runtime.origin, claimPath, token, {
+      method: "POST",
+      body: { protocolVersion: 4 },
+    });
+
+  answers.push({ standingContext: "## Standing context for this repository\n\nnote" });
+  const withNote = await claim();
+  assert.equal(withNote.status, 200, JSON.stringify(withNote.data));
+  assert.deepEqual(withNote.data, {
+    standingContext: "## Standing context for this repository\n\nnote",
+  });
+
+  answers.push({});
+  const nothing = await claim();
+  assert.equal(nothing.status, 204);
+  assert.equal(nothing.data, undefined);
+
+  const plan = { taskId: leased.data.task.id, objective: "cap the value" };
+  answers.push({ plan, standingContext: "note" });
+  const claimed = await claim();
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.data));
+  assert.deepEqual(claimed.data, { plan, standingContext: "note" });
+});
+
 test("releasing a lease returns the task to the queue", async (t) => {
   const { runtime, token } = await workerRuntime(t);
   const workerId = (

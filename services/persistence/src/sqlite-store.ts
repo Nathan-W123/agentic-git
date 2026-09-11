@@ -25,6 +25,7 @@ import {
   type IntegrationResult,
   type IntegrationStatus,
   type ProjectId,
+  type RepositoryContext,
   type ResourceLease,
   type RiskLevel,
   type ScopeChangeDecision,
@@ -109,6 +110,8 @@ import type {
   RunStatus,
   SaveSubChannelReviewInput,
   SaveWorkLeasePlanInput,
+  SaveRepositoryContextInput,
+  SaveRepositoryContextResult,
   SaveWorkLeasePlanResult,
   SessionRecord,
   SignupIntentRecord,
@@ -237,6 +240,16 @@ function integer(row: Row, column: string): number {
 
 function parseJson<T>(row: Row, column: string): T {
   return JSON.parse(text(row, column)) as T;
+}
+
+function toRepositoryContext(row: Row): RepositoryContext {
+  return {
+    repositoryId: text(row, "repository_id"),
+    content: text(row, "content"),
+    updatedBy: text(row, "updated_by"),
+    updatedAt: text(row, "updated_at"),
+    version: integer(row, "version"),
+  };
 }
 
 function optionalJson<T>(row: Row, column: string): T | undefined {
@@ -2426,6 +2439,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .run(id);
       this.db
         .prepare("DELETE FROM auditor_cursors WHERE repository_id = ?")
+        .run(id);
+      this.db
+        .prepare("DELETE FROM repository_contexts WHERE repository_id = ?")
         .run(id);
       this.db
         .prepare("DELETE FROM repository_grants WHERE repository_id = ?")
@@ -5913,6 +5929,65 @@ public async recordBranchClaim(
            updated_at = excluded.updated_at`,
       )
       .run(repositoryId, paused ? 1 : 0, new Date().toISOString());
+  }
+
+  public async getRepositoryContext(
+    repositoryId: string,
+  ): Promise<RepositoryContext | undefined> {
+    const row = this.db
+      .prepare(
+        `SELECT repository_id, content, updated_by, updated_at, version
+           FROM repository_contexts WHERE repository_id = ?`,
+      )
+      .get(repositoryId) as Row | undefined;
+    return row === undefined ? undefined : toRepositoryContext(row);
+  }
+
+  public async saveRepositoryContext(
+    input: SaveRepositoryContextInput,
+  ): Promise<SaveRepositoryContextResult> {
+    // Read-then-write under the same write lock, so a pinned save that
+    // passes the version check cannot be overtaken between the check and
+    // the upsert. `node:sqlite` is synchronous on one connection, which
+    // makes the pair atomic by itself; the transaction is what makes it
+    // visibly so, and what the Postgres store mirrors.
+    const owned = this.begin();
+    try {
+      const current = await this.getRepositoryContext(input.repositoryId);
+      if (
+        input.expectedVersion !== undefined &&
+        (current?.version ?? 0) !== input.expectedVersion
+      ) {
+        this.commit(owned);
+        return { outcome: "stale", current };
+      }
+      this.db
+        .prepare(
+          `INSERT INTO repository_contexts
+             (repository_id, content, updated_by, updated_at, version)
+           VALUES (?, ?, ?, ?, 1)
+           ON CONFLICT(repository_id) DO UPDATE SET
+             content = excluded.content,
+             updated_by = excluded.updated_by,
+             updated_at = excluded.updated_at,
+             version = repository_contexts.version + 1`,
+        )
+        .run(
+          input.repositoryId,
+          input.content,
+          input.updatedBy,
+          input.updatedAt ?? new Date().toISOString(),
+        );
+      const saved = await this.getRepositoryContext(input.repositoryId);
+      this.commit(owned);
+      if (saved === undefined) {
+        throw new Error("The standing context vanished as it was saved");
+      }
+      return { outcome: "saved", context: saved };
+    } catch (error) {
+      this.rollback(owned);
+      throw error;
+    }
   }
 
   private toChannelMessageBase(

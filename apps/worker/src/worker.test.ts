@@ -1309,6 +1309,122 @@ test("a remote worker keeps the thread as the conversation and planning hints as
   }
 });
 
+test("a remote worker plans with the repository's standing context, between the thread and the hints, and executes without it", async (t) => {
+  // The claim route carries the note the repository's people wrote; the
+  // worker is the production path and used to be the one that never saw it.
+  // It rides in `priorContext` only — thread, then note, then hints, the
+  // in-process order — so the planning prompt reads it as background and no
+  // execution round is shown it as something said in the conversation.
+  // Planning-only is the limit of phase 1 on every path, and this pins it so
+  // it cannot regress silently into the transcript.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+  await runtime.store.saveRepositoryContext({
+    repositoryId: runtime.repositoryId,
+    content: "Run `npm test` before reporting; the value lives in src/value.js.",
+    updatedBy: "user_nathan",
+  });
+
+  const thread =
+    "This request was made inside an ongoing conversation.\n" +
+    "- Rewrote src/value.js to export the value from a loader.";
+  const hints = "Files that declare the names the objective uses: src/value.js";
+  class ControlPlaneWithHints extends WorkerClient {
+    public override async claimRepository(
+      ...args: Parameters<WorkerClient["claimRepository"]>
+    ): ReturnType<WorkerClient["claimRepository"]> {
+      // The real claim answer, note included, with the hints the estimator
+      // would have added on a repository large enough to anchor.
+      return { ...(await super.claimRepository(...args)), planningContext: hints };
+    }
+  }
+
+  const prompts: Array<{ args: string[]; prompt: string }> = [];
+  let taskId = "";
+  const runner: CodexProcessRunner = async (_executable, args, options) => {
+    const prompt = options?.input ?? "";
+    prompts.push({ args: [...args], prompt });
+    if (!prompt.includes("Implement the approved task")) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          taskId,
+          objective: "raise the value",
+          expectedFiles: ["src/value.js"],
+          expectedSymbols: ["value"],
+          dependencies: [],
+          commands: [],
+          externalAccess: [],
+          riskLevel: "low",
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    const cwd = options?.cwd;
+    assert.ok(cwd);
+    await writeFile(
+      path.join(cwd, "src", "value.js"),
+      "export const value = 6;\n",
+    );
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "raised",
+      }),
+      stderr: "",
+      durationMs: 1,
+    };
+  };
+  const worker = makeWorker(runtime, {
+    client: new ControlPlaneWithHints({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+    codexRunner: runner,
+  });
+  await worker.register();
+
+  const submitted = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+    context: thread,
+    conversationId: "msg_thread_root",
+  });
+  taskId = submitted.id;
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(prompts.length, 2, JSON.stringify(prompts.map((p) => p.args)));
+  const [planning, execution] = prompts;
+  assert.ok(planning !== undefined && execution !== undefined);
+
+  const heading = "## Standing context for this repository";
+  const threadAt = planning.prompt.indexOf(thread);
+  const noteAt = planning.prompt.indexOf(heading);
+  const hintsAt = planning.prompt.indexOf(hints);
+  assert.ok(threadAt >= 0 && noteAt >= 0 && hintsAt >= 0, planning.prompt);
+  assert.ok(threadAt < noteAt && noteAt < hintsAt, planning.prompt);
+  assert.ok(
+    planning.prompt.includes("Run `npm test` before reporting"),
+    planning.prompt,
+  );
+  // Execution is told the conversation, and nothing that was not said in it.
+  assert.ok(execution.prompt.includes(thread), execution.prompt);
+  assert.equal(execution.prompt.includes(heading), false, execution.prompt);
+  assert.equal(
+    execution.prompt.includes("Run `npm test` before reporting"),
+    false,
+    execution.prompt,
+  );
+});
+
 test("the Codex adapter refuses to pretend it is sandboxed", async (t) => {
   const runtime = await startRuntime(t);
   runtime.project.config.sandbox = { mode: "docker", image: "coord/agent:1" };

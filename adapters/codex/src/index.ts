@@ -2701,8 +2701,15 @@ export class CodexAdapter implements AgentAdapter {
       ...(input.priorContext === undefined || input.priorContext.trim() === ""
         ? []
         : [
-            "Notes left by earlier work in this repository. Treat as background,",
-            "not as fact — verify anything you rely on against the workspace:",
+            // Two provenances now share this slot — handoffs the control
+            // plane projected and a note the repository's people wrote —
+            // so the label names both. The old sentence claimed the first
+            // alone, which became untrue the day the second arrived, and an
+            // adapter that grepped the text for a heading to tell them apart
+            // would couple two packages on a string.
+            "Background about this repository — notes left by earlier work and",
+            "by the people who work here. Treat as background, not as fact —",
+            "verify anything you rely on against the workspace:",
             input.priorContext.trim(),
           ]),
       `Canonical revision: ${input.canonicalVersion.revision}`,

@@ -1347,6 +1347,12 @@ test("earlier work reaches the planning prompt as background, not as fact", asyn
   const planning = prompts[0] ?? "";
   assert.match(planning, /Gotcha: the retry counter is off by one\./u);
   assert.match(planning, /Treat as background/u);
+  // The label names both provenances the slot now carries — projected
+  // handoffs and the standing context the repository's people wrote — rather
+  // than claiming earlier work alone.
+  assert.match(planning, /Background about this repository/u);
+  assert.match(planning, /by the people who work here/u);
+  assert.doesNotMatch(planning, /Notes left by earlier work/u);
   // The objective stays the thing somebody actually asked for.
   assert.match(planning, /Objective: /u);
   await rm(fixture.root, { recursive: true, force: true });

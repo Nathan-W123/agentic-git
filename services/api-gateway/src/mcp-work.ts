@@ -117,6 +117,13 @@ export interface McpTakenTask {
   readonly expiresAt: string;
   readonly bundleUrl: string;
   readonly validationCommands: readonly string[];
+  /**
+   * The repository's standing context, already rendered by
+   * `renderRepositoryContext` in shared-types, when one is set. The editor
+   * is the third surface that executes a task and the only one with no
+   * adapter prompt to carry it, so the brief is where it goes.
+   */
+  readonly standingContext?: string;
 }
 
 /** Everything the work tools may do. Small, and deliberately not the gateway. */
@@ -312,6 +319,18 @@ export function takenTaskBrief(taken: McpTakenTask): string {
       "",
       "This repository expects these to pass before anything lands:",
       ...taken.validationCommands.map((command) => `  ${command}`),
+    );
+  }
+  // After the validation commands and only when set, so a brief with no note
+  // is the brief it always was. Framed as background: the planning prompts
+  // say the same of it, and an editor reading it as a second task would be
+  // the first surface to do so.
+  if (taken.standingContext !== undefined && taken.standingContext !== "") {
+    lines.push(
+      "",
+      "What the people who work in this repository want you to know " +
+        "(background, verify against the checkout):",
+      taken.standingContext,
     );
   }
   lines.push(

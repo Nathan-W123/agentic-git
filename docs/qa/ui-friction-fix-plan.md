@@ -36,7 +36,8 @@ hold:
 - The changed-files disclosure is a bare `<details class="cmsg-changes">`,
   while the two other disclosures in the transcript persist through
   `state.thinkingOpen` and `state.summaryOpen`.
-- The slash picker ends in `matching.slice(0, 6)` against a ten-command table.
+- The slash picker ends in `matching.slice(0, 6)` against a ten-command table
+  (eleven since `/context` was added for the repository standing context).
 - `state.changeSet` is a single global, written by `ensureCodeData` from the
   first run it finds for the repository, and read by the channel file panel and
   by the agent detail's Files tab alike.

@@ -25,6 +25,7 @@ import {
   type IntegrationResult,
   type IntegrationStatus,
   type ProjectId,
+  type RepositoryContext,
   type ResourceLease,
   type RiskLevel,
   type ScopeChangeDecision,
@@ -110,6 +111,8 @@ import type {
   RunStatus,
   SaveSubChannelReviewInput,
   SaveWorkLeasePlanInput,
+  SaveRepositoryContextInput,
+  SaveRepositoryContextResult,
   SaveWorkLeasePlanResult,
   SessionRecord,
   SignupIntentRecord,
@@ -229,6 +232,16 @@ function integer(row: Row, column: string): number {
     throw new Error(`Expected a number in column ${column}`);
   }
   return value;
+}
+
+function toRepositoryContext(row: Row): RepositoryContext {
+  return {
+    repositoryId: text(row, "repository_id"),
+    content: text(row, "content"),
+    updatedBy: text(row, "updated_by"),
+    updatedAt: text(row, "updated_at"),
+    version: integer(row, "version"),
+  };
 }
 
 function flag(row: Row, column: string): boolean {
@@ -2532,6 +2545,10 @@ export class PostgresCoordinationStore implements CoordinationStore {
       );
       await client.query(
         "DELETE FROM auditor_cursors WHERE repository_id = $1",
+        [id],
+      );
+      await client.query(
+        "DELETE FROM repository_contexts WHERE repository_id = $1",
         [id],
       );
       await client.query(
@@ -5681,6 +5698,72 @@ public async recordBranchClaim(
          paused = EXCLUDED.paused,
          updated_at = EXCLUDED.updated_at`,
       [repositoryId, paused, new Date().toISOString()],
+    );
+  }
+
+  public async getRepositoryContext(
+    repositoryId: string,
+  ): Promise<RepositoryContext | undefined> {
+    const row = await this.row(
+      `SELECT repository_id, content, updated_by, updated_at, version
+         FROM repository_contexts WHERE repository_id = $1`,
+      [repositoryId],
+    );
+    return row === undefined ? undefined : toRepositoryContext(row);
+  }
+
+  public async saveRepositoryContext(
+    input: SaveRepositoryContextInput,
+  ): Promise<SaveRepositoryContextResult> {
+    // Serialized: two pinned saves racing on separate connections must not
+    // both read the same version and both be told they won. The upsert
+    // carries the pin again in its WHERE, so even a reader that slipped past
+    // the check writes nothing when the row has moved.
+    return await this.transaction(
+      async (client) => {
+        const before = (
+          await client.query(
+            `SELECT repository_id, content, updated_by, updated_at, version
+               FROM repository_contexts WHERE repository_id = $1`,
+            [input.repositoryId],
+          )
+        ).rows[0] as Row | undefined;
+        const current =
+          before === undefined ? undefined : toRepositoryContext(before);
+        if (
+          input.expectedVersion !== undefined &&
+          (current?.version ?? 0) !== input.expectedVersion
+        ) {
+          return { outcome: "stale", current };
+        }
+        const pinned = input.expectedVersion !== undefined;
+        const written = (
+          await client.query(
+            `INSERT INTO repository_contexts
+               (repository_id, content, updated_by, updated_at, version)
+             VALUES ($1, $2, $3, $4, 1)
+             ON CONFLICT (repository_id) DO UPDATE SET
+               content = EXCLUDED.content,
+               updated_by = EXCLUDED.updated_by,
+               updated_at = EXCLUDED.updated_at,
+               version = repository_contexts.version + 1
+             ${pinned ? "WHERE repository_contexts.version = $5" : ""}
+             RETURNING repository_id, content, updated_by, updated_at, version`,
+            [
+              input.repositoryId,
+              input.content,
+              input.updatedBy,
+              input.updatedAt ?? new Date().toISOString(),
+              ...(pinned ? [input.expectedVersion] : []),
+            ],
+          )
+        ).rows[0] as Row | undefined;
+        if (written === undefined) {
+          return { outcome: "stale", current };
+        }
+        return { outcome: "saved", context: toRepositoryContext(written) };
+      },
+      { serialize: true },
     );
   }
 

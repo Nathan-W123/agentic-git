@@ -198,6 +198,17 @@ owner's machine (only ever asked at the channel root today), and an MCP
 one only when the gateway merges it there. See
 [docs/handoff/task-context.md](../handoff/task-context.md).
 
+Repository standing context: a curated, versioned per-repository note — the
+conventions, the validation commands that actually work, the known pitfalls —
+set by `/context`, `PUT .../repositories/:id/context` or the
+`set_repository_context` MCP tool under the rename gate, audited on every
+save, and seeded into every task's prior context ahead of the handoffs on the
+in-process, remote-worker and editor paths alike. Beside it, in process only,
+the coordinator projects validation labels that keep failing across recorded
+handoffs into a block of its own, computed at read time and never stored.
+Both reach the planning round only. See
+[repository-standing-context.md](repository-standing-context.md).
+
 ## Repository Lifecycle
 
 - Greenfield start: `coord repo create` and the web repository form create an
@@ -265,6 +276,10 @@ Hosted execution has a protocol and a working control-plane half:
   while the spending is still happening, and `maxProjectTokensPerDay` throttles
   leasing the way the runtime budget does. Reporting is optional and never
   inferred, so an agent that says nothing is recorded as having said nothing.
+- The claim route (`POST /workers/leases/:id/claim`) also carries the
+  repository's standing context, claimed or not, so a remote task plans with
+  the same note an in-process one does. A 204 now means no plan and no
+  context of any kind; a 200 without `plan` is not a claim.
 
 Container isolation for hosted execution is verified against a live Docker
 daemon, not merely implemented: `npm run verify:remote-docker` drives the whole

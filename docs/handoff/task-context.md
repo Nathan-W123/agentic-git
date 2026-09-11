@@ -14,14 +14,15 @@ draft of this page and the second.
 
 ## Background: what an agent knows
 
-Four channels carry context, and they reach different places.
+Five channels carry context, and they reach different places.
 
 | | Carries | Reaches |
 | --- | --- | --- |
 | Handoffs | What earlier tasks completed, decided, and warned about | The next **task** in that repository, as planning notes |
 | Thread history | The part of a thread `selectThreadContext` keeps under `THREAD_CONTEXT_TOKEN_BUDGET` (1,600 tokens; 400 per entry; older entries recalled by relevance at or above `THREAD_CONTEXT_RELEVANCE_MIN`, 0.12), with an explicit elided-history notice where it cut | An agent **answering a question** in the thread, and a **task** dispatched from inside it |
 | Channel memo | One line per conversation the room recently settled (`channel-memo.ts`, a few hundred tokens) | Every **mention-dispatched task**, and work an editor files for itself |
-| `priorContext` | All of the above that applies, thread first, then handoffs and the control plane's planning hints | The **planning prompt** |
+| Standing context | The note the repository's people wrote for every agent (`repository_contexts`, versioned and audited; see [repository-standing-context.md](../architecture/repository-standing-context.md)) | Every **task** in that repository, as planning notes, and an editor's `take_task` brief |
+| `priorContext` | All of the above that applies, thread first, then the standing context, then the control plane's planning hints and the handoffs | The **planning prompt** |
 
 Handoff seeding was wired up on 2026-08-10 (`c4015dd`): `seedContextForTask`
 had existed and been tested since the handoff work, and nothing in production
@@ -74,11 +75,12 @@ a client asserts.
    shared-types. `task.context` is the conversation and nothing else;
    `priorContext` is the conversation first, then everything else planning
    should know. The coordinator (`coordinator.ts`, where it builds
-   `startInput`) joins `[thread, turn note, lease note, likely files, recent
-   touch points, handoffs]` into `priorContext`, passes `task` through with
-   its context untouched, and sets `conversational: true` for a turn of a
-   conversation. The remote worker (`worker.ts`, after `claimRepository`)
-   does the same with `[thread, planningContext]`, and sets `conversational`
+   `startInput`) joins `[thread, turn note, lease note, standing context,
+   likely files, recent touch points, handoffs, derived pitfalls]` into
+   `priorContext`, passes `task` through with its context untouched, and
+   sets `conversational: true` for a turn of a conversation. The remote
+   worker (`worker.ts`, after `claimRepository`) does the same with
+   `[thread, standingContext, planningContext]`, and sets `conversational`
    from `SubmittedTask.conversationId`. It used to join the two and pass the
    join in both slots, which presented the control plane's file estimates to
    the model as something somebody said, and it never set `conversational`,
@@ -92,7 +94,8 @@ a client asserts.
    on its `OpenConversation` and calls `continueTask` when the adapter has
    one; a reader should not expect it on a worker host.
 5. **Adapters.** `codex` and `prompt-cli` render `priorContext` in the planning
-   prompt ("Notes left by earlier work in this repository") and `task.context`
+   prompt ("Background about this repository — notes left by earlier work and
+   by the people who work here") and `task.context`
    through `conversationContextLines` in the execution and replan rounds, and
    raw in the forced-question round. `generic-cli` builds no prompt: it
    forwards both as the optional `context` and `priorContext` fields of its
@@ -221,9 +224,9 @@ they normally pass in 100ms, and the failure looks like a bug in the diff.
   twin; today the two carry different context.
 - `threadContextFor` drops only `progress` replies. Whether `system` and
   `plan` replies belong in a task's context is undecided.
-- The planning-prompt heading in the adapters still says "Notes left by
-  earlier work in this repository" although `priorContext` now begins with
-  the thread. Cosmetic.
+- The planning-prompt heading in the adapters was reworded when the standing
+  context landed; it names both provenances now, and still does not mention
+  the thread that leads the block. Cosmetic.
 - Routed questions could carry the channel memo even at the root; cheap, but
   it changes the prompt the worker's `answerQuestion` sees.
 - The per-run `tasks` table (`saveTask` in `worker-operations.ts`) does not

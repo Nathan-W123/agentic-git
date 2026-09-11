@@ -4686,11 +4686,13 @@ function channelSlashCandidates(repositoryId, target = "channel") {
       );
     });
   }
-  // Every match, not the first six. The table holds ten commands, so an empty
-  // query — which is what the picker opens on — hid `retry`, `cancel`, `stop`
-  // and `help` behind a cut nobody could see, including the one command whose
-  // entire job is to list the others. Ten rows is not a scale problem; the
-  // list scrolls (see `.mention-pop` in styles.css) rather than truncating.
+  // Every match, not the first six. The table holds eleven commands, so an
+  // empty query — which is what the picker opens on — hid `retry`, `cancel`,
+  // `stop` and `help` behind a cut nobody could see, including the one command
+  // whose entire job is to list the others. (`/context` arrived after that was
+  // fixed, and would have been the fifth thing hidden.) Eleven rows is not a
+  // scale problem; the list scrolls (see `.mention-pop` in styles.css) rather
+  // than truncating.
   return matching;
 }
 

@@ -244,6 +244,44 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
   assert.deepEqual(changeSet.symbolsChanged, ["value"]);
 });
 
+test("claude: prior context is introduced as background from earlier work and from the repository's people", async () => {
+  // Two provenances share the slot now — handoffs the control plane
+  // projected and the standing context somebody wrote — so the label has to
+  // name both. The old sentence claimed earlier work alone, which became
+  // untrue the day a human-written block arrived in it.
+  const fixture = await createFixture();
+  const prompts: string[] = [];
+  const runner: PromptCliProcessRunner = async (_executable, args, options = {}) => {
+    prompts.push(String(options.input));
+    assert.ok(args.includes("--permission-mode"));
+    return output(claudeEnvelope(JSON.stringify(PLAN)));
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+    priorContext:
+      "## Standing context for this repository\n\nRun `npm test` before reporting.",
+  });
+  await adapter.requestPlan(session.id);
+  const planning = prompts[0] ?? "";
+  assert.match(planning, /Run `npm test` before reporting\./u);
+  assert.match(planning, /Background about this repository/u);
+  assert.match(planning, /by the people who work here/u);
+  assert.doesNotMatch(planning, /Notes left by earlier work/u);
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
 test("claude: an explicit ask cannot complete before asking its questions", async () => {
   const fixture = await createFixture();
   const runner: PromptCliProcessRunner = async (

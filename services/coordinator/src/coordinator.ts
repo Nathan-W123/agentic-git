@@ -94,7 +94,8 @@ import {
 } from "./approval-service.js";
 import { InMemoryAuditLog } from "./audit-log.js";
 import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
-import { seedContextForTask } from "./handoff-store.js";
+import { renderHandoffContext } from "./handoff.js";
+import { findTaskHandoffs } from "./handoff-store.js";
 import { OwnershipService } from "./ownership-service.js";
 import {
   type ChangeSetSplit,
@@ -105,6 +106,10 @@ import {
   approvedSchemaResources,
   structuralConflict,
 } from "./plan-admission.js";
+import {
+  derivePitfalls,
+  standingContextForTask,
+} from "./repository-context.js";
 import {
   assessReplay,
   residualAdvance,
@@ -2004,16 +2009,35 @@ export class Coordinator {
           // and wrote down. The handoffs have been recorded at every task
           // boundary all along; this is the first thing to read them back.
           //
+          // One read, deliberately. `findTaskHandoffs` reads the whole
+          // type-filtered audit log whatever `limit` it is given — the
+          // filter has no repository column — so the five handoffs the seed
+          // shows and the twenty-five the pitfall tallies count come out of
+          // the same array rather than costing the log twice per task.
+          //
           // Never allowed to stop a run: seeding is an advantage, and a task
           // that cannot read old notes should still do the work.
-          const seeded =
+          const handoffs =
             this.store === undefined
-              ? ""
-              : await seedContextForTask(this.store, {
+              ? []
+              : await findTaskHandoffs(this.store, {
                   repositoryId: input.repository.id,
                   ...(input.projectId === undefined
                     ? {}
                     : { projectId: input.projectId }),
+                  limit: 25,
+                }).catch(() => []);
+          const seeded = renderHandoffContext(handoffs.slice(0, 5));
+          const pitfalls = derivePitfalls(handoffs);
+          // What the people who work here wrote for every agent that plans
+          // here. The one block of prior context a person authored — see
+          // `repository-context.ts` for why that squares with the
+          // evidence-only rule the handoffs keep.
+          const standing =
+            this.store === undefined
+              ? ""
+              : await standingContextForTask(this.store, {
+                  repositoryId: input.repository.id,
                 }).catch(() => "");
           // The conversation this request was asked inside, ahead of what
           // earlier tasks left behind. Both are background rather than fact,
@@ -2022,6 +2046,18 @@ export class Coordinator {
           // gets its meaning — while a handoff is about the repository in
           // general. Nearest first, so the thing being asked for survives any
           // truncation the model does at the far end.
+          //
+          // The same rule orders the rest, with one deliberate exception.
+          // The turn-start note and the leases are about this task and
+          // follow the thread. The standing note comes next, ahead of the
+          // file estimates and recent touches: it is about the repository in
+          // general, but it is the one block a person wrote and stands
+          // behind, where the estimates are the control plane's guesses —
+          // and it is the order the remote worker builds after
+          // `claimRepository` (`worker.ts`), which has no estimates of its
+          // own and must not end up with a different prompt for the same
+          // task. Then the handoffs, older per-task projections, and the
+          // derived tallies last because they are the least specific.
           // What other in-flight tasks already hold, told to the agent
           // *before* it plans. Admission would trim or defer a plan that
           // reaches into leased files anyway — this makes the agent route
@@ -2134,9 +2170,11 @@ export class Coordinator {
             entry.task.context?.trim() ?? "",
             turnStart.note,
             leaseNote,
+            standing,
             likelyFiles,
             recentTouchPoints(recentlyTouched),
             seeded,
+            pitfalls,
           ]
             .filter((part) => part !== "")
             .join("\n\n");

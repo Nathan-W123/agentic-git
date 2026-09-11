@@ -1311,6 +1311,8 @@ test("an MCP client can hand-shake and see the tools", async (t) => {
       "task_status",
       "cancel_task",
       "answer_question",
+      "get_repository_context",
+      "set_repository_context",
       "take_task",
       "report_task",
       "extend_task",

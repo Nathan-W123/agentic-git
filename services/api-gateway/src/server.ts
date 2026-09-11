@@ -84,6 +84,8 @@ import {
   mcpServersEnabled,
   projectBudgets,
   readsAsReportRequest,
+  renderRepositoryContext,
+  REPOSITORY_CONTEXT_MAX_CHARS,
   requestFromObjective,
   ROLE_CONTEXT_PREFIX,
   uniqueStrings,
@@ -115,7 +117,11 @@ import {
   verifyWebhookSignature,
   type StripeClient,
 } from "./stripe.js";
-import { billableSeats, paymentsEnabled, TRIAL_DAYS } from "./billing.js";
+import {
+  billableSeats,
+  paymentsEnabled,
+  TRIAL_DAYS,
+} from "./billing.js";
 import {
   arbitrationLine,
   arbitrationReleaseLine,
@@ -548,6 +554,44 @@ export interface WatchedChannelTask {
   opener?: { authorId: string; content: string };
   /** Whether substantive run narration has begun, after which all of it stays here. */
   threaded: boolean;
+}
+
+/**
+ * The sentence `/context` says when the repository gate turns somebody away,
+ * or `undefined` when the failure was not a refusal at all.
+ *
+ * The gate is a route's gate, so it answers in status codes; a room answers
+ * in sentences, and the wrong sentence sends somebody after a permission
+ * that was never the problem. A token refused for its scopes holds the
+ * permission and would read "ask for manage_project" as nonsense, and an
+ * archived project refuses the very people the other sentence tells to try
+ * again. Anything that is not one of the gate's four refusals is not this
+ * function's to translate.
+ */
+function repositoryContextRefusal(error: unknown): string | undefined {
+  const code =
+    error instanceof AuthenticationError || error instanceof HttpError
+      ? error.code
+      : undefined;
+  if (code === "token_scope_missing") {
+    return (
+      "That API token is not scoped to `manage_project`, so it cannot set " +
+      "the standing context — the same refusal `PUT .../context` gives it."
+    );
+  }
+  if (code === "project_archived") {
+    return (
+      "This project is archived and read-only, so the standing context " +
+      "cannot be changed until it is unarchived."
+    );
+  }
+  if (code === "forbidden" || code === "not_found") {
+    return (
+      "Setting the standing context takes the manage_project permission, " +
+      "or having created the repository — the same rule as renaming it."
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -2749,6 +2793,49 @@ export class ApiGateway {
         });
         return cancelled.length === 0 ? "already_finished" : "cancelled";
       },
+      setRepositoryContext: async (input) => {
+        // The HTTP route's gate, with its refusal folded into the answer:
+        // the tool reads a word and says a sentence, where a thrown 403
+        // would reach the model as an error about nothing in particular.
+        try {
+          await this.authorizeRepositoryOwnerAction(
+            principal,
+            input.projectId,
+            input.repositoryId,
+            "manage_project",
+          );
+        } catch (error) {
+          if (
+            (error instanceof HttpError && error.status === 403) ||
+            (error instanceof AuthenticationError && error.statusCode === 403)
+          ) {
+            return "forbidden";
+          }
+          throw error;
+        }
+        const saved = await this.options.store.saveRepositoryContext({
+          repositoryId: input.repositoryId,
+          content: input.content,
+          updatedBy: principal.user.id,
+          ...(input.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: input.expectedVersion }),
+        });
+        if (saved.outcome === "saved") {
+          await this.options.store.appendAudit(undefined, {
+            type: "repository_context_changed",
+            data: {
+              projectId: input.projectId,
+              repositoryId: input.repositoryId,
+              version: saved.context.version,
+              cleared: input.content === "",
+              chars: input.content.length,
+              actorId: principal.user.id,
+            },
+          });
+        }
+        return saved;
+      },
       outcomeFor: async (taskId) => {
         const events = await this.options.store
           .listAuditEvents({
@@ -3138,10 +3225,20 @@ export class ApiGateway {
             userId: principal.user.id,
             vendor: input.vendor,
           });
+          // The repository's standing context, rendered with the same
+          // function every planning prompt uses, so an editor is told what
+          // an agent would have been. Read defensively: a brief must not
+          // fail for want of a note.
+          const standingContext = renderRepositoryContext(
+            await this.options.store
+              .getRepositoryContext(taken.repositoryId)
+              .catch(() => undefined),
+          );
           return {
             taskId: taken.taskId,
             objective: taken.objective,
             ...(taken.context === undefined ? {} : { context: taken.context }),
+            ...(standingContext === "" ? {} : { standingContext }),
             repository: taken.repositoryId,
             branch: taken.branch,
             baseRevision: taken.baseRevision,
@@ -4463,7 +4560,18 @@ export class ApiGateway {
   private async runSlashCommand(input: {
     projectId: string;
     repositoryId: string;
-    senderId: string;
+    /**
+     * Who typed it, as the request authenticated them.
+     *
+     * The whole principal rather than a bare user id because a command can
+     * be a repository-administrative act — `/context` sets the standing
+     * context every task in the repository is planned with — and an API
+     * token's scopes are part of who its holder is. Handed a user id alone,
+     * this path could only restate the role half of the route's gate, and a
+     * token scoped to `view` would have set from the room what `PUT
+     * .../context` refuses it.
+     */
+    principal: AuthenticatedPrincipal;
     command: SlashCommand;
     rest: string;
     /**
@@ -4479,6 +4587,7 @@ export class ApiGateway {
     channelId?: string;
   }): Promise<SlashCommandDispatch> {
     const { projectId, repositoryId } = input;
+    const senderId = input.principal.user.id;
     // Read before either word's own branch: whichever was typed first is the
     // one `parseSlashCommand` returned, and acting on that one alone is
     // exactly what this is here to stop — a `/push` that publishes over the
@@ -4488,7 +4597,7 @@ export class ApiGateway {
       const queued = await this.queuePushAfterRunningWork({
         projectId,
         repositoryId,
-        actorId: input.senderId,
+        actorId: senderId,
         ...(input.channelId === undefined ? {} : { channelId: input.channelId }),
       });
       // `/queue @Eos land the retry fix /push` is two instructions on one
@@ -4506,11 +4615,21 @@ export class ApiGateway {
       );
       return { handled: true };
     }
+    if (input.command.name === "context") {
+      await this.runContextCommand({
+        projectId,
+        repositoryId,
+        principal: input.principal,
+        rest: input.rest,
+        ...(input.channelId === undefined ? {} : { channelId: input.channelId }),
+      });
+      return { handled: true };
+    }
     if (input.command.name === "stop") {
       // `/cancel` with the code put back. Stopping is entirely its job — the
       // same operation, the same targeting, the same summary — and the only
       // thing this adds is undoing what the stopped tasks had already landed.
-      await this.cancelFromChannel({ ...input, undo: true });
+      await this.cancelFromChannel({ ...input, senderId, undo: true });
       return { handled: true };
     }
     // `/retry` acts on the task a thread is following, and a message in the
@@ -4526,7 +4645,7 @@ export class ApiGateway {
       return { handled: true };
     }
     if (input.command.name === "cancel") {
-      await this.cancelFromChannel(input);
+      await this.cancelFromChannel({ ...input, senderId });
       return { handled: true };
     }
     if (input.command.name === "push") {
@@ -4564,7 +4683,7 @@ export class ApiGateway {
       const result = await operation({
         projectId,
         repositoryId,
-        actorId: input.senderId,
+        actorId: senderId,
       });
       if (result.detail?.syncConflict !== true) {
         await this.postChannelSystemMessage(
@@ -4597,6 +4716,115 @@ export class ApiGateway {
       }
     }
     return { handled: false };
+  }
+
+  /**
+   * `/context`: shows, sets or clears the repository's standing context.
+   *
+   * Answered in the room it was typed in, as `/help` is: a channel message,
+   * in the repository's own room or a work sub-channel's, is where this is
+   * read as a command at all — a thread reply goes to that thread's agent,
+   * as it does for `/plan` and `/help`. A repository-wide act rather than a
+   * per-room one — the note reaches every task in the repository, whichever
+   * channel it was set from — so it is confirmed where it was said and takes
+   * effect everywhere.
+   *
+   * Setting goes through {@link authorizeRepositoryOwnerAction}, the same
+   * call the `PUT .../context` route makes, rather than a by-user-id
+   * restatement of it: the two gates cannot drift apart if there is only
+   * one, and the scope check an API token is entitled to comes free with it.
+   * The refusal is spoken in the room and names the rule, because a person
+   * who typed a note and got silence would type it again.
+   */
+  private async runContextCommand(input: {
+    projectId: string;
+    repositoryId: string;
+    principal: AuthenticatedPrincipal;
+    rest: string;
+    channelId?: string;
+  }): Promise<void> {
+    const { projectId, repositoryId, channelId } = input;
+    const senderId = input.principal.user.id;
+    const say = async (content: string): Promise<void> =>
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        content,
+        channelId,
+      );
+    const rest = input.rest.trim();
+    if (rest === "") {
+      const rendered = renderRepositoryContext(
+        await this.options.store.getRepositoryContext(repositoryId),
+      );
+      await say(
+        rendered === ""
+          ? "Nothing is set. `/context <note>` sets what every agent in this " +
+              "repository is told before it plans."
+          : rendered,
+      );
+      return;
+    }
+    try {
+      await this.authorizeRepositoryOwnerAction(
+        input.principal,
+        projectId,
+        repositoryId,
+        "manage_project",
+      );
+    } catch (error) {
+      // Only the gate's own refusals are turned into a sentence. Anything
+      // else — a store that threw, a bug — is rethrown to the dispatcher,
+      // which logs it loudly; reporting a fault as "you are not allowed"
+      // would send somebody after a permission that was never the problem.
+      const refusal = repositoryContextRefusal(error);
+      if (refusal === undefined) {
+        throw error;
+      }
+      await say(refusal);
+      return;
+    }
+    const content = rest === "clear" ? "" : rest;
+    if (content.length > REPOSITORY_CONTEXT_MAX_CHARS) {
+      await say(
+        `That note is ${content.length} characters; the standing context ` +
+          `is capped at ${REPOSITORY_CONTEXT_MAX_CHARS} because every ` +
+          "planning prompt in this repository pays for it.",
+      );
+      return;
+    }
+    const saved = await this.options.store.saveRepositoryContext({
+      repositoryId,
+      content,
+      updatedBy: senderId,
+    });
+    if (saved.outcome === "stale") {
+      // Unpinned saves cannot be stale; said anyway rather than assumed,
+      // because a silent no-op is the one ending a command must never have.
+      await say("The standing context moved as it was being set; try again.");
+      return;
+    }
+    await this.options.store.appendAudit(undefined, {
+      type: "repository_context_changed",
+      data: {
+        projectId,
+        repositoryId,
+        version: saved.context.version,
+        cleared: content === "",
+        chars: content.length,
+        actorId: senderId,
+      },
+    });
+    const author =
+      (await this.options.store.getUser(senderId))?.displayName ?? "somebody";
+    await say(
+      content === ""
+        ? `Standing context cleared by ${author} (v${saved.context.version}). ` +
+            "Tasks in this repository no longer see a note."
+        : `Standing context v${saved.context.version} set by ${author} ` +
+            `(${content.length} chars). Every task in this repository sees ` +
+            "it from now on.",
+    );
   }
 
   /** Whether a `/queue /push` is waiting on this repository's running work. */
@@ -5011,7 +5239,7 @@ export class ApiGateway {
         repositoryId,
         channelId: channel.id,
         content,
-        senderId: principal.user.id,
+        principal,
         referencedMessageId: message.id,
       });
     } catch (error) {
@@ -5050,12 +5278,19 @@ export class ApiGateway {
      */
     channelId?: string;
     content: string;
-    senderId: string;
+    /**
+     * Who posted it, as the request authenticated them.
+     *
+     * Carried whole rather than as a bare user id because a slash command can
+     * administer the repository (`/context`), and that gate has to see the
+     * credential's scopes as well as the person's role.
+     */
+    principal: AuthenticatedPrincipal;
     /** The stored channel root that caused this dispatch. */
     referencedMessageId: string;
   }): Promise<ChannelDispatch> {
-    const { projectId, repositoryId, channelId, senderId, referencedMessageId } =
-      input;
+    const { projectId, repositoryId, channelId, referencedMessageId } = input;
+    const senderId = input.principal.user.id;
     // A command says *how* to treat the request; an "@" says who it is for.
     // Different questions, so they compose: the command word is taken out
     // here — wherever in the message it was written — and everything left
@@ -5075,7 +5310,7 @@ export class ApiGateway {
       const dispatched = await this.runSlashCommand({
         projectId,
         repositoryId,
-        senderId,
+        principal: input.principal,
         command: parsed.command,
         rest: parsed.rest,
         content: input.content,

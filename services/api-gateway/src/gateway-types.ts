@@ -729,12 +729,24 @@ export interface ApiOperations {
    * Optional, and answering `undefined` is the ordinary case rather than a
    * fault: it means the conditions were not met and the worker plans exactly
    * as it does today. A deployment that omits this behaves the same way.
+   *
+   * `standingContext` — the repository's curated note, rendered — is carried
+   * whether or not a claim was granted, so that the answer's shape does not
+   * depend on the claim decision. Only `planningContext` is withheld on a
+   * claim. A claimed task builds no planning prompt, and the note is
+   * rendered only into that prompt, so today it is carried and not read on
+   * that branch; delivering it to execution is a change to the adapters, not
+   * to this contract.
    */
   claimWorkRepository?(input: {
     leaseId: string;
     actorId: string;
     protocolVersion: number;
-  }): Promise<{ plan?: unknown; planningContext?: string }>;
+  }): Promise<{
+    plan?: unknown;
+    planningContext?: string;
+    standingContext?: string;
+  }>;
   /**
    * The two directions of a repository claim, folded onto the heartbeat.
    *

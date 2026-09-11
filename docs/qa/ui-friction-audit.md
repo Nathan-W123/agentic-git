@@ -121,6 +121,10 @@ the way in is missing.
     you can type, are invisible unless you already know the word. In a thread
     the reordering hides `plan`, `queue`, `stop` and `help` instead.
 
+    Since fixed, and the count has moved with it: `channelSlashCandidates`
+    returns every match, and the table now holds eleven commands — `/context`
+    came with the repository standing context.
+
 12. **Nothing you can click stops a running agent.** In the channel, stopping
     work means typing `/cancel` or `/stop`, both hidden by 11. The in-chat
     agent panel offers a tab switch and a role field and nothing else

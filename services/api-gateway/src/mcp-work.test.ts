@@ -453,3 +453,60 @@ test("take_task tells the agent the thread is empty unless it speaks", async () 
   // will prompt it to narrate work nobody has asked it about.
   assert.match(String(answer.content[0]?.text), /task_progress/u);
 });
+
+test("a taken task's brief carries the repository's standing context after the validation commands, and nothing extra without one", () => {
+  // The editor is the third surface that executes a task and the only one
+  // with no adapter prompt to carry the note, so the brief is where it goes.
+  // With no note the brief is byte-for-byte the brief it always was, up to
+  // the point the block would have been appended.
+  const bare: McpTakenTask = {
+    taskId: "task-9",
+    objective: "Fix the login redirect",
+    repository: "payments",
+    branch: "main",
+    baseRevision: "a".repeat(40),
+    expiresAt: "2026-01-01T00:30:00.000Z",
+    bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+    validationCommands: ["npm test"],
+  };
+  const standingContext =
+    "## Standing context for this repository\n\nRun `npm test` before reporting.";
+  const without = takenTaskBrief(bare);
+  const withNote = takenTaskBrief({ ...bare, standingContext });
+  assert.doesNotMatch(without, /people who work in this repository/u);
+
+  const commandsAt = withNote.indexOf("  npm test");
+  const labelAt = withNote.indexOf(
+    "What the people who work in this repository want you to know",
+  );
+  const noteAt = withNote.indexOf(standingContext);
+  const releaseAt = withNote.indexOf("If you cannot do this one");
+  assert.ok(commandsAt >= 0 && labelAt >= 0 && noteAt >= 0 && releaseAt >= 0, withNote);
+  assert.ok(commandsAt < labelAt && labelAt < noteAt && noteAt < releaseAt, withNote);
+  assert.match(withNote, /background, verify against the checkout/u);
+  // Everything before the block is the brief without it.
+  assert.equal(withNote.slice(0, labelAt - 1), without.slice(0, labelAt - 1));
+  // An empty note is no note.
+  assert.equal(takenTaskBrief({ ...bare, standingContext: "" }), without);
+});
+
+test("a taken task in a repository with a note is briefed with it through the tool", async () => {
+  const { deps } = harness({
+    take: async () => ({
+      taskId: "task-9",
+      objective: "Fix the login redirect",
+      repository: "payments",
+      branch: "main",
+      baseRevision: "a".repeat(40),
+      expiresAt: "2026-01-01T00:30:00.000Z",
+      bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+      validationCommands: ["npm test"],
+      standingContext:
+        "## Standing context for this repository\n\nThe retry ceiling is in src/retry.ts.",
+    }),
+  });
+  const answer = await toolNamed(deps, "take_task").run({ editor: "claude" });
+  const text = String(answer.content[0]?.text);
+  assert.match(text, /The retry ceiling is in src\/retry\.ts/u);
+  assert.ok(text.indexOf("npm test") < text.indexOf("Standing context"), text);
+});

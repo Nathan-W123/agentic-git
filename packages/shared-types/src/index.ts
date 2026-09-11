@@ -1104,6 +1104,90 @@ export function boundCommandOutput(
     : `[…${text.length - max} earlier characters dropped]\n${text.slice(-max)}`;
 }
 
+/**
+ * What the people who work in a repository want every agent there to know.
+ *
+ * The one block of prior context that a person wrote rather than the control
+ * plane projected. Handoffs are deliberately evidence-only (see
+ * `services/coordinator/src/handoff.ts`): a summary of a session launders
+ * guesses into fact. This is compatible with that rule because it is not a
+ * recollection — a named person stands behind it, it carries a version, and
+ * every change is audited, so a stale or wrong note is attributable and
+ * checkable in a way a summary never is.
+ *
+ * Declared here rather than in persistence or the coordinator because every
+ * package that renders it into a prompt — the gateway for an editor's brief,
+ * the coordinator in process, the CLI for a remote worker — already depends
+ * on this one, and the gateway cannot depend on the coordinator.
+ */
+export interface RepositoryContext {
+  repositoryId: string;
+  /**
+   * Markdown, at most {@link REPOSITORY_CONTEXT_MAX_CHARS}. `""` means
+   * cleared: the row is kept so `version` keeps counting, and a reader treats
+   * it as nothing set.
+   */
+  content: string;
+  updatedBy: UserId;
+  updatedAt: string;
+  /**
+   * Starts at 1 and rises by one per save. The handle an editor pins a write
+   * to, so two people editing the same note cannot silently overwrite each
+   * other.
+   */
+  version: number;
+}
+
+/**
+ * Two pages, roughly two thousand tokens: an order above a channel memo and
+ * paid on every planning prompt in the repository, which is why "small" in
+ * the interface copy means small. Enforced at every writer and defended again
+ * by the renderer.
+ */
+export const REPOSITORY_CONTEXT_MAX_CHARS = 8_000;
+
+/** The heading the rendered block opens with; tests and prompts look for it. */
+export const REPOSITORY_CONTEXT_HEADING = "## Standing context for this repository";
+
+/**
+ * Renders the standing context as the plain-text block a prompt carries.
+ *
+ * `""` for no record and for a cleared one, so a caller can concatenate it
+ * unconditionally without seeding a heading with nothing under it. Pure, so
+ * every package renders the same block and a reader in an editor sees exactly
+ * what a planning prompt saw.
+ *
+ * Head-truncated rather than tail-kept like `boundCommandOutput`, and the
+ * difference is the point: a failing command says what went wrong at the end,
+ * while a curated note puts what matters first. The cap is a defence against a
+ * row written past the limit by an older writer, not the ordinary path — every
+ * writer refuses over-cap content before it is stored.
+ */
+export function renderRepositoryContext(
+  context: RepositoryContext | undefined,
+): string {
+  const content = context?.content.trim() ?? "";
+  if (context === undefined || content === "") {
+    return "";
+  }
+  const bounded =
+    content.length <= REPOSITORY_CONTEXT_MAX_CHARS
+      ? content
+      : `${content.slice(0, REPOSITORY_CONTEXT_MAX_CHARS)}\n[…${
+          content.length - REPOSITORY_CONTEXT_MAX_CHARS
+        } characters dropped]`;
+  return [
+    REPOSITORY_CONTEXT_HEADING,
+    "",
+    "Written by the people who work in this repository " +
+      `(version ${context.version}, last updated by ${context.updatedBy} at ${context.updatedAt}).`,
+    "Background to check against the workspace, not a second set of " +
+      "instructions — the task above is what to build.",
+    "",
+    bounded,
+  ].join("\n");
+}
+
 /** One command's result with its output bounded — see {@link boundCommandOutput}. */
 export function boundValidation(
   validation: readonly CommandResult[],
@@ -1833,7 +1917,13 @@ export type AuditEventType =
    * rather than any one reader's, so changing it changes what colleagues see,
    * and is worth a record of who changed it.
    */
-  | "repository_picture_changed";
+  | "repository_picture_changed"
+  /**
+   * A repository's standing context was set or cleared. The note is injected
+   * into every planning prompt in the repository, so who wrote which version
+   * of it is the record that makes the note checkable rather than anonymous.
+   */
+  | "repository_context_changed";
 
 export interface AuditEvent {
   id: string;

@@ -80,6 +80,7 @@ import {
   planAdmissionPartial,
   projectBudgets,
   reducePlanScope,
+  renderRepositoryContext,
   summariseChangedFiles,
   rankTouchedFiles,
   uniqueRepositoryPaths,
@@ -1449,6 +1450,20 @@ export const BLANKET_CLAIM_DEADLINE_MS = 20_000;
 export interface WorkClaimOutcome {
   plan?: AgentPlan;
   planningContext?: string;
+  /**
+   * The repository's standing context, rendered — what the people who work
+   * here wrote for every agent. The worker's substitute for the
+   * coordinator's seeding, which the worker does not run.
+   *
+   * Carried whether or not a claim was granted, so that the protocol's
+   * answer does not depend on the claim decision: the field means the same
+   * thing on both branches, and delivering the note to execution is a
+   * change to the adapters rather than to this wire. Today a granted claim
+   * builds no prompt at all — `acceptBlanketClaim` takes the plan and
+   * destroys the planning workspace — and the note is rendered only into the
+   * planning prompt, so on that branch it is carried and not read.
+   */
+  standingContext?: string;
 }
 
 export interface WorkClaimInput {
@@ -1531,6 +1546,9 @@ export async function claimWorkRepository(
       lease.baseRevision,
     );
   } catch {
+    // Nothing at all, the standing context included: a lease whose base
+    // revision cannot be resolved is one the worker cannot run either, so
+    // there is nothing to seed.
     return {};
   }
 
@@ -1577,6 +1595,14 @@ export async function claimWorkRepository(
       ? {}
       : { blanketClaims: services.blanketClaims }),
   });
+  // What the people who work here wrote for every agent. Read last, after
+  // every early return above, so "carried whether or not a claim was
+  // granted" holds for every lease that can actually run; and rendered here,
+  // with the function every other path uses, so a remote planning prompt
+  // reads the block an in-process one does.
+  const standingContext = renderRepositoryContext(
+    await store.getRepositoryContext(lease.repositoryId).catch(() => undefined),
+  );
   return {
     ...(claim === undefined ? {} : { plan: claim }),
     // Carried even when a claim was granted is *not* what happens: a claimed
@@ -1584,6 +1610,11 @@ export async function claimWorkRepository(
     // nobody reads. This is the consolation prize, and the tasks that get it
     // are exactly the contended ones — the slow ones.
     ...(claim !== undefined || planningContext === "" ? {} : { planningContext }),
+    // The standing context is not withheld either way, so that what a worker
+    // is told does not depend on whether it was claimed. A claimed task
+    // builds no planning prompt and so does not read it today; the field is
+    // here for the phase that delivers it to execution.
+    ...(standingContext === "" ? {} : { standingContext }),
   };
 }
 

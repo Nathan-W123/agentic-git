@@ -33,7 +33,8 @@ validation → promotion). Which one runs is chosen per agent in
 Every adapter is handed the same two things beside the objective, and treats
 them as background rather than instructions: `task.context`, the conversation
 the task was asked inside, and `priorContext`, that conversation again followed
-by what earlier work in the repository left behind. The vendor adapters render
+by the repository's [standing context](repository-standing-context.md) and
+what earlier work in the repository left behind. The vendor adapters render
 `priorContext` into the planning prompt and `task.context` into every
 execution, replan and clarification round. A `generic-cli` agent writes its own
 prompts, so it receives them raw, as the optional `context` and `priorContext`

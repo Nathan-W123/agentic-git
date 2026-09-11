@@ -15,6 +15,7 @@ import type {
   McpServerTransport,
   PlanAdmission,
   ProjectId,
+  RepositoryContext,
   ResourceLease,
   ScopeChangeDecision,
   ScopeChangeRequest,
@@ -1421,6 +1422,32 @@ export interface AuditorCursor {
   updatedAt: string;
 }
 
+/**
+ * A save of a repository's standing context — see `RepositoryContext` in
+ * shared-types for what the note is and why a person, not a projection,
+ * writes it.
+ */
+export interface SaveRepositoryContextInput {
+  repositoryId: string;
+  /** `""` clears the note. The row stays, so `version` keeps counting. */
+  content: string;
+  updatedBy: UserId;
+  /** Defaults to now. */
+  updatedAt?: string;
+  /**
+   * The version the writer read, `0` for "there was none". When given, the
+   * save applies only if that is still current; absent, the save is
+   * unconditional — the shape a slash command wants, where nobody read a
+   * version first.
+   */
+  expectedVersion?: number;
+}
+
+export type SaveRepositoryContextResult =
+  | { outcome: "saved"; context: RepositoryContext }
+  /** Somebody saved since `expectedVersion` was read; `current` is theirs. */
+  | { outcome: "stale"; current: RepositoryContext | undefined };
+
 export interface AppendChannelMessageInput {
   repositoryId: string;
   /**
@@ -2552,9 +2579,9 @@ export interface CoordinationStore {
    * Removes a repository registration and everything scoped to it.
    *
    * That is the shared channel (messages, replies, reactions, per-agent
-   * overrides and membership), the per-repository access grants, and the
-   * execution history: the queue, runs and their children, approvals, and
-   * leases.
+   * overrides and membership), the per-repository access grants, the
+   * auditor's cursor and the standing context, and the execution history:
+   * the queue, runs and their children, approvals, and leases.
    *
    * History used to refuse deletion, on the reasoning that a run is a record
    * and a record should not be thrown away. In production that surfaced as a
@@ -3405,6 +3432,30 @@ export interface CoordinationStore {
    * audits the gap rather than starting over.
    */
   setAuditorPaused(repositoryId: string, paused: boolean): Promise<void>;
+
+  /**
+   * The standing context people have written for a repository, if any.
+   *
+   * A cleared note comes back as a record with `content: ""` rather than
+   * `undefined`: the version has to keep counting across a clear, or an
+   * editor holding version 3 could pin a write against a row that was
+   * cleared and rewritten as a fresh version 1.
+   */
+  getRepositoryContext(
+    repositoryId: string,
+  ): Promise<RepositoryContext | undefined>;
+  /**
+   * Sets or clears a repository's standing context, bumping its version.
+   *
+   * Version-pinned when `expectedVersion` is given: the write is refused as
+   * `stale` if anyone saved in between, and the caller re-reads. Read and
+   * write happen under one lock on every backend, so two writers cannot both
+   * be told they won. A save of `""` keeps the row — see
+   * {@link CoordinationStore.getRepositoryContext}.
+   */
+  saveRepositoryContext(
+    input: SaveRepositoryContextInput,
+  ): Promise<SaveRepositoryContextResult>;
 
   /**
    * Whether this store can answer a query right now.

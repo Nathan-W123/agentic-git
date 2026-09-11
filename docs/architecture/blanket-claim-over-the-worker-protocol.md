@@ -123,7 +123,7 @@ they already do.
 
 ### The claim itself
 
-    POST /workers/leases/:id/claim   → AgentPlan | 204
+    POST /workers/leases/:id/claim   → { plan?, planningContext?, standingContext? } | 204
 
 Called by the worker after `bundle` and before `submitPlan`. The gateway runs the
 existing `claimRepository`, including the scope estimate — which needs a symbol
@@ -135,8 +135,15 @@ index at that revision, and is deliberately the expensive step:
 
 That trade was made for a local agent whose round trip was in-process. For a
 desktop worker the planning round trip is *more* expensive, not less, so the trade
-gets better, not worse. A 204 means the conditions were not met and the worker
-plans exactly as it does today.
+gets better, not worse. A 204 means the conditions were not met and there was
+nothing else to say — no plan and no context of any kind — so the worker plans
+exactly as it does today. A 200 without `plan` is not a claim: it carries
+`planningContext` (where to start reading; withheld when a claim was granted,
+because a claimed task never plans) and `standingContext` (the repository's
+curated note, carried claimed or not, so the answer's shape does not depend on
+the claim decision — today a claimed task builds no prompt to render it into;
+see [repository-standing-context.md](repository-standing-context.md)).
+The worker reads `plan` by presence and tolerates any subset of the rest.
 
 ### Version
 

@@ -23,9 +23,14 @@
 
 import type {
   CoordinationStore,
+  SaveRepositoryContextResult,
   StoredRepository,
   SubmittedTask,
 } from "@coord/persistence";
+import {
+  REPOSITORY_CONTEXT_MAX_CHARS,
+  renderRepositoryContext,
+} from "@coord/shared-types";
 
 import {
   McpArgumentError,
@@ -139,6 +144,22 @@ export interface McpToolDeps {
   cancelTask(taskId: string): Promise<
     "cancelled" | "not_found" | "not_yours" | "already_finished"
   >;
+  /**
+   * Sets or clears a repository's standing context, under the same gate the
+   * HTTP route applies (`manage_project`, or the repository's creator).
+   *
+   * The only dependency the context tools add: reading goes through `store`
+   * after `findRepository`, which already limits a caller to repositories
+   * `listRepositories` showed them. Writing is the authorized act, so it
+   * lives behind the gateway, and `"forbidden"` is the answer the gate gives
+   * rather than an exception the tool would have to translate.
+   */
+  setRepositoryContext(input: {
+    projectId: string;
+    repositoryId: string;
+    content: string;
+    expectedVersion?: number;
+  }): Promise<SaveRepositoryContextResult | "forbidden">;
 }
 
 /** A question an agent is holding a run open for. */
@@ -729,7 +750,152 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
     },
   };
 
-  return [listRepositories, submitTask, taskStatus, cancelTask, answerQuestion];
+  const getRepositoryContext: McpTool = {
+    name: "get_repository_context",
+    title: "Read a repository's standing context",
+    description:
+      "Shows the standing context for a Kumi repository: the note the people " +
+      "who work there wrote for every agent — conventions, the validation " +
+      "commands that work, known pitfalls. Every task in the repository is " +
+      "handed it before it plans.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repository: {
+          type: "string",
+          description: "The repository name, as list_repositories shows it.",
+        },
+      },
+      required: ["repository"],
+      additionalProperties: false,
+    },
+    async run(args) {
+      deps.assertScope("view");
+      const target = await findRepository(
+        deps,
+        requiredString(args, "repository", 200),
+      );
+      const found = await deps.store.getRepositoryContext(
+        target.repository.id,
+      );
+      const rendered = renderRepositoryContext(found);
+      return mcpText(
+        rendered === ""
+          ? `Nothing is set for ${repositoryLabel(target)}. ` +
+              "set_repository_context writes one."
+          : rendered,
+      );
+    },
+  };
+
+  const setRepositoryContext: McpTool = {
+    name: "set_repository_context",
+    title: "Set a repository's standing context",
+    description:
+      "Sets or clears the standing context for a Kumi repository — the note " +
+      "every agent planning there is handed. Keep it short: conventions, " +
+      "the validation commands that actually work, known pitfalls. An " +
+      "empty content clears it. Pass expected_version (from " +
+      "get_repository_context) to refuse the write if somebody else saved " +
+      "first. Needs the manage_project permission, or to have created the " +
+      "repository.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repository: {
+          type: "string",
+          description: "The repository name, as list_repositories shows it.",
+        },
+        content: {
+          type: "string",
+          description:
+            `The note, at most ${REPOSITORY_CONTEXT_MAX_CHARS} characters. ` +
+            "Empty clears it.",
+        },
+        expected_version: {
+          type: "integer",
+          description:
+            "The version you last read; the write is refused if it has " +
+            "moved. 0 means there was none.",
+        },
+      },
+      required: ["repository", "content"],
+      additionalProperties: false,
+    },
+    async run(args) {
+      deps.assertScope("manage_project");
+      const target = await findRepository(
+        deps,
+        requiredString(args, "repository", 200),
+      );
+      // Read by hand rather than through `requiredString`, which refuses an
+      // empty string, or `optionalString`, which folds one to absent: an
+      // empty note is the clear, and it has to be told apart from the
+      // argument being left out.
+      const raw = args["content"];
+      if (typeof raw !== "string") {
+        throw new McpArgumentError('"content" is required and must be text');
+      }
+      const content = raw.trim();
+      // Refused here rather than stored and truncated later: the cap is the
+      // whole promise that the note stays small enough to pay for on every
+      // planning prompt, and a writer is the one party that can shorten it.
+      if (content.length > REPOSITORY_CONTEXT_MAX_CHARS) {
+        throw new McpArgumentError(
+          `"content" is longer than ${REPOSITORY_CONTEXT_MAX_CHARS} characters`,
+        );
+      }
+      const version = args["expected_version"];
+      if (
+        version !== undefined &&
+        (typeof version !== "number" ||
+          !Number.isInteger(version) ||
+          version < 0)
+      ) {
+        throw new McpArgumentError(
+          '"expected_version" must be a non-negative whole number',
+        );
+      }
+      const outcome = await deps.setRepositoryContext({
+        projectId: target.projectId,
+        repositoryId: target.repository.id,
+        content,
+        ...(typeof version === "number" ? { expectedVersion: version } : {}),
+      });
+      if (outcome === "forbidden") {
+        return mcpRefusal(
+          `You cannot set the standing context for ${repositoryLabel(target)}: ` +
+            "that takes the manage_project permission, or having created the " +
+            "repository.",
+        );
+      }
+      if (outcome.outcome === "stale") {
+        return mcpRefusal(
+          "Somebody changed the standing context since you read it " +
+            `(it is now version ${outcome.current?.version ?? 0}). Call ` +
+            "get_repository_context and try again.",
+        );
+      }
+      return mcpText(
+        content === ""
+          ? `Cleared the standing context for ${repositoryLabel(target)} ` +
+              `(version ${outcome.context.version}).`
+          : `Standing context for ${repositoryLabel(target)} is now version ` +
+              `${outcome.context.version} (${content.length} characters). ` +
+              "Every task in this repository sees it from now on.",
+      );
+    },
+  };
+
+  return [
+    listRepositories,
+    submitTask,
+    taskStatus,
+    cancelTask,
+    answerQuestion,
+    getRepositoryContext,
+    setRepositoryContext,
+  ];
 }
 
 /** Exported for the gateway's own use when narrowing a task to its owner. */

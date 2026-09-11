@@ -1444,4 +1444,18 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE integrations ADD COLUMN IF NOT EXISTS replayed_from TEXT`,
     ],
   },
+  {
+    // See the SQLite copy for why.
+    version: 67,
+    name: "repository-standing-context",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS repository_contexts (
+         repository_id TEXT PRIMARY KEY,
+         content TEXT NOT NULL DEFAULT '',
+         updated_by TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         version INTEGER NOT NULL DEFAULT 1
+       )`,
+    ],
+  },
 ];

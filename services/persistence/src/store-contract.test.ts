@@ -653,6 +653,121 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a repository's standing context is versioned, pinnable, and its own row`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      assert.equal(await store.getRepositoryContext(REPOSITORY.id), undefined);
+
+      // The first save is version 1 and everything round-trips as written.
+      const first = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "Run `npm test` before reporting.",
+        updatedBy: "user_nathan",
+        updatedAt: "2026-09-01T10:00:00.000Z",
+      });
+      assert.equal(first.outcome, "saved");
+      assert.deepEqual(await store.getRepositoryContext(REPOSITORY.id), {
+        repositoryId: REPOSITORY.id,
+        content: "Run `npm test` before reporting.",
+        updatedBy: "user_nathan",
+        updatedAt: "2026-09-01T10:00:00.000Z",
+        version: 1,
+      });
+
+      // A second save moves the version on by one.
+      const second = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "Run `npm test`; the retry ceiling is in src/retry.ts.",
+        updatedBy: "user_sam",
+      });
+      assert.equal(second.outcome, "saved");
+      assert.equal(
+        second.outcome === "saved" ? second.context.version : undefined,
+        2,
+      );
+
+      // A save pinned to the version somebody read before the second save
+      // landed is refused, says what is current, and changes nothing.
+      const stale = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "overwriting what Sam wrote",
+        updatedBy: "user_nathan",
+        expectedVersion: 1,
+      });
+      assert.equal(stale.outcome, "stale");
+      assert.equal(
+        stale.outcome === "stale" ? stale.current?.version : undefined,
+        2,
+      );
+      const kept = await store.getRepositoryContext(REPOSITORY.id);
+      assert.equal(kept?.content, "Run `npm test`; the retry ceiling is in src/retry.ts.");
+      assert.equal(kept?.updatedBy, "user_sam");
+      assert.equal(kept?.version, 2);
+
+      // Pinned to the current version, it goes through.
+      const pinned = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "Pinned edit.",
+        updatedBy: "user_nathan",
+        expectedVersion: 2,
+      });
+      assert.equal(pinned.outcome, "saved");
+      assert.equal((await store.getRepositoryContext(REPOSITORY.id))?.version, 3);
+
+      // Clearing keeps the row and the count: an editor holding version 3
+      // must not be able to pin a write against a note that was cleared and
+      // rewritten as a fresh version 1.
+      const cleared = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "",
+        updatedBy: "user_nathan",
+      });
+      assert.equal(cleared.outcome, "saved");
+      const afterClear = await store.getRepositoryContext(REPOSITORY.id);
+      assert.equal(afterClear?.content, "");
+      assert.equal(afterClear?.version, 4);
+
+      // `saveRepository` is first-insert-wins and knows nothing of this row.
+      await store.saveRepository(REPOSITORY);
+      assert.equal((await store.getRepositoryContext(REPOSITORY.id))?.version, 4);
+
+      // Expecting "there was none" on a repository that has none is a match.
+      const OTHER = { id: "repo_2", path: "/other.git", branch: "main" };
+      await store.saveRepository(OTHER);
+      const fresh = await store.saveRepositoryContext({
+        repositoryId: OTHER.id,
+        content: "first note",
+        updatedBy: "user_nathan",
+        expectedVersion: 0,
+      });
+      assert.equal(fresh.outcome, "saved");
+      // And expecting one that is not there is stale, with nothing current.
+      const OTHER_TOO = { id: "repo_3", path: "/third.git", branch: "main" };
+      await store.saveRepository(OTHER_TOO);
+      const missing = await store.saveRepositoryContext({
+        repositoryId: OTHER_TOO.id,
+        content: "note",
+        updatedBy: "user_nathan",
+        expectedVersion: 1,
+      });
+      assert.equal(missing.outcome, "stale");
+      assert.equal(
+        missing.outcome === "stale" ? missing.current : "present",
+        undefined,
+      );
+
+      // Removing the repository takes the note with it, as it takes the
+      // auditor's cursor and the grants.
+      await store.removeRepository(REPOSITORY.id);
+      assert.equal(await store.getRepositoryContext(REPOSITORY.id), undefined);
+      assert.equal((await store.getRepositoryContext(OTHER.id))?.version, 1);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a replayed result remembers what it was replayed from`, async () => {
     const { store, cleanup } = await backend.open();
     try {

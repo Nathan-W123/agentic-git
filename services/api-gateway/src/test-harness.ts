@@ -517,6 +517,13 @@ export async function startRuntime(
     /** Drops direct push support, as an older or limited deployment may. */
     withoutPushRepository?: boolean;
     /**
+     * Answers the worker claim route, standing in for `claimWorkRepository`
+     * in `worker-operations`. Absent for every other test, which is also
+     * what a deployment without the operation looks like: the route answers
+     * 204 and the worker plans as it always did.
+     */
+    claimWorkRepository?: ApiOperations["claimWorkRepository"];
+    /**
      * Drops every branch operation, as a deployment with no repository
      * access has — the case where a work channel cannot be created at all
      * and the route must say so rather than store one.
@@ -1478,6 +1485,9 @@ export async function startRuntime(
   }
   if (options.withoutPushRepository === true) {
     delete operations.pushRepository;
+  }
+  if (options.claimWorkRepository !== undefined) {
+    operations.claimWorkRepository = options.claimWorkRepository;
   }
   if (options.withoutBranches === true) {
     // All five together, because that is how a deployment without repository

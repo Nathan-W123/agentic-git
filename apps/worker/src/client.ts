@@ -136,12 +136,16 @@ export interface WorkerClientOptions {
  * `plan` is the repository itself — a claim, after which there is nothing to
  * plan. `planningContext` is the cheaper half: where the objective's words
  * appear in the index and where the repository has been working lately, which
- * is what stops an agent searching for something already computed. Both empty
- * is the ordinary answer and means "plan exactly as before".
+ * is what stops an agent searching for something already computed.
+ * `standingContext` is what the people who work in the repository wrote for
+ * every agent, and comes claim or no claim. All empty is the ordinary answer
+ * and means "plan exactly as before".
  */
 export interface PreparedWork {
   plan?: AgentPlan;
   planningContext?: string;
+  /** The repository's standing context, already rendered for a prompt. */
+  standingContext?: string;
 }
 
 /** One dirty path in a holder's workspace, as the control plane reads it. */

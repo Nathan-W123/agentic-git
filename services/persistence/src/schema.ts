@@ -1901,6 +1901,36 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "integration-replayed-from",
     statements: [`ALTER TABLE integrations ADD COLUMN replayed_from TEXT`],
   },
+  {
+    /**
+     * The standing context: a short note the people who work in a
+     * repository write for every agent that plans there — conventions, the
+     * validation commands that actually work, the pitfalls. Every task in
+     * the repository is handed it as prior context, on the in-process path,
+     * over the worker claim route, and in an editor's brief.
+     *
+     * Its own table rather than a column on `repositories`. `listRepositories`
+     * is `SELECT *` on every rail load and already carries a 256 KiB picture,
+     * and a versioned, attributed note has facts of its own — who, when, and
+     * which version an editor is pinning a write to. Keyed by repository like
+     * `auditor_cursors` (migration 22) and removed by the same cascade.
+     *
+     * `version` starts at 1 and rises by one per save, clears included: a
+     * clear that deleted the row would let a stale editor pin a write
+     * against a rewritten note that happens to be version 1 again.
+     */
+    version: 67,
+    name: "repository-standing-context",
+    statements: [
+      `CREATE TABLE repository_contexts (
+         repository_id TEXT PRIMARY KEY,
+         content TEXT NOT NULL DEFAULT '',
+         updated_by TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         version INTEGER NOT NULL DEFAULT 1
+       )`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

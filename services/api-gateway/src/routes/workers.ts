@@ -736,7 +736,9 @@ export async function routeWorkers(
       // route existed, so every reason to say no — blanket claims switched
       // off, somebody else in the repository, an objective the estimator
       // could not anchor, a control plane too old to have the operation —
-      // is the same answer: 204, carry on.
+      // is the same answer: 204, carry on. A 204 means no plan and no
+      // context of any kind; a 200 without `plan` is not a claim, only
+      // something worth reading before planning.
       const claimOperation = gw.options.operations.claimWorkRepository;
       const body = objectBody(await gw.readJson(request));
       const prepared =
@@ -756,7 +758,8 @@ export async function routeWorkers(
             });
       if (
         prepared.plan === undefined &&
-        (prepared.planningContext ?? "") === ""
+        (prepared.planningContext ?? "") === "" &&
+        (prepared.standingContext ?? "") === ""
       ) {
         response.writeHead(204).end();
         return true;
@@ -766,6 +769,9 @@ export async function routeWorkers(
         ...(prepared.planningContext === undefined
           ? {}
           : { planningContext: prepared.planningContext }),
+        ...(prepared.standingContext === undefined
+          ? {}
+          : { standingContext: prepared.standingContext }),
       });
       return true;
     }

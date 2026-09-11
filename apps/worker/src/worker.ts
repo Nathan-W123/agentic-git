@@ -1813,15 +1813,23 @@ export class Worker {
     // conversation this was asked inside", so a file list or a recent-touch
     // hint placed there is presented to the model as something somebody
     // said. `priorContext` is read by the planning prompt alone, labelled as
-    // notes to verify, which is the right frame for both. The thread goes
-    // first in it because it is about this request; the planning hints are
-    // about the repository.
+    // notes to verify, which is the right frame for all of it. The thread
+    // goes first in it because it is about this request; the repository's
+    // standing context — the note its people wrote, which the claim route
+    // carries as the worker's substitute for the coordinator's seeding —
+    // comes next, and the planning hints last, exactly the in-process order.
+    // The note rides only here, never in `task.context`, so no adapter ever
+    // presents it as something said in the conversation.
     //
     // This used to join the two and pass the join in both slots. An adapter
     // cannot take the join apart again, so the split has to happen here,
     // exactly as the in-process coordinator does it.
     const conversation = assignment.task.context?.trim() ?? "";
-    const priorContext = [conversation, prepared.planningContext ?? ""]
+    const priorContext = [
+      conversation,
+      prepared.standingContext ?? "",
+      prepared.planningContext ?? "",
+    ]
       .filter((part) => part !== "")
       .join("\n\n");
     const session = await adapter.startTask({

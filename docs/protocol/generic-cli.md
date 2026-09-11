@@ -49,10 +49,13 @@ fields, both optional and both omitted rather than sent empty:
   control plane stores it on the task. It is what "the same thing" or "that
   file" in the objective refers to. Background, not a second set of
   instructions; absent for a task that was not asked in a thread.
-- `priorContext` — notes for planning: the same conversation first, then what
-  the control plane already knows about the repository (handoffs from earlier
-  tasks, files likely to be involved, what has been touched lately). Advisory:
-  it was true at some earlier revision, and the workspace is what is true now.
+- `priorContext` — notes for planning: the same conversation first, then the
+  repository's standing context (a note its people wrote and stand behind —
+  see [repository-standing-context.md](../architecture/repository-standing-context.md)),
+  then what the control plane already knows about the repository (files
+  likely to be involved, what has been touched lately, handoffs from earlier
+  tasks). Advisory: it was true at some earlier revision, and the workspace
+  is what is true now.
 
 An agent written before these fields existed sees exactly the message it
 always saw whenever there is nothing to carry, and may ignore them otherwise.

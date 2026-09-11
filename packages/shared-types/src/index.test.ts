@@ -40,6 +40,10 @@ import {
   type PlanAdmission,
   boundCommandOutput,
   summariseGrants,
+  renderRepositoryContext,
+  REPOSITORY_CONTEXT_HEADING,
+  REPOSITORY_CONTEXT_MAX_CHARS,
+  type RepositoryContext,
   type ResourceLease,
 } from "./index.js";
 
@@ -1145,4 +1149,61 @@ test("no two call signs are the same deity under two spellings", () => {
   // And no plain duplicates either, in any casing.
   const lower = AGENT_CALL_SIGNS.map((name) => name.toLowerCase());
   assert.equal(new Set(lower).size, lower.length);
+});
+
+test("a repository's standing context renders as one attributed block, or as nothing", () => {
+  // Nothing set and nothing said both render as "", so a caller can join it
+  // into a prompt unconditionally without seeding a heading with no note
+  // under it. A cleared note is a row that still exists — the version keeps
+  // counting — and it must read as nothing set all the same.
+  assert.equal(renderRepositoryContext(undefined), "");
+  assert.equal(
+    renderRepositoryContext({
+      repositoryId: "repo_1",
+      content: "",
+      updatedBy: "user_nathan",
+      updatedAt: "2026-09-01T10:00:00.000Z",
+      version: 2,
+    }),
+    "",
+  );
+
+  const note: RepositoryContext = {
+    repositoryId: "repo_1",
+    content: "Run `npm test` before reporting.\nThe retry ceiling is in src/retry.ts.",
+    updatedBy: "user_nathan",
+    updatedAt: "2026-09-01T10:00:00.000Z",
+    version: 3,
+  };
+  const rendered = renderRepositoryContext(note);
+  assert.ok(rendered.startsWith(REPOSITORY_CONTEXT_HEADING), rendered);
+  // Who stands behind it, and which version: the two facts that make a
+  // human-written block checkable where a summary is not.
+  assert.match(rendered, /version 3/u);
+  assert.match(rendered, /user_nathan/u);
+  assert.match(rendered, /2026-09-01T10:00:00\.000Z/u);
+  assert.match(rendered, /not a second set of instructions/u);
+  assert.ok(rendered.endsWith(note.content), rendered);
+});
+
+test("an over-long standing context keeps its head, not its tail", () => {
+  // The opposite of `boundCommandOutput`, on purpose: a failing command says
+  // what went wrong at the end, a curated note puts what matters first. The
+  // cap is a defence against a row written past the limit, not a path any
+  // writer should reach.
+  const firstLine = "FIRST: the thing that matters most.";
+  const content = `${firstLine}\n${"x".repeat(REPOSITORY_CONTEXT_MAX_CHARS)}`;
+  const rendered = renderRepositoryContext({
+    repositoryId: "repo_1",
+    content,
+    updatedBy: "user_nathan",
+    updatedAt: "2026-09-01T10:00:00.000Z",
+    version: 1,
+  });
+  assert.match(rendered, /FIRST: the thing that matters most\./u);
+  const dropped = content.length - REPOSITORY_CONTEXT_MAX_CHARS;
+  assert.ok(rendered.endsWith(`[…${dropped} characters dropped]`), rendered.slice(-80));
+  // What survives is exactly the cap: the head, then the trailer.
+  const body = rendered.slice(rendered.indexOf(firstLine));
+  assert.equal(body.indexOf("\n[…"), REPOSITORY_CONTEXT_MAX_CHARS);
 });
