@@ -38,6 +38,10 @@ import {
   type JvmLanguage,
 } from "./jvm-imports.js";
 import { resolvePythonImport } from "./python-imports.js";
+import {
+  resolveCSharpLoad,
+  resolveInclude,
+} from "./native-imports.js";
 import { resolveRustModule, resolveRustUse } from "./rust-imports.js";
 import {
   resolvePhpRequire,
@@ -62,6 +66,8 @@ export interface ResolutionContext {
   goModuleRoots: ReadonlyMap<string, string>;
   /** What each `.go` file says about itself: its package, and its imports. */
   goFacts: ReadonlyMap<string, GoFileFacts>;
+  /** Path suffix to the one file carrying it, for C's include search. */
+  pathSuffixes: ReadonlyMap<string, string>;
   /** Ruby's load-path roots, derived from layout alone. */
   rubyRoots: readonly string[];
   /** Lowercased PHP class name to its declaring file. */
@@ -149,6 +155,21 @@ const RESOLVERS: Partial<Record<SupportedLanguage, ImportResolver>> = {
           files: context.files,
           types: context.phpTypes,
         }),
+  c: (fromFile, specifier, context) =>
+    resolveInclude(fromFile, specifier, {
+      files: context.files,
+      suffixes: context.pathSuffixes,
+    }),
+  cpp: (fromFile, specifier, context) =>
+    resolveInclude(fromFile, specifier, {
+      files: context.files,
+      suffixes: context.pathSuffixes,
+    }),
+  csharp: (fromFile, specifier, context) =>
+    resolveCSharpLoad(fromFile, specifier, {
+      files: context.files,
+      suffixes: context.pathSuffixes,
+    }),
   python: (fromFile, specifier, context) => {
     const hit = resolvePythonImport(fromFile, specifier, {
       files: context.files,

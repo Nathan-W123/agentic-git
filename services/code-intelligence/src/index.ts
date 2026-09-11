@@ -6,6 +6,11 @@ import {
   type ResolutionContext,
 } from "./import-resolution.js";
 import { goModuleRoots, readGoFile, type GoFileFacts } from "./go-imports.js";
+import {
+  pathSuffixes,
+  readCSharpLoads,
+  readIncludes,
+} from "./native-imports.js";
 import { readRustFile } from "./rust-imports.js";
 import {
   phpTypes,
@@ -258,6 +263,9 @@ const MANIFESTS = new Set(["go.mod"]);
 
 /** The languages whose imports name a type rather than a path. */
 const JVM_LANGUAGES = new Set<SupportedLanguage>(["java", "kotlin", "scala"]);
+
+/** The languages whose dependency is a `#include` with a path in it. */
+const C_LANGUAGES = new Set<SupportedLanguage>(["c", "cpp"]);
 
 /** Every path by its file name, for Java's one reliable layout convention. */
 function byBasename(files: ReadonlySet<string>): Map<string, string[]> {
@@ -1324,6 +1332,24 @@ export class CodeIntelligenceService {
                 });
               }
             }
+            if (C_LANGUAGES.has(language)) {
+              // Only a quoted include names a path. An angled one names a
+              // search-path header, and the search path is a compiler flag
+              // there is nothing here to read.
+              const includes = readIncludes(source);
+              if (includes !== undefined) {
+                scanned.imports = includes;
+              }
+            }
+            if (language === "csharp") {
+              // `using A.B` names a namespace, which is spread across as
+              // many files as anybody likes and so has no file to point at.
+              // `#load` is a real path.
+              const loads = readCSharpLoads(source);
+              if (loads !== undefined) {
+                scanned.imports = loads;
+              }
+            }
             if (language === "rust") {
               // Two kinds of dependency and `mod` is the valuable one: it
               // literally names a file. A `use` path is a walk through a
@@ -1428,6 +1454,7 @@ export class CodeIntelligenceService {
       goModuleRoots: goModuleRoots(manifests),
       goFacts,
       rubyRoots: rubyLoadRoots(allPaths),
+      pathSuffixes: pathSuffixes(allPaths),
       phpTypes: phpTypes(phpUnits),
       jvm: {
         declarations: jvmDeclarations(jvmDeclared),
