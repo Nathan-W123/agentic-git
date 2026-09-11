@@ -1380,16 +1380,19 @@ export class CodeIntelligenceService {
                 scanned.imports = facts.imports;
               }
             }
-            slots.push(scanned);
-          } else if (language === "php") {
-            const scanned = analyzeScannedFile(filePath, source, language, undefined);
-            const unit = readPhpFile(source);
-            if (unit !== undefined) {
-              phpUnits.set(filePath, unit);
-              scanned.imports = [
-                ...unit.uses.map((name) => `use:${name}`),
-                ...unit.requires.map((name) => `req:${name}`),
-              ];
+            if (language === "php") {
+              // Inside the brace branch, not beside it: PHP is a brace
+              // language for the scanner, so a sibling `else if` after this
+              // one was dead code, and every PHP file indexed with no
+              // imports at all while the unit tests for the reader passed.
+              const unit = readPhpFile(source);
+              if (unit !== undefined) {
+                phpUnits.set(filePath, unit);
+                scanned.imports = [
+                  ...unit.uses.map((name) => `use:${name}`),
+                  ...unit.requires.map((name) => `req:${name}`),
+                ];
+              }
             }
             slots.push(scanned);
           } else {

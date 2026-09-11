@@ -1273,3 +1273,75 @@ test("a Kotlin repository resolves an import to the file declaring the type", as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("every scanned language puts its imports into the graph, not just its reader's tests", async () => {
+  // The readers and resolvers each have a unit suite, and PHP's passed while
+  // no PHP file ever got an import: its branch in the scan loop sat behind
+  // the brace-language branch that already matched it, and was dead. This
+  // goes through the front door for every language whose resolution the
+  // unit suites cover, one repository, one edge each, so a wiring mistake
+  // fails here even when every piece it wires is fine.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-wiring-"));
+  try {
+    const source = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    const files: Record<string, string> = {
+      "rb/lib/greeter.rb": "class Greeter\nend\n",
+      "rb/lib/app.rb": 'require_relative "greeter"\nclass App\nend\n',
+      "php/src/Money.php": "<?php\nnamespace Acme;\nclass Money {}\n",
+      "php/src/App.php":
+        "<?php\nnamespace Acme\\App;\nuse Acme\\Money;\nclass App {}\n",
+      // A crate root is only a crate root beside a manifest.
+      "rs/Cargo.toml": '[package]\nname = "rs"\n',
+      "rs/src/lib.rs": "mod util;\n",
+      "rs/src/util.rs": "pub fn util() {}\n",
+      "c/main.c": '#include "util.h"\nint main(void) { return util(); }\n',
+      "c/util.h": "int util(void);\n",
+      "cpp/main.cpp": '#include "lib.hpp"\nint main() { return 0; }\n',
+      "cpp/lib.hpp": "int lib();\n",
+      "cs/Program.cs": '#load "Helpers.cs"\nclass Program {}\n',
+      "cs/Helpers.cs": "static class Helpers {}\n",
+      "java/util/Money.java": "package com.acme.util;\npublic class Money {}\n",
+      "java/app/Main.java":
+        "package com.acme.app;\nimport com.acme.util.Money;\npublic class Main {}\n",
+      "scala/util/Money.scala": "package com.acme.sutil\nobject Money {}\n",
+      "scala/app/Main.scala":
+        "package com.acme.sapp\nimport com.acme.sutil.Money\nobject Main {}\n",
+    };
+    for (const [relative, text] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+      await writeFile(path.join(source, relative), text);
+    }
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      "wiring",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+
+    const expected: Array<[string, string]> = [
+      ["rb/lib/app.rb", "rb/lib/greeter.rb"],
+      ["php/src/App.php", "php/src/Money.php"],
+      ["rs/src/lib.rs", "rs/src/util.rs"],
+      ["c/main.c", "c/util.h"],
+      ["cpp/main.cpp", "cpp/lib.hpp"],
+      ["cs/Program.cs", "cs/Helpers.cs"],
+      ["java/app/Main.java", "java/util/Money.java"],
+      ["scala/app/Main.scala", "scala/util/Money.scala"],
+    ];
+    const missing = expected.filter(
+      ([from, to]) =>
+        !index.edges.some(
+          (edge) =>
+            edge.kind === "import" && edge.fromFile === from && edge.toFile === to,
+        ),
+    );
+    assert.deepEqual(missing, [], "every language's import should become an edge");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
