@@ -152,9 +152,20 @@ export function claimFromChangeSet(input: {
   contracts?: {
     shapes: readonly ClaimedShape[];
   };
+  /**
+   * Which of the recorded names the branch actually changed against
+   * canonical; see {@link movedAgainstCanonical}. Left out when nobody
+   * compared, and recorded as left out: the first version of this took it
+   * in and did not write it, so every claim read as unmeasured and the
+   * fast path was refused on presence alone.
+   */
+  movedResources?: MovedResources;
 }): RecordBranchClaimInput {
   const observed = input.resources;
   return {
+    ...(input.movedResources === undefined
+      ? {}
+      : { movedResources: input.movedResources }),
     repositoryId: input.repositoryId,
     branch: input.branch,
     taskId: input.changeSet.taskId,

@@ -20,6 +20,7 @@ import {
   createId,
   ROLE_CONTEXT_PREFIX,
   type AgentPlan,
+  type CanonicalVersion,
   type ChangeSet,
   type FilePatch,
   type ReplanRequest,
@@ -27,8 +28,16 @@ import {
   type ScopeChangeRequest,
   type TaskDefinition,
 } from "@coord/shared-types";
+import {
+  CodeIntelligenceService,
+  type IndexedFile,
+  type RepositoryIndex,
+} from "@coord/code-intelligence";
 import { SqliteCoordinationStore } from "@coord/persistence";
-import type { CoordinationStore } from "@coord/persistence";
+import type {
+  CoordinationStore,
+  RecordBranchClaimInput,
+} from "@coord/persistence";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -3795,4 +3804,155 @@ test("a withheld symbol costs its hunks, not the whole file", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a contract in a file canonical could not read is not measured, and a branch that could not read its own falls back to the plan", async () => {
+  // The claim written when work lands on a branch compares each of the
+  // branch's shapes against canonical's digest for it. Canonical's map was
+  // built from whatever its index held, so a file canonical could not read
+  // — the interpreter down while it was indexed, the file past the budget —
+  // made every shape in it an arrival: recorded `moved: false`, and the
+  // blanket fast path granted with a changed contract sitting on the branch.
+  // "Nobody looked" has to be recorded as nobody having looked.
+  const shape = (type: string): IndexedFile["exportedShapes"][number] => ({
+    symbol: "f",
+    kind: "function",
+    shape: `(a: ${type}) -> ${type}`,
+    digest: `digest-${type}`,
+  });
+  const libPy = (overrides: Partial<IndexedFile>): IndexedFile => ({
+    path: "app/lib.py",
+    language: "python",
+    bytes: 40,
+    symbols: ["f"],
+    exportedSymbols: ["f"],
+    exportedShapes: [shape("int")],
+    symbolRanges: [{ name: "f", startLine: 1, endLine: 2 }],
+    symbolCalls: [],
+    imports: [],
+    dependencies: [],
+    referencedSymbols: [],
+    apis: [],
+    schemas: [],
+    configKeys: [],
+    tests: [],
+    services: [],
+    ...overrides,
+  });
+  const indexAt = (revision: string, files: IndexedFile[]): RepositoryIndex => ({
+    repositoryId: "repo_claims",
+    revision,
+    generatedAt: "",
+    files,
+    edges: [],
+    paths: ["app/lib.py"],
+    truncated: false,
+    skippedFiles: 0,
+  });
+  const unread = libPy({
+    symbols: [],
+    exportedSymbols: [],
+    exportedShapes: [],
+    symbolRanges: [],
+    symbolRangesUnknown: true,
+    exportedShapesUnknown: true,
+  });
+  const readable = libPy({});
+  const changed = libPy({ exportedShapes: [shape("str")] });
+
+  class FixedIntelligence extends CodeIntelligenceService {
+    public constructor(private readonly indexes: ReadonlyMap<string, RepositoryIndex>) {
+      super(new RepositoryService());
+    }
+    public override async index(
+      _repository: CanonicalRepository,
+      revision: string,
+    ): Promise<RepositoryIndex> {
+      const index = this.indexes.get(revision);
+      if (index === undefined) {
+        throw new Error(`no index for ${revision}`);
+      }
+      return structuredClone(index);
+    }
+  }
+  class FixedRepositories extends RepositoryService {
+    public override async getCanonicalVersion(
+      repository: CanonicalRepository,
+    ): Promise<CanonicalVersion> {
+      return { sequence: 1, revision: "canon", branch: repository.branch, createdAt: "" };
+    }
+  }
+  const changeSet: ChangeSet = {
+    id: "cs_1",
+    taskId: "task_claim",
+    baseVersion: 1,
+    baseRevision: "canon",
+    patches: [{ path: "app/lib.py", status: "modified", patch: "@@ -1 +1 @@\n-a\n+b\n" }],
+    commandsRun: [],
+    tests: [],
+    dependenciesChanged: [],
+    symbolsChanged: ["as_the_agent_said"],
+    riskAssessment: { level: "low", reasons: [] },
+    agentExplanation: "",
+    createdAt: "",
+  };
+  const recorded = async (
+    canonical: RepositoryIndex,
+    branch: RepositoryIndex,
+  ): Promise<RecordBranchClaimInput> => {
+    const claims: RecordBranchClaimInput[] = [];
+    const repositories = new FixedRepositories();
+    const coordinator = new Coordinator({
+      repositories,
+      workspaces: new GitWorktreeWorkspaceManager(repositories.getGitClient()),
+      intelligence: new FixedIntelligence(new Map([["canon", canonical], ["tip", branch]])),
+      store: {
+        getRepository: async () => ({ branch: "main" }),
+        recordBranchClaim: async (claim: RecordBranchClaimInput) => {
+          claims.push(claim);
+          return claim;
+        },
+      } as unknown as CoordinationStore,
+    });
+    // The private method itself: the decision this pins is inside a closure
+    // that only a whole integrated run reaches, and the run would need the
+    // interpreter to fail on one revision and not the next.
+    await (
+      coordinator as unknown as {
+        holdOnBranch(
+          input: { repository: CanonicalRepository },
+          result: { changeSet: ChangeSet; plan?: AgentPlan },
+          integration: { canonicalVersion: { revision: string } },
+        ): Promise<void>;
+      }
+    ).holdOnBranch(
+      { repository: { id: "repo_claims", path: "/nowhere", branch: "feature" } },
+      { changeSet },
+      { canonicalVersion: { revision: "tip" } },
+    );
+    assert.equal(claims.length, 1);
+    const claim = claims[0];
+    assert.ok(claim !== undefined);
+    return claim;
+  };
+
+  // Canonical read the file: the change is measured, and it moved.
+  const measured = await recorded(indexAt("canon", [readable]), indexAt("tip", [changed]));
+  assert.deepEqual(measured.shapes?.map((entry) => entry.moved), [true]);
+  assert.notEqual(measured.movedResources, undefined);
+
+  // Canonical could not: the same change is recorded as not compared — no
+  // mark on the shape, no moved lists — so the reader falls back to the
+  // presence test rather than to "nothing moved".
+  const unmeasured = await recorded(indexAt("canon", [unread]), indexAt("tip", [changed]));
+  assert.deepEqual(unmeasured.shapes?.map((entry) => entry.moved), [undefined]);
+  assert.equal(unmeasured.movedResources, undefined);
+  assert.deepEqual(unmeasured.symbols, ["f"]);
+
+  // The branch's own index could not read the file: nothing observed is
+  // recorded, and the claim is the plan's — here, the agent's own account.
+  const blind = await recorded(indexAt("canon", [readable]), indexAt("tip", [unread]));
+  assert.deepEqual(blind.shapes, []);
+  assert.deepEqual(blind.symbols, ["as_the_agent_said"]);
+  assert.equal(blind.movedResources, undefined);
 });

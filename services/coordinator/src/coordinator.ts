@@ -4864,6 +4864,16 @@ export class Coordinator {
       const canonical = { ...repository, branch: canonicalBranch };
       const version = await this.repositories.getCanonicalVersion(canonical);
       const index = await this.intelligence.index(canonical, version.revision);
+      // A file canonical could not read — the interpreter down while it was
+      // indexed, the file past the budget — is not a file canonical holds
+      // no contracts in, and a map built without it says exactly that:
+      // every shape the branch recorded there compared as an arrival, was
+      // written down as `moved: false`, and a contract the branch had
+      // genuinely changed sat behind a granted fast path. Nobody looked,
+      // and that is what gets recorded.
+      if (this.intelligence.unreadableIn(changedFiles, index).length > 0) {
+        return undefined;
+      }
       return {
         shapes: new Map(
           this.intelligence
@@ -4943,6 +4953,13 @@ export class Coordinator {
       const observed = await this.intelligence
         .index(input.repository, integration.canonicalVersion.revision)
         .then((index) => {
+          // The same rule as for canonical: a changed file this index could
+          // not read would be recorded as holding nothing, and "nothing" is
+          // an answer. The plan is the fallback, as it is when no index can
+          // be built at all.
+          if (this.intelligence.unreadableIn(changedFiles, index).length > 0) {
+            return undefined;
+          }
           // Names, and then shapes. The names say which contracts this branch
           // touched; the shapes say what state it left them in, which is the
           // half a clean merge destroys — `sign` is `sign` on both sides of a
