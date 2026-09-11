@@ -48,9 +48,11 @@ import {
 } from "@coord/workspace-manager";
 
 import {
+  MAX_CONTEXT_HANDOFFS,
   STALE_REASSESSMENT_BUDGET,
   acceptWorkResult,
   admitWorkPlan,
+  claimWorkRepository,
   leaseBundle,
   blockedAdmissionHistory,
   readsAsReportRequest,
@@ -4822,6 +4824,180 @@ test("a frozen claim may still widen onto a file nobody holds", async () => {
     assert.deepEqual(
       (widened.data as { expectedFiles?: string[] }).expectedFiles,
       ["src/a.js", "src/b.js"],
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * What a worker reports when its session stopped on a full window.
+ *
+ * Figures rather than prose: the control plane records these and projects the
+ * handoff from them, and the adapter's `reason` never leaves the audit event.
+ */
+const HANDOFF_PRESSURE = {
+  occupiedTokens: 48_153,
+  peakTokens: 69_478,
+  maximumContextTokens: 60_000,
+  turns: 12,
+  compactions: 1,
+  droppedTokens: 46_655,
+  stale: true,
+};
+
+async function handOff(
+  harness: Harness,
+  assignment: WorkAssignment,
+  reason = "the agent compacted its own context at 69478 tokens",
+) {
+  return await acceptWorkResult(harness.store, {
+    leaseId: assignment.lease.id,
+    status: "handed_off",
+    actorId: "user",
+    plan: plan(assignment.task.id),
+    changeSet: undefined,
+    handoff: { reason, pressure: HANDOFF_PRESSURE },
+  });
+}
+
+test("a handed-off result requeues the task seeded with a long_running handoff", async () => {
+  // Nothing went wrong, so nothing is failed: the lease is released, which is
+  // what puts the row back in the queue, and the next worker to take it is
+  // told where the last one got to.
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await leaseAndAdmit(harness);
+    assert.equal(
+      assignment.contextHandoffsRemaining,
+      MAX_CONTEXT_HANDOFFS,
+      "a fresh task arrives with its whole budget, and the field is also how a worker knows the status is accepted",
+    );
+
+    const outcome = await handOff(harness, assignment);
+    assert.equal(outcome.accepted, false);
+    assert.equal(outcome.requeued, true);
+    assert.equal(
+      (await harness.store.getWorkLease(assignment.lease.id))?.status,
+      "released",
+    );
+    assert.equal(
+      (await harness.store.listSubmittedTasks())[0]?.status,
+      "submitted",
+    );
+
+    // The record first, then the handoff projected from it. A handoff whose
+    // figures had no audit event behind them would be a claim rather than a
+    // view over the log.
+    const events = await harness.store.listAuditEvents({ taskId });
+    const handedOff = events.findIndex(
+      (entry) => entry.event.type === "task_handed_off",
+    );
+    const recorded = events.findIndex(
+      (entry) => entry.event.type === "handoff_recorded",
+    );
+    assert.ok(handedOff !== -1 && recorded !== -1, "both events must be written");
+    assert.ok(handedOff < recorded, "the figures are recorded before they are cited");
+    const data = events[handedOff]?.event.data ?? {};
+    assert.equal(data["repositoryId"], "repo_worker");
+    assert.equal(data["projectId"], DEFAULT_PROJECT_ID);
+    assert.equal(data["workerId"], harness.workerId);
+    assert.equal(data["leaseId"], assignment.lease.id);
+    assert.equal(data["attempt"], 1);
+    assert.equal(data["remaining"], MAX_CONTEXT_HANDOFFS - 1);
+    assert.deepEqual(data["pressure"], HANDOFF_PRESSURE);
+
+    const handoffs = await findTaskHandoffs(harness.store, { taskId });
+    assert.equal(handoffs[0]?.reason, "long_running");
+
+    // The next lease spends one of the budget, and the claim answer carries
+    // the note whether or not the repository was claimed — a claimed task
+    // runs straight into execution, which is where it matters most.
+    const second = await lease(harness);
+    assert.ok(second);
+    assert.equal(second.contextHandoffsRemaining, MAX_CONTEXT_HANDOFFS - 1);
+    const prepared = await claimWorkRepository(
+      harness.store,
+      {
+        leaseId: second.lease.id,
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+      },
+      { blanketClaims: true },
+    );
+    // Returned outside the `claim === undefined` gate that withholds the
+    // planning estimate, because a task's own note is not a hint about where
+    // to start reading — it is the record of what the last attempt did.
+    assert.match(String(prepared.handoffContext), /long_running/u);
+    assert.match(String(prepared.handoffContext), new RegExp(taskId, "u"));
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("the re-entry guard fails a task that hands off past its budget", async () => {
+  // Twice filling a window after being reseeded with everything the control
+  // plane knows is a task that does not fit. Circling the queue forever is
+  // worse than an ending that says so.
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    for (let attempt = 0; attempt < MAX_CONTEXT_HANDOFFS; attempt += 1) {
+      const assignment = await leaseAndAdmit(harness);
+      const requeued = await handOff(harness, assignment);
+      assert.equal(requeued.requeued, true, `attempt ${attempt + 1}`);
+    }
+
+    const last = await leaseAndAdmit(harness);
+    assert.equal(last.contextHandoffsRemaining, 0);
+    const refused = await handOff(harness, last);
+    assert.equal(refused.accepted, false);
+    assert.equal(refused.requeued, undefined);
+    assert.match(refused.reason ?? "", /does not fit/u);
+    assert.equal(
+      (await harness.store.getWorkLease(last.lease.id))?.status,
+      "failed",
+    );
+    assert.equal(
+      (await harness.store.listSubmittedTasks())[0]?.status,
+      "failed",
+    );
+    // The ending is written down the same way every other ending is.
+    const newest = (await findTaskHandoffs(harness.store, { taskId }))[0];
+    assert.equal(newest?.reason, "failed");
+    const failure = (await harness.store.listAuditEvents({ taskId })).find(
+      (entry) =>
+        entry.event.type === "task_failed" &&
+        entry.event.data["stage"] === "context_handoff_budget",
+    );
+    assert.ok(failure, "the budget failure must say why it was a failure");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a handed_off result with no figures is refused rather than requeued", async () => {
+  // A status whose body is missing is a worker bug. Treating it as a failure
+  // would hide that behind an ending that reads as the agent's fault, and
+  // requeueing it would leave a handoff nobody could check.
+  const harness = await createHarness();
+  try {
+    await submit(harness);
+    const assignment = await leaseAndAdmit(harness);
+    const refused = await acceptWorkResult(harness.store, {
+      leaseId: assignment.lease.id,
+      status: "handed_off",
+      actorId: "user",
+      plan: plan(assignment.task.id),
+      changeSet: undefined,
+    });
+    assert.equal(refused.accepted, false);
+    assert.equal(refused.requeued, undefined);
+    assert.match(refused.reason ?? "", /context pressure/u);
+    assert.equal(
+      (await harness.store.getWorkLease(assignment.lease.id))?.status,
+      "active",
+      "the lease is left where it was for the worker to report properly",
     );
   } finally {
     await rm(harness.root, { recursive: true, force: true });

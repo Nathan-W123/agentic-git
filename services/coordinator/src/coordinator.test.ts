@@ -45,7 +45,11 @@ import {
   type DeferredScopeRequest,
 } from "./coordinator.js";
 import { buildTaskHandoff, HANDOFF_AUDIT_TYPE } from "./handoff.js";
-import { recordTaskHandoff } from "./handoff-store.js";
+import {
+  findTaskHandoffs,
+  MAX_CONTEXT_HANDOFFS,
+  recordTaskHandoff,
+} from "./handoff-store.js";
 import { DERIVED_PITFALLS_HEADING } from "./repository-context.js";
 import { TaskCancellationRegistry } from "./task-cancellation.js";
 
@@ -3959,6 +3963,166 @@ test("a withheld symbol costs its hunks, not the whole file", async () => {
     assert.match(head, /return 33;/u, "the hunk after the withheld symbol");
     assert.match(head, /return 2;/u, "the withheld symbol is untouched");
     assert.doesNotMatch(head, /return 22;/u, "the withheld edit did not land");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * An agent that stops itself mid-execution because its window filled.
+ *
+ * The in-process driver has to answer this event explicitly: before it did,
+ * every unmatched variant fell through to the scope-change branch and read
+ * `additionalFiles` off an event that has none, which failed the task with a
+ * TypeError rather than requeueing it.
+ */
+class WindowFillingAgent extends TestAgent {
+  /** Whether anything asked this agent for a changeset. */
+  public collectCount = 0;
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    await super.sendContext(sessionId, context);
+    this.handlerFor(sessionId)?.({
+      event: "context_handoff_requested",
+      reason: "the agent compacted its own context at 69478 tokens",
+      pressure: {
+        occupiedTokens: 48_153,
+        peakTokens: 69_478,
+        maximumContextTokens: 60_000,
+        turns: 12,
+        compactions: 1,
+        droppedTokens: 46_655,
+        stale: true,
+      },
+      occurredAt: new Date().toISOString(),
+    });
+  }
+
+  public override async collectChanges(sessionId: string): Promise<ChangeSet> {
+    this.collectCount += 1;
+    return await super.collectChanges(sessionId);
+  }
+}
+
+test("an in-process run that filled its window is requeued with a handoff", async () => {
+  // The same ending the remote driver gives it, reached by the same route:
+  // the figures are recorded first, the handoff is projected from them, and
+  // the task goes back to the queue as `queued` — the status the runner turns
+  // into a released lease or a retried row. Nothing is collected: the edits of
+  // a stopped round are half-finished by definition.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = SqliteCoordinationStore.open(":memory:");
+    const agent = new WindowFillingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "queued");
+    assert.match(
+      result.tasks[0]?.explanation ?? "",
+      /context window was nearly full/u,
+    );
+    assert.equal(agent.collectCount, 0, "a stopped round has no changeset");
+
+    const handedOff = result.audit.find(
+      (event) => event.type === "task_handed_off",
+    );
+    assert.ok(handedOff, result.audit.map((event) => event.type).join(", "));
+    assert.equal(handedOff.taskId, "task_a");
+    assert.equal(handedOff.data["attempt"], 1);
+    assert.equal(
+      (handedOff.data["pressure"] as { droppedTokens: number }).droppedTokens,
+      46_655,
+    );
+
+    const handoffs = await findTaskHandoffs(store, { taskId: "task_a" });
+    assert.equal(handoffs[0]?.reason, "long_running");
+    assert.ok(
+      handoffs[0]?.open.some((item) => item.item.includes("stopped itself")),
+      JSON.stringify(handoffs[0]?.open),
+    );
+    // Nothing was promoted, and the failure path was not taken.
+    assert.equal(
+      result.audit.some((event) => event.type === "canonical_promoted"),
+      false,
+    );
+    assert.equal(
+      result.audit.some((event) => event.type === "task_failed"),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an in-process task that has spent its handoff budget is failed", async () => {
+  // The guard is counted from the handoffs on the log, which is what lets one
+  // budget cover a task that stopped once on a worker and once here.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = SqliteCoordinationStore.open(":memory:");
+    for (let spent = 0; spent < MAX_CONTEXT_HANDOFFS; spent += 1) {
+      await recordTaskHandoff(
+        store,
+        buildTaskHandoff({
+          taskId: "task_a",
+          objective: "task_a",
+          repositoryId: fixture.repository.id,
+          canonicalRevision: "b".repeat(40),
+          reason: "long_running",
+        }),
+      );
+    }
+    const agent = new WindowFillingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "failed");
+    assert.match(result.tasks[0]?.explanation ?? "", /does not fit/u);
+    const failed = result.audit.find((event) => event.type === "task_failed");
+    assert.equal(failed?.data["stage"], "context_handoff_budget");
+    assert.equal(
+      result.audit.some((event) => event.type === "task_handed_off"),
+      false,
+      "a task past its budget is not handed off again",
+    );
+    const newest = (await findTaskHandoffs(store, { taskId: "task_a" }))[0];
+    assert.equal(newest?.reason, "failed");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

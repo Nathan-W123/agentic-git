@@ -4,6 +4,7 @@ import {
 } from "@coord/cli/worker-operations";
 import type { AgentTokenUsage } from "@coord/agent-protocol";
 import type {
+  AgentContextPressure,
   AgentPlan,
   PlanAdmission,
   ScopeChangeDecision,
@@ -138,14 +139,20 @@ export interface WorkerClientOptions {
  * appear in the index and where the repository has been working lately, which
  * is what stops an agent searching for something already computed.
  * `standingContext` is what the people who work in the repository wrote for
- * every agent, and comes claim or no claim. All empty is the ordinary answer
- * and means "plan exactly as before".
+ * every agent, and comes claim or no claim. So does `handoffContext`, the
+ * note this task's own previous attempt left. All empty is the ordinary
+ * answer and means "plan exactly as before".
  */
 export interface PreparedWork {
   plan?: AgentPlan;
   planningContext?: string;
   /** The repository's standing context, already rendered for a prompt. */
   standingContext?: string;
+  /**
+   * This task's own handoff, rendered — present only when a previous attempt
+   * stopped itself on a full context window and was requeued.
+   */
+  handoffContext?: string;
 }
 
 /** One dirty path in a holder's workspace, as the control plane reads it. */
@@ -781,6 +788,18 @@ export class WorkerClient {
            * reach the room as a failure.
            */
           answer?: string;
+        }
+      | {
+          /**
+           * The session stopped itself on a nearly full context window.
+           *
+           * Sent only when the assignment carried `contextHandoffsRemaining`:
+           * a control plane that does not know the status answers it with a
+           * 400, which would strand the lease until it expired.
+           */
+          status: "handed_off";
+          plan: unknown;
+          handoff: { reason: string; pressure: AgentContextPressure };
         }
       | { status: "failed"; detail: string },
     tokenUsage: readonly AgentTokenUsage[] = [],

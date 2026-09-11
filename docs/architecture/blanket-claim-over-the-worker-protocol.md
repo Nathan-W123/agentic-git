@@ -123,7 +123,7 @@ they already do.
 
 ### The claim itself
 
-    POST /workers/leases/:id/claim   → { plan?, planningContext?, standingContext? } | 204
+    POST /workers/leases/:id/claim   → { plan?, planningContext?, standingContext?, handoffContext? } | 204
 
 Called by the worker after `bundle` and before `submitPlan`. The gateway runs the
 existing `claimRepository`, including the scope estimate — which needs a symbol
@@ -142,8 +142,16 @@ exactly as it does today. A 200 without `plan` is not a claim: it carries
 because a claimed task never plans) and `standingContext` (the repository's
 curated note, carried claimed or not, so the answer's shape does not depend on
 the claim decision — today a claimed task builds no prompt to render it into;
-see [repository-standing-context.md](repository-standing-context.md)).
-The worker reads `plan` by presence and tolerates any subset of the rest.
+see [repository-standing-context.md](repository-standing-context.md)). It also
+carries `handoffContext`: this task's own note, when a previous attempt stopped
+itself on a nearly full context window and was requeued. That one is never
+withheld on a claim for a stronger reason than the standing note — a claimed
+task runs straight into execution, which is exactly where knowing that the last
+attempt ran out of window matters (see
+[context-window-handoff.md](context-window-handoff.md)).
+The worker reads `plan` by presence and tolerates any subset of the rest, and a
+204 now requires all four to be empty — a 204 sent while one was set would drop
+it silently.
 
 ### Version
 

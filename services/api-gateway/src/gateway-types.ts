@@ -17,6 +17,7 @@ import type {
 } from "@coord/persistence";
 import type { ChatterFilter } from "@coord/local-triage";
 import type {
+  AgentContextPressure,
   FilePatch,
   WorkAssignment as SharedWorkAssignment,
 } from "@coord/shared-types";
@@ -737,6 +738,12 @@ export interface ApiOperations {
    * rendered only into that prompt, so today it is carried and not read on
    * that branch; delivering it to execution is a change to the adapters, not
    * to this contract.
+   *
+   * `handoffContext` is the note this task's own previous attempt left when
+   * it stopped on a full context window. Carried on both branches too, and
+   * for a stronger reason than the standing note: a claimed task runs
+   * straight into execution, which is exactly where knowing that the last
+   * attempt ran out of window matters.
    */
   claimWorkRepository?(input: {
     leaseId: string;
@@ -746,6 +753,7 @@ export interface ApiOperations {
     plan?: unknown;
     planningContext?: string;
     standingContext?: string;
+    handoffContext?: string;
   }>;
   /**
    * The two directions of a repository claim, folded onto the heartbeat.
@@ -796,13 +804,21 @@ export interface ApiOperations {
   >;
   acceptWorkResult?(input: {
     leaseId: string;
-    status: "completed" | "failed";
+    /**
+     * `handed_off` is the session having stopped itself on a nearly full
+     * context window. The implementation releases the lease and requeues the
+     * task rather than finishing it; the editor and MCP report paths are
+     * separate contracts and keep their own three-value unions.
+     */
+    status: "completed" | "failed" | "handed_off";
     actorId: string;
     plan: unknown;
     changeSet: unknown;
     detail?: string;
     /** What the agent said, when the lease was on a question. */
     answer?: string;
+    /** The figures a `handed_off` result stopped on, and the adapter's verdict. */
+    handoff?: { reason: string; pressure: AgentContextPressure };
     // Narrowed from `unknown` only as far as this route actually reads it:
     // whether to post, and what. The body is still relayed whole to the
     // worker, so an implementation may return more than this names.

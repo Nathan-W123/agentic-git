@@ -15,6 +15,7 @@ import {
   createGeminiAdapter,
   createKiroAdapter,
   type PromptCliEffort,
+  type PromptCliProcessRunner,
 } from "@coord/adapter-prompt-cli";
 import type {
   AgentAdapter,
@@ -145,6 +146,14 @@ export interface WorkerOptions {
   /** Injected only by tests or embedded runtimes. */
   codexRunner?: CodexProcessRunner;
   /**
+   * The same, for the prompt-in / JSON-out vendors.
+   *
+   * A test of what this worker *decides* — how it reports a session that
+   * stopped on a full context window, say — must not depend on a vendor CLI
+   * being installed on the machine running it.
+   */
+  promptCliRunner?: PromptCliProcessRunner;
+  /**
    * How this machine answers "am I plugged in".
    *
    * Injected for the same reason `codexRunner` is: the real one shells out to
@@ -252,6 +261,14 @@ export interface IterationResult {
    * problem gets mistaken for a scheduling result.
    */
   transport?: boolean;
+  /**
+   * The session stopped itself because its context window was nearly full and
+   * the control plane requeued the task with a handoff. Reported apart from a
+   * failure for the reason `deferred` is: nothing went wrong, and a harness
+   * counting failures that counted this one would read a working feature as a
+   * regression.
+   */
+  handedOff?: boolean;
 }
 
 const DEFAULT_POLL_MS = 5_000;
@@ -435,6 +452,14 @@ class Run {
    * it. What the worker reports has to be what the control plane last decided.
    */
   public adoptedPlan: AgentPlan | undefined;
+  /**
+   * Set when the agent asked to be handed off mid-execution. Read after the
+   * event chain drains, so the round's other events are answered first and
+   * the decision is made in one place rather than inside the handler.
+   */
+  public contextHandoff:
+    | Extract<AgentEvent, { event: "context_handoff_requested" }>
+    | undefined;
   /**
    * The repository claim this run is currently holding, if it is.
    *
@@ -890,6 +915,47 @@ export class Worker {
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
+      if ("handoff" in result) {
+        const handoff = result.handoff;
+        // Reported as `handed_off` only where the control plane said it
+        // accepts one, which is what the presence of
+        // `contextHandoffsRemaining` on the assignment means. An older
+        // control plane answers the status with a 400, and a 400 here would
+        // strand the lease until it expired — so the run is reported as the
+        // failure that older control plane would have seen anyway, with the
+        // agent's own reason as the detail rather than a silent stop.
+        const handedOff = assignment.contextHandoffsRemaining !== undefined;
+        const answer = await this.options.client.report(
+          assignment.lease.id,
+          handedOff
+            ? {
+                status: "handed_off",
+                plan: run.adoptedPlan ?? result.plan,
+                handoff: {
+                  reason: handoff.reason,
+                  pressure: handoff.pressure,
+                },
+              }
+            : {
+                status: "failed",
+                detail: handoff.reason,
+              },
+          this.spentSoFar(run),
+        );
+        laps.mark("report");
+        console.log(
+          `[worker] task ${assignment.task.id} — handed off (${handoff.reason}) — ` +
+            laps.summary(),
+        );
+        return {
+          worked: true,
+          taskId: assignment.task.id,
+          accepted: answer.accepted,
+          deferred: true,
+          ...(handedOff ? { handedOff: true } : {}),
+          reason: handoff.reason,
+        };
+      }
       const accepted = await this.options.client.report(
         assignment.lease.id,
         {
@@ -1043,6 +1109,15 @@ export class Worker {
       explanation: "A question declares no files, so there is nothing to admit.",
       decidedAt: new Date().toISOString(),
     });
+    if ("handoff" in result) {
+      // A question that filled its window is a question that cannot be
+      // answered in one; there is no partial answer to requeue and nothing
+      // for a handoff to carry it to, so it ends as the failure the room can
+      // act on.
+      throw new Error(
+        `The agent ran out of context before answering: ${result.handoff.reason}`,
+      );
+    }
     const said = (result.changeSet.agentExplanation ?? "").trim();
     // Every adapter falls back to "<name> completed <request>" when the model
     // returns no explanation of its own. For work that is a reasonable status
@@ -1827,6 +1902,10 @@ export class Worker {
     const conversation = assignment.task.context?.trim() ?? "";
     const priorContext = [
       conversation,
+      // This task's own handoff, when a previous attempt left one — nearest
+      // to the request after the conversation itself, because it is about
+      // this objective rather than about the repository.
+      prepared.handoffContext ?? "",
       prepared.standingContext ?? "",
       prepared.planningContext ?? "",
     ]
@@ -2016,7 +2095,13 @@ export class Worker {
     assignment: WorkAssignment,
     planned: PlannedWork,
     admission: PlanAdmission,
-  ): Promise<{ plan: AgentPlan; changeSet: ChangeSet }> {
+  ): Promise<
+    | { plan: AgentPlan; changeSet: ChangeSet }
+    | {
+        plan: AgentPlan;
+        handoff: Extract<AgentEvent, { event: "context_handoff_requested" }>;
+      }
+  > {
     const { adapter, sessionId, plan } = planned;
     let eventError: unknown;
     let eventChain = Promise.resolve();
@@ -2095,6 +2180,19 @@ export class Worker {
             });
             return;
           }
+          if (event.event === "context_handoff_requested") {
+            // Stored rather than acted on here: `execute` decides, once the
+            // chain has drained, whether to collect a changeset or report a
+            // handoff. Narrated first, because a run that simply stops is a
+            // run a room reads as hung.
+            run.contextHandoff = event;
+            await this.options.client.progress(
+              assignment.lease.id,
+              `Context window nearly full — ${event.reason}. Stopping here ` +
+                "and handing the task back with a note of where it got to.",
+            );
+            return;
+          }
           if (event.event !== "scope_change_requested") {
             return;
           }
@@ -2130,6 +2228,13 @@ export class Worker {
     await eventChain;
     if (eventError !== undefined) {
       throw eventError;
+    }
+    // Deliberately before `collectChanges`, which would throw anyway: a
+    // stopped round has no completion, and its half-finished edits are not a
+    // changeset. The task is requeued and starts again from a fresh
+    // workspace with the handoff the control plane projects.
+    if (run.contextHandoff !== undefined) {
+      return { plan, handoff: run.contextHandoff };
     }
     return {
       plan,
@@ -2288,6 +2393,9 @@ export class Worker {
         ...(workerExecutionSandbox === undefined
           ? {}
           : { executionSandbox: workerExecutionSandbox }),
+        ...(agent.maximumContextTokens === undefined
+          ? {}
+          : { maximumContextTokens: agent.maximumContextTokens }),
         ...(mcp.codex === undefined ? {} : { mcpServers: mcp.codex.servers }),
         ...(agent.env === undefined ? {} : { env: { ...process.env, ...agent.env } }),
         ...(this.options.codexRunner === undefined
@@ -2345,6 +2453,23 @@ export class Worker {
           ? {}
           : { executionTimeoutMs: agent.executionTimeoutMs }),
         ...(promptEffort === undefined ? {} : { effort: promptEffort }),
+        ...(this.options.promptCliRunner === undefined
+          ? {}
+          : { runner: this.options.promptCliRunner }),
+        // Whether this run may stop itself, decided here rather than in the
+        // adapter: the deployment's configuration says whether it is allowed
+        // at all, and the assignment says whether this task has any budget
+        // left. A task on its last attempt runs to whatever ending it
+        // reaches, because a stop it cannot be requeued from is a failure
+        // dressed up as a handoff.
+        contextPressure: {
+          ...(agent.maximumContextTokens === undefined
+            ? {}
+            : { maximumContextTokens: agent.maximumContextTokens }),
+          handOff:
+            agent.contextHandoff !== false &&
+            (assignment.contextHandoffsRemaining ?? 0) > 0,
+        },
         ...(mcp.claude === undefined
           ? {}
           : { mcpConfigPath: mcp.claude.configPath }),

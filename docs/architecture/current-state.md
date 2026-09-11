@@ -280,6 +280,18 @@ Hosted execution has a protocol and a working control-plane half:
   repository's standing context, claimed or not, so a remote task plans with
   the same note an in-process one does. A 204 now means no plan and no
   context of any kind; a 200 without `plan` is not a claim.
+- Context-window handoff. An agent whose CLI reports occupancy mid-run (Claude
+  Code today) stops itself at a tool boundary when its window is nearly full or
+  has already been compacted; the control plane records `task_handed_off`,
+  projects a `long_running` handoff from that record, and requeues the task
+  seeded with it on the claim answer, at most `MAX_CONTEXT_HANDOFFS` times
+  before the task is failed instead. Reporting it is gated on the assignment
+  carrying `contextHandoffsRemaining`, so an older control plane is never sent
+  a status it would refuse. Codex reports a per-round total only and Gemini
+  nothing before a task ends; each adapter declares `contextObservation`, where
+  absent reads as none. The same stream makes `reportedTokenUsage` live, so
+  `maxTaskTokens` is judged against a round while it is still running. See
+  [context-window-handoff.md](context-window-handoff.md).
 
 Container isolation for hosted execution is verified against a live Docker
 daemon, not merely implemented: `npm run verify:remote-docker` drives the whole
@@ -353,6 +365,14 @@ The following are intentionally not represented as complete:
   With a sandbox configured it already runs in a container rather than as the
   control-plane process, but the tree being validated is the merge of a result
   onto current canonical, which exists only on the control plane.
+- Salvage of a context handoff's stopped attempt, and delivery of prior context
+  to a claimed task. When a run stops itself on a nearly full context window its
+  half-finished edits are discarded and the handoff says so; naming the files it
+  touched, or promoting a validated subset of them, is not built. The note the
+  control plane projects rides the claim answer whether or not a claim was
+  granted, but the adapters render prior context into the planning prompt only,
+  so a task handed its repository carries the note without reading it — the same
+  gap the repository's standing context has.
 - Collaborative IDE presence/cursors, PTY terminal streams, and projection of
   agents' unapproved in-flight edits. Per-user human overlay editing and
   bounded sandbox commands are already implemented.

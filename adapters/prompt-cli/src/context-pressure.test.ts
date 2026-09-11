@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ContextPressureMonitor,
   assessContextPressure,
+  pressureSnapshot,
   readContextSignal,
 } from "./context-pressure.js";
 import { RECORDED_COMPACTION_STREAM } from "./recorded-stream.fixture.js";
@@ -269,4 +270,75 @@ test("an unterminated oversized line cannot grow without bound", () => {
   );
   assert.equal(signals.length, 1);
   assert.equal(monitor.pressure().latestTokens, 7);
+});
+
+test("billed usage counts each request once, however many blocks it arrives in", () => {
+  // The turn count already de-duplicates by occupancy; billing cannot use the
+  // same rule, because two consecutive requests may legitimately cost the
+  // same. It keys on `message.id`, which the recorded run repeats per content
+  // block — three ids across ten assistant lines.
+  const monitor = new ContextPressureMonitor();
+  monitor.write(`${RECORDED_COMPACTION_STREAM}\n`);
+
+  assert.deepEqual(monitor.usage(), {
+    totalTokens: 122_416,
+    inputTokens: 26,
+    outputTokens: 8,
+    cacheReadTokens: 67_214,
+    cacheCreationTokens: 55_168,
+  });
+});
+
+test("billed usage is readable mid-run, before any result envelope exists", () => {
+  // What the heartbeat asks for. The stream is fed as far as the second
+  // turn, which is a round still in flight as far as the CLI is concerned.
+  const lines = RECORDED_COMPACTION_STREAM.split("\n");
+  const monitor = new ContextPressureMonitor();
+  monitor.write(`${lines.slice(0, 4).join("\n")}\n`);
+
+  assert.equal(monitor.usage().totalTokens, 25_776 + 48_154);
+});
+
+test("an assistant event with no message id is billed once per distinct usage", () => {
+  // The fallback for a CLI release that stops emitting ids. It under-counts
+  // two identical consecutive requests rather than over-counting every block,
+  // which is the safer side for a figure a budget is enforced against.
+  const monitor = new ContextPressureMonitor();
+  const line = JSON.stringify({
+    type: "assistant",
+    message: { usage: { input_tokens: 10, output_tokens: 4 } },
+  });
+  monitor.write(`${line}\n${line}\n`);
+
+  assert.equal(monitor.usage().totalTokens, 14);
+  assert.equal(monitor.pressure().turns, 1);
+});
+
+test("a pressure snapshot carries the figures the control plane records", () => {
+  // The wire shape, which is what the audit event holds and what a handoff is
+  // projected from. `latestTokens` becomes `occupiedTokens` and the list of
+  // compactions becomes a count, because a handoff cites how many there were
+  // and never their internals.
+  const monitor = new ContextPressureMonitor();
+  monitor.write(`${RECORDED_COMPACTION_STREAM}\n`);
+
+  assert.deepEqual(pressureSnapshot(monitor.pressure(), 60_000), {
+    occupiedTokens: 48_483,
+    peakTokens: 69_478,
+    maximumContextTokens: 60_000,
+    turns: 3,
+    compactions: 1,
+    droppedTokens: 46_655,
+    stale: false,
+  });
+});
+
+test("a snapshot taken without a configured window says so by omission", () => {
+  // "not judged against anything" and "judged against zero" are different
+  // claims, and a zero here would read as the second.
+  const snapshot = pressureSnapshot(new ContextPressureMonitor().pressure());
+
+  assert.equal("maximumContextTokens" in snapshot, false);
+  assert.equal("occupiedTokens" in snapshot, false);
+  assert.equal(snapshot.peakTokens, 0);
 });

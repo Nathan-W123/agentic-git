@@ -405,6 +405,11 @@ export class GenericCliAdapter implements AgentAdapter {
       canUseTools: false,
       supportsStreaming: true,
       supportsPause: true,
+      // A generic agent reports no usage at all until its run ends, and the
+      // wire protocol has no event it could send to ask for a handoff — the
+      // parser refuses an event it does not know, which is the correct
+      // reading of "none" rather than a gap.
+      contextObservation: "none",
     };
   }
 

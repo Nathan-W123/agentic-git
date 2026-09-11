@@ -9,6 +9,7 @@
 import type { McpServerScope } from "@coord/persistence";
 import {
   uniqueStrings,
+  type AgentContextPressure,
   type McpServerTransport,
 } from "@coord/shared-types";
 
@@ -172,6 +173,58 @@ export function stringField(
     );
   }
   return trimmed;
+}
+
+/**
+ * Validates the pressure figures a worker reports with a handed-off result.
+ *
+ * Checked here rather than trusted because the control plane writes them into
+ * an audit event and then projects a handoff from them: a `NaN` or a negative
+ * would reach a person as a sentence about how full a window got, with no way
+ * to tell it from a measurement. The same trust as a heartbeat's token usage —
+ * a worker asserts the numbers, and the shape is enforced before they are
+ * recorded.
+ */
+export function contextPressureField(
+  value: unknown,
+  field: string,
+): AgentContextPressure {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new HttpError(400, "invalid_request", `${field} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const counted = (name: string): number => {
+    const entry = record[name];
+    if (typeof entry !== "number" || !Number.isFinite(entry) || entry < 0) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `${field}.${name} must be a number of zero or more`,
+      );
+    }
+    return entry;
+  };
+  const optionalCount = (name: string): number | undefined =>
+    record[name] === undefined ? undefined : counted(name);
+  const stale = record["stale"];
+  if (typeof stale !== "boolean") {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `${field}.stale must be true or false`,
+    );
+  }
+  const occupiedTokens = optionalCount("occupiedTokens");
+  const maximumContextTokens = optionalCount("maximumContextTokens");
+  return {
+    ...(occupiedTokens === undefined ? {} : { occupiedTokens }),
+    peakTokens: counted("peakTokens"),
+    ...(maximumContextTokens === undefined ? {} : { maximumContextTokens }),
+    turns: counted("turns"),
+    compactions: counted("compactions"),
+    droppedTokens: counted("droppedTokens"),
+    stale,
+  };
 }
 
 export function emailField(

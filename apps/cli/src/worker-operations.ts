@@ -26,8 +26,11 @@ import {
   isDeferredScopeFollowUp,
   assessReplay,
   buildTaskHandoff,
+  contextHandoffsUsed,
   filesOutsideClaim,
+  MAX_CONTEXT_HANDOFFS,
   recordTaskHandoff,
+  seedContextForTask,
   splitChangeSet,
   withheldPatchRecord,
   type ActivePlan,
@@ -85,6 +88,7 @@ import {
   rankTouchedFiles,
   uniqueRepositoryPaths,
   uniqueStrings,
+  type AgentContextPressure,
   type AgentPlan,
   type CanonicalVersion,
   type ChangeSet,
@@ -262,6 +266,16 @@ export function configuredBlanketClaims(explicit?: boolean): boolean {
  *   worker is never sent them, and the thread is told, because a run that
  *   silently lacks tools it was promised is the failure this exists to
  *   prevent.
+ *
+ * 4 later gained three optional members and no new number, because each is
+ *   announced by the field that carries it rather than by the version: the
+ *   lease's `contextHandoffsRemaining` says both how much of this task's
+ *   handoff budget is left and that this control plane will accept a
+ *   `handed_off` result at all; the claim answer's `handoffContext` carries
+ *   the note a previous attempt left. An older worker never sees either, so
+ *   it never reports `handed_off` — and a control plane that does not know
+ *   the status answers it with a 400, which is why the permission travels
+ *   with the lease instead of being assumed.
  */
 export const WORKER_PROTOCOL_VERSION = 4;
 
@@ -277,7 +291,13 @@ export type WorkAssignment = SharedWorkAssignment<WorkLease, SubmittedTask>;
 
 export interface WorkResultInput {
   leaseId: string;
-  status: "completed" | "failed";
+  /**
+   * `handed_off` is neither: the session stopped itself on a full context
+   * window and asks to be requeued with a handoff. The lease is released
+   * rather than failed and the task goes back to the queue, so it is handled
+   * before the failure branch and never reaches integration.
+   */
+  status: "completed" | "failed" | "handed_off";
   actorId: string;
   plan: unknown;
   changeSet: unknown;
@@ -291,6 +311,15 @@ export interface WorkResultInput {
    * truncating answers or loosening the bound on failure text.
    */
   answer?: string;
+  /**
+   * The pressure figures and the adapter's verdict, on a `handed_off` result.
+   *
+   * The figures are written to the audit event before anything is projected
+   * from them; the `reason` stays there as trace data and is never copied
+   * into the handoff, because a handoff is checkable against the record and
+   * prose from an adapter is not.
+   */
+  handoff?: { reason: string; pressure: AgentContextPressure };
 }
 
 export interface WorkResultAcceptance {
@@ -315,6 +344,13 @@ export interface WorkResultAcceptance {
  * unbounded agent replan — but only a bounded one.
  */
 export const STALE_REASSESSMENT_BUDGET = 1;
+
+/**
+ * Re-exported so the remote result path and the budget it enforces read from
+ * one definition. It lives beside the handoffs it counts, in the coordinator
+ * package, because the in-process driver applies exactly the same guard.
+ */
+export { MAX_CONTEXT_HANDOFFS };
 
 export interface WorkResultServices {
   repositories?: RepositoryService;
@@ -865,6 +901,24 @@ export async function leaseWork(
       bundleRef: bundleRefFor(leased.lease.id),
       heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
       protocolVersion: WORKER_PROTOCOL_VERSION,
+      // What is left of this task's handoff budget, and — by being present at
+      // all — the signal that this control plane will accept a `handed_off`
+      // result. An older one answers that status with a 400, so a worker that
+      // does not see the field reports a failure instead.
+      //
+      // One indexed, task-scoped audit read per *successful* lease, not per
+      // poll: the literal is built only where `leaseNextTask` returned work.
+      // There is no cheaper signal to gate it behind — a released task's
+      // `claimedAt` is nulled, so nothing on the row says it has been
+      // attempted before, and adding a column for it is the migration this
+      // design deliberately does without.
+      contextHandoffsRemaining: Math.max(
+        0,
+        MAX_CONTEXT_HANDOFFS -
+          (await contextHandoffsUsed(store, leased.task.id).catch(
+            () => MAX_CONTEXT_HANDOFFS,
+          )),
+      ),
       planUrl: `/api/v1/workers/leases/${leased.lease.id}/plan`,
       // Only when there is something to carry. An older worker that does not
       // know the field never sees an empty one either.
@@ -1048,6 +1102,112 @@ async function requeueForCanonicalChange(
     ...(runId === undefined ? {} : { runId }),
     requeued: true,
   };
+}
+
+/**
+ * Returns a task to the queue because its session's context window filled.
+ *
+ * Modelled on `requeueForCanonicalChange` above, and different from it in one
+ * way worth stating: nothing went wrong. The agent stopped itself at a tool
+ * boundary rather than carrying on inside a window it had already overflowed,
+ * so the lease is *released* — which is what returns the row to `submitted` —
+ * and the task is seeded with a handoff on its next lease.
+ *
+ * The order is deliberate. The audit event is written first, so every figure
+ * the handoff cites has a record behind it and the projection is a view over
+ * the log rather than a claim of its own. The handoff is written next, before
+ * the lease is released, so no worker can be granted the task without it.
+ * Only then does the lease go.
+ *
+ * The budget is counted from the handoffs already on the log. A task that has
+ * spent it is failed here rather than requeued: twice filling a window after
+ * being reseeded with everything the control plane knows is a task that does
+ * not fit, and a queue it circles forever is worse than an ending that says
+ * so.
+ */
+async function requeueForContextHandoff(
+  store: CoordinationStore,
+  lease: WorkLease,
+  task: SubmittedTask,
+  handoff: { reason: string; pressure: AgentContextPressure },
+): Promise<WorkResultAcceptance> {
+  letGoOfClaim(task.id);
+  const now = new Date().toISOString();
+  const used = await contextHandoffsUsed(store, task.id).catch(() => 0);
+  const attempt = used + 1;
+  const pressure = {
+    ...handoff.pressure,
+    attempt,
+    budget: MAX_CONTEXT_HANDOFFS,
+    leaseId: lease.id,
+  };
+  const handoffInput = {
+    taskId: task.id,
+    objective: task.objective,
+    repositoryId: task.repositoryId,
+    ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+    canonicalRevision: lease.baseRevision,
+    ...(lease.plan === undefined ? {} : { admission: lease.plan.admission }),
+    contextPressure: pressure,
+  };
+
+  if (used >= MAX_CONTEXT_HANDOFFS) {
+    const reason =
+      `The context window filled ${used} times already, which is the budget ` +
+      "for one task; the objective does not fit and was failed rather than " +
+      "requeued again";
+    const settled = await store.finishWorkLease(lease.id, "failed", now, reason);
+    if (!settled) {
+      await store.expireWorkLeases(now);
+      return { accepted: false, reason: "lease was lost before failure report" };
+    }
+    await store.completeSubmittedTask(task.id, "failed");
+    await recordTaskHandoff(
+      store,
+      buildTaskHandoff({ ...handoffInput, reason: "failed", failure: reason }),
+    );
+    await trace(store, undefined, "task_failed", task.id, {
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      workerId: lease.workerId,
+      leaseId: lease.id,
+      error: reason,
+      stage: "context_handoff_budget",
+      pressure: handoff.pressure,
+      attempt,
+    });
+    return { accepted: false, reason };
+  }
+
+  // The same data keys `replan_requested` carries, so the channel narration
+  // that keys off `projectId`/`repositoryId` finds them. Deliberately not
+  // added to the terminal-event list the thread uses to retire its state: the
+  // task is not over, it is between attempts.
+  await trace(store, undefined, "task_handed_off", task.id, {
+    projectId: task.projectId,
+    repositoryId: task.repositoryId,
+    workerId: lease.workerId,
+    leaseId: lease.id,
+    reason: handoff.reason,
+    pressure: handoff.pressure,
+    attempt,
+    remaining: MAX_CONTEXT_HANDOFFS - attempt,
+  });
+  await recordTaskHandoff(
+    store,
+    buildTaskHandoff({ ...handoffInput, reason: "long_running" }),
+  );
+  const released = await store.finishWorkLease(
+    lease.id,
+    "released",
+    now,
+    "context window nearly full; requeued with a handoff",
+  );
+  if (!released) {
+    await store.expireWorkLeases(now);
+    return { accepted: false, reason: "lease was lost before requeueing" };
+  }
+  return { accepted: false, reason: handoff.reason, requeued: true };
 }
 
 /**
@@ -1451,6 +1611,17 @@ export interface WorkClaimOutcome {
   plan?: AgentPlan;
   planningContext?: string;
   /**
+   * This task's own handoff, rendered — where the work got to when a previous
+   * attempt stopped itself on a full context window.
+   *
+   * Carried whether or not a claim was granted, for a different reason than
+   * the standing context is: the planning estimate is withheld from a claimed
+   * task because a claimed task never plans, but a task's own handoff is not
+   * a hint about where to start reading. It is the record of what the last
+   * attempt did, and a second attempt that is not told it repeats the first.
+   */
+  handoffContext?: string;
+  /**
    * The repository's standing context, rendered — what the people who work
    * here wrote for every agent. The worker's substitute for the
    * coordinator's seeding, which the worker does not run.
@@ -1603,6 +1774,13 @@ export async function claimWorkRepository(
   const standingContext = renderRepositoryContext(
     await store.getRepositoryContext(lease.repositoryId).catch(() => undefined),
   );
+  // Its own note, if a previous attempt left one. Limit 1: a task's newest
+  // handoff is the state of the work, and an older one is what the newest was
+  // written on top of.
+  const handoffContext = await seedContextForTask(store, {
+    taskId: task.id,
+    limit: 1,
+  }).catch(() => "");
   return {
     ...(claim === undefined ? {} : { plan: claim }),
     // Carried even when a claim was granted is *not* what happens: a claimed
@@ -1615,6 +1793,10 @@ export async function claimWorkRepository(
     // builds no planning prompt and so does not read it today; the field is
     // here for the phase that delivers it to execution.
     ...(standingContext === "" ? {} : { standingContext }),
+    // Never withheld on a claim: see the field's doc. A claimed task runs
+    // straight into execution, which is exactly where knowing that a previous
+    // attempt ran out of window matters most.
+    ...(handoffContext === "" ? {} : { handoffContext }),
   };
 }
 
@@ -3134,6 +3316,20 @@ export async function acceptWorkResult(
       kind: "question",
     });
     return { accepted: true, answer };
+  }
+
+  if (input.status === "handed_off") {
+    const handoff = input.handoff;
+    if (handoff === undefined) {
+      // Refused rather than treated as a failure: a status whose body is
+      // missing is a worker bug, and failing the task would hide it behind an
+      // ending that reads as the agent's fault.
+      return {
+        accepted: false,
+        reason: "a handed_off result must carry the context pressure it stopped on",
+      };
+    }
+    return await requeueForContextHandoff(store, leaseAtStart, task, handoff);
   }
 
   if (input.status === "failed") {

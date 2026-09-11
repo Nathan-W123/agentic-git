@@ -1,4 +1,5 @@
 import type {
+  AgentContextPressure,
   AgentPlan,
   CanonicalVersion,
   ChangeSet,
@@ -8,6 +9,31 @@ import type {
   TaskDefinition,
 } from "@coord/shared-types";
 
+/**
+ * Re-exported so an adapter, which already speaks this protocol, does not have
+ * to reach past it for the one shape it reports. The declaration lives in
+ * `@coord/shared-types` because the control plane — which records the figures
+ * before acting on them — has no dependency on this package.
+ */
+export type { AgentContextPressure } from "@coord/shared-types";
+
+/**
+ * What an adapter can say about its context window while a task is running.
+ *
+ * - `"live"`: occupancy per model turn, mid-run, in time to act on it. Claude
+ *   Code's `stream-json` output is the one shape read today.
+ * - `"per_round"`: a total only when each CLI invocation exits, which is what
+ *   the Codex adapter reads out of `turn.completed`. It says what a round
+ *   cost, not how full the window is.
+ * - `"none"`: nothing before the task ends.
+ *
+ * Absent reads as `"none"`. Declared rather than inferred so a driver can tell
+ * "this vendor will never ask to be handed off" from "this vendor has not
+ * asked yet" — an asymmetry that is otherwise invisible in behaviour, and one
+ * that looks exactly like a broken adapter when a fleet runs two vendors.
+ */
+export type ContextObservation = "live" | "per_round" | "none";
+
 export interface AgentCapabilities {
   canPlan: boolean;
   canEditFiles: boolean;
@@ -15,7 +41,14 @@ export interface AgentCapabilities {
   canUseTools: boolean;
   supportsStreaming: boolean;
   supportsPause: boolean;
+  /**
+   * The model's context window in tokens, when the deployment configured one.
+   * Absent means occupancy is not judged: a window guessed from a model name
+   * is wrong the week the vendor changes it.
+   */
   maximumContextTokens?: number;
+  /** See {@link ContextObservation}. Absent reads as `"none"`. */
+  contextObservation?: ContextObservation;
 }
 
 export interface StartTaskInput {
@@ -267,6 +300,33 @@ export type AgentEvent =
       requestId?: string;
       plan: AgentPlan;
       reason: string;
+      occurredAt: string;
+    }
+  | {
+      /**
+       * The session stopped itself at a tool boundary because its window was
+       * nearly full, or because the CLI had already compacted it, and asks to
+       * be requeued with a handoff rather than carry on degrading inside an
+       * overloaded window.
+       *
+       * Not a failure and not a completion: no `completed` follows, and
+       * `collectChanges` must not be called, because the attempt's edits are
+       * half-finished by definition and the requeued task starts from a fresh
+       * workspace. A driver that does not recognise this event leaves the run
+       * to end the way it always did, which is where this started.
+       *
+       * Emitted only by adapters reporting `contextObservation: "live"`, and
+       * only when the deployment allowed a run to stop itself.
+       */
+      event: "context_handoff_requested";
+      /**
+       * The adapter's own verdict, in words. Trace data: it is recorded on the
+       * audit event and never copied into a handoff, because a handoff is
+       * projected from figures the control plane holds rather than from prose
+       * the adapter asserted.
+       */
+      reason: string;
+      pressure: AgentContextPressure;
       occurredAt: string;
     }
   | {

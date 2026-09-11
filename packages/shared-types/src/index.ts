@@ -818,6 +818,44 @@ export interface TaskHandoff {
   createdAt: string;
 }
 
+/**
+ * How full an agent's context window was, as the vendor CLI accounted for it
+ * and the adapter relayed it.
+ *
+ * A wire and audit shape rather than an adapter one, and here rather than in
+ * `@coord/agent-protocol` because the control plane is the side that has to
+ * hold it: the gateway relays it, `worker-operations` writes it into a
+ * `task_handed_off` audit event, and only then is a handoff projected from
+ * those figures. The gateway does not depend on the agent protocol, and the
+ * protocol package already depends on this one, so this is the only place all
+ * three can name the same shape. The same trust is extended to it as to a
+ * heartbeat's token usage: a worker asserts the numbers, the control plane
+ * records them before acting on them, and a wrong figure costs at most one
+ * requeue.
+ */
+export interface AgentContextPressure {
+  /**
+   * Latest occupancy the CLI reported. A floor rather than the truth when
+   * `stale` is set, and absent when the vendor never reported one.
+   */
+  occupiedTokens?: number;
+  /** The highest occupancy seen during the run. */
+  peakTokens: number;
+  /** The window the occupancy was judged against. Absent when unconfigured. */
+  maximumContextTokens?: number;
+  /** Model turns observed in the run. */
+  turns: number;
+  /** How many times the CLI compacted its own history. */
+  compactions: number;
+  /** Tokens those compactions discarded. */
+  droppedTokens: number;
+  /**
+   * A tool result landed after `occupiedTokens` was reported, so the real
+   * occupancy is higher than the figure by whatever that result weighed.
+   */
+  stale: boolean;
+}
+
 export interface CanonicalChangeNotice {
   previousVersion: CanonicalVersion;
   canonicalVersion: CanonicalVersion;
@@ -1802,6 +1840,18 @@ export type AuditEventType =
   | "canonical_promoted"
   | "canonical_changed"
   | "task_failed"
+  /**
+   * A session stopped itself because its context window was nearly full, and
+   * the task went back to the queue with a handoff rather than degrading
+   * inside an overloaded window.
+   *
+   * Beside `task_failed` because it is the same moment in a run's life and
+   * the opposite outcome: nothing went wrong, the work is not over, and the
+   * lease is released rather than failed. It carries the pressure figures the
+   * worker reported, and it is written *before* the handoff is projected, so
+   * every line of that handoff has a record to be checked against.
+   */
+  | "task_handed_off"
   | "task_cancelled"
   /**
    * Nothing picked a task up, and the thread was told so.
@@ -3926,6 +3976,14 @@ export interface WorkAssignment<Lease = unknown, Task = unknown> {
    * `mcpServersForLease` for the gates between a stored row and this field.
    */
   mcpServers?: readonly ResolvedMcpServer[];
+  /**
+   * How many more times this task may stop itself for context pressure before
+   * the control plane fails it instead. Absent from an older control plane,
+   * and its presence is also the signal that a `handed_off` result will be
+   * accepted: a worker that does not see the field reports a failure rather
+   * than a status the other end would answer with a 400.
+   */
+  contextHandoffsRemaining?: number;
 }
 
 /**

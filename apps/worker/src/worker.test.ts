@@ -7,8 +7,13 @@ import test, { type TestContext } from "node:test";
 
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
 import type { CodexProcessRunner } from "@coord/adapter-codex";
+import type { PromptCliProcessRunner } from "@coord/adapter-prompt-cli";
 import { CoordinatorProject, mcpServerDigest } from "@coord/cli/project";
-import { workerOperations } from "@coord/cli/worker-operations";
+import {
+  MAX_CONTEXT_HANDOFFS,
+  workerOperations,
+} from "@coord/cli/worker-operations";
+import { findTaskHandoffs } from "@coord/coordinator";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
@@ -25,7 +30,11 @@ interface CachedPlanEntry {
 }
 
 import { WorkerClient } from "./client.js";
-import { Worker, workerScratchPath } from "./worker.js";
+import {
+  Worker,
+  workerScratchPath,
+  type IterationResult,
+} from "./worker.js";
 
 /**
  * The whole hosted-execution loop over real HTTP: a worker leases a task from
@@ -2544,4 +2553,262 @@ test("a blocked plan is narrowed against the refusal, not resubmitted", async (t
     ["src/other.js", "src/value.js"],
     ["src/value.js"],
   ]);
+});
+
+/**
+ * One real `compact_boundary` event, copied verbatim from
+ * `adapters/prompt-cli/src/recorded-stream.fixture.ts` — which was recorded
+ * from a run that really did compact — rather than written to match the
+ * parser. It is the whole of what a stopped round needs to emit: the tool has
+ * already discarded history by the time this line is printed.
+ */
+const COMPACT_BOUNDARY_LINE = JSON.stringify({
+  type: "system",
+  subtype: "compact_boundary",
+  compact_metadata: {
+    trigger: "auto",
+    pre_tokens: 69_478,
+    post_tokens: 22_823,
+    cumulative_dropped_tokens: 46_655,
+    duration_ms: 41_749,
+  },
+});
+
+/**
+ * A Claude-shaped CLI that plans, then fills its window instead of finishing.
+ *
+ * Injected rather than spawned: what is under test is what this worker
+ * *decides* when a session stops itself, and that must not depend on a vendor
+ * CLI being installed on the machine running the suite. The execution round
+ * waits to be aborted and answers the way a killed process does — exit 130,
+ * `aborted: true` — which is the shape the adapter tells a deliberate stop
+ * apart from a cancellation by.
+ */
+function fillsItsWindow(prompts: string[]): PromptCliProcessRunner {
+  return async (_executable, args, options = {}) => {
+    const prompt = String(options.input ?? "");
+    prompts.push(prompt);
+    if (args.includes("--permission-mode")) {
+      const taskId = /Task id: (\S+)/u.exec(prompt)?.[1] ?? "";
+      const plan = {
+        taskId,
+        objective: "raise the value",
+        expectedFiles: ["src/value.js"],
+        expectedSymbols: ["value"],
+        dependencies: [],
+        commands: [],
+        externalAccess: [],
+        riskLevel: "low",
+      };
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "```json\n" + JSON.stringify(plan) + "\n```",
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    options.onStdout?.(`${COMPACT_BOUNDARY_LINE}\n`);
+    // Bounded, so a round nobody stops finishes the way an unstoppable agent
+    // does — with the edit it was asked for — instead of hanging the suite.
+    // The injected runner has no timeout of its own; the real one's is the
+    // process's.
+    const deadline = Date.now() + 2_000;
+    while (options.signal?.aborted !== true && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    if (options.signal?.aborted !== true) {
+      await writeFile(
+        path.join(String(options.cwd), "src", "value.js"),
+        "export const value = 2;\n",
+        "utf8",
+      );
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: JSON.stringify({
+            outcome: "completed",
+            symbolsChanged: ["value"],
+            explanation: "raised the value",
+            requestId: "",
+            additionalFiles: [],
+            additionalSymbols: [],
+            additionalApis: [],
+            additionalSchemas: [],
+            additionalConfigKeys: [],
+            additionalTests: [],
+            additionalServices: [],
+            reason: "",
+          }),
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    return {
+      exitCode: 130,
+      stdout: "",
+      stderr: "",
+      durationMs: 1,
+      aborted: true,
+    };
+  };
+}
+
+/** A client that can hide the handoff budget, as an older control plane does. */
+class BudgetHidingClient extends WorkerClient {
+  public hideBudget = false;
+
+  public override async lease(
+    ...args: Parameters<WorkerClient["lease"]>
+  ): Promise<Awaited<ReturnType<WorkerClient["lease"]>>> {
+    const assignment = await super.lease(...args);
+    if (assignment === undefined || !this.hideBudget) {
+      return assignment;
+    }
+    const { contextHandoffsRemaining: _remaining, ...rest } = assignment;
+    return rest;
+  }
+}
+
+async function claudeShapedAgent(runtime: Runtime): Promise<void> {
+  runtime.project.config.agents = {
+    ...runtime.project.config.agents,
+    claude: { adapter: "claude", maximumContextTokens: 60_000 },
+  };
+  await runtime.project.save();
+}
+
+test("a session that filled its window is handed off, not failed", async (t) => {
+  // The whole point of the status: nothing went wrong, so nothing is failed.
+  // The lease is released — which is what returns the row to the queue — and
+  // the attempt after it is told where the last one got to rather than
+  // starting from the objective alone.
+  const runtime = await startRuntime(t);
+  await claudeShapedAgent(runtime);
+  const prompts: string[] = [];
+  // A fresh worker per attempt, which is what a requeued task meets: whoever
+  // polls next. One long-lived worker would answer its own second attempt out
+  // of the plan it cached for the first, which is a different path.
+  const attempt = async (): Promise<IterationResult> => {
+    const worker = makeWorker(runtime, {
+      promptCliRunner: fillsItsWindow(prompts),
+    });
+    await worker.register();
+    return await worker.runOnce();
+  };
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    // Vague on purpose: an objective naming a real path is granted the
+    // repository and never plans, and the planning prompt is where a handoff
+    // is delivered today.
+    objective: "raise the value",
+    agentId: "claude",
+    validationCommands: [],
+  });
+
+  const first = await attempt();
+  assert.equal(first.worked, true);
+  assert.equal(first.taskId, task.id);
+  assert.equal(first.handedOff, true, first.reason);
+  assert.equal(first.deferred, true);
+  assert.match(first.reason ?? "", /compacted its own context/u);
+
+  // Released and requeued, with the figures and the note on the record.
+  const leases = await runtime.store.listWorkLeases({});
+  assert.equal(leases[0]?.status, "released");
+  assert.equal(
+    (await runtime.store.listSubmittedTasks())[0]?.status,
+    "submitted",
+  );
+  const handedOff = (await runtime.store.listAudit()).find(
+    (event) => event.type === "task_handed_off",
+  );
+  assert.ok(handedOff, "the figures must be recorded before they are cited");
+  assert.equal(handedOff.taskId, task.id);
+  assert.equal(
+    (handedOff.data["pressure"] as { compactions: number }).compactions,
+    1,
+  );
+  const handoffs = await findTaskHandoffs(runtime.store, { taskId: task.id });
+  assert.equal(handoffs[0]?.reason, "long_running");
+
+  // The second attempt plans with the first attempt's note in front of it.
+  const second = await attempt();
+  assert.equal(second.handedOff, true, second.reason);
+  const planningPrompts = prompts.filter((prompt) =>
+    prompt.includes("Task id:"),
+  );
+  assert.equal(planningPrompts.length, 2, `${prompts.length} prompts in all`);
+  assert.match(String(planningPrompts[1]), /long_running/u);
+  assert.match(String(planningPrompts[1]), /stopped itself before finishing/u);
+
+  // Third time the budget is gone, so the run is not allowed to stop itself:
+  // a stop it could not be requeued from is a failure dressed up as a
+  // handoff, and the honest ending is whatever the attempt reaches.
+  const third = await attempt();
+  assert.equal(third.handedOff, undefined);
+  assert.equal(third.accepted, true, third.reason);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks())[0]?.status,
+    "integrated",
+  );
+  assert.equal(
+    (await runtime.store.listAudit()).filter(
+      (event) => event.type === "task_handed_off",
+    ).length,
+    MAX_CONTEXT_HANDOFFS,
+  );
+});
+
+test("a worker whose control plane never mentioned a budget never stops itself", async (t) => {
+  // The compatibility rule, enforced where the permission is granted:
+  // `contextHandoffsRemaining` on the assignment is how a worker knows a
+  // `handed_off` result will be answered rather than refused with a 400, and
+  // a 400 here would strand the lease until it expired. Absent, the adapter
+  // is simply never allowed to stop, so the run ends exactly as it did before
+  // this feature existed — compacted context and all.
+  const runtime = await startRuntime(t);
+  await claudeShapedAgent(runtime);
+  const client = new BudgetHidingClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+  });
+  client.hideBudget = true;
+  const worker = makeWorker(runtime, {
+    client,
+    promptCliRunner: fillsItsWindow([]),
+  });
+  await worker.register();
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "claude",
+    validationCommands: [],
+  });
+
+  const result = await worker.runOnce();
+  assert.equal(result.taskId, task.id);
+  assert.equal(result.handedOff, undefined);
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks())[0]?.status,
+    "integrated",
+  );
+  assert.equal(
+    (await runtime.store.listAudit()).some(
+      (event) => event.type === "task_handed_off",
+    ),
+    false,
+    "a control plane that never offered a budget must not be sent a handoff",
+  );
 });

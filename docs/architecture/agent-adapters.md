@@ -54,6 +54,17 @@ should set them explicitly. Claude agents may also set `effort` to `low`,
 `"windowsSandbox": "unelevated"` when administrator-approved elevated setup is
 blocked by local policy; both modes retain scoped filesystem boundaries.
 
+`maximumContextTokens` declares the model's context window, in tokens. Nothing
+in a vendor CLI's stream says how large the window is, and a figure guessed
+from a model name is wrong the week the vendor changes it, so absent means
+occupancy is never judged — an agent that can watch its own window still
+notices a compaction the CLI already performed, which needs no threshold.
+`contextHandoff: false` keeps such an agent from stopping itself and being
+requeued with a handoff: the stop costs the attempt's unfinished edits, and a
+deployment that would rather have a degraded answer than a restart can say so.
+It has no effect on an agent that cannot observe its window
+(see [context-window handoff](context-window-handoff.md)).
+
 ## The workflow, end to end
 
 1. **Install and authenticate the vendor CLI once, on the machine that

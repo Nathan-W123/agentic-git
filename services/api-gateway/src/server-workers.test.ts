@@ -1513,3 +1513,166 @@ test("work is found where it was filed, not where the machine guessed", async (t
       "the only thing liveness reads",
   );
 });
+
+
+test("the result route relays a handed-off session's figures, and refuses figures it cannot read", async (t) => {
+  // The body becomes an audit record and then a handoff a person reads, so
+  // the route checks it here rather than relaying it as `unknown`: a NaN or a
+  // missing verdict would otherwise reach somebody as a sentence about how
+  // full a window got, indistinguishable from a measurement.
+  const relayed: unknown[] = [];
+  const runtime = await startRuntime(t, {
+    async acceptWorkResult(input) {
+      relayed.push(input.handoff);
+      return { accepted: false, reason: "requeued" };
+    },
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "fleet", scopes: ["view", "run_task"] },
+  });
+  const token = minted.data.token as string;
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "w",
+        adapters: ["claude"],
+        version: "1",
+      },
+    },
+  );
+  await runtime.store.saveRepository({
+    id: "repo_handoff",
+    path: "/canonical/handoff.git",
+    branch: "main",
+  });
+  await runtime.store.submitTask({
+    repositoryId: "repo_handoff",
+    objective: "read the whole index",
+    agentId: "claude",
+    validationCommands: [],
+  });
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId: registered.data.id, projectId: DEFAULT_PROJECT_ID },
+  });
+  assert.equal(leased.status, 200, JSON.stringify(leased.data));
+  const resultPath = `/api/v1/workers/leases/${leased.data.lease.id}/result`;
+  const pressure = {
+    occupiedTokens: 48_153,
+    peakTokens: 69_478,
+    maximumContextTokens: 60_000,
+    turns: 12,
+    compactions: 1,
+    droppedTokens: 46_655,
+    stale: true,
+  };
+  const report = async (handoff: unknown) =>
+    await bearer(runtime.origin, resultPath, token, {
+      method: "POST",
+      body: { status: "handed_off", plan: {}, changeSet: {}, handoff },
+    });
+
+  const accepted = await report({
+    reason: "the agent compacted its own context at 69478 tokens",
+    pressure,
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  assert.deepEqual(relayed, [
+    {
+      reason: "the agent compacted its own context at 69478 tokens",
+      pressure,
+    },
+  ]);
+
+  // No member at all, which is the shape a worker sends when it decides to
+  // hand off and forgets the figures. The refusal has to name the field: the
+  // body itself is a perfectly good object, so "JSON body must be an object"
+  // would send the sender looking in the wrong place.
+  const noHandoff = await report(undefined);
+  assert.equal(noHandoff.status, 400);
+  assert.match(String(noHandoff.data.error.message), /handoff is required/u);
+
+  const noReason = await report({ pressure });
+  assert.equal(noReason.status, 400);
+  assert.match(String(noReason.data.error.message), /handoff\.reason/u);
+
+  const badFigure = await report({
+    reason: "stopped",
+    pressure: { ...pressure, peakTokens: "lots" },
+  });
+  assert.equal(badFigure.status, 400);
+  assert.match(
+    String(badFigure.data.error.message),
+    /handoff\.pressure\.peakTokens/u,
+  );
+
+  // Nothing beyond the first well-formed report reached the operation.
+  assert.equal(relayed.length, 1);
+});
+
+test("the claim route carries a task's own handoff, and answers 200 for it alone", async (t) => {
+  // A 204 means "nothing to carry", so every field the claim can answer with
+  // has to be counted in it. A handoff dropped here is a second attempt that
+  // repeats the first.
+  const runtime = await startRuntime(t, {
+    claimWorkRepository: async () => ({
+      handoffContext: "## task_x — long_running\n\nstopped on a full window",
+    }),
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const minted = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "fleet", scopes: ["view", "run_task"] },
+  });
+  const token = minted.data.token as string;
+  const registered = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "w",
+        adapters: ["claude"],
+        version: "1",
+      },
+    },
+  );
+  await runtime.store.saveRepository({
+    id: "repo_reseed",
+    path: "/canonical/reseed.git",
+    branch: "main",
+  });
+  await runtime.store.submitTask({
+    repositoryId: "repo_reseed",
+    objective: "carry on",
+    agentId: "claude",
+    validationCommands: [],
+  });
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId: registered.data.id, projectId: DEFAULT_PROJECT_ID },
+  });
+  assert.equal(leased.status, 200, JSON.stringify(leased.data));
+
+  const claimed = await bearer(
+    runtime.origin,
+    `/api/v1/workers/leases/${leased.data.lease.id}/claim`,
+    token,
+    { method: "POST", body: { protocolVersion: 4 } },
+  );
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.data));
+  assert.deepEqual(claimed.data, {
+    handoffContext: "## task_x — long_running\n\nstopped on a full window",
+  });
+});

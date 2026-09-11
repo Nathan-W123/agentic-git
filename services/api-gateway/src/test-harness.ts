@@ -524,6 +524,15 @@ export async function startRuntime(
      */
     claimWorkRepository?: ApiOperations["claimWorkRepository"];
     /**
+     * Answers the worker result route, standing in for `acceptWorkResult`.
+     *
+     * The default fake ends the lease and says yes, which is all most route
+     * tests need. A test about what the route *relays* — the handoff body a
+     * `handed_off` result carries, say — replaces it to see the input the
+     * operation was actually given.
+     */
+    acceptWorkResult?: ApiOperations["acceptWorkResult"];
+    /**
      * Drops every branch operation, as a deployment with no repository
      * access has — the case where a work channel cannot be created at all
      * and the route must say so rather than store one.
@@ -1392,7 +1401,11 @@ export async function startRuntime(
     async acceptWorkResult(input) {
       await store.finishWorkLease(
         input.leaseId,
-        input.status,
+        // A handed-off lease is released, not failed: the real operation
+        // requeues the task, and `WorkLeaseStatus` has no third value for
+        // "stopped on purpose". Mapped here so the fake ends the lease the
+        // way the deployment does rather than in a state the store rejects.
+        input.status === "handed_off" ? "released" : input.status,
         new Date().toISOString(),
         input.detail,
       );
@@ -1488,6 +1501,9 @@ export async function startRuntime(
   }
   if (options.claimWorkRepository !== undefined) {
     operations.claimWorkRepository = options.claimWorkRepository;
+  }
+  if (options.acceptWorkResult !== undefined) {
+    operations.acceptWorkResult = options.acceptWorkResult;
   }
   if (options.withoutBranches === true) {
     // All five together, because that is how a deployment without repository

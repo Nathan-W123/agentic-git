@@ -94,8 +94,13 @@ import {
 } from "./approval-service.js";
 import { InMemoryAuditLog } from "./audit-log.js";
 import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
-import { renderHandoffContext } from "./handoff.js";
-import { findTaskHandoffs } from "./handoff-store.js";
+import { buildTaskHandoff, renderHandoffContext } from "./handoff.js";
+import {
+  contextHandoffsUsed,
+  findTaskHandoffs,
+  MAX_CONTEXT_HANDOFFS,
+  recordTaskHandoff,
+} from "./handoff-store.js";
 import { OwnershipService } from "./ownership-service.js";
 import {
   type ChangeSetSplit,
@@ -399,6 +404,15 @@ interface PlannedTask extends CoordinatedTask {
    * freeze has something to narrow to before the agent's first write.
    */
   blanketEstimate?: readonly string[];
+  /**
+   * Set when the session stopped itself on a full context window.
+   *
+   * Carried on the entry rather than thrown, because an event handler that
+   * threw would reach the failure path and record a `task_failed` — and this
+   * is the opposite of a failure. The execution block reads it after the
+   * event chain drains and requeues the task instead of collecting changes.
+   */
+  contextHandoff?: Extract<AgentEvent, { event: "context_handoff_requested" }>;
 }
 
 interface PreparedTask extends PlannedTask {
@@ -2027,7 +2041,22 @@ export class Coordinator {
                     : { projectId: input.projectId }),
                   limit: 25,
                 }).catch(() => []);
-          const seeded = renderHandoffContext(handoffs.slice(0, 5));
+          // This task's own record, when it has one — it was requeued after
+          // stopping itself on a full window, and the note it left is where
+          // the work actually got to. Read out of the array already fetched,
+          // and lifted out of the repository-wide seed below so the same
+          // handoff is not shown twice under two headings; the seed's limit
+          // of five is a window a task's own note could otherwise fall out
+          // of entirely.
+          const own = handoffs.filter(
+            (handoff) => handoff.taskId === entry.task.id,
+          );
+          const ownHandoff = renderHandoffContext(own.slice(0, 1));
+          const seeded = renderHandoffContext(
+            handoffs
+              .filter((handoff) => handoff.taskId !== entry.task.id)
+              .slice(0, 5),
+          );
           const pitfalls = derivePitfalls(handoffs);
           // What the people who work here wrote for every agent that plans
           // here. The one block of prior context a person authored — see
@@ -2170,6 +2199,7 @@ export class Coordinator {
             entry.task.context?.trim() ?? "",
             turnStart.note,
             leaseNote,
+            ownHandoff,
             standing,
             likelyFiles,
             recentTouchPoints(recentlyTouched),
@@ -3908,6 +3938,21 @@ export class Coordinator {
           // Unpriced work still lands.
         }
       }
+      // The session stopped itself rather than finishing. Nothing is
+      // collected: the edits of a stopped round are half-finished by
+      // definition, and the requeued task starts from a fresh workspace with
+      // a handoff naming where the work got to.
+      if (entry.contextHandoff !== undefined) {
+        return await this.handOffForContext(
+          input,
+          entry,
+          waveVersion,
+          workspace,
+          entry.contextHandoff,
+          recorder,
+          runAudit,
+        );
+      }
       let changeSet = await entry.adapter.collectChanges(entry.session.id);
       if (
         changeSet.taskId !== entry.task.id ||
@@ -4155,6 +4200,118 @@ export class Coordinator {
   }
 
   /**
+   * Returns a task to the queue because its window filled, or fails it
+   * because it has done that too often.
+   *
+   * The remote driver does the same thing in `requeueForContextHandoff`, and
+   * the two must not drift: the audit event is written *first*, so every
+   * figure the handoff cites has a record to be checked against, and the
+   * handoff is written before the task is requeued, so the next attempt
+   * cannot start without it. In process there is no lease to release — the
+   * runner that owns the durable row reads a `queued` result and releases or
+   * retries it, which is the same primitive an empty admission already uses.
+   *
+   * The budget is counted from the audit log by the same helper the remote
+   * path uses, so a task that hands off once in process and once on a worker
+   * has spent two of its two.
+   */
+  private async handOffForContext(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    waveVersion: CanonicalVersion,
+    workspace: TaskWorkspace,
+    event: Extract<AgentEvent, { event: "context_handoff_requested" }>,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<TaskExecutionResult> {
+    const store = this.store;
+    const used =
+      store === undefined
+        ? 0
+        : await contextHandoffsUsed(store, entry.task.id).catch(() => 0);
+    const attempt = used + 1;
+    const pressure = {
+      ...event.pressure,
+      attempt,
+      budget: MAX_CONTEXT_HANDOFFS,
+    };
+    let explanation =
+      used >= MAX_CONTEXT_HANDOFFS
+        ? `The context window filled ${used} times already, which is the ` +
+          "budget for one task; the objective does not fit and was failed " +
+          "rather than requeued again"
+        : "The context window was nearly full, so the run stopped at a tool " +
+          "boundary and the task was returned to the queue with a handoff";
+    const cleanupFailure = await this.cleanupTask(
+      entry,
+      workspace,
+      recorder,
+      runAudit,
+    );
+    if (cleanupFailure !== undefined) {
+      explanation += `; ${cleanupFailure}`;
+    }
+    const exhausted = used >= MAX_CONTEXT_HANDOFFS;
+    await this.trace(
+      recorder,
+      runAudit,
+      exhausted ? "task_failed" : "task_handed_off",
+      entry.task.id,
+      {
+        repositoryId: input.repository.id,
+        ...(input.projectId === undefined
+          ? {}
+          : { projectId: input.projectId }),
+        ...(exhausted
+          ? { stage: "context_handoff_budget", error: explanation }
+          : {
+              reason: event.reason,
+              remaining: MAX_CONTEXT_HANDOFFS - attempt,
+            }),
+        pressure: event.pressure,
+        attempt,
+      },
+    );
+    if (store !== undefined) {
+      // Best effort, like every other handoff write: a task that could not
+      // leave a note is still a task whose ending must be reported.
+      await recordTaskHandoff(
+        store,
+        buildTaskHandoff({
+          taskId: entry.task.id,
+          objective: entry.task.objective,
+          repositoryId: input.repository.id,
+          ...(input.projectId === undefined
+            ? {}
+            : { projectId: input.projectId }),
+          canonicalRevision: waveVersion.revision,
+          ...(entry.admission === undefined
+            ? {}
+            : { admission: entry.admission }),
+          decision: entry.decision,
+          reason: exhausted ? "failed" : "long_running",
+          ...(exhausted ? { failure: explanation } : {}),
+          contextPressure: pressure,
+        }),
+      ).catch(() => undefined);
+    }
+    await recorder?.status(
+      entry.task.id,
+      exhausted ? "failed" : "queued",
+      explanation,
+    );
+    return {
+      task: entry.task,
+      plan: entry.plan,
+      decision: exhausted
+        ? entry.decision
+        : { ...entry.decision, decision: "queued", explanation },
+      status: exhausted ? "failed" : "queued",
+      explanation,
+    };
+  }
+
+  /**
    * Puts an agent's question to whoever is watching, and bounds the wait.
    *
    * The deadline is the whole design. A question costs more than a message:
@@ -4286,6 +4443,19 @@ export class Coordinator {
         recorder,
         runAudit,
       );
+      return;
+    }
+    if (event.event === "context_handoff_requested") {
+      // Recorded here and acted on after the event chain drains. Handled
+      // explicitly rather than left to the scope-change fallthrough below,
+      // which would read `additionalFiles` off an event that has none and
+      // fail the task with a TypeError instead of requeueing it.
+      entry.contextHandoff = event;
+      await this.trace(recorder, runAudit, "agent_progress", entry.task.id, {
+        message: `context handoff requested: ${event.reason}`,
+        pressure: event.pressure,
+        occurredAt: event.occurredAt,
+      });
       return;
     }
     if (event.event === "replan_proposed") {

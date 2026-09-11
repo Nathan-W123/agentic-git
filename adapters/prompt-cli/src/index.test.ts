@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import type { CoordinatorContext } from "@coord/agent-protocol";
+import type { AgentEvent, CoordinatorContext } from "@coord/agent-protocol";
 import {
   ANSWER_NOT_STATUS_DIRECTIVE,
   KEEP_IT_SIMPLE_DIRECTIVE,
@@ -39,6 +39,7 @@ import {
   readClaudeNarration,
   failureFromStream,
 } from "./index.js";
+import { RECORDED_COMPACTION_STREAM } from "./recorded-stream.fixture.js";
 
 const TASK: TaskDefinition = {
   id: "task_update_value",
@@ -590,9 +591,12 @@ test("claude: an action round trip — the platform acts, the next round knows",
 
 test("claude: the vendor session id chains --resume across execs and instances", async () => {
   // Warm continuation, adapter side: the envelope's session_id is captured
-  // after every exec, rides the next one as --resume, and — handed over as
-  // the session record's resume token — lets a completely fresh adapter
-  // instance pick the conversation up where the vendor left it.
+  // after every exec of a conversation, rides the next one as --resume, and —
+  // handed over as the session record's resume token — lets a completely
+  // fresh adapter instance pick the conversation up where the vendor left it.
+  // Declared conversational because that is what makes a planning id worth
+  // keeping: a one-shot task's execution deliberately starts outside the
+  // planning transcript (see the test below).
   const fixture = await createFixture();
   const calls: Array<{ args: readonly string[] }> = [];
   const runner: PromptCliProcessRunner = async (_executable, args, options = {}) => {
@@ -629,6 +633,7 @@ test("claude: the vendor session id chains --resume across execs and instances",
       fixture.repository,
     ),
     repositoryId: fixture.repository.id,
+    conversational: true,
   });
   await adapter.requestPlan(session.id);
   // The first exec of a fresh session has nothing to resume.
@@ -683,6 +688,7 @@ test("claude: the vendor session id chains --resume across execs and instances",
         fixture.repository,
       ),
       repositoryId: fixture.repository.id,
+      conversational: true,
     },
   );
   assert.equal(continued.id, session.id);
@@ -701,6 +707,9 @@ test("claude: a stale resume token is retried without the flag, once", async () 
   // A restart or the CLI's own cleanup can invalidate a session id. That
   // costs the conversation its memory, never the turn: the exec is retried
   // once without --resume, the same policy the chat providers apply.
+  // Conversational, because that is where a resume token comes from early
+  // enough to go stale: a one-shot task's execution does not resume the
+  // planning session it was planned in.
   const fixture = await createFixture();
   const calls: Array<{ args: readonly string[] }> = [];
   const runner: PromptCliProcessRunner = async (_executable, args, options = {}) => {
@@ -742,6 +751,7 @@ test("claude: a stale resume token is retried without the flag, once", async () 
       fixture.repository,
     ),
     repositoryId: fixture.repository.id,
+    conversational: true,
   });
   await adapter.requestPlan(session.id);
   const workspace = await fixture.workspaces.create({
@@ -2734,4 +2744,606 @@ test("a vendor with no config flag refuses managed MCP servers rather than runni
   createGeminiAdapter(plain);
   assert.equal(CLAUDE_PROFILE.mcpArgs?.("/x/claude.json").join(" "), "--mcp-config /x/claude.json --strict-mcp-config");
   assert.equal(GEMINI_PROFILE.mcpArgs, undefined);
+});
+
+/**
+ * The recorded stream, line by line, for tests that need to feed it at the
+ * pace a process really would. The observer's decisions are made between
+ * lines, so a test that wrote the whole stream in one chunk would only ever
+ * prove that the last decision won.
+ */
+const RECORDED_LINES = RECORDED_COMPACTION_STREAM.split("\n");
+
+/**
+ * Feeds lines to a run's observer one macrotask apart and stops where the
+ * real runner stops.
+ *
+ * `abort()` destroys the child's stdout synchronously, so no line after the
+ * kill is ever delivered; the promise then settles on `close`, which is a
+ * later tick. Reproducing both is the only way a test can tell *which* line a
+ * verdict landed on.
+ */
+async function feedStream(
+  options: ProcessOptions,
+  lines: readonly string[],
+): Promise<number> {
+  let fed = 0;
+  for (const line of lines) {
+    if (options.signal?.aborted === true) {
+      break;
+    }
+    options.onStdout?.(`${line}\n`);
+    fed += 1;
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+  }
+  return fed;
+}
+
+function claudeUsageEnvelope(
+  result: string,
+  usage: Record<string, number>,
+): string {
+  return JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result,
+    usage,
+  });
+}
+
+async function planned(
+  fixture: Fixture,
+  adapter: PromptCliAdapter,
+): Promise<{ sessionId: string; workspace: TaskWorkspace }> {
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  return { sessionId: session.id, workspace };
+}
+
+test("claude: a streamed execution reports live usage on the heartbeat", async () => {
+  // The heartbeat used to see nothing until a round exited, so a budget could
+  // not stop a run that was already over it. The monitor reads the same bytes
+  // the narrator does, so the figure exists while the round is still running
+  // — and is replaced, not added to, once the envelope arrives.
+  const fixture = await createFixture();
+  let release!: () => void;
+  const parked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let streamed!: () => void;
+  const fedEverything = new Promise<void>((resolve) => {
+    streamed = resolve;
+  });
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope("```json\n" + JSON.stringify(PLAN) + "\n```"),
+      );
+    }
+    // Odd-sized chunks, because a process does not hand over whole lines.
+    const text = `${RECORDED_COMPACTION_STREAM}\n`;
+    for (let index = 0; index < text.length; index += 7) {
+      options.onStdout?.(text.slice(index, index + 7));
+    }
+    streamed();
+    await parked;
+    return output(
+      claudeUsageEnvelope(JSON.stringify(COMPLETION), {
+        input_tokens: 11,
+        output_tokens: 9,
+        cache_read_input_tokens: 20,
+        cache_creation_input_tokens: 60,
+      }),
+    );
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const { sessionId, workspace } = await planned(fixture, adapter);
+
+  const round = adapter.sendContext(sessionId, contextFor(workspace));
+  await fedEverything;
+  const live = adapter.reportedTokenUsage(sessionId);
+  assert.deepEqual(
+    live.map((entry) => [entry.phase, entry.totalTokens]),
+    [["execution", 122_416]],
+  );
+
+  release();
+  await round;
+  const settled = adapter.reportedTokenUsage(sessionId);
+  assert.deepEqual(
+    settled.map((entry) => [entry.phase, entry.totalTokens]),
+    [["execution", 100]],
+  );
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: a planning round's live spend is billed to planning", async () => {
+  // Both phases stream, so both are watched; the monitor is booked to the
+  // phase that opened it. A planning round counted as execution would put a
+  // task over an execution budget it had not touched.
+  const fixture = await createFixture();
+  let release!: () => void;
+  const parked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let streamed!: () => void;
+  const fedEverything = new Promise<void>((resolve) => {
+    streamed = resolve;
+  });
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    assert.ok(args.includes("--permission-mode"));
+    options.onStdout?.(`${RECORDED_LINES.slice(0, 4).join("\n")}\n`);
+    streamed();
+    await parked;
+    return output(claudeEnvelope("```json\n" + JSON.stringify(PLAN) + "\n```"));
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  const planning = adapter.requestPlan(session.id);
+  await fedEverything;
+
+  assert.deepEqual(
+    adapter
+      .reportedTokenUsage(session.id)
+      .map((entry) => [entry.phase, entry.totalTokens]),
+    [["planning", 25_776 + 48_154]],
+  );
+
+  release();
+  await planning;
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: a compaction stops the round on the line that reports it", async () => {
+  // A `compact_boundary` is printed between requests, with nothing local in
+  // flight, so it is acted on the line it arrives on — the eighth of the
+  // recorded run. The tool has already thrown history away by then; carrying
+  // on means working from a summary nobody in the coordination record chose.
+  const fixture = await createFixture();
+  let fed = 0;
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope("```json\n" + JSON.stringify(PLAN) + "\n```"),
+      );
+    }
+    fed = await feedStream(options, RECORDED_LINES);
+    return output("", { exitCode: 130, aborted: true });
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+    contextPressure: { handOff: true },
+  });
+  const { sessionId, workspace } = await planned(fixture, adapter);
+  const seen: AgentEvent[] = [];
+  await adapter.streamEvents(sessionId, (event) => {
+    seen.push(event);
+  });
+
+  await adapter.sendContext(sessionId, contextFor(workspace));
+
+  assert.equal(fed, 8);
+  const handoff = seen.find(
+    (event) => event.event === "context_handoff_requested",
+  );
+  assert.ok(
+    handoff !== undefined && handoff.event === "context_handoff_requested",
+    seen.map((event) => event.event).join(", "),
+  );
+  assert.match(handoff.reason, /compacted its own context at 69478 tokens/u);
+  assert.equal(handoff.pressure.compactions, 1);
+  assert.equal(handoff.pressure.droppedTokens, 46_655);
+  assert.equal(handoff.pressure.peakTokens, 69_478);
+  assert.equal(
+    seen.some((event) => event.event === "completed"),
+    false,
+  );
+  // The aborted round has no envelope, so its spend comes off the monitor
+  // rather than being lost.
+  assert.deepEqual(
+    adapter
+      .reportedTokenUsage(sessionId)
+      .map((entry) => [entry.phase, entry.totalTokens]),
+    [["execution", 25_776 + 48_154]],
+  );
+  await assert.rejects(
+    async () => await adapter.collectChanges(sessionId),
+    /has not completed/u,
+  );
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: occupancy past the window stops at the next tool boundary", async () => {
+  // The second turn of the recorded run is at 48,153 of a 60,000-token window
+  // — over the 0.8 default — but the run is not stopped there: the model may
+  // be part-way through composing a message. It is stopped on the tool-result
+  // line that follows, which is the one moment nothing local is in flight.
+  const fixture = await createFixture();
+  let fed = 0;
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope("```json\n" + JSON.stringify(PLAN) + "\n```"),
+      );
+    }
+    fed = await feedStream(options, RECORDED_LINES);
+    return output("", { exitCode: 130, aborted: true });
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+    contextPressure: { maximumContextTokens: 60_000, handOff: true },
+  });
+  const { sessionId, workspace } = await planned(fixture, adapter);
+  const seen: AgentEvent[] = [];
+  await adapter.streamEvents(sessionId, (event) => {
+    seen.push(event);
+  });
+
+  await adapter.sendContext(sessionId, contextFor(workspace));
+
+  // Seven lines: the tool result at index 6, and nothing after it.
+  assert.equal(fed, 7);
+  const handoff = seen.find(
+    (event) => event.event === "context_handoff_requested",
+  );
+  assert.ok(
+    handoff !== undefined && handoff.event === "context_handoff_requested",
+    seen.map((event) => event.event).join(", "),
+  );
+  assert.match(handoff.reason, /80% full \(48153 of 60000 tokens\)/u);
+  assert.match(handoff.reason, /tool result has landed/u);
+  assert.deepEqual(handoff.pressure, {
+    occupiedTokens: 48_153,
+    peakTokens: 48_153,
+    maximumContextTokens: 60_000,
+    turns: 2,
+    compactions: 0,
+    droppedTokens: 0,
+    stale: true,
+  });
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: without permission to hand off, the same run is only watched", async () => {
+  // The deployment's choice, not the adapter's: observation is unconditional
+  // on a live profile, and `handOff` decides whether a verdict may stop
+  // anything. A deployment that says no still gets its live usage figures,
+  // and gets its completion too.
+  const fixture = await createFixture();
+  let fed = 0;
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope("```json\n" + JSON.stringify(PLAN) + "\n```"),
+      );
+    }
+    fed = await feedStream(options, RECORDED_LINES);
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+    contextPressure: { maximumContextTokens: 60_000, handOff: false },
+  });
+  const { sessionId, workspace } = await planned(fixture, adapter);
+  const seen: AgentEvent[] = [];
+  await adapter.streamEvents(sessionId, (event) => {
+    seen.push(event);
+  });
+
+  await adapter.sendContext(sessionId, contextFor(workspace));
+
+  assert.equal(fed, RECORDED_LINES.length);
+  assert.equal(
+    seen.some((event) => event.event === "context_handoff_requested"),
+    false,
+  );
+  assert.equal(
+    seen.some((event) => event.event === "completed"),
+    true,
+  );
+  const changes = await adapter.collectChanges(sessionId);
+  assert.equal(changes.patches.length, 1);
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: a cancelled round is not reported as a context handoff", async () => {
+  // Both stop the process through the same controller and both come back as
+  // exit 130, so the two are told apart by the verdict recorded before the
+  // abort — and a person stopping a task must never leave the control plane
+  // requeueing it as though the agent had asked.
+  const fixture = await createFixture();
+  let stop!: () => void;
+  const cancelled = new Promise<void>((resolve) => {
+    stop = resolve;
+  });
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope("```json\n" + JSON.stringify(PLAN) + "\n```"),
+      );
+    }
+    options.onStdout?.(`${RECORDED_LINES.slice(0, 2).join("\n")}\n`);
+    stop();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5);
+    });
+    return output("", { exitCode: 130, aborted: true });
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+    contextPressure: { maximumContextTokens: 60_000, handOff: true },
+  });
+  const { sessionId, workspace } = await planned(fixture, adapter);
+  const seen: AgentEvent[] = [];
+  await adapter.streamEvents(sessionId, (event) => {
+    seen.push(event);
+  });
+
+  const round = adapter.sendContext(sessionId, contextFor(workspace));
+  await cancelled;
+  await adapter.cancel(sessionId);
+  // The killed round ends as the failure it is. What matters is what it is
+  // not: no verdict was recorded before the abort, so nothing asks the
+  // control plane to requeue a task somebody just stopped.
+  await assert.rejects(async () => await round, /exit code 130/u);
+
+  assert.equal(
+    seen.some((event) => event.event === "context_handoff_requested"),
+    false,
+  );
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: the session id is read out of a streamed result event", async () => {
+  // The bug this feature had to fix first: `parseClaudeSessionId` parsed the
+  // whole of stdout as one JSON value, which a stream never is, so no real
+  // run ever recorded a resume token. A one-shot task resumes its own earlier
+  // execution rounds and deliberately not its planning session — that
+  // transcript is what the window would otherwise be spent on.
+  const fixture = await createFixture();
+  const calls: Array<readonly string[]> = [];
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    calls.push(args);
+    if (args.includes("--permission-mode")) {
+      return output(
+        [
+          RECORDED_LINES[0] ?? "",
+          claudeEnvelope(
+            "```json\n" + JSON.stringify(PLAN) + "\n```",
+            "sess-plan-11111111",
+          ),
+        ].join("\n"),
+      );
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(
+      [
+        RECORDED_LINES[0] ?? "",
+        claudeEnvelope(JSON.stringify(COMPLETION), "sess-exec-22222222"),
+      ].join("\n"),
+    );
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const { sessionId, workspace } = await planned(fixture, adapter);
+  await adapter.sendContext(sessionId, contextFor(workspace));
+
+  assert.equal(calls[1]?.includes("--resume"), false);
+  assert.equal(adapter.resumeToken(sessionId), "sess-exec-22222222");
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: a continued conversation starts with no pending handoff", async () => {
+  // The verdict belongs to the round that made it. A record that carried one
+  // into the next turn would hand that turn off before it had run a line.
+  const fixture = await createFixture();
+  let executions = 0;
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope(
+          "```json\n" +
+            JSON.stringify(
+              executions === 0 ? PLAN : { ...PLAN, taskId: "task_turn_two" },
+            ) +
+            "\n```",
+        ),
+      );
+    }
+    executions += 1;
+    if (executions === 1) {
+      await feedStream(options, RECORDED_LINES);
+      return output("", { exitCode: 130, aborted: true });
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+    contextPressure: { handOff: true },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+    conversational: true,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+
+  const continued = await adapter.continueTask(session, {
+    task: { ...TASK, id: "task_turn_two", objective: "Update it again" },
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+    conversational: true,
+  });
+  const seen: AgentEvent[] = [];
+  await adapter.streamEvents(continued.id, (event) => {
+    seen.push(event);
+  });
+  await adapter.requestPlan(continued.id);
+  await adapter.sendContext(continued.id, {
+    ...contextFor(workspace),
+    decision: { ...contextFor(workspace).decision, taskId: "task_turn_two" },
+  });
+
+  // The second turn ran to a completion rather than inheriting the first
+  // turn's verdict.
+  assert.equal(
+    seen.some((event) => event.event === "context_handoff_requested"),
+    false,
+  );
+  assert.equal(
+    seen.some((event) => event.event === "completed"),
+    true,
+  );
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("every profile says what it can observe, and claude carries its window", async () => {
+  // Declared rather than inferred: a driver can tell a vendor that will never
+  // ask to be handed off from one that has not asked yet.
+  const fixture = await createFixture();
+  const common = {
+    agentId: "agent",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+  };
+  const claude = await createClaudeAdapter({
+    ...common,
+    contextPressure: { maximumContextTokens: 200_000, handOff: true },
+  }).getCapabilities();
+  assert.equal(claude.contextObservation, "live");
+  assert.equal(claude.maximumContextTokens, 200_000);
+
+  const gemini = await createGeminiAdapter(common).getCapabilities();
+  assert.equal(gemini.contextObservation, "none");
+  assert.equal("maximumContextTokens" in gemini, false);
+  await rm(fixture.root, { recursive: true, force: true });
 });
