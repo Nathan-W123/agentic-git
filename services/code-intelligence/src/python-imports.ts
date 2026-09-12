@@ -27,11 +27,134 @@ function candidates(base: string): string[] {
   return [
     // The package first: `a/b/__init__.py` shadows `a/b.py`, and probing the
     // module first would attribute an edge to the file Python would not load.
+    // A module beats a stub-only directory, though: `x/__init__.pyi` with no
+    // `__init__.py` beside it is a namespace package as far as the
+    // interpreter is concerned, and `x.py` wins over a namespace package.
     `${base}/__init__.py`,
-    `${base}/__init__.pyi`,
     `${base}.py`,
+    `${base}/__init__.pyi`,
     `${base}.pyi`,
   ];
+}
+
+/**
+ * Whether a dotted path is cut off by a plain module on the way down.
+ *
+ * `import foo.bar` with `foo.py` and `foo/bar.py` but no `foo/__init__.py`
+ * loads `foo.py` — a regular module beats a namespace package — and then
+ * fails, because a module has no submodules. Pointing the edge at
+ * `foo/bar.py` would name a file Python never opens.
+ */
+function shadowedByModule(
+  root: string,
+  parts: readonly string[],
+  files: ReadonlySet<string>,
+): boolean {
+  for (let depth = 1; depth < parts.length; depth += 1) {
+    const prefix = join(root, parts.slice(0, depth));
+    if (
+      files.has(`${prefix}.py`) &&
+      !files.has(`${prefix}/__init__.py`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a directory sits inside a package, at any depth.
+ *
+ * A root inside a package cannot supply top-level names: its children are
+ * `pkg.child`, not `child`. The first version only asked whether the root
+ * itself held an `__init__.py`, so `app/utils/` — a namespace directory
+ * inside `app/` — was read as a script directory, and `import user` from
+ * inside it resolved to `app/utils/user.py`, which is `app.utils.user` and
+ * not importable by that name at all.
+ */
+function insidePackage(dir: string, files: ReadonlySet<string>): boolean {
+  let current = dir;
+  while (current !== "") {
+    if (
+      files.has(`${current}/__init__.py`) ||
+      files.has(`${current}/__init__.pyi`)
+    ) {
+      return true;
+    }
+    const parent = path.posix.dirname(current);
+    current = parent === "." ? "" : parent;
+  }
+  return false;
+}
+
+/**
+ * What the repository's layout says about where roots are, read once.
+ *
+ * Read once because the resolver used to walk every path in the repository
+ * for every specifier in every file — a project-marker search inside the
+ * hot loop — and fifty thousand files times ten imports each is a build that
+ * never finishes.
+ */
+export interface PythonLayout {
+  /** Directories holding a `pyproject.toml`, `setup.py` or `setup.cfg`. */
+  markerDirs: readonly string[];
+  hasSrc: boolean;
+}
+
+/**
+ * Directories whose project markers describe a fixture, not the project.
+ *
+ * A `setup.py` under `tests/fixtures/sample/` is something a test installs
+ * into a temporary environment; read as a root it would make that fixture's
+ * `settings.py` the answer to `import settings` from anywhere in the
+ * repository. An example project is the same thing under another name: a
+ * `pyproject.toml` under `examples/demo/` is not on the application's
+ * `sys.path`, and with it as a root the Django idiom `from local_settings
+ * import *` — whose target is gitignored and so absent from the tree —
+ * resolved onto the example's `local_settings.py`, the only file of that
+ * name anywhere. Files under these directories keep their own ancestor
+ * roots; only the generosity to every other importer is withheld.
+ */
+const FIXTURE_DIRS = new Set([
+  "test",
+  "tests",
+  "testing",
+  "testdata",
+  "fixture",
+  "fixtures",
+  "__fixtures__",
+  "example",
+  "examples",
+  "sample",
+  "samples",
+  "demo",
+  "demos",
+]);
+
+const LAYOUTS = new WeakMap<ReadonlySet<string>, PythonLayout>();
+
+export function pythonLayout(files: ReadonlySet<string>): PythonLayout {
+  const known = LAYOUTS.get(files);
+  if (known !== undefined) {
+    return known;
+  }
+  const markerDirs = new Set<string>();
+  let hasSrc = false;
+  for (const file of files) {
+    if (file.startsWith("src/")) {
+      hasSrc = true;
+    }
+    if (PROJECT_MARKERS.includes(path.posix.basename(file))) {
+      const dir = path.posix.dirname(file);
+      if (dir.split("/").some((segment) => FIXTURE_DIRS.has(segment))) {
+        continue;
+      }
+      markerDirs.add(dir === "." ? "" : dir);
+    }
+  }
+  const layout = { markerDirs: [...markerDirs].sort(), hasSrc };
+  LAYOUTS.set(files, layout);
+  return layout;
 }
 
 /**
@@ -39,8 +162,12 @@ function candidates(base: string): string[] {
  *
  * A vendored copy of a package imports itself by its own top-level name, so
  * without this a repository that vendors anything grows an edge from every
- * vendored file to the real package beside it. `build` is deliberately absent
- * — it is a real package name on PyPI, and excluding it drops correct edges.
+ * vendored file to the real package beside it. `_vendor` is the name pip,
+ * setuptools and poetry-core use and `vendored` is botocore's; neither was
+ * here, and `poetry/core/_vendor/lark/` — inside the `poetry.core` package,
+ * so every ancestor root refused — resolved `import lark` to the repository
+ * root's real `lark/`. `build` is deliberately absent — it is a real package
+ * name on PyPI, and excluding it drops correct edges.
  */
 const VENDOR = new Set([
   "node_modules",
@@ -48,6 +175,8 @@ const VENDOR = new Set([
   ".venv",
   "venv",
   "vendor",
+  "_vendor",
+  "vendored",
   "third_party",
   ".tox",
   "dist",
@@ -80,7 +209,15 @@ function join(root: string, parts: readonly string[]): string {
 
 export interface PythonResolution {
   files: ReadonlySet<string>;
-  stdlib: ReadonlySet<string>;
+  /**
+   * The interpreter's own standard-library names, or `undefined` when no
+   * interpreter answered. Unknown is not empty: with no list to check
+   * against, every absolute import is dropped rather than matched against a
+   * repository file that happens to be called `json.py`.
+   */
+  stdlib: ReadonlySet<string> | undefined;
+  /** Computed from `files` when absent; pass it in when resolving many. */
+  layout?: PythonLayout;
 }
 
 /**
@@ -136,7 +273,7 @@ export function resolvePythonImport(
       return undefined;
     }
     const base = parts.length === 0 ? dir : join(dir, parts);
-    if (base === "") {
+    if (base === "" || shadowedByModule(dir, parts, files)) {
       return undefined;
     }
     const hit = candidates(base).find((candidate) => files.has(candidate));
@@ -145,7 +282,7 @@ export function resolvePythonImport(
     return hit === fromFile ? undefined : hit;
   }
 
-  if (parts.length === 0) {
+  if (parts.length === 0 || stdlib === undefined) {
     return undefined;
   }
   // `import email` against a repository file called `email.py` is a plausible
@@ -155,36 +292,61 @@ export function resolvePythonImport(
     return undefined;
   }
 
-  const roots = new Set<string>(["", ...ancestors(fromFile)]);
-  if (files.has("src/__init__.py") || [...files].some((file) => file.startsWith("src/"))) {
-    roots.add("src");
-  }
-  for (const file of files) {
-    const name = path.posix.basename(file);
-    if (!PROJECT_MARKERS.includes(name)) {
-      continue;
+  const layout = context.layout ?? pythonLayout(files);
+  const fromVendored = vendored(fromFile);
+  const roots = new Set<string>();
+  if (fromVendored) {
+    // A vendored file imports its own package by its top-level name, and the
+    // copy it means is the one it sits inside. Its roots are the vendored
+    // directories above it and nothing else — not the repository root, or
+    // `vendor/lark/parser.py` resolves `import lark` to the real `lark/`
+    // beside `vendor/`, which is precisely the edge the VENDOR list exists
+    // to prevent.
+    for (const dir of ancestors(fromFile)) {
+      if (dir !== "" && vendored(dir)) {
+        roots.add(dir);
+      }
     }
-    const dir = path.posix.dirname(file);
-    const root = dir === "." ? "" : dir;
-    roots.add(root);
-    roots.add(root === "" ? "src" : `${root}/src`);
+  } else {
+    roots.add("");
+    for (const dir of ancestors(fromFile)) {
+      roots.add(dir);
+    }
+    if (layout.hasSrc) {
+      roots.add("src");
+    }
+    // A project marker makes its directory a root for every importer, not
+    // only the files under it: in a monorepo `libs/` is installed into the
+    // same environment `services/` runs in, and the cross-project edge is
+    // the one worth having. The ambiguity backstop below is what keeps that
+    // generosity safe.
+    for (const dir of layout.markerDirs) {
+      roots.add(dir);
+      roots.add(dir === "" ? "src" : `${dir}/src`);
+    }
   }
 
+  const searched = [...roots].filter(
+    (root) =>
+      (fromVendored || root === "" || !vendored(root)) &&
+      (root === "" || !insidePackage(root, files)),
+  );
+  // A plain module under any searched root cuts the dotted path off under
+  // every root, not just its own. The import system reads each `sys.path`
+  // entry in turn and a regular module on any of them beats a namespace
+  // directory on any other, so with `src/config.py` and `config/dev.py`
+  // CPython loads the module and then fails: "'config' is not a package".
+  // Checked per root, the shadow only removed `src` from the search and the
+  // repository root still handed out `config/dev.py` — a file Python never
+  // opens — while answering `import config` with `src/config.py` in the same
+  // breath.
+  if (searched.some((root) => shadowedByModule(root, parts, files))) {
+    return undefined;
+  }
   const hits = new Set<string>();
-  for (const root of roots) {
-    if (root !== "" && vendored(root)) {
-      continue;
-    }
-    // A root that is itself inside a package cannot supply top-level names:
-    // its children are `pkg.child`, not `child`.
-    if (
-      root !== "" &&
-      (files.has(`${root}/__init__.py`) || files.has(`${root}/__init__.pyi`))
-    ) {
-      continue;
-    }
+  for (const root of searched) {
     const hit = candidates(join(root, parts)).find(
-      (candidate) => files.has(candidate) && !vendored(candidate),
+      (candidate) => files.has(candidate) && (fromVendored || !vendored(candidate)),
     );
     if (hit !== undefined && hit !== fromFile) {
       hits.add(hit);

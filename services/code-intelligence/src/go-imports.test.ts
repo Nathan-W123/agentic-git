@@ -239,3 +239,193 @@ test("a module nobody declared resolves to nothing", () => {
     [],
   );
 });
+
+test("a build constraint is read from the comments above the clause, wherever the word package appears", () => {
+  // The first version sliced the text at the first occurrence of "package",
+  // which a licence header is allowed to contain — and then never saw the
+  // constraint under it. Go ignores this file; so must this.
+  assert.equal(
+    readGoFile(
+      [
+        "// Copyright 2024 Acme. Distributed with the other packages under MIT.",
+        "",
+        "//go:build ignore",
+        "",
+        "package cp",
+        "",
+        "var X = 1",
+      ].join("\n"),
+    )?.buildIgnored,
+    true,
+  );
+  // A constraint inside a block comment is prose.
+  assert.equal(
+    readGoFile("/*\n//go:build ignore\n*/\n\npackage blk\n")?.buildIgnored,
+    false,
+  );
+  // `!ignore` builds everywhere, and an expression with an operator depends
+  // on tags this cannot see.
+  assert.equal(readGoFile("//go:build !ignore\n\npackage neg\n")?.buildIgnored, false);
+  assert.equal(
+    readGoFile("//go:build ignore || linux\n\npackage or\n")?.buildIgnored,
+    false,
+  );
+  // The old form needs a blank line before the clause, or it is a doc comment.
+  assert.equal(readGoFile("// +build ignore\npackage under\n")?.buildIgnored, false);
+  assert.equal(readGoFile("// +build ignore\n\npackage over\n")?.buildIgnored, true);
+  assert.equal(
+    readGoFile("// +build linux,ignore darwin\n\npackage and\n")?.buildIgnored,
+    true,
+  );
+});
+
+test("files the go tool never builds are neither end of an edge", () => {
+  const F = (packageName: string): GoFileFacts => ({
+    packageName,
+    buildIgnored: false,
+    imports: [],
+  });
+  const context = {
+    files: new Set(["main.go", "_gen.go", "store/store.go", "store/_template.go", "store/.hidden.go"]),
+    moduleRoots: new Map([["example.com/m", ""]]),
+    facts: new Map([
+      ["store/store.go", F("store")],
+      ["store/_template.go", F("store")],
+      ["store/.hidden.go", F("store")],
+    ]),
+  };
+  assert.deepEqual(resolveGoImport("main.go", "example.com/m/store", context), [
+    "store/store.go",
+  ]);
+  assert.deepEqual(resolveGoImport("_gen.go", "example.com/m/store", context), []);
+});
+
+test("a nested module with an unrelated path still owns its subtree", () => {
+  // `sub/` is `example.com/other`, so `example.com/m/sub/lib` does not
+  // compile — and the longest-prefix match on the specifier alone would have
+  // aimed it at sub/lib anyway.
+  assert.deepEqual(
+    resolveGoImport("main.go", "example.com/m/sub/lib", {
+      files: new Set(["sub/lib/lib.go", "sub/go.mod", "go.mod"]),
+      moduleRoots: new Map([
+        ["example.com/m", ""],
+        ["example.com/other", "sub"],
+      ]),
+      facts: new Map([
+        ["sub/lib/lib.go", { packageName: "lib", buildIgnored: false, imports: [] }],
+      ]),
+    }),
+    [],
+  );
+});
+
+test("a specifier with a dot element is refused rather than normalised", () => {
+  const context = {
+    files: new Set(["store/store.go"]),
+    moduleRoots: new Map([["example.com/m", ""]]),
+    facts: new Map([
+      ["store/store.go", { packageName: "store", buildIgnored: false, imports: [] }],
+    ]),
+  };
+  for (const specifier of [
+    "example.com/m/billing/../store",
+    "example.com/m/./store",
+    "example.com/m//store",
+  ]) {
+    assert.deepEqual(resolveGoImport("main.go", specifier, context), [], specifier);
+  }
+});
+
+test("go.mod is read the way go mod reads it", () => {
+  for (const [source, expected] of [
+    ["module example.com/m // the module\n\ngo 1.22\n", "example.com/m"],
+    ["﻿module example.com/m\n", "example.com/m"],
+    ["module (\n\texample.com/m\n)\n", "example.com/m"],
+    ['module "example.com/q"\n', "example.com/q"],
+  ] as const) {
+    assert.deepEqual(
+      [...goModuleRoots(new Map([["go.mod", source]]))],
+      [[expected, ""]],
+      JSON.stringify(source),
+    );
+  }
+  // A block with nothing in it declares no path, and `(` is not one.
+  assert.deepEqual([...goModuleRoots(new Map([["go.mod", "module (\n)\n"]]))], []);
+});
+
+test("a go.mod under testdata is a fixture, not a module root", () => {
+  // A fixture repeating the root's own path used to mark it ambiguous and
+  // delete it — every edge in the repository gone, over a test file.
+  assert.deepEqual(
+    [
+      ...goModuleRoots(
+        new Map([
+          ["go.mod", "module example.com/m\n"],
+          ["internal/testdata/mod/go.mod", "module example.com/m\n"],
+        ]),
+      ),
+    ],
+    [["example.com/m", ""]],
+  );
+});
+
+test("a CRLF file is read as go/build reads it, one trimmed line at a time", () => {
+  // The old constraint form, saved with CRLF. go/build trims each header
+  // line, so `\r\n\r\n` is the blank line the form needs and the constraint
+  // counts: `go list` puts the file in IgnoredGoFiles. Read raw, the
+  // `+build` pattern never matched a body ending in `\r` and the blank-line
+  // test never saw one, so a generator script joined its package — or, as
+  // `package main`, gave the directory two package names and cost every
+  // importer of it every edge.
+  assert.equal(
+    readGoFile("// +build ignore\r\n\r\npackage billing\r\n\r\nfunc main() {}\r\n")
+      ?.buildIgnored,
+    true,
+  );
+  // Without the blank line it is still a doc comment, CRLF or not.
+  assert.equal(
+    readGoFile("// +build ignore\r\npackage under\r\n")?.buildIgnored,
+    false,
+  );
+  // And the prologue itself reads through CRLF.
+  assert.deepEqual(
+    readGoFile('package a\r\n\r\nimport "example.com/m/x"\r\n\r\nfunc F() {}\r\n')
+      ?.imports,
+    ["example.com/m/x"],
+  );
+});
+
+test("a parenthesised ignore is the ignore tag, as the go tool evaluates it", () => {
+  // `//go:build (ignore)` and `//go:build ignore` are one expression to
+  // constraint.Parse, and `go list` puts both files in IgnoredGoFiles.
+  // Compared as text against the word `ignore`, the parenthesised form read
+  // as some other constraint and the file joined its package.
+  for (const expression of ["(ignore)", "((ignore))", "( ignore )"]) {
+    assert.equal(
+      readGoFile(`//go:build ${expression}\n\npackage x\n`)?.buildIgnored,
+      true,
+      expression,
+    );
+  }
+  // Only a pair enclosing the whole expression is removed. These depend on
+  // tags this cannot see, negate the tag, or are not an expression at all.
+  for (const expression of ["(ignore) && linux", "(ignore)&&(linux)", "!(ignore)", "(ignore"]) {
+    assert.equal(
+      readGoFile(`//go:build ${expression}\n\npackage x\n`)?.buildIgnored,
+      false,
+      expression,
+    );
+  }
+});
+
+test("an identifier is any Unicode letter, so a file with one is read rather than abandoned", () => {
+  // `π "math"` is a legal import alias and `package données` a legal package
+  // clause. Matched as `[A-Za-z_]\w*`, either abandoned the whole file, and
+  // the index recorded it as importing nothing — indistinguishable from a
+  // file that does.
+  const read = readGoFile(
+    'package données\n\nimport (\n\tπ "math"\n\t"example.com/m/billing"\n)\n\nfunc Aire(r float64) float64 { return π.Pi * r * r }\n',
+  );
+  assert.equal(read?.packageName, "données");
+  assert.deepEqual(read?.imports, ["math", "example.com/m/billing"]);
+});

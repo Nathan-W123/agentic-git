@@ -12,7 +12,10 @@ import {
   readCSharpLoads,
   readIncludes,
 } from "./native-imports.js";
-import { readRustFile } from "./rust-imports.js";
+import { pythonLayout } from "./python-imports.js";
+import { resourcesFromNames, resourcesFromText } from "./resources.js";
+import { braceShapes, pythonShapes, rubyShapes } from "./signature-shapes.js";
+import { cargoTargets, readRustFile } from "./rust-imports.js";
 import {
   phpTypes,
   readPhpFile,
@@ -23,7 +26,7 @@ import {
 import {
   jvmDeclarations,
   readJvmHeader,
-  topLevelNames,
+  topLevelDeclarations,
   type JvmLanguage,
   type JvmUnit,
 } from "./jvm-imports.js";
@@ -52,10 +55,12 @@ import {
 } from "./contract-shape.js";
 
 import {
+  braceDeclarations,
   braceSymbolRanges,
   pythonSymbolRanges,
   rubySymbolRanges,
   type BraceLanguage,
+  type PythonRead,
 } from "./symbol-ranges.js";
 
 export {
@@ -195,6 +200,22 @@ export interface IndexedFile {
   /** Call edges inside this file, attributed to the calling symbol. */
   symbolCalls: SymbolCall[];
   imports: string[];
+  /**
+   * Set when this file's language has imports worth reading and this file's
+   * could not be read — the reader lost its place in a prologue or header
+   * and abandoned the file, the masker that tells a Ruby or PHP file's code
+   * from its heredocs and comments lost its place, or the file could not be
+   * read at all.
+   *
+   * The distinction {@link symbolRangesUnknown} draws, for `imports` and
+   * `dependencies`: both are `[]` here, and a file that imports nothing is
+   * safe to leave out of every dependency while a file whose imports could
+   * not be read is not. Without it a Go file with an unreadable prologue was
+   * indexed as importing nothing, and a change to a package it depended on
+   * was attributed to nobody. A plan over such a file is enriched as
+   * {@link AgentPlan.dependenciesUnknown}.
+   */
+  importsUnknown?: boolean;
   dependencies: string[];
   referencedSymbols: string[];
   apis: string[];
@@ -202,6 +223,41 @@ export interface IndexedFile {
   configKeys: string[];
   tests: string[];
   services: string[];
+  /**
+   * What a scanned file says about itself that resolution needs and
+   * `imports` does not carry: a Go, JVM or PHP package clause, a Go build
+   * constraint, the classes a PHP file declares.
+   *
+   * On the file rather than in a table beside the scan loop, because a file
+   * served from the parse cache never goes through that loop. The first
+   * version kept these in loop-local maps, so every build after the first —
+   * any revision that did not touch a given file — resolved that file's
+   * package to nothing in Go, Java, Kotlin, Scala and PHP. The unit tests
+   * for each reader passed throughout.
+   */
+  scan?: ScanFacts;
+}
+
+/** See {@link IndexedFile.scan}. */
+export interface ScanFacts {
+  packageName?: string;
+  buildIgnored?: boolean;
+  declared?: string[];
+  /**
+   * How each entry of `imports` was written, aligned by position — `rel`
+   * for Ruby's `require_relative`, `req` for PHP's `require`, `mod` and
+   * `path` for Rust's module declarations — and "" where the specifier
+   * alone says enough. The specifier itself stays as the file wrote it.
+   */
+  importKinds?: string[];
+  /**
+   * Every top-level declaration of a JVM file by name, functions included,
+   * where `declared` holds its types alone: a Kotlin or Scala import may
+   * name a top-level function, so the specifier as written is looked up
+   * here. Absent when the declaration pass could not read the file — which
+   * is not the same as declaring nothing.
+   */
+  topLevel?: string[];
 }
 
 /** Paths enrichment treats as tests in their own right. */
@@ -309,10 +365,13 @@ export interface CodeIntelligenceStats {
  *
  * A Go module's import path is written in `go.mod` and nowhere else — not in
  * the source, and not in the clone path either — so a repository whose
- * `go.mod` is never read has no resolvable Go imports at all. These are not
- * indexed: they produce no `IndexedFile` and no symbols.
+ * `go.mod` is never read has no resolvable Go imports at all. A Cargo
+ * manifest is where a crate root that does not follow the layout convention
+ * is named (`[[bin]] path = "src/tools/tool.rs"`), and without it that root's
+ * `crate::` resolved into the library beside it. These are not indexed: they
+ * produce no `IndexedFile` and no symbols.
  */
-const MANIFESTS = new Set(["go.mod"]);
+const MANIFESTS = new Set(["go.mod", "Cargo.toml"]);
 
 /** The languages whose imports name a type rather than a path. */
 const JVM_LANGUAGES = new Set<SupportedLanguage>(["java", "kotlin", "scala"]);
@@ -343,18 +402,35 @@ const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".pyi", "python"],
   [".rb", "ruby"],
   [".rake", "ruby"],
+  [".rbw", "ruby"],
+  [".ru", "ruby"],
+  [".gemspec", "ruby"],
   [".go", "go"],
   [".rs", "rust"],
   [".java", "java"],
   [".cs", "csharp"],
+  // A C# script is the one kind of C# file with a path in it: `#load`.
+  [".csx", "csharp"],
   [".c", "c"],
   [".h", "c"],
   [".cc", "cpp"],
   [".cpp", "cpp"],
   [".cxx", "cpp"],
+  [".c++", "cpp"],
   [".hpp", "cpp"],
   [".hh", "cpp"],
+  [".hxx", "cpp"],
+  [".h++", "cpp"],
+  [".inl", "cpp"],
+  [".ipp", "cpp"],
+  [".tpp", "cpp"],
+  [".cu", "cpp"],
+  [".cuh", "cpp"],
   [".php", "php"],
+  [".phtml", "php"],
+  [".php5", "php"],
+  [".php7", "php"],
+  [".inc", "php"],
   [".swift", "swift"],
   [".kt", "kotlin"],
   [".kts", "kotlin"],
@@ -365,6 +441,26 @@ const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".sql", "sql"],
   [".prisma", "prisma"],
 ]);
+
+/** Files whose name is their whole extension. */
+const SOURCE_BASENAMES = new Map<string, SupportedLanguage>([
+  ["Rakefile", "ruby"],
+  ["Gemfile", "ruby"],
+  ["Guardfile", "ruby"],
+  ["Capfile", "ruby"],
+  ["Vagrantfile", "ruby"],
+  ["Berksfile", "ruby"],
+  ["Podfile", "ruby"],
+  ["Fastfile", "ruby"],
+]);
+
+/** The language a path is written in, by extension and then by name. */
+function languageOf(filePath: string): SupportedLanguage | undefined {
+  return (
+    SOURCE_EXTENSIONS.get(path.posix.extname(filePath).toLowerCase()) ??
+    SOURCE_BASENAMES.get(path.posix.basename(filePath))
+  );
+}
 
 const HTTP_METHODS = new Set([
   "all",
@@ -526,11 +622,8 @@ function analyzeScript(
     });
   };
 
-  const visit = (node: ts.Node): void => {
-    const scope = opensScope(node);
-    if (scope !== undefined) {
-      enclosing.push(scope);
-    }
+  /** What one node contributes, before its children are looked at. */
+  const read = (node: ts.Node): void => {
     const declaration = namedDeclaration(node);
     if (declaration !== undefined) {
       symbols.add(declaration);
@@ -539,14 +632,21 @@ function analyzeScript(
         shape(declaration, node);
       }
       record(declaration, node);
-      if (/(?:Service|Client|Repository|Gateway|Worker)$/u.test(declaration)) {
+      // Capitalised only, and the path rule anchored to a segment: the same
+      // narrowing `resourcesFromNames` applies for every other language, so
+      // a TypeScript `validateInput` is not a schema.
+      if (
+        /^[A-Z]/u.test(declaration) &&
+        /(?:Service|Client|Repository|Gateway|Worker)$/u.test(declaration)
+      ) {
         services.add(declaration);
       }
       if (
-        /(?:Schema|Entity|Model|Record|Payload|Input|Migration)$/u.test(
-          declaration,
-        ) ||
-        /(?:schema|migration|model)/iu.test(filePath)
+        (/^[A-Z]/u.test(declaration) &&
+          /(?:Schema|Entity|Model|Record|Payload|Input|Migration)$/u.test(
+            declaration,
+          )) ||
+        /(?:^|\/)(?:schemas?|migrations?|models?)(?:\/|\.)/iu.test(filePath)
       ) {
         schemas.add(declaration);
       }
@@ -698,13 +798,42 @@ function analyzeScript(
     ) {
       configKeys.add(node.name.text);
     }
-
-    ts.forEachChild(node, visit);
-    if (scope !== undefined) {
-      enclosing.pop();
-    }
   };
-  visit(file);
+
+  // Pre-order, left to right, on an explicit stack rather than the call
+  // stack. The tree is as deep as the source is nested, and a generated
+  // file — a string table written as one `+` chain three thousand terms
+  // long — nests further than the call stack allows while the parser itself
+  // is fine with it. Recursing threw a RangeError out of the whole build.
+  //
+  // A scope is left when its marker is popped, which is after every node
+  // beneath it has been entered, exactly as the recursive version's
+  // post-child pop was.
+  const pending: Array<{ enter: ts.Node } | { leave: true }> = [{ enter: file }];
+  while (pending.length > 0) {
+    const step = pending.pop();
+    if (step === undefined) {
+      break;
+    }
+    if ("leave" in step) {
+      enclosing.pop();
+      continue;
+    }
+    const node = step.enter;
+    const scope = opensScope(node);
+    if (scope !== undefined) {
+      enclosing.push(scope);
+      pending.push({ leave: true });
+    }
+    read(node);
+    const children: ts.Node[] = [];
+    ts.forEachChild(node, (child) => {
+      children.push(child);
+    });
+    for (const child of children.reverse()) {
+      pending.push({ enter: child });
+    }
+  }
 
   return {
     path: filePath,
@@ -807,26 +936,32 @@ const BRACE_LANGUAGES = new Set<string>([
  * `undefined` from the scanner means it could not read the file, and is
  * recorded here as an unparsed file so `symbolRangesInFile` says "no idea".
  */
-function analyzeScannedFile(
+/**
+ * A file whose source could not be obtained or could not be read: known to
+ * exist, and nothing else. Every "unknown" flag is set, so nothing downstream
+ * reads it as empty.
+ *
+ * `bytes` is the source's length where the source was in hand and the
+ * analyzer refused it, and 0 where nothing was read at all, so the budget
+ * charges it the same way any other file is charged.
+ */
+function unreadableFile(
   filePath: string,
-  source: string,
   language: SupportedLanguage,
-  ranges: SymbolRange[] | undefined,
+  bytes = 0,
 ): IndexedFile {
   return {
     path: filePath,
     language,
-    bytes: Buffer.byteLength(source),
-    symbols: (ranges ?? []).map((range) => range.name),
-    symbolRanges: ranges ?? [],
-    ...(ranges === undefined ? { symbolRangesUnknown: true } : {}),
-    // Located, but not shaped. A scanner can find where a declaration starts
-    // and cannot read what it publishes, so this says so rather than
-    // reporting an unchanging contract through every rewrite the file gets.
+    bytes,
+    symbols: [],
+    symbolRanges: [],
+    symbolRangesUnknown: true,
     exportedShapes: [],
     exportedShapesUnknown: true,
     symbolCalls: [],
     imports: [],
+    importsUnknown: true,
     dependencies: [],
     exportedSymbols: [],
     referencedSymbols: [],
@@ -835,6 +970,150 @@ function analyzeScannedFile(
     configKeys: [],
     tests: [],
     services: [],
+  };
+}
+
+/**
+ * Records a scanned file's imports as written, with how each was written
+ * kept beside it rather than inside it, and unique — a target imported
+ * under two aliases is one dependency.
+ */
+function recordImports(
+  file: IndexedFile,
+  imports: ReadonlyArray<readonly [kind: string | undefined, specifier: string]>,
+): void {
+  const seen = new Set<string>();
+  const specifiers: string[] = [];
+  const kinds: string[] = [];
+  let anyKind = false;
+  for (const [kind, specifier] of imports) {
+    const trimmed = specifier.trim();
+    const key = `${kind ?? ""}\u0000${trimmed}`;
+    if (trimmed === "" || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    specifiers.push(trimmed);
+    kinds.push(kind ?? "");
+    anyKind = anyKind || kind !== undefined;
+  }
+  file.imports = specifiers;
+  file.dependencies = uniqueStrings(specifiers);
+  if (anyKind) {
+    file.scan = { ...file.scan, importKinds: kinds };
+  }
+}
+
+/**
+ * An extractor that throws answers "no idea", which is what every extractor
+ * here answers when it is unsure. A stack overflow on one pathological file
+ * must not take the whole index build with it.
+ */
+function safely<T>(read: () => T): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Git's mode for a symbolic link: the blob is the link's target, not a file. */
+const SYMLINK_MODE = "120000";
+
+/**
+ * The text of a blob, or `undefined` when there is no text to be had.
+ *
+ * Decoded once, before any reader sees it, so every reader reads the same
+ * text. A UTF-16 file — Visual Studio writes some `.cs` and `.cpp` this way
+ * — is told apart by its byte-order mark and decoded as such; read as UTF-8
+ * it was a NUL-interleaved string that every scanner found nothing in, which
+ * is "declares nothing" for a file that declares plenty, and a commit
+ * converting it to UTF-8 made every export appear. A leading U+FEFF is
+ * dropped here for the same reason: half the readers strip it themselves and
+ * the other half glued it to the first token, so a BOM erased the line-1
+ * declaration in Rust, Swift, C++ and C#. Bytes that are not text in any
+ * encoding this decodes — a NUL, invalid UTF-8 — are not read at all, and the
+ * file is recorded as unreadable rather than as whatever a lossy decode
+ * would have made of it.
+ */
+function decodeSource(blob: Buffer): string | undefined {
+  let text: string;
+  const utf16 =
+    blob.length >= 2 && blob[0] === 0xff && blob[1] === 0xfe
+      ? "le"
+      : blob.length >= 2 && blob[0] === 0xfe && blob[1] === 0xff
+        ? "be"
+        : undefined;
+  if (utf16 !== undefined) {
+    if (blob.length % 2 !== 0) {
+      return undefined;
+    }
+    const body = Buffer.from(blob.subarray(2));
+    text = (utf16 === "be" ? body.swap16() : body).toString("utf16le");
+  } else {
+    try {
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(blob);
+    } catch {
+      return undefined;
+    }
+  }
+  if (text.includes("\0")) {
+    return undefined;
+  }
+  return text.startsWith("\uFEFF") ? text.slice(1) : text;
+}
+
+/**
+ * The names declared at the top level of a brace-language file — every one,
+ * and the types alone — or nothing when the declaration pass could not read
+ * it.
+ */
+function topLevelDeclared(
+  source: string,
+  language: BraceLanguage,
+): { names: string[]; types: string[] } | undefined {
+  const read = safely(() => braceDeclarations(source, language));
+  return read === undefined ? undefined : topLevelDeclarations(read.declarations);
+}
+
+function analyzeScannedFile(
+  filePath: string,
+  source: string,
+  language: SupportedLanguage,
+  ranges: SymbolRange[] | undefined,
+  shapes: SymbolShape[] | undefined,
+): IndexedFile {
+  const symbols = (ranges ?? []).map((range) => range.name);
+  // Two of the four resources are questions about names, and a name is a
+  // name in any language: the same rule the TypeScript side applies. The
+  // other two are read from the text, on positions the masker says are code,
+  // and are simply absent when the masker could not read the file.
+  const named = resourcesFromNames(filePath, symbols);
+  const fromText = resourcesFromText(source, language, filePath);
+  return {
+    path: filePath,
+    language,
+    bytes: Buffer.byteLength(source),
+    symbols,
+    symbolRanges: ranges ?? [],
+    ...(ranges === undefined ? { symbolRangesUnknown: true } : {}),
+    // Located and, where the signature reader could follow the file, shaped.
+    // Where it could not, this says so rather than reporting an unchanging
+    // contract through every rewrite the file gets.
+    exportedShapes: shapes ?? [],
+    ...(shapes === undefined ? { exportedShapesUnknown: true } : {}),
+    symbolCalls: [],
+    imports: [],
+    dependencies: [],
+    // The reachable declarations are what other files can depend on; the
+    // shape reader is what decided reachability, so the two lists agree.
+    exportedSymbols: (shapes ?? []).map((shape) => shape.symbol),
+    referencedSymbols: [],
+    apis: fromText?.apis ?? [],
+    schemas: named.schemas,
+    configKeys: fromText?.configKeys ?? [],
+    tests: [],
+    services: named.services,
   };
 }
 
@@ -980,14 +1259,36 @@ interface ScriptJob extends ScriptRequest {
  *
  * The worker imports this rather than reimplementing it, so a repository
  * indexed across cores and one indexed on a single thread cannot disagree.
+ *
+ * One file that cannot be read is one unreadable file, never a failed build:
+ * the scanners have always run under `safely`, and this is the same rule for
+ * the parser. A file the analyzer throws on — the parser or the walk running
+ * out of stack on something generated — is recorded with every unknown flag
+ * set, and the rest of the repository indexes as it would have.
  */
 export function analyzeScriptFile(
   filePath: string,
   source: string,
   language: "typescript" | "javascript",
 ): IndexedFile {
-  return analyzeScript(filePath, source, language);
+  return (
+    safely(() => analyzeScript(filePath, source, language)) ??
+    unreadableFile(filePath, language, Buffer.byteLength(source))
+  );
 }
+
+/**
+ * One interpreter run answers for at most this much Python.
+ *
+ * The reader is all-or-nothing per run against a fixed timeout, and a run
+ * over a budget-sized repository — 50 MB, 1,400 files — took twenty seconds
+ * here against the thirty allowed: a slower machine, or two builds sharing
+ * one, lost every Python file of every build and paid the timeout again on
+ * each. Bounded runs degrade to partial answers instead: a run that times
+ * out loses its own files and no others.
+ */
+const PYTHON_BATCH_MAX_BYTES = 5 * 1024 * 1024;
+const PYTHON_BATCH_MAX_FILES = 500;
 
 /**
  * How a parsed file is addressed: its contents, and where they sit.
@@ -1053,6 +1354,25 @@ export class CodeIntelligenceService {
   private cacheHits = 0;
   private persistedLoads = 0;
   private persistedWrites = 0;
+  /**
+   * The interpreter's standard-library names, from the last batch that ran.
+   *
+   * The batch only runs for Python files not already in the parse cache, so
+   * on the second build in a process — any commit that touched no Python —
+   * it is skipped and comes back with no list. Without this, that build
+   * resolved `import json` to a repository file called `json.py`: a false
+   * edge that appeared on warm builds and vanished on cold ones.
+   */
+  private pythonStdlib: ReadonlySet<string> | undefined;
+  /**
+   * Interpreter runs in flight, keyed by the blob they were asked about.
+   *
+   * Nothing is remembered until a build ends, so two builds that overlap — a
+   * cold `staleContracts` indexes both revisions at once — each fed the
+   * whole corpus to an interpreter of its own at the same instant. A build
+   * that finds a blob already being asked about joins that run instead.
+   */
+  private readonly pythonInFlight = new Map<string, Promise<PythonRead>>();
   /** Started by {@link warmUp}, kept for the service's life, unref'd when idle. */
   private pool: Promise<Worker[]> | undefined;
   /**
@@ -1123,7 +1443,7 @@ export class CodeIntelligenceService {
   ): Promise<IndexedFile[]> {
     const here = (): IndexedFile[] =>
       requests.map((request) =>
-        analyzeScript(request.path, request.source, request.language),
+        analyzeScriptFile(request.path, request.source, request.language),
       );
     // Only threads that are already loaded and idle. Starting them here is
     // what made the first build *slower* than not threading at all: a worker
@@ -1206,6 +1526,97 @@ export class CodeIntelligenceService {
    * the bound still indexes correctly, it simply stops saving the files it
    * evicted.
    */
+  /**
+   * Every Python file of a build, answered by bounded interpreter runs.
+   *
+   * A blob another build is already asking about is joined rather than
+   * asked again; the rest is split into batches no larger than
+   * {@link PYTHON_BATCH_MAX_BYTES} / {@link PYTHON_BATCH_MAX_FILES}, each
+   * with the reader's own timeout, run one after another so a build holds
+   * one interpreter at a time. Every batch is registered before any runs, so
+   * a build arriving while the first is still answering joins the later
+   * ones too.
+   *
+   * The answer for a path is whatever its run said, or nothing when the run
+   * was lost — and nothing is what the caller already treats as "the
+   * interpreter could not answer", so a lost batch is that batch's files
+   * unknown, not the build's.
+   */
+  private async readPython(
+    sources: ReadonlyMap<string, { key: string; source: string }>,
+  ): Promise<PythonRead> {
+    const files: PythonRead["files"] = new Map();
+    const stdlib = new Set<string>();
+    if (sources.size === 0) {
+      return { files, stdlib };
+    }
+    const runs = new Map<string, Promise<PythonRead>>();
+    const unread: Array<{ path: string; key: string; source: string }> = [];
+    for (const [filePath, { key, source }] of sources) {
+      const running = this.pythonInFlight.get(key);
+      if (running !== undefined) {
+        runs.set(filePath, running);
+      } else {
+        unread.push({ path: filePath, key, source });
+      }
+    }
+    const batches: (typeof unread)[] = [];
+    let batch: typeof unread = [];
+    let batchBytes = 0;
+    for (const item of unread) {
+      const bytes = Buffer.byteLength(item.source);
+      if (
+        batch.length > 0 &&
+        (batch.length >= PYTHON_BATCH_MAX_FILES ||
+          batchBytes + bytes > PYTHON_BATCH_MAX_BYTES)
+      ) {
+        batches.push(batch);
+        batch = [];
+        batchBytes = 0;
+      }
+      batch.push(item);
+      batchBytes += bytes;
+    }
+    if (batch.length > 0) {
+      batches.push(batch);
+    }
+    let previous: Promise<unknown> = Promise.resolve();
+    for (const items of batches) {
+      const run: Promise<PythonRead> = previous
+        .then(() =>
+          pythonSymbolRanges(new Map(items.map((item) => [item.path, item.source]))),
+        )
+        // The reader answers "nothing" rather than throwing, and a run that
+        // did throw must answer the same: a rejection here would be a
+        // failed build for every caller that joined it.
+        .catch((): PythonRead => ({ files: new Map(), stdlib: new Set() }));
+      previous = run;
+      for (const item of items) {
+        this.pythonInFlight.set(item.key, run);
+        runs.set(item.path, run);
+      }
+      const settle = (): void => {
+        for (const item of items) {
+          if (this.pythonInFlight.get(item.key) === run) {
+            this.pythonInFlight.delete(item.key);
+          }
+        }
+      };
+      void run.then(settle, settle);
+    }
+    for (const [filePath, run] of runs) {
+      const read = await run;
+      const answer = read.files.get(filePath);
+      if (answer !== undefined) {
+        files.set(filePath, answer);
+      }
+      for (const name of read.stdlib) {
+        stdlib.add(name);
+      }
+    }
+    return { files, stdlib };
+  }
+
   private remember(key: string, file: IndexedFile): void {
     this.parsed.set(key, structuredClone(file));
     while (this.parsed.size > (this.options.maxParsedFiles ?? 20_000)) {
@@ -1284,15 +1695,42 @@ export class CodeIntelligenceService {
     const maxTotalBytes = this.options.maxTotalBytes ?? 50 * 1024 * 1024;
     const entries = await this.repositories.listFileEntries(repository, revision);
     const repositoryFiles = entries.map((entry) => entry.path);
+    // Two entries under one path — two names the listing could not tell
+    // apart — are neither indexed: one would be recorded twice with the
+    // other's content and the other's declarations would vanish.
+    const seenPaths = new Set<string>();
+    const duplicated = new Set<string>();
+    for (const entry of entries) {
+      if (seenPaths.has(entry.path)) {
+        duplicated.add(entry.path);
+      }
+      seenPaths.add(entry.path);
+    }
+    // A symbolic link is listed as a blob whose contents are the link's
+    // target path. Read as a source file it is a header that declares
+    // nothing — `../src/foo.h` parses as exactly that — and a consumer
+    // including it through the link resolved onto the link, so the real
+    // header's contract had no consumers and the link's never moved. A link
+    // is recorded as unreadable and is not somewhere an import can land;
+    // the file it names is indexed under its own path.
+    const symlinks = new Set(
+      entries
+        .filter((entry) => entry.mode === SYMLINK_MODE)
+        .map((entry) => entry.path),
+    );
     const candidates = entries.filter(
+      (entry) => entry.type === "blob" && languageOf(entry.path) !== undefined,
+    );
+    // Not indexed, but read: a Go module's own import path lives in `go.mod`
+    // and nowhere else — not in the source, not in the clone path — so
+    // without this every Go specifier looks like a third-party module and no
+    // Go edge can ever resolve.
+    const manifestEntries = entries.filter(
       (entry) =>
         entry.type === "blob" &&
-        (SOURCE_EXTENSIONS.has(path.posix.extname(entry.path).toLowerCase()) ||
-          // Not indexed, but read: a Go module's own import path lives in
-          // `go.mod` and nowhere else — not in the source, not in the clone
-          // path — so without this every Go specifier looks like a
-          // third-party module and no Go edge can ever resolve.
-          MANIFESTS.has(path.posix.basename(entry.path))),
+        languageOf(entry.path) === undefined &&
+        MANIFESTS.has(path.posix.basename(entry.path)) &&
+        !symlinks.has(entry.path),
     );
     // Held for {@link persist}, which cannot ask for them afterwards: an
     // object id is a property of this revision's tree listing, not of the
@@ -1307,20 +1745,10 @@ export class CodeIntelligenceService {
     const slots: (IndexedFile | undefined)[] = [];
     /** Scripts awaiting the parse pass, each remembering the slot it holds. */
     const scripts: ScriptJob[] = [];
-    /** Python sources, answered in one batch once every file has been read. */
-    const pythonSources = new Map<string, string>();
+    /** Python sources, answered in batches once every file has been read. */
+    const pythonSources = new Map<string, { key: string; source: string }>();
     /** Manifests read for what they say about the repository, not indexed. */
     const manifests = new Map<string, string>();
-    /** What each Go file says about itself, for resolving a package to files. */
-    const goFacts = new Map<string, GoFileFacts>();
-    /** What each PHP file declares and imports, for the class table. */
-    const phpUnits = new Map<string, PhpUnit>();
-    /** What each JVM file declares and imports, for the declaration index. */
-    const jvmUnits = new Map<string, JvmUnit>();
-    const jvmDeclared = new Map<
-      string,
-      { packageName: string; topLevelNames: readonly string[] }
-    >();
     /** Parsed this time round, remembered once Python has had its turn. */
     const fresh = new Map<string, IndexedFile>();
     let totalBytes = 0;
@@ -1338,8 +1766,26 @@ export class CodeIntelligenceService {
     // had already started, which is what the sequential version did by never
     // issuing them; the resulting index is identical either way.
     const reader = this.repositories.openBatchReader(repository, revision);
+    const readAhead = 256;
     try {
-      const readAhead = 256;
+      // Manifests first, in a pass of their own, because they are exempt
+      // from the budgets and the loop below is not. The first version read
+      // them inside that loop, where a chunk-level `break` on a spent budget
+      // skipped whatever chunk `go.mod` happened to fall in: whether a Go
+      // import resolved depended on which 256-entry chunk the manifest was
+      // in, and "a manifest is not charged against the budgets" was only
+      // true of the chunks the loop reached.
+      for (let offset = 0; offset < manifestEntries.length; offset += readAhead) {
+        const chunk = manifestEntries.slice(offset, offset + readAhead);
+        const fetched = await reader.read(chunk.map((entry) => entry.path));
+        chunk.forEach((entry, position) => {
+          const blob = fetched[position];
+          const text = blob === undefined ? undefined : decodeSource(blob);
+          if (text !== undefined) {
+            manifests.set(entry.path, text);
+          }
+        });
+      }
       for (let offset = 0; offset < candidates.length; offset += readAhead) {
         if (slots.length >= maxFiles || totalBytes >= maxTotalBytes) {
           skippedFiles += candidates.length - offset;
@@ -1350,46 +1796,85 @@ export class CodeIntelligenceService {
         // revision is never read or parsed again. That is what makes the
         // revision after a three-file change cost three files instead of the
         // four hundred that had not moved.
-        const unseen = chunk.filter((entry) => !this.parsed.has(parsedKey(entry)));
+        // The cached entries are taken now, in the same breath as the
+        // decision not to read them. A concurrent build can evict from the
+        // parse cache between here and the loop below, and the first
+        // version looked the cache up again per entry: an evicted file then
+        // had neither a cached parse nor a source, and was indexed — and
+        // remembered — as empty. "Declares nothing" is the one answer an
+        // unread file must never give.
+        const remembered = new Map<string, IndexedFile>();
+        for (const entry of chunk) {
+          const cached = this.parsed.get(parsedKey(entry));
+          if (cached !== undefined) {
+            remembered.set(entry.path, cached);
+          }
+        }
+        const unseen = chunk.filter(
+          (entry) => !remembered.has(entry.path) && !symlinks.has(entry.path),
+        );
         const fetched =
           unseen.length === 0
             ? []
             : await reader.read(unseen.map((entry) => entry.path));
         const sources = new Map<string, string>();
         unseen.forEach((entry, position) => {
-          sources.set(entry.path, fetched[position]?.toString("utf8") ?? "");
+          const blob = fetched[position];
+          const text = blob === undefined ? undefined : decodeSource(blob);
+          if (text !== undefined) {
+            sources.set(entry.path, text);
+          }
         });
 
         for (const entry of chunk) {
+          const filePath = entry.path;
+          const cached = remembered.get(filePath);
+          const source = sources.get(filePath);
+          const language = languageOf(filePath);
+          if (language === undefined) {
+            // Every candidate has one; this narrows the type.
+            continue;
+          }
+          if (duplicated.has(filePath)) {
+            skippedFiles += 1;
+            continue;
+          }
+          if (symlinks.has(filePath)) {
+            // A link, not a file: nothing here was read, and nothing here
+            // is remembered. See `symlinks` above.
+            skippedFiles += 1;
+            slots.push(unreadableFile(filePath, language));
+            continue;
+          }
+          if (cached === undefined && source === undefined) {
+            // Nothing to read from: the blob was not served (a name the
+            // listing could not spell exactly), its bytes are not text in
+            // any encoding read here, or the cache lost it since the check
+            // above. Unreadable, counted, and never remembered.
+            skippedFiles += 1;
+            slots.push(unreadableFile(filePath, language));
+            continue;
+          }
           if (slots.length >= maxFiles || totalBytes >= maxTotalBytes) {
             skippedFiles += 1;
             continue;
           }
-          const filePath = entry.path;
-          const cached = this.parsed.get(parsedKey(entry));
-          const source = sources.get(filePath) ?? "";
           // `bytes` is the source's byte length wherever an analyzer sets it,
           // so a remembered file replays the budget exactly as reading it
           // again would have.
-          const bytes = cached?.bytes ?? Buffer.byteLength(source);
+          const bytes = cached?.bytes ?? Buffer.byteLength(source ?? "");
           if (bytes > maxFileBytes || totalBytes + bytes > maxTotalBytes) {
             skippedFiles += 1;
             continue;
           }
           totalBytes += bytes;
-          const language = SOURCE_EXTENSIONS.get(
-            path.posix.extname(filePath).toLowerCase(),
-          );
-          if (language === undefined) {
-            if (MANIFESTS.has(path.posix.basename(filePath))) {
-              manifests.set(filePath, source);
-            }
-            continue;
-          }
           if (cached !== undefined) {
             // Cloned on the way out: this entry outlives the index being
             // built, and two indexes must never share one mutable file.
             slots.push(structuredClone(cached));
+            continue;
+          }
+          if (source === undefined) {
             continue;
           }
           if (language === "typescript" || language === "javascript") {
@@ -1406,25 +1891,34 @@ export class CodeIntelligenceService {
             continue;
           }
           if (language === "python") {
-            // Held back for the batch: one interpreter answers for every Python
-            // file in the repository rather than one per file.
-            pythonSources.set(filePath, source);
-            slots.push(analyzeScannedFile(filePath, source, language, undefined));
+            // Held back for the batch: one interpreter answers for many Python
+            // files rather than one per file. Keyed by blob as well as path,
+            // so a build already asking about this blob can be joined.
+            pythonSources.set(filePath, { key: parsedKey(entry), source });
+            slots.push(
+              analyzeScannedFile(filePath, source, language, undefined, undefined),
+            );
           } else if (language === "ruby") {
             const scanned = analyzeScannedFile(
               filePath,
               source,
               language,
-              rubySymbolRanges(source),
+              safely(() => rubySymbolRanges(source)),
+              safely(() => rubyShapes(source)),
             );
             // A `require` inside a heredoc is a sentence, not a dependency,
             // which is why this reads from the masked text rather than the
             // raw source. `require_relative` measures from a different base
             // than `require`, so the two are marked apart on the way in.
-            const requires = readRubyRequires(source);
-            if (requires !== undefined) {
-              scanned.imports = requires.map((request) =>
-                `${request.relative ? "rel:" : "lib:"}${request.specifier}`,
+            // A file the masker could not follow has an import list nobody
+            // read, which is not an empty one.
+            const requires = safely(() => readRubyRequires(source));
+            if (requires === undefined) {
+              scanned.importsUnknown = true;
+            } else {
+              recordImports(
+                scanned,
+                requires.map((request) => [request.relative ? "rel" : "lib", request.specifier]),
               );
             }
             slots.push(scanned);
@@ -1433,73 +1927,103 @@ export class CodeIntelligenceService {
               filePath,
               source,
               language,
-              braceSymbolRanges(source, language as BraceLanguage),
+              safely(() => braceSymbolRanges(source, language as BraceLanguage)),
+              safely(() => braceShapes(source, language as BraceLanguage)),
             );
             if (JVM_LANGUAGES.has(language)) {
               // An import here names a type, so nothing resolves until every
               // file has said which type it declares. The header is read for
               // the same reason Go's prologue is: small, bounded, and unable
               // to contain a method body.
-              const unit = readJvmHeader(source, language as JvmLanguage);
+              const unit = safely(() => readJvmHeader(source, language as JvmLanguage));
               if (unit !== undefined) {
-                jvmUnits.set(filePath, unit);
-                scanned.imports = unit.imports;
-                jvmDeclared.set(filePath, {
+                recordImports(scanned, unit.imports.map((name) => [undefined, name]));
+                // From the declarations, not the symbol ranges: the ranges
+                // merge same-named declarations into one span, and a class
+                // between two overloads of a top-level function lay inside
+                // it and left the index.
+                const declared = topLevelDeclared(source, language as BraceLanguage);
+                scanned.scan = {
+                  ...scanned.scan,
                   packageName: unit.packageName,
-                  topLevelNames: topLevelNames(scanned.symbolRanges),
-                });
+                  // The types alone, for the resolver's walk back up a
+                  // specifier: a top-level function is a declaration but
+                  // not something an import can be truncated onto.
+                  declared: declared?.types ?? [],
+                  ...(declared === undefined ? {} : { topLevel: declared.names }),
+                };
               }
             }
             if (C_LANGUAGES.has(language)) {
               // Only a quoted include names a path. An angled one names a
               // search-path header, and the search path is a compiler flag
               // there is nothing here to read.
-              const includes = readIncludes(source);
+              const includes = safely(() => readIncludes(source));
               if (includes !== undefined) {
-                scanned.imports = includes;
+                recordImports(scanned, includes.map((name) => [undefined, name]));
               }
             }
             if (language === "csharp") {
               // `using A.B` names a namespace, which is spread across as
               // many files as anybody likes and so has no file to point at.
               // `#load` is a real path.
-              const loads = readCSharpLoads(source);
+              const loads = safely(() => readCSharpLoads(source));
               if (loads !== undefined) {
-                scanned.imports = loads;
+                recordImports(scanned, loads.map((name) => [undefined, name]));
               }
             }
             if (language === "rust") {
               // Two kinds of dependency and `mod` is the valuable one: it
               // literally names a file. A `use` path is a walk through a
               // module tree, and only the anchored forms are resolvable.
-              const facts = readRustFile(source);
+              const facts = safely(() => readRustFile(source));
               if (facts !== undefined) {
-                scanned.imports = [
-                  ...facts.modules.map((name) => `mod:${name}`),
-                  ...facts.uses,
-                ];
+                recordImports(scanned, [
+                  ...facts.modules.map((name): readonly [string, string] =>
+                    name.startsWith("path:") ? ["path", name.slice(5)] : ["mod", name],
+                  ),
+                  ...facts.uses.map((name): readonly [undefined, string] => [undefined, name]),
+                ]);
               }
             }
             if (language === "go") {
               // Only the prologue is read — Go puts the package clause first
               // and every import before any declaration, so the region has a
               // defined end and cannot contain a function body.
-              const facts = readGoFile(source);
+              const facts = safely(() => readGoFile(source));
               if (facts !== undefined) {
-                goFacts.set(filePath, facts);
-                scanned.imports = facts.imports;
+                recordImports(scanned, facts.imports.map((name) => [undefined, name]));
+                scanned.scan = {
+                  ...scanned.scan,
+                  packageName: facts.packageName,
+                  buildIgnored: facts.buildIgnored,
+                };
+              } else {
+                // Abandoned, not empty. The reader refuses a whole file over
+                // one thing it cannot place, and "imports nothing" is the
+                // one answer that file must not give.
+                scanned.importsUnknown = true;
               }
             }
-            slots.push(scanned);
-          } else if (language === "php") {
-            const scanned = analyzeScannedFile(filePath, source, language, undefined);
-            const unit = readPhpFile(source);
-            if (unit !== undefined) {
-              phpUnits.set(filePath, unit);
-              scanned.imports = [
-                ...unit.uses.map((name) => `use:${name}`),
-                ...unit.requires.map((name) => `req:${name}`),
-              ];
+            if (language === "php") {
+              // Inside the brace branch, not beside it: PHP is a brace
+              // language for the scanner, so a sibling `else if` after this
+              // one was dead code, and every PHP file indexed with no
+              // imports at all while the unit tests for the reader passed.
+              const unit = safely(() => readPhpFile(source));
+              if (unit === undefined) {
+                scanned.importsUnknown = true;
+              } else {
+                recordImports(scanned, [
+                  ...unit.uses.map((name): readonly [string, string] => ["use", name]),
+                  ...unit.requires.map((name): readonly [string, string] => ["req", name]),
+                ]);
+                scanned.scan = {
+                  ...scanned.scan,
+                  packageName: unit.namespace,
+                  declared: unit.declared,
+                };
+              }
             }
             slots.push(scanned);
           } else {
@@ -1527,67 +2051,227 @@ export class CodeIntelligenceService {
         continue;
       }
       slots[job.slot] = parsed;
-      fresh.set(job.key, parsed);
+      // A script the analyzer refused is unknown this time and is not
+      // remembered: how deep a walk can go is a property of the thread it
+      // ran on, not of the blob, and a remembered refusal would make it
+      // that file's permanent contract.
+      if (parsed.symbolRangesUnknown !== true) {
+        fresh.set(job.key, parsed);
+      }
     }
     // Nothing is left unfilled: a slot is only claimed with a job beside it.
     const files = slots.filter((file): file is IndexedFile => file !== undefined);
 
-    // One interpreter for the repository. A file the reader could not answer
-    // for simply keeps the empty placeholder recorded above, and
+    // One interpreter per batch of the repository. A file the reader could
+    // not answer for simply keeps the empty placeholder recorded above, and
     // `symbolRangesInFile` reports it as unreadable rather than as empty.
-    const pythonAnswers = await pythonSymbolRanges(pythonSources);
+    const pythonAnswers = await this.readPython(pythonSources);
     for (const file of files) {
       const answer = pythonAnswers.files.get(file.path);
       if (answer !== undefined) {
         file.symbolRanges = answer.ranges;
         file.symbols = answer.ranges.map((range) => range.name);
         delete file.symbolRangesUnknown;
+        file.exportedShapes = pythonShapes(answer.shapes);
+        file.exportedSymbols = file.exportedShapes.map((shape) => shape.symbol);
+        delete file.exportedShapesUnknown;
+        // The name-based resources could not be classified until the names
+        // existed, which for Python is now.
+        const named = resourcesFromNames(file.path, file.symbols);
+        file.schemas = named.schemas;
+        file.services = named.services;
         // The same parse that found the declarations found these, so a line
         // that looks like an import inside a docstring is not one here — the
         // interpreter already decided. `dependencies` takes the statement's
         // own module parts; `imports` carries the submodule probes too,
         // because only the file set can say which of those is real.
         file.imports = answer.imports;
-        file.dependencies = answer.imports.filter(
-          (name) => !name.includes("."),
+        // The distribution a dotted import names is its first segment:
+        // `django.db.models` is a dependency on django. Relative imports are
+        // kept whole, as a `./util` is on the TypeScript side.
+        file.dependencies = uniqueStrings(
+          answer.imports.map((name) =>
+            name.startsWith(".") ? name : (name.split(".")[0] ?? name),
+          ),
         );
       }
+    }
+    if (pythonAnswers.stdlib.size > 0) {
+      this.pythonStdlib = pythonAnswers.stdlib;
     }
 
     // Remembered only now: a Python file is a placeholder until the batch
     // above fills its ranges in, and caching it before that would serve the
-    // placeholder to every later revision.
+    // placeholder to every later revision. A Python file the interpreter did
+    // not answer for is not remembered at all — a timeout or a missing
+    // interpreter is transient, and caching the placeholder would make it
+    // that file's permanent contract.
     for (const [key, file] of fresh) {
+      if (file.language === "python" && !pythonAnswers.files.has(file.path)) {
+        continue;
+      }
       this.remember(key, file);
     }
 
-    const allPaths = new Set(repositoryFiles);
+    // The per-language tables resolution needs, rebuilt from every file in
+    // the index — cached or fresh — rather than from the ones the scan loop
+    // happened to read this time.
+    const goFacts = new Map<string, GoFileFacts>();
+    const phpUnits = new Map<string, PhpUnit>();
+    const jvmUnits = new Map<string, JvmUnit>();
+    const jvmDeclared = new Map<
+      string,
+      {
+        packageName: string;
+        topLevelNames: readonly string[];
+        typeNames: readonly string[];
+      }
+    >();
+    for (const file of files) {
+      const scan = file.scan;
+      if (scan?.packageName === undefined) {
+        continue;
+      }
+      if (file.language === "go") {
+        goFacts.set(file.path, {
+          packageName: scan.packageName,
+          buildIgnored: scan.buildIgnored === true,
+          imports: file.imports,
+        });
+      } else if (JVM_LANGUAGES.has(file.language)) {
+        jvmUnits.set(file.path, {
+          packageName: scan.packageName,
+          imports: file.imports,
+        });
+        jvmDeclared.set(file.path, {
+          packageName: scan.packageName,
+          topLevelNames: scan.topLevel ?? [],
+          typeNames: scan.declared ?? [],
+        });
+      } else if (file.language === "php") {
+        phpUnits.set(file.path, {
+          namespace: scan.packageName,
+          declared: scan.declared ?? [],
+          uses: [],
+          requires: [],
+        });
+      }
+    }
+
+    // Files, for the resolvers: a submodule is a path in the listing and
+    // not a file anybody can edit here, so it is not somewhere an import
+    // can land, and neither is a link — the file it names is.
+    const allPaths = new Set(
+      entries
+        .filter(
+          (entry) =>
+            entry.type === "blob" &&
+            !duplicated.has(entry.path) &&
+            !symlinks.has(entry.path),
+        )
+        .map((entry) => entry.path),
+    );
+    // The declaration tables are only as complete as the index, and the
+    // resolvers that read them answer by uniqueness: one file declaring
+    // `Acme\Money` is the target, two is "no way to say which one the
+    // importer compiles against", and that refusal is the whole safeguard
+    // against build-variant source sets and vendored copies. A file the
+    // budget left out, a duplicate name the listing could not tell apart, a
+    // link, a header the reader refused — any of these may be the second
+    // declaration that would have made the answer ambiguous, and the first
+    // version rebuilt the tables from the files it had and answered with
+    // confidence. So a table is trusted only when every file of its language
+    // went into it; otherwise the lookups that depend on uniqueness answer
+    // nothing. The budget may lose an edge and must never add one. Java's
+    // layout fallback is path-based over the complete listing and stays.
+    //
+    // A header the reader could read over a body it could not is a file that
+    // did go in: its package is known, so whatever it hides is hidden inside
+    // that package and not somewhere else in the repository. Counting it as
+    // missing emptied every JVM table in a repository over one unreadable
+    // body, and the declaration index stopped answering for files nobody had
+    // touched. {@link JvmContext.unreadBodies} is what carries that file.
+    const known = new Set(
+      files
+        .filter((file) => file.scan?.packageName !== undefined)
+        .map((file) => file.path),
+    );
+    let phpComplete = true;
+    let jvmComplete = true;
+    for (const entry of candidates) {
+      const language = languageOf(entry.path);
+      if (language === undefined || known.has(entry.path)) {
+        continue;
+      }
+      if (language === "php") {
+        phpComplete = false;
+      } else if (JVM_LANGUAGES.has(language)) {
+        jvmComplete = false;
+      }
+    }
     // Built once, after every file has been read, because what a specifier
     // resolves to is a fact about the repository rather than about the file:
     // a Go import names a directory, a JVM import names a type, and Python
     // needs the interpreter's own standard-library list.
     const resolution: ResolutionContext = {
       files: allPaths,
-      pythonStdlib: pythonAnswers.stdlib,
+      pythonStdlib:
+        pythonAnswers.stdlib.size > 0 ? pythonAnswers.stdlib : this.pythonStdlib,
+      pythonLayout: pythonLayout(allPaths),
       goModuleRoots: goModuleRoots(manifests),
       goFacts,
       rubyRoots: rubyLoadRoots(allPaths),
       pathSuffixes: pathSuffixes(allPaths),
-      phpTypes: phpTypes(phpUnits),
+      phpTypes: phpComplete ? phpTypes(phpUnits) : new Map(),
       jvm: {
-        declarations: jvmDeclarations(jvmDeclared),
+        declarations: jvmComplete ? jvmDeclarations(jvmDeclared) : new Map(),
+        types: jvmComplete
+          ? jvmDeclarations(
+              new Map(
+                [...jvmDeclared].map(([file, unit]) => [
+                  file,
+                  { packageName: unit.packageName, topLevelNames: unit.typeNames },
+                ]),
+              ),
+            )
+          : new Map(),
         basenames: byBasename(allPaths),
         units: jvmUnits,
+        // A readable header over a body the declaration pass could not
+        // read: the file is in no table, and only its name speaks for it.
+        unreadBodies: new Set(
+          files
+            .filter(
+              (file) =>
+                file.language === "java" &&
+                file.scan?.packageName !== undefined &&
+                file.scan.topLevel === undefined,
+            )
+            .map((file) => file.path),
+        ),
       },
+      rustTargets: cargoTargets(manifests),
     };
     const edges: DependencyEdge[] = [];
+    // One edge per (from, to, resource, kind): a target imported four ways
+    // is one dependency, not four.
+    const seenEdges = new Set<string>();
+    const record = (edge: DependencyEdge): void => {
+      const key = `${edge.fromFile}\u0000${edge.toFile ?? ""}\u0000${edge.resource}\u0000${edge.kind}`;
+      if (!seenEdges.has(key)) {
+        seenEdges.add(key);
+        edges.push(edge);
+      }
+    };
     for (const file of files) {
-      for (const imported of file.imports) {
+      for (const [position, imported] of file.imports.entries()) {
+        const kind = file.scan?.importKinds?.[position];
         const targets = resolveImportedFiles(
           file.language,
           file.path,
           imported,
           resolution,
+          kind === undefined || kind === "" ? undefined : kind,
         );
         if (targets.length === 0) {
           // Unresolved, and that is the ordinary case: the standard library,
@@ -1595,7 +2279,7 @@ export class CodeIntelligenceService {
           // is still recorded against the specifier, because "this file
           // imports express" is worth knowing even though express is not
           // here.
-          edges.push({
+          record({
             fromFile: file.path,
             resource: imported,
             kind: "import",
@@ -1605,7 +2289,7 @@ export class CodeIntelligenceService {
         // One specifier, several edges: a Go import names a directory, and
         // every file in it is a real dependency of the importer.
         for (const target of targets) {
-          edges.push({
+          record({
             fromFile: file.path,
             toFile: target,
             resource: target,
@@ -1614,7 +2298,7 @@ export class CodeIntelligenceService {
         }
       }
       for (const service of file.services) {
-        edges.push({
+        record({
           fromFile: file.path,
           resource: service,
           kind: "service",
@@ -1751,10 +2435,20 @@ export class CodeIntelligenceService {
     // should have been in the index and were not, because they are new, or
     // skipped by the byte budget, or in a language that is scanned rather than
     // parsed.
-    const couldHaveDependencies = plan.expectedFiles.some((file) =>
-      SOURCE_EXTENSIONS.has(path.posix.extname(file).toLowerCase()),
+    //
+    // And a file that is in the index with an import list nobody could read
+    // — `importsUnknown`, the Ruby or PHP masker having lost its place — is
+    // the same blindness with a file beside it.
+    const couldHaveDependencies = plan.expectedFiles.some(
+      (file) => languageOf(file) !== undefined,
     );
-    const blind = couldHaveDependencies && files.length === 0;
+    // And a plan over a file that is in the index but whose imports could not
+    // be read is blind in the same way: its read set is whatever the reader
+    // managed before it gave up, which is nothing, and nothing is not what
+    // the file depends on.
+    const blind =
+      couldHaveDependencies &&
+      (files.length === 0 || files.some((file) => file.importsUnknown === true));
     const enriched: AgentPlan = {
       ...structuredClone(plan),
       ...(blind ? { dependenciesUnknown: true } : {}),
@@ -1905,12 +2599,26 @@ export class CodeIntelligenceService {
     before: RepositoryIndex,
     after: RepositoryIndex,
   ): Array<ContractChange & { consumers: string[] }> {
+    // A file whose shapes could not be read is handed over as `undefined`,
+    // never dropped: dropped, it is indistinguishable from deleted, and
+    // `contractChanges` would report every contract it had as removed. The
+    // comparison then leaves it out on either side, which is the honest
+    // answer — nothing is known about it at that revision.
+    //
+    // The same for a file that is at the revision but not in the index — one
+    // the budget left out, which happens to a file that did not change when
+    // two unrelated files that sort earlier are added to a repository at the
+    // cutoff. Absent from the map it read as deleted, and every consumer of
+    // a contract nobody had touched was told it had been removed. Every path
+    // is entered as unknown first, and what was read overrides that.
     const shapesOf = (index: RepositoryIndex) =>
-      new Map(
-        index.files
-          .filter((file) => file.exportedShapesUnknown !== true)
-          .map((file) => [file.path, file.exportedShapes]),
-      );
+      new Map<string, readonly SymbolShape[] | undefined>([
+        ...index.paths.map((file): [string, undefined] => [file, undefined]),
+        ...index.files.map((file): [string, readonly SymbolShape[] | undefined] => [
+          file.path,
+          file.exportedShapesUnknown === true ? undefined : file.exportedShapes,
+        ]),
+      ]);
     return contractChanges(shapesOf(before), shapesOf(after)).map((change) => ({
       ...change,
       consumers: this.consumersOf(before, {
@@ -1936,6 +2644,42 @@ export class CodeIntelligenceService {
       .flatMap((file) =>
         file.exportedShapes.map((shape) => ({ ...shape, file: file.path })),
       );
+  }
+
+  /**
+   * Which of these files this index could not read the contracts of.
+   *
+   * The question a caller must ask before treating {@link shapesIn} or
+   * {@link changedResources} as a measurement. Both answer from what is in
+   * the index, and a file the index has nothing for — its shapes or ranges
+   * unknown, or a source file at this revision that the budget or the
+   * listing left out of `files` — contributes nothing, which reads exactly
+   * like a file with nothing in it. The coordinator compared a branch's
+   * shapes against a canonical that had not read the file, found every one
+   * of them an arrival, and recorded that nothing had moved.
+   *
+   * A file that is not at this revision at all is not unreadable: it has
+   * been deleted or not yet added, and "no contracts" is the true answer.
+   * Nor is a file in a language whose shapes are never read — a JSON file's
+   * unknown-shapes flag is structural, and its keys are read fine.
+   */
+  public unreadableIn(
+    files: readonly string[],
+    index: RepositoryIndex,
+  ): string[] {
+    const indexed = new Map(index.files.map((file) => [file.path, file]));
+    const present = new Set(index.paths);
+    return files.filter((filePath) => {
+      const file = indexed.get(filePath);
+      if (file === undefined) {
+        return present.has(filePath) && languageOf(filePath) !== undefined;
+      }
+      return (
+        file.symbolRangesUnknown === true ||
+        (file.exportedShapesUnknown === true &&
+          RANGEABLE_LANGUAGES.has(file.language))
+      );
+    });
   }
 
   /**

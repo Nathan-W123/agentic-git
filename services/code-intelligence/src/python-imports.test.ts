@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolvePythonImport } from "./python-imports.js";
+import { pythonLayout, resolvePythonImport } from "./python-imports.js";
 
 const STDLIB = new Set(["os", "sys", "json", "email", "typing"]);
 
@@ -132,15 +132,52 @@ test("two roots that both answer means there is no answer", () => {
 test("a vendored copy does not become an edge to the real package", () => {
   // The measured failure. A vendored package imports itself by its own
   // top-level name, and without this every vendored file grows an edge to
-  // the real one beside it.
-  const context = repo(
+  // the real one beside it. `_vendor` is the name pip, setuptools and
+  // poetry-core use; until it was in the vendor list this layout passed
+  // only because two roots answered and neither was used.
+  const vendored = [
     "poetry/core/_vendor/lark/parser.py",
     "poetry/core/_vendor/lark/__init__.py",
     "lark/__init__.py",
+  ];
+  assert.equal(
+    resolvePythonImport("poetry/core/_vendor/lark/parser.py", "lark", repo(...vendored)),
+    "poetry/core/_vendor/lark/__init__.py",
+  );
+  // poetry-core really has `poetry/core/__init__.py`. With it, every
+  // ancestor root is inside a package and the repository root was the sole
+  // hit — the vendored copy pointed at the real package beside it, the very
+  // edge the list exists to prevent. Nothing is the honest answer.
+  assert.equal(
+    resolvePythonImport(
+      "poetry/core/_vendor/lark/parser.py",
+      "lark",
+      repo(...vendored, "poetry/core/__init__.py"),
+    ),
+    undefined,
+  );
+  // A frozen copy of a monorepo library inside a service's own package is
+  // the same case, with the library's marker root as the wrong answer.
+  const frozen = repo(
+    "libs/pyproject.toml",
+    "libs/common/__init__.py",
+    "services/api/api/__init__.py",
+    "services/api/api/_vendor/common/__init__.py",
+    "services/api/api/_vendor/common/util.py",
   );
   assert.equal(
-    resolvePythonImport("poetry/core/_vendor/lark/parser.py", "lark", context),
+    resolvePythonImport("services/api/api/_vendor/common/util.py", "common", frozen),
     undefined,
+  );
+  // botocore's spelling.
+  const botocore = repo(
+    "botocore/vendored/requests/__init__.py",
+    "botocore/vendored/requests/api.py",
+    "requests/__init__.py",
+  );
+  assert.equal(
+    resolvePythonImport("botocore/vendored/requests/api.py", "requests", botocore),
+    "botocore/vendored/requests/__init__.py",
   );
 });
 
@@ -165,4 +202,159 @@ test("an empty or malformed specifier resolves to nothing rather than to the roo
     assert.notEqual(answer, "", `${specifier} should not resolve to the root`);
   }
   assert.equal(resolvePythonImport("app/main.py", "", context), undefined);
+});
+
+/* ------------------------------------------------------------- second pass -- */
+
+test("a vendored file's own package is the copy it sits inside", () => {
+  // Vendored roots were skipped and the repository root was not, which
+  // resolved `import lark` from inside `vendor/lark/` to the real `lark/`
+  // beside it — the very edge the vendor list exists to prevent.
+  const context = repo(
+    "vendor/lark/__init__.py",
+    "vendor/lark/tree.py",
+    "vendor/lark/parser.py",
+    "lark/__init__.py",
+    "lark/tree.py",
+  );
+  assert.equal(
+    resolvePythonImport("vendor/lark/parser.py", "lark", context),
+    "vendor/lark/__init__.py",
+  );
+  assert.equal(
+    resolvePythonImport("vendor/lark/parser.py", "lark.tree", context),
+    "vendor/lark/tree.py",
+  );
+  // And the real package still never reaches into the vendored copy.
+  assert.equal(resolvePythonImport("lark/tree.py", "lark", context), "lark/__init__.py");
+});
+
+test("a namespace directory inside a package is not a script root", () => {
+  // `app/utils/user.py` is `app.utils.user`; nothing can `import user` and
+  // land on it. Asking only whether `app/utils/` itself held an `__init__`
+  // missed that the package is one level up.
+  const context = repo("app/__init__.py", "app/utils/helpers.py", "app/utils/user.py");
+  assert.equal(resolvePythonImport("app/utils/helpers.py", "user", context), undefined);
+});
+
+test("a module beats a stub-only directory, and a module cuts off a dotted path", () => {
+  // `x.py` beside `x/__init__.pyi`: the stub directory is a namespace package
+  // to the interpreter, and a regular module wins over one.
+  assert.equal(
+    resolvePythonImport("main.py", "x", repo("main.py", "x.py", "x/__init__.pyi")),
+    "x.py",
+  );
+  // `foo.py` beside `foo/bar.py` with no `foo/__init__.py`: Python loads
+  // foo.py and then fails, because a module has no submodules.
+  assert.equal(
+    resolvePythonImport("main.py", "foo.bar", repo("main.py", "foo.py", "foo/bar.py")),
+    undefined,
+  );
+  assert.equal(
+    resolvePythonImport(
+      "pkg/mod.py",
+      ".sub.x",
+      repo("pkg/__init__.py", "pkg/mod.py", "pkg/sub.py", "pkg/sub/x.py"),
+    ),
+    undefined,
+  );
+  // With the package marker present, the directory is the package.
+  assert.equal(
+    resolvePythonImport(
+      "main.py",
+      "foo.bar",
+      repo("main.py", "foo.py", "foo/__init__.py", "foo/bar.py"),
+    ),
+    "foo/bar.py",
+  );
+});
+
+test("a project marker inside a test fixture is not a root", () => {
+  const context = repo(
+    "app/main.py",
+    "tests/fixtures/sample/setup.py",
+    "tests/fixtures/sample/settings.py",
+  );
+  assert.equal(resolvePythonImport("app/main.py", "settings", context), undefined);
+  // Whereas a real sibling project is, because that is what a monorepo is.
+  const monorepo = repo("services/api/main.py", "libs/pyproject.toml", "libs/common/__init__.py");
+  assert.equal(
+    resolvePythonImport("services/api/main.py", "common", monorepo),
+    "libs/common/__init__.py",
+  );
+});
+
+test("with no interpreter to name the standard library, absolute imports are dropped", () => {
+  // Unknown is not empty. An empty list would match `import json` against a
+  // repository file called `json.py`, which is the edge that appeared on
+  // warm builds and vanished on cold ones.
+  const context = { files: new Set(["app/main.py", "app/x.py", "json.py"]), stdlib: undefined };
+  assert.equal(resolvePythonImport("app/main.py", "json", context), undefined);
+  assert.equal(resolvePythonImport("app/main.py", ".x", context), "app/x.py");
+});
+
+test("the layout is read once and handed in, not rediscovered per specifier", () => {
+  const files = new Set(["src/app/__init__.py", "libs/pyproject.toml", "tests/fixtures/x/setup.py"]);
+  const layout = pythonLayout(files);
+  assert.deepEqual(layout, { markerDirs: ["libs"], hasSrc: true });
+  // The same Set answers with the same object, so a resolver asked fifty
+  // thousand times does not walk the tree fifty thousand times.
+  assert.equal(pythonLayout(files), layout);
+});
+
+test("a plain module under any root cuts a dotted path off under every root", () => {
+  // `src/config.py` beside a top-level `config/dev.py` with no `__init__`:
+  // the import system reads every sys.path entry, and a regular module on
+  // any of them beats a namespace directory on any other, so `import
+  // config.dev` fails with "'config' is not a package" whichever order the
+  // entries are in. Checked per root, the shadow only removed `src` from
+  // the search, and the repository root handed out `config/dev.py` — a file
+  // Python never opens — while `import config` from the same file answered
+  // `src/config.py`.
+  const context = repo(
+    "pyproject.toml",
+    "src/app/__init__.py",
+    "src/config.py",
+    "config/dev.py",
+    "scripts/x.py",
+  );
+  assert.equal(resolvePythonImport("scripts/x.py", "config", context), "src/config.py");
+  assert.equal(resolvePythonImport("scripts/x.py", "config.dev", context), undefined);
+  // The same through a project marker's root.
+  const marker = repo("libs/pyproject.toml", "libs/config.py", "config/dev.py", "app/main.py");
+  assert.equal(resolvePythonImport("app/main.py", "config.dev", marker), undefined);
+  // A root that is not searched casts no shadow: `app/config.py` is
+  // `app.config`, and says nothing about `config.dev` at the top level.
+  const packaged = repo("app/__init__.py", "app/main.py", "app/config.py", "config/dev.py");
+  assert.equal(resolvePythonImport("app/main.py", "config.dev", packaged), "config/dev.py");
+});
+
+test("a project marker under an examples directory is not a root for everyone", () => {
+  // Django's `try: from local_settings import *` names a file that is
+  // gitignored and so absent from the tree. The example project's marker
+  // made `examples/demo/` a root for every importer, and its
+  // `local_settings.py` — the only file of that name — was the answer.
+  // One layout per spelling, so that each name in the list is doing its own
+  // work: `examples/demo/` would be caught by either of two.
+  for (const project of ["examples/blog", "demo", "samples/kitchen"]) {
+    const context = repo(
+      "app/__init__.py",
+      "app/settings.py",
+      `${project}/pyproject.toml`,
+      `${project}/local_settings.py`,
+      `${project}/manage.py`,
+    );
+    assert.equal(
+      resolvePythonImport("app/settings.py", "local_settings", context),
+      undefined,
+      project,
+    );
+    assert.deepEqual(pythonLayout(context.files).markerDirs, [], project);
+    // The example still resolves its own imports, through its own ancestors.
+    assert.equal(
+      resolvePythonImport(`${project}/manage.py`, "local_settings", context),
+      `${project}/local_settings.py`,
+      project,
+    );
+  }
 });

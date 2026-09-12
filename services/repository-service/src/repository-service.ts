@@ -12,6 +12,7 @@ import path from "node:path";
 
 import {
   normalizeRepositoryPath,
+  repositoryPathFromGit,
   type CanonicalVersion,
 } from "@coord/shared-types";
 
@@ -626,6 +627,15 @@ export interface RepositoryFileEntry {
   oid: string;
   /** `blob` for a file; `commit` for a submodule, which has no contents here. */
   type: string;
+  /**
+   * Git's mode for the entry, as `ls-tree` prints it: `100644`, `100755`,
+   * `120000` for a symbolic link, `160000` for a submodule.
+   *
+   * Kept because `type` alone cannot tell a link from a file — a link is a
+   * `blob` too, one whose contents are the path it points at — and an indexer
+   * that read one as a source file recorded a header declaring nothing.
+   */
+  mode: string;
 }
 
 export class RepositoryService {
@@ -2888,11 +2898,11 @@ export class RepositoryService {
         if (tab === -1) {
           return [];
         }
-        const [, type = "", oid = ""] = entry.slice(0, tab).split(" ");
+        const [mode = "", type = "", oid = ""] = entry.slice(0, tab).split(" ");
         // Submodules stay in the listing. They are real paths, and `listFiles`
         // has always reported them, so dropping them here would quietly shrink
         // the set that answers "does this declared path exist".
-        return [{ path: normalizeRepositoryPath(entry.slice(tab + 1)), oid, type }];
+        return [{ path: repositoryPathFromGit(entry.slice(tab + 1)), oid, type, mode }];
       })
       .sort((left, right) => (left.path < right.path ? -1 : 1));
   }
@@ -2925,7 +2935,7 @@ export class RepositoryService {
     return result.stdout
       .split("\0")
       .filter((entry) => entry.length > 0)
-      .map(normalizeRepositoryPath)
+      .map(repositoryPathFromGit)
       .sort();
   }
 
@@ -3001,7 +3011,7 @@ export class RepositoryService {
     return result.stdout
       .split("\0")
       .filter((entry) => entry.length > 0)
-      .map(normalizeRepositoryPath)
+      .map(repositoryPathFromGit)
       .sort();
   }
 

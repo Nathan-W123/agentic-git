@@ -117,3 +117,189 @@ test("a using names a namespace, and only #load names a file", () => {
   ]);
   assert.deepEqual(resolveCSharpLoad("src/Script.csx", "missing.csx", context), []);
 });
+
+/* ------------------------------------------------------------ second pass -- */
+
+test("a line spliced onto the one above it cannot begin a directive", () => {
+  // C splices a backslash-newline before it looks for directives, so the
+  // `#include` under a comment ending in a Windows path is comment text.
+  assert.deepEqual(
+    readIncludes('// path C:\\dir\\\n#include "ghost.h"\n#include "real.h"\n'),
+    ["real.h"],
+  );
+  assert.deepEqual(readIncludes('// c \\ \n#include "ghost.h"\n'), []);
+  assert.deepEqual(readIncludes('// c\\\r\n#include "ghost.h"\r\n'), []);
+  assert.deepEqual(readIncludes('#define STAMP \\\n#include "ghost.h"\nint x;\n'), []);
+  assert.deepEqual(readIncludes('#include "real.h" \\\n#include "ghost.h"\n'), ["real.h"]);
+  // C# has no such splice, and a `#load` after a backslash line is live.
+  assert.deepEqual(readCSharpLoads('var p = "x\\\\";\n#load "a.csx"\n'), ["a.csx"]);
+});
+
+test("an #if 0 group is dead, and what comes after its #else is not", () => {
+  assert.deepEqual(readIncludes('#if 0\n#include "dead.h"\n#endif\n#include "real.h"\n'), ["real.h"]);
+  assert.deepEqual(
+    readIncludes('#if 0\n#include "dead.h"\n#else\n#include "live.h"\n#endif\n'),
+    ["live.h"],
+  );
+  assert.deepEqual(
+    readIncludes('#if 0\n#ifdef X\n#include "deeper.h"\n#endif\n#endif\n#include "real.h"\n'),
+    ["real.h"],
+  );
+  // Any other condition is somebody's flag, and left alone.
+  assert.deepEqual(readIncludes('#ifdef DEBUG\n#include "debug.h"\n#endif\n'), ["debug.h"]);
+  assert.deepEqual(readCSharpLoads('#if false\n#load "ghost.csx"\n#endif\n#load "real.csx"\n'), ["real.csx"]);
+});
+
+test("a dead group is dead with Windows line endings too", () => {
+  // The masked text keeps each line's `\r`, and a constant test anchored at
+  // the end of the line has to see past it — or every `#if 0` in a
+  // Windows-authored file is live, and its disabled include is an edge.
+  assert.deepEqual(
+    readIncludes('#if 0\r\n#include "dead.h"\r\n#endif\r\n#include "real.h"\r\n'),
+    ["real.h"],
+  );
+  assert.deepEqual(readCSharpLoads('#if false\r\n#load "ghost.csx"\r\n#endif\r\n'), []);
+});
+
+test("the other arm of a constant toggle is dead", () => {
+  // `#if 1 ... #else ... #endif` is the everyday way of switching between
+  // two implementations; the compiler never enters the other arm.
+  assert.deepEqual(
+    readIncludes('#if 1\n#include "live.h"\n#else\n#include "dead.h"\n#endif\n'),
+    ["live.h"],
+  );
+  assert.deepEqual(
+    readIncludes('#ifdef FOO\n#include "a.h"\n#elif 0\n#include "dead.h"\n#endif\n'),
+    ["a.h"],
+  );
+  assert.deepEqual(
+    readIncludes(
+      '#if 0\n#include "dead1.h"\n#elif 1\n#include "live.h"\n#else\n#include "dead2.h"\n#endif\n',
+    ),
+    ["live.h"],
+  );
+  // An arm after a taken one is dead whatever its own condition says.
+  assert.deepEqual(
+    readIncludes('#if 1\n#include "live.h"\n#elif FOO\n#include "dead.h"\n#endif\n'),
+    ["live.h"],
+  );
+  // A flag nobody can see still leaves both arms alone.
+  assert.deepEqual(
+    readIncludes('#if 0\n#include "dead.h"\n#elif FOO\n#include "a.h"\n#else\n#include "b.h"\n#endif\n'),
+    ["a.h", "b.h"],
+  );
+  assert.deepEqual(
+    readCSharpLoads('#if true\n#load "live.csx"\n#else\n#load "ghost.csx"\n#endif\n'),
+    ["live.csx"],
+  );
+  assert.deepEqual(
+    readCSharpLoads('#if false\n#load "g1.csx"\n#elif false\n#load "g2.csx"\n#endif\n'),
+    [],
+  );
+});
+
+test("a bare name is not resolved into somebody else's tree", () => {
+  // The project's own config.h is written by ./configure and never
+  // committed; the one config.h in the repository belongs to a vendored
+  // zlib, and nothing in `#include "config.h"` ties main.c to it.
+  const context = repo("src/main.c", "third_party/zlib/config.h", "third_party/zlib/deflate.c");
+  assert.deepEqual(resolveInclude("src/main.c", "config.h", context), []);
+  // A directory in the specifier is the evidence a bare name lacks, and a
+  // file inside that tree includes its own header the ordinary way.
+  assert.deepEqual(resolveInclude("src/main.c", "zlib/config.h", context), [
+    "third_party/zlib/config.h",
+  ]);
+  assert.deepEqual(resolveInclude("third_party/zlib/test/x.c", "config.h", context), [
+    "third_party/zlib/config.h",
+  ]);
+});
+
+test("an absolute path is not in the repository, whatever it happens to match", () => {
+  const context = repo("src/a.c", "src/abs.h", "s/a.csx", "s/x.csx");
+  assert.deepEqual(resolveInclude("src/a.c", "/abs.h", context), []);
+  assert.deepEqual(resolveInclude("src/a.c", "C:\\abs.h", context), []);
+  assert.deepEqual(resolveCSharpLoad("s/a.csx", "/x.csx", context), []);
+});
+
+test("a byte-order mark does not hide the first directive", () => {
+  assert.deepEqual(readIncludes('\uFEFF#include "first.h"\n#include "second.h"\n'), ["first.h", "second.h"]);
+  assert.deepEqual(readCSharpLoads('\uFEFF#load "a.csx"\n'), ["a.csx"]);
+});
+
+test("directive prose and a stray apostrophe do not abandon the file", () => {
+  assert.deepEqual(readIncludes("#warning don't\n#include \"a.h\"\n"), ["a.h"]);
+  assert.deepEqual(readIncludes("#if 0\nthis doesn't work\n#endif\n#include \"a.h\"\n"), ["a.h"]);
+  assert.deepEqual(readCSharpLoads("#region Don't touch\n#load \"a.csx\"\n#endregion\n"), ["a.csx"]);
+});
+
+test("C# verbatim and raw strings are read by their own rules", () => {
+  // A verbatim path ending in a backslash is not an escape.
+  assert.deepEqual(readCSharpLoads('var p = @"C:\\dir\\";\n#load "a.csx"\n'), ["a.csx"]);
+  // A verbatim string spans lines, and a `#load` inside it is text.
+  assert.deepEqual(readCSharpLoads('var s = @"line one\n#load ""ghost.csx""\nline two";\n#load "a.csx"\n'), ["a.csx"]);
+  assert.deepEqual(readCSharpLoads('var s = $@"x{y}""z";\n#load "a.csx"\n'), ["a.csx"]);
+  assert.deepEqual(readCSharpLoads('var r = """\n#load "ghost.csx"\n""";\n#load "a.csx"\n'), ["a.csx"]);
+});
+
+test("a #load must be the first thing on its line as written", () => {
+  assert.deepEqual(readCSharpLoads('/* a */ #load "ghost.csx"\n'), []);
+  assert.deepEqual(readCSharpLoads('/*\n#load "ghost.csx"\n*/\n#load "real.csx"\n'), ["real.csx"]);
+});
+
+test("a large file is read in linear time and memory", () => {
+  const started = Date.now();
+  const includes = readIncludes(`${"x".repeat(3 * 1024 * 1024)}\n#include "end.h"\n`);
+  assert.deepEqual(includes, ["end.h"]);
+  assert.ok(Date.now() - started < 3000);
+});
+
+/* ------------------------------------------------------------- third pass -- */
+
+test("a dead group is dead with Windows line endings too", () => {
+  // The masked lines still carried their `\r`, so `#if 0\r` never matched the
+  // opener and every include inside a disabled block became a real edge.
+  assert.deepEqual(
+    readIncludes('#if 0\r\n#include "dead.h"\r\n#endif\r\n#include "real.h"\r\n'),
+    ["real.h"],
+  );
+  assert.deepEqual(readCSharpLoads('#if false\r\n#load "ghost.csx"\r\n#endif\r\n'), []);
+});
+
+test("the arm the compiler does not enter is dead, whichever arm that is", () => {
+  // `#if 1 ... #else ... #endif` is how a project switches between two
+  // implementations; reading the unused half as live is a false edge to code
+  // nothing compiles.
+  assert.deepEqual(
+    readIncludes('#if 1\n#include "live.h"\n#else\n#include "dead.h"\n#endif\n'),
+    ["live.h"],
+  );
+  assert.deepEqual(
+    readIncludes('#ifdef FOO\n#include "a.h"\n#elif 0\n#include "dead.h"\n#endif\n'),
+    ["a.h"],
+  );
+  assert.deepEqual(
+    readIncludes('#if 0\n#include "d1.h"\n#elif 1\n#include "live.h"\n#else\n#include "d2.h"\n#endif\n'),
+    ["live.h"],
+  );
+  assert.deepEqual(
+    readCSharpLoads('#if true\n#load "live.csx"\n#else\n#load "ghost.csx"\n#endif\n'),
+    ["live.csx"],
+  );
+  assert.deepEqual(
+    readCSharpLoads('#if false\n#load "g1.csx"\n#elif false\n#load "g2.csx"\n#endif\n'),
+    [],
+  );
+  // A condition nobody here can evaluate stays live, as it always did.
+  assert.deepEqual(readIncludes('#if CONFIG\n#include "maybe.h"\n#endif\n'), ["maybe.h"]);
+});
+
+test("the include search path needs a directory to search for", () => {
+  // `config.h` is generated by ./configure in nearly every C project that
+  // also vendors a library shipping one; the bare name is no evidence.
+  const files = new Set(["src/main.c", "third_party/zlib/config.h"]);
+  const context = { files, suffixes: pathSuffixes(files) };
+  assert.deepEqual(resolveInclude("src/main.c", "config.h", context), []);
+  assert.deepEqual(resolveInclude("src/main.c", "zlib/config.h", context), [
+    "third_party/zlib/config.h",
+  ]);
+});

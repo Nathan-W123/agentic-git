@@ -275,6 +275,32 @@ test("a file that has gone entirely takes its contracts with it", () => {
   );
 });
 
+test("a file that could not be read at `after` is unknown, not removed", () => {
+  // The other way a file can have no shapes at a revision: the reader
+  // refused it — a syntax error, a construct the scanner cannot follow. Its
+  // contracts may all still be there, and reporting them as removed would
+  // tell every consumer its dependency had gone because somebody left a
+  // bracket open. Only a file that is *absent* has taken its contracts away.
+  const readable = [...shapes("export function f(): void {}").values()];
+  const before = new Map([
+    ["src/broken.ts", readable],
+    ["src/deleted.ts", readable],
+  ]);
+  const after = new Map<string, typeof readable | undefined>([
+    ["src/broken.ts", undefined],
+  ]);
+  assert.deepEqual(
+    contractChanges(before, after).map((change) => [change.file, change.symbol, change.after]),
+    [["src/deleted.ts", "f", "(removed)"]],
+  );
+  // And unreadable at `before` is just as much of a non-answer: nothing is
+  // known to compare against, so nothing has moved.
+  assert.deepEqual(
+    contractChanges(new Map([["src/broken.ts", undefined]]), new Map([["src/broken.ts", []]])),
+    [],
+  );
+});
+
 test("the shape is what a person reads; the digest is what decides", () => {
   const shape = shapes("export function sign(password: string): string {}").get("sign");
   // Two fields with two jobs. `(:string): string` is the right thing to

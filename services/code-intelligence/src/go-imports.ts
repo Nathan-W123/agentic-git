@@ -18,7 +18,7 @@
  * below drops rather than guesses.
  */
 
-import { posixDirname, posixJoin } from "./import-resolution.js";
+import { posixBasename, posixDirname, posixJoin } from "./import-resolution.js";
 
 /** What one `.go` file says about itself, or nothing if it could not be read. */
 export interface GoFileFacts {
@@ -54,6 +54,11 @@ export function goDirectoryIsIgnored(dir: string): boolean {
   return IGNORED_DIR.test(`${dir}/`);
 }
 
+/** The same rule for a file: `_gen.go` and `.hidden.go` are never built. */
+function goFileIsIgnored(file: string): boolean {
+  return /^[._]/u.test(posixBasename(file));
+}
+
 /**
  * Reads a `.go` file's prologue: its package clause and its imports.
  *
@@ -65,14 +70,25 @@ export function goDirectoryIsIgnored(dir: string): boolean {
  * reader has lost its place, and the whole file is abandoned.
  */
 export function readGoFile(source: string): GoFileFacts | undefined {
-  const text = source.startsWith("﻿") ? source.slice(1) : source;
-  // `//go:build ignore` is a whole-file constraint and is only meaningful
-  // above the package clause, which is where both forms are required to be.
-  const head = text.slice(0, Math.max(0, text.indexOf("package")));
-  const buildIgnored =
-    /^\/\/(?:go:build|[ \t]*\+build)\b[^\n]*\bignore\b/mu.test(head);
+  // Line endings are normalised because go/build trims each header line
+  // before reading it, so a CRLF line is a blank line and `// +build` ends
+  // at the `\r`. Read raw, the `+build` regex never matched a body ending
+  // in `\r` and the blank-line test never saw `\n\r\n` as blank, and a
+  // CRLF-saved generator script joined its package.
+  const text = (source.startsWith("\uFEFF") ? source.slice(1) : source).replace(
+    /\r\n/gu,
+    "\n",
+  );
 
   let at = 0;
+  // Every line comment the walker steps over before the package clause, with
+  // where it ended. Build constraints are read from these and nowhere else:
+  // the first version sliced the text at the first occurrence of the word
+  // "package", so a licence header saying "distributed with the other
+  // packages" ended the region before `//go:build ignore` was reached, and a
+  // constraint inside a block comment counted as one.
+  const lineComments: Array<{ body: string; end: number }> = [];
+  let packageAt: number | undefined;
   const skipTrivia = (): boolean => {
     for (;;) {
       while (at < text.length && /\s/u.test(text[at] ?? "")) {
@@ -80,7 +96,11 @@ export function readGoFile(source: string): GoFileFacts | undefined {
       }
       if (text.startsWith("//", at)) {
         const end = text.indexOf("\n", at);
-        at = end === -1 ? text.length : end;
+        const stop = end === -1 ? text.length : end;
+        if (packageAt === undefined) {
+          lineComments.push({ body: text.slice(at, stop), end: stop });
+        }
+        at = stop;
         continue;
       }
       if (text.startsWith("/*", at)) {
@@ -136,11 +156,13 @@ export function readGoFile(source: string): GoFileFacts | undefined {
   if (!skipTrivia() || !text.startsWith("package", at)) {
     return undefined;
   }
+  packageAt = at;
+  const buildIgnored = constrainedToIgnore(text, lineComments, packageAt);
   at += "package".length;
   if (!skipTrivia()) {
     return undefined;
   }
-  const name = /^[A-Za-z_]\w*/u.exec(text.slice(at))?.[0];
+  const name = IDENTIFIER.exec(text.slice(at))?.[0];
   if (name === undefined) {
     return undefined;
   }
@@ -154,10 +176,13 @@ export function readGoFile(source: string): GoFileFacts | undefined {
     if (at >= text.length) {
       break;
     }
-    if (!text.startsWith("import", at) || /\w/u.test(text[at + 6] ?? "")) {
+    if (
+      !text.startsWith("import", at) ||
+      IDENTIFIER_CHARACTER.test(text[at + 6] ?? "")
+    ) {
       // The prologue ends here. Only a declaration may follow it, and
       // anything else means this reader mis-parsed something above.
-      const next = /^[A-Za-z_]\w*/u.exec(text.slice(at))?.[0];
+      const next = IDENTIFIER.exec(text.slice(at))?.[0];
       return next !== undefined &&
         ["func", "type", "const", "var"].includes(next)
         ? { packageName: name, buildIgnored, imports }
@@ -180,7 +205,7 @@ export function readGoFile(source: string): GoFileFacts | undefined {
         break;
       }
       // An optional name: `_`, `.`, or an identifier alias.
-      const alias = /^(?:_|\.|[A-Za-z_]\w*)/u.exec(text.slice(at))?.[0];
+      const alias = text[at] === "." ? "." : IDENTIFIER.exec(text.slice(at))?.[0];
       if (alias !== undefined && text[at] !== '"' && text[at] !== "`") {
         at += alias.length;
         if (!skipTrivia()) {
@@ -201,6 +226,82 @@ export function readGoFile(source: string): GoFileFacts | undefined {
 }
 
 /**
+ * A Go identifier: a letter or underscore, then letters, digits and
+ * underscores — where a letter is any Unicode letter, not an ASCII one. The
+ * first version wrote `[A-Za-z_]\w*`, and a legal file with `π "math"` among
+ * its imports was abandoned whole, indexed as importing nothing.
+ */
+const IDENTIFIER = /^[\p{L}_][\p{L}\p{Nd}_]*/u;
+const IDENTIFIER_CHARACTER = /[\p{L}\p{Nd}_]/u;
+
+/**
+ * Whether the constraint comments above the package clause exclude the file
+ * from every build.
+ *
+ * `//go:build` is authoritative when present, and only the expression that
+ * evaluates to the bare `ignore` tag is honoured — `(ignore)` is that tag,
+ * `!ignore` builds everywhere, and anything with an operator in it depends on
+ * tags this cannot see. The older `// +build`
+ * form is a list of OR-ed terms, each a comma list of AND-ed tags, and it
+ * only counts as a constraint when a blank line separates it from the
+ * package clause — without one the go tool reads it as a doc comment.
+ */
+function constrainedToIgnore(
+  text: string,
+  comments: readonly { body: string; end: number }[],
+  packageAt: number,
+): boolean {
+  const goBuild = comments.filter((comment) =>
+    /^\/\/go:build\b/u.test(comment.body),
+  );
+  if (goBuild.length > 0) {
+    return goBuild.some(
+      (comment) =>
+        unparenthesised(comment.body.slice("//go:build".length)) === "ignore",
+    );
+  }
+  return comments.some((comment) => {
+    const match = /^\/\/[ \t]*\+build\b(.*)$/u.exec(comment.body);
+    if (match === null) {
+      return false;
+    }
+    if (!/\n[ \t]*\n/u.test(text.slice(comment.end, packageAt))) {
+      return false;
+    }
+    return (match[1] ?? "")
+      .trim()
+      .split(/\s+/u)
+      .some((term) => term.split(",").includes("ignore"));
+  });
+}
+
+/**
+ * A build expression with its whitespace and every enclosing pair of
+ * parentheses removed: `( ignore )` and `((ignore))` are the tag `ignore`.
+ * Only a pair that encloses the whole expression is removed — `(a)&&(b)`
+ * begins with `(` and ends with `)` and is not enclosed by either.
+ */
+function unparenthesised(expression: string): string {
+  let text = expression.replace(/\s+/gu, "");
+  while (text.startsWith("(") && text.endsWith(")")) {
+    let depth = 0;
+    let enclosed = true;
+    for (let index = 0; index < text.length - 1; index += 1) {
+      depth += text[index] === "(" ? 1 : text[index] === ")" ? -1 : 0;
+      if (depth === 0) {
+        enclosed = false;
+        break;
+      }
+    }
+    if (!enclosed) {
+      break;
+    }
+    text = text.slice(1, -1);
+  }
+  return text;
+}
+
+/**
  * Where each module path lives in this repository, from its `go.mod` files.
  *
  * A module path claimed by two directories is dropped entirely rather than
@@ -213,14 +314,17 @@ export function goModuleRoots(
   const ambiguous = new Set<string>();
   for (const [file, source] of manifests) {
     if (posixBasenameIs(file, "go.mod")) {
-      const module = /^[ \t]*module[ \t]+(?:"([^"\n]+)"|(\S+))[ \t]*$/mu.exec(
-        source,
-      );
-      const modulePath = module?.[1] ?? module?.[2];
+      const dir = posixDirname(file);
+      // A fixture under testdata/ is a go.mod the tool never reads, and one
+      // that repeats the root's path would otherwise mark the root ambiguous
+      // and delete it.
+      if (goDirectoryIsIgnored(dir)) {
+        continue;
+      }
+      const modulePath = modulePathOf(source);
       if (modulePath === undefined) {
         continue;
       }
-      const dir = posixDirname(file);
       const already = roots.get(modulePath);
       if (already !== undefined && already !== dir) {
         ambiguous.add(modulePath);
@@ -233,6 +337,37 @@ export function goModuleRoots(
     roots.delete(path);
   }
   return roots;
+}
+
+/**
+ * The `module` directive's path, as `go mod` reads it.
+ *
+ * Comments are stripped first because a trailing `// the module` is legal and
+ * common; the block form `module (\n\tpath\n)` is legal and rare; and a BOM
+ * is neither but appears anyway.
+ */
+function modulePathOf(source: string): string | undefined {
+  const lines = source
+    .replace(/^\uFEFF/u, "")
+    .split("\n")
+    .map((line) => line.replace(/\/\/.*$/u, "").trim());
+  for (const [position, line] of lines.entries()) {
+    const match = /^module(?:\s+(.*))?$/u.exec(line);
+    if (match === null) {
+      continue;
+    }
+    let rest = (match[1] ?? "").trim();
+    if (rest === "(") {
+      rest = lines.slice(position + 1).find((next) => next !== "") ?? "";
+    }
+    const unquoted = /^(?:"([^"]+)"|`([^`]+)`|(\S+))$/u.exec(rest);
+    const modulePath = unquoted?.[1] ?? unquoted?.[2] ?? unquoted?.[3];
+    if (modulePath === undefined || modulePath === "(" || modulePath === ")") {
+      return undefined;
+    }
+    return modulePath;
+  }
+  return undefined;
 }
 
 function posixBasenameIs(file: string, name: string): boolean {
@@ -253,16 +388,19 @@ export function resolveGoImport(
 ): readonly string[] {
   // The go tool never builds these, and `testdata` is routinely invalid Go on
   // purpose — so they are neither end of an edge.
-  if (goDirectoryIsIgnored(posixDirname(fromFile))) {
+  if (
+    goDirectoryIsIgnored(posixDirname(fromFile)) ||
+    goFileIsIgnored(fromFile)
+  ) {
     return [];
   }
+  // `C` is cgo, and an element that is empty, `.` or `..` is a path the go
+  // tool refuses outright — normalising it would aim the edge at whatever
+  // directory the `..` happened to walk into.
   if (
-    specifier === "" ||
     specifier === "C" ||
-    specifier === "." ||
-    specifier === ".." ||
-    /^\.{1,2}\//u.test(specifier) ||
-    specifier.startsWith("/")
+    specifier.startsWith("/") ||
+    specifier.split("/").some((element) => ["", ".", ".."].includes(element))
   ) {
     return [];
   }
@@ -294,13 +432,31 @@ export function resolveGoImport(
   if (goDirectoryIsIgnored(dir)) {
     return [];
   }
+  // A nested go.mod excludes its subtree from the parent module whatever
+  // path it declares. Longest-prefix matching on the *specifier* only sees a
+  // nested module whose path extends the parent's; one called something
+  // else entirely still owns its directory, and `example.com/m/sub/lib`
+  // does not compile when `sub/` is `example.com/other`.
+  for (const otherDir of context.moduleRoots.values()) {
+    if (
+      otherDir !== matched.dir &&
+      otherDir.length > matched.dir.length &&
+      (dir === otherDir || dir.startsWith(`${otherDir}/`))
+    ) {
+      return [];
+    }
+  }
 
   const members: string[] = [];
   const packages = new Set<string>();
   for (const file of context.files) {
-    if (!file.endsWith(".go") || file.endsWith("_test.go")) {
+    if (
+      !file.endsWith(".go") ||
+      file.endsWith("_test.go") ||
+      goFileIsIgnored(file)
+    ) {
       // A `_test.go` file is never visible to an importer, so an edge to one
-      // is always false.
+      // is always false; a `_template.go` or `.hidden.go` is never built.
       continue;
     }
     if (posixDirname(file) !== dir) {

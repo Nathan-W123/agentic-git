@@ -227,6 +227,47 @@ test("what the files hold beats what the plan predicted, both ways", () => {
   assert.deepEqual(guessed.symbols, ["whatTheAgentSaid"]);
 });
 
+test("what was measured against canonical is written down, and so is its absence", () => {
+  // The coordinator computes which names the branch moved and hands them in
+  // beside the resources. The first version of this function took them in
+  // and never wrote them out, so no claim ever carried a measurement and
+  // `claimCrossesBranches` fell back to presence for every branch — the
+  // fast path refused on names nobody had touched.
+  const changeSet: ChangeSet = {
+    id: "cs_1",
+    taskId: "task_a",
+    baseVersion: 1,
+    baseRevision: "b".repeat(40),
+    patches: [patch("src/payments.ts", "@@ -1,2 +1,5 @@\n+const a = 1;\n")],
+    commandsRun: [],
+    tests: [],
+    dependenciesChanged: [],
+    symbolsChanged: [],
+    riskAssessment: { level: "low", reasons: [] },
+    agentExplanation: "",
+    createdAt: "2026-09-08T10:00:00.000Z",
+  };
+  const moved = { apis: ["POST /charges"], schemas: [], configKeys: [], services: [] };
+  const measured = claimFromChangeSet({
+    repositoryId: "repo",
+    branch: "kumi/payments-v2",
+    revision: "c".repeat(40),
+    changeSet,
+    resources: { symbols: [], apis: ["POST /charges"], configKeys: [], schemas: [], services: [] },
+    movedResources: moved,
+  });
+  assert.deepEqual(measured.movedResources, moved);
+  // Absent is a statement of its own — nobody compared — and must not be
+  // written as empty lists, which would say "compared, and nothing moved".
+  const unmeasured = claimFromChangeSet({
+    repositoryId: "repo",
+    branch: "kumi/payments-v2",
+    revision: "c".repeat(40),
+    changeSet,
+  });
+  assert.equal("movedResources" in unmeasured, false);
+});
+
 test("a branch's claims arbitrate as a plan, whole, for something else to narrow", () => {
   const active = branchClaimsAsActivePlans([
     claim({
