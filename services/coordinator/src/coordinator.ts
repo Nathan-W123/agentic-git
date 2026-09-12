@@ -1283,8 +1283,13 @@ async function withDeadline<T>(
     return await Promise.race([
       work.catch(() => undefined),
       new Promise<undefined>((resolve) => {
+        // Refed. The `finally` below clears it the moment the work wins, so
+        // it never outlives the wait — and while the wait is on, holding the
+        // loop is the point. Unref'd, a deadline cannot fire in the one case
+        // it exists for: work that stalls with nothing else pending drains
+        // the loop instead, and the process leaves with this promise unsettled
+        // rather than falling back.
         timer = setTimeout(() => resolve(undefined), timeoutMs);
-        timer.unref?.();
       }),
     ]);
   } finally {

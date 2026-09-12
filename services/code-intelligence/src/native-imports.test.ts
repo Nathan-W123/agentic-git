@@ -246,11 +246,43 @@ test("a #load must be the first thing on its line as written", () => {
   assert.deepEqual(readCSharpLoads('/*\n#load "ghost.csx"\n*/\n#load "real.csx"\n'), ["real.csx"]);
 });
 
+/**
+ * The fastest read of a file of this size, in nanoseconds.
+ *
+ * The fastest rather than the average because scheduling noise only ever
+ * adds time: the floor of a few attempts is the reader, everything above it
+ * is the machine.
+ */
+function fastestRead(megabytes: number): number {
+  const source = `${"x".repeat(megabytes * 1024 * 1024)}\n#include "end.h"\n`;
+  let best = Number.POSITIVE_INFINITY;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const started = process.hrtime.bigint();
+    assert.deepEqual(readIncludes(source), ["end.h"]);
+    best = Math.min(best, Number(process.hrtime.bigint() - started));
+  }
+  return best;
+}
+
 test("a large file is read in linear time and memory", () => {
-  const started = Date.now();
-  const includes = readIncludes(`${"x".repeat(3 * 1024 * 1024)}\n#include "end.h"\n`);
-  assert.deepEqual(includes, ["end.h"]);
-  assert.ok(Date.now() - started < 3000);
+  // This asserted that 3 MB were read inside three seconds, which measured
+  // the runner and not the reader. The same unchanged, linear code takes
+  // about 0.4s on a developer machine and over 3.5s on a CI runner sharing
+  // its cores with seventeen other packages' suites, so the budget failed a
+  // reader that had not regressed — on main, before the branch that noticed
+  // it, and on every branch cut from it.
+  //
+  // What the name promises is a shape, so the shape is what is checked:
+  // doubling the input doubles a linear reader and quadruples a quadratic
+  // one. A ratio cannot be failed by a slow machine, only by the reader
+  // growing a nested pass over the text — which is the regression worth
+  // catching, and the one a wall clock was standing in for.
+  const single = fastestRead(1);
+  const double = fastestRead(2);
+  assert.ok(
+    double < single * 3,
+    `2 MB took ${(double / single).toFixed(2)} times as long as 1 MB`,
+  );
 });
 
 /* ------------------------------------------------------------- third pass -- */
