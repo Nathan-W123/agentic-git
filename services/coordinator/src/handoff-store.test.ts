@@ -19,6 +19,7 @@ import {
   contextHandoffsUsed,
   findTaskHandoffs,
   MAX_CONTEXT_HANDOFFS,
+  readTaskHandoffs,
   recordTaskHandoff,
   seedContextForTask,
 } from "./handoff-store.js";
@@ -600,4 +601,153 @@ test("the budget is counted from the whole log, not from its first page", async 
   await recordTaskHandoff(store, handoff({ reason: "long_running" }));
 
   assert.equal(await contextHandoffsUsed(store, "task_a"), 1);
+});
+
+test("a record that could not be read is seeded as an unknown, not as nothing", async () => {
+  // The rule the whole module is written to. A damaged record is skipped so
+  // the rest of the log still reaches the successor — but a successor handed
+  // the survivors alone cannot tell this log from a log that never held the
+  // damaged note, and those two call for opposite behaviour: one starts from
+  // a clean sheet, the other goes and looks. The count of what could not be
+  // read therefore travels with the read and is stated in the seed.
+  const store = freshStore();
+  await store.appendAudit(undefined, {
+    type: HANDOFF_AUDIT_TYPE,
+    taskId: "task_damaged",
+    data: { repositoryId: "repo_1", handoff: { version: 1, taskId: "task_damaged" } },
+  });
+  await recordTaskHandoff(store, handoff({ taskId: "task_intact" }));
+
+  const read = await readTaskHandoffs(store, { repositoryId: "repo_1" });
+  assert.deepEqual(
+    read.handoffs.map((entry) => entry.taskId),
+    ["task_intact"],
+  );
+  assert.equal(read.unreadable, 1);
+  assert.equal(read.incomplete, false);
+
+  const seeded = await seedContextForTask(store, { repositoryId: "repo_1" });
+  assert.match(seeded, /Unknown:/u);
+  assert.match(seeded, /1 handoff record[^s]/u);
+  assert.match(seeded, /task_intact/u);
+});
+
+test("a log that cannot be read at all seeds an unknown rather than an empty note", async () => {
+  // The failure this module must never have. Seeding cannot fail a run, so
+  // the read is caught somewhere — and a caught read that renders as "" tells
+  // the next agent, in the only words it will ever get, that nothing was
+  // handed over. It then plans as though the repository were new.
+  const store = withStore(freshStore(), {
+    listAuditEvents: async () => {
+      throw new Error("the audit log is unreachable");
+    },
+  });
+
+  const seeded = await seedContextForTask(store, { repositoryId: "repo_1" });
+  assert.notEqual(seeded, "");
+  assert.match(seeded, /part of the log could not be read at all/u);
+  assert.match(seeded, /incomplete record rather than an empty one/u);
+  // And the plain read still throws, so a caller that can handle a failure is
+  // not handed a quietly empty answer instead.
+  await assert.rejects(findTaskHandoffs(store, { repositoryId: "repo_1" }));
+});
+
+test("an archive that could not be reached is reported beside what was read", async () => {
+  // The live log in hand is worth more than the read that failed, so the
+  // archive leg is caught rather than thrown. Caught is not the same as
+  // forgotten: a seed short of the notes an unreachable archive held must not
+  // read as a repository that never wrote them.
+  const store = freshStore();
+  await recordTaskHandoff(store, handoff());
+  const broken = withStore(store, {
+    listArchivedAuditEvents: async () => {
+      throw new Error("archive storage is offline");
+    },
+  });
+
+  const read = await readTaskHandoffs(broken);
+  assert.deepEqual(
+    read.handoffs.map((entry) => entry.taskId),
+    ["task_a"],
+  );
+  assert.equal(read.incomplete, true);
+  assert.match(await seedContextForTask(broken), /part of the log could not be read/u);
+});
+
+test("a record damaged in another repository is not reported against this one", async () => {
+  // The count is shown to an agent working in one repository, and every line
+  // it is shown has to be about that repository. The row mirrors the
+  // repository beside the payload, so a damaged record that says where it
+  // belongs can be attributed; one that does not is still counted, because a
+  // record that might be this repository's and cannot be read is precisely
+  // what an unknown is for.
+  const store = freshStore();
+  await store.appendAudit(undefined, {
+    type: HANDOFF_AUDIT_TYPE,
+    taskId: "task_elsewhere",
+    data: { repositoryId: "repo_2", handoff: { version: 1 } },
+  });
+  await recordTaskHandoff(store, handoff());
+
+  assert.equal((await readTaskHandoffs(store, { repositoryId: "repo_1" })).unreadable, 0);
+  assert.equal((await readTaskHandoffs(store, { repositoryId: "repo_2" })).unreadable, 1);
+  assert.equal((await readTaskHandoffs(store)).unreadable, 1, "unscoped, every damaged row counts");
+});
+
+test("a handoff written without the mirrored reason still spends the context budget", async () => {
+  // `reason` beside the payload is a copy kept so the log can be filtered;
+  // the handoff itself is the original. A row that carries only the original
+  // — written before the copy existed, or by anything else that puts a
+  // handoff on this log — counted for nothing, and a budget counted low hands
+  // a task another window it has already proved it cannot use. That is the
+  // loop the budget exists to end.
+  const store = freshStore();
+  const written = handoff({ reason: "long_running" });
+  await store.appendAudit(undefined, {
+    type: HANDOFF_AUDIT_TYPE,
+    taskId: written.taskId,
+    data: { handoff: written },
+  });
+
+  assert.equal(await contextHandoffsUsed(store, "task_a"), 1);
+});
+
+test("a handoff archived while the log is being read is still found, exactly once", async () => {
+  // Compaction runs against a live system, so it can land between the two
+  // legs of one read. The row moves out of the live log after it was read and
+  // into the archive before that was read, which is the arrangement that
+  // could report it twice; the other order would drop it. It is one handoff
+  // either way.
+  const store = freshStore();
+  await recordTaskHandoff(store, handoff());
+  const compacting = withStore(store, {
+    listAuditEvents: async (filter?: AuditEventFilter) => {
+      const page = await store.listAuditEvents(filter);
+      await store.archiveAuditEvents({ throughSequence: 1 });
+      return page;
+    },
+  });
+
+  const read = await readTaskHandoffs(compacting);
+  assert.deepEqual(
+    read.handoffs.map((entry) => entry.taskId),
+    ["task_a"],
+  );
+  assert.equal(read.unreadable, 0);
+});
+
+test("two tasks handing off at the same moment both keep their note", async () => {
+  // Deduplication keys on task and timestamp, and two workers finishing in
+  // the same millisecond is ordinary rather than exotic. Collapsing them
+  // would lose one task's memory to another task's clock.
+  const store = freshStore();
+  await Promise.all([
+    recordTaskHandoff(store, handoff({ taskId: "task_one" })),
+    recordTaskHandoff(store, handoff({ taskId: "task_two" })),
+  ]);
+
+  assert.deepEqual(
+    (await findTaskHandoffs(store)).map((entry) => entry.taskId).sort(),
+    ["task_one", "task_two"],
+  );
 });

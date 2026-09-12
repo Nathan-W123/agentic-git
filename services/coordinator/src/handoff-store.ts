@@ -110,7 +110,30 @@ export interface HandoffQuery {
 }
 
 /**
- * Finds handoffs worth seeding a new task with.
+ * What a read of the handoff log found, and what it could not read.
+ *
+ * The handoffs alone are not a sufficient answer. A log with three damaged
+ * rows and a log with three rows that were never written produce the same
+ * array, and a successor handed that array cannot tell "nothing was handed
+ * over" from "I could not read what was handed over" — which are the two
+ * situations it must behave most differently in. So what could not be read is
+ * counted and travels beside what could.
+ */
+export interface HandoffRead {
+  /** The handoffs that could be read, newest first, capped by the query. */
+  handoffs: TaskHandoff[];
+  /**
+   * Rows on the log, written under the handoff type, that are not readable as
+   * handoffs — truncated, foreign, or written to a shape this code does not
+   * know. Each one is a task's memory that exists and cannot be recovered.
+   */
+  unreadable: number;
+  /** A whole leg of the log could not be read, so its contents are unknown. */
+  incomplete: boolean;
+}
+
+/**
+ * Finds handoffs worth seeding a new task with, and says what it could not read.
  *
  * Reads the archive as well as the live log, because a handoff that has been
  * compacted out of the live log is still the best record of what happened and
@@ -120,11 +143,20 @@ export interface HandoffQuery {
  * scan; a caller asking for one recent note is the common case and should not
  * pay for it. The price of the short circuit is that the rarer call makes two
  * round trips instead of one, which is the cheaper half of the trade.
+ *
+ * An archive that cannot be reached is reported rather than thrown, because
+ * the live log in hand is worth more than the read that failed — but it is
+ * reported, not swallowed: a seed short of the notes an unreachable archive
+ * held is not the same thing as a repository that never wrote them.
+ *
+ * A live log that cannot be read does throw. There is no partial answer to
+ * give in that case, and a caller that wants one can ask `seedContextForTask`,
+ * which turns it into a stated unknown.
  */
-export async function findTaskHandoffs(
+export async function readTaskHandoffs(
   store: CoordinationStore,
   query: HandoffQuery = {},
-): Promise<TaskHandoff[]> {
+): Promise<HandoffRead> {
   const filter: AuditEventFilter = {
     types: [HANDOFF_AUDIT_TYPE],
     ...(query.taskId === undefined ? {} : { taskId: query.taskId }),
@@ -136,17 +168,50 @@ export async function findTaskHandoffs(
     filter,
   );
   const fromLive = collectHandoffs(live, query);
-  if (fromLive.length >= limit) {
-    return fromLive.slice(0, limit);
+  if (fromLive.handoffs.length >= limit) {
+    return {
+      handoffs: fromLive.handoffs.slice(0, limit),
+      unreadable: fromLive.unreadable,
+      incomplete: false,
+    };
   }
-  const archived = await readAuditPages(
-    (page) => store.listArchivedAuditEvents(page),
-    filter,
-  ).catch(() => []);
+  let archived: SequencedAuditEvent[] = [];
+  let incomplete = false;
+  try {
+    archived = await readAuditPages(
+      (page) => store.listArchivedAuditEvents(page),
+      filter,
+    );
+  } catch {
+    incomplete = true;
+  }
   if (archived.length === 0) {
-    return fromLive.slice(0, limit);
+    return {
+      handoffs: fromLive.handoffs.slice(0, limit),
+      unreadable: fromLive.unreadable,
+      incomplete,
+    };
   }
-  return collectHandoffs([...live, ...archived], query).slice(0, limit);
+  const merged = collectHandoffs([...live, ...archived], query);
+  return {
+    handoffs: merged.handoffs.slice(0, limit),
+    unreadable: merged.unreadable,
+    incomplete,
+  };
+}
+
+/**
+ * The handoffs a query selects, newest first.
+ *
+ * The plain answer, for callers that have nowhere to put the rest of it.
+ * Anything that will be read by an agent should use `readTaskHandoffs` and
+ * pass what it could not read on to the reader.
+ */
+export async function findTaskHandoffs(
+  store: CoordinationStore,
+  query: HandoffQuery = {},
+): Promise<TaskHandoff[]> {
+  return (await readTaskHandoffs(store, query)).handoffs;
 }
 
 /**
@@ -154,18 +219,40 @@ export async function findTaskHandoffs(
  *
  * Newest first because a successor wants the most recent state of the world,
  * and a stale handoff read first is worse than no handoff at all.
+ *
+ * A row of the handoff type whose payload will not read back as a handoff is
+ * counted rather than passed over in silence. Something wrote a handoff there
+ * — that is what the type means — and it cannot be recovered, so the one
+ * honest thing left to do with it is to tell the reader a memory is missing.
+ * Skipping it quietly would report a damaged log as a log with less on it.
  */
 function collectHandoffs(
   entries: readonly SequencedAuditEvent[],
   query: HandoffQuery,
-): TaskHandoff[] {
+): { handoffs: TaskHandoff[]; unreadable: number } {
   const handoffs: TaskHandoff[] = [];
   const seen = new Set<string>();
+  // By sequence, so a row the live log and the archive both answer with is one
+  // damaged record rather than two.
+  const unreadable = new Set<number>();
   for (const entry of [...entries].sort(
     (left, right) => right.sequence - left.sequence,
   )) {
     const candidate = entry.event.data["handoff"];
     if (!isTaskHandoff(candidate)) {
+      // The repository the row belongs to is mirrored beside the payload, so
+      // a repository-scoped read can tell a record damaged here from one
+      // damaged elsewhere. A row that does not say is counted: a record that
+      // might be this repository's and cannot be read is exactly the thing
+      // this count exists to report.
+      const owner = entry.event.data["repositoryId"];
+      if (
+        query.repositoryId === undefined ||
+        typeof owner !== "string" ||
+        owner === query.repositoryId
+      ) {
+        unreadable.add(entry.sequence);
+      }
       continue;
     }
     const key = `${candidate.taskId}\0${candidate.createdAt}`;
@@ -190,20 +277,36 @@ function collectHandoffs(
     seen.add(key);
     handoffs.push(candidate);
   }
-  return handoffs;
+  return { handoffs, unreadable: unreadable.size };
 }
 
 /**
  * The context string a fresh task should start from.
  *
- * Empty when nothing relevant is on record, so a caller can concatenate it
- * unconditionally without seeding a task with a heading and no content.
+ * Empty when nothing relevant is on record *and* the whole record was read, so
+ * a caller can concatenate it unconditionally without seeding a task with a
+ * heading and no content.
+ *
+ * Never throws, and that is the point rather than a convenience. Every caller
+ * of this function seeds a prompt with what it returns and cannot fail a run
+ * over a note it could not fetch, so a throw here has always become `""` at
+ * the call site — an unreadable log presented to the successor as a
+ * repository that has never handed anything over. What a failed read produces
+ * now is a block that says the log could not be read, which is the difference
+ * between a session that knows to go and look and one that starts blind
+ * believing it has seen everything.
  */
 export async function seedContextForTask(
   store: CoordinationStore,
   query: HandoffQuery = {},
 ): Promise<string> {
-  return renderHandoffContext(await findTaskHandoffs(store, query));
+  const read = await readTaskHandoffs(store, query).catch(
+    (): HandoffRead => ({ handoffs: [], unreadable: 0, incomplete: true }),
+  );
+  return renderHandoffContext(read.handoffs, {
+    unreadable: read.unreadable,
+    incomplete: read.incomplete,
+  });
 }
 
 /**
@@ -238,6 +341,34 @@ export async function contextHandoffsUsed(
     types: [HANDOFF_AUDIT_TYPE],
     taskId,
   });
-  return events.filter((entry) => entry.event.data["reason"] === "long_running")
+  return events.filter((entry) => handoffRowReason(entry) === "long_running")
     .length;
+}
+
+/**
+ * Why the task that wrote a handoff row stopped.
+ *
+ * `recordTaskHandoff` mirrors the reason beside the payload so the log can be
+ * filtered without parsing every record, but the mirror is a copy and the
+ * handoff is the original. A row written before the mirror existed, or by
+ * anything else that puts a handoff on the log, carries the reason only
+ * inside the record — and read through the mirror alone such a row counts for
+ * nothing. That is the worse direction for this particular number to be wrong
+ * in: a budget counted low hands a task another window it has already proved
+ * it cannot use, and a task that keeps stopping keeps being requeued, which
+ * is the loop `MAX_CONTEXT_HANDOFFS` exists to end.
+ */
+function handoffRowReason(entry: SequencedAuditEvent): string | undefined {
+  const mirrored = entry.event.data["reason"];
+  if (typeof mirrored === "string") {
+    return mirrored;
+  }
+  const payload = entry.event.data["handoff"];
+  if (typeof payload === "object" && payload !== null) {
+    const reason = (payload as { reason?: unknown }).reason;
+    if (typeof reason === "string") {
+      return reason;
+    }
+  }
+  return undefined;
 }
