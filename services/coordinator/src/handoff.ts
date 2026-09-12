@@ -72,6 +72,71 @@ export interface HandoffInput {
   now?: () => Date;
 }
 
+/**
+ * How long one rendered line may be before it is cut, in code points.
+ *
+ * A handoff field is prose from the run record — an objective somebody typed,
+ * a validation command's last output — and nothing upstream bounds it. A
+ * single enormous field would otherwise crowd every other handoff out of the
+ * window it is being read in, which loses the rest of the memory to say one
+ * thing at length. Cut with the cut announced: a reader who can see that a
+ * line was truncated knows to go and read the record, whereas a silent cut is
+ * a sentence that means something other than what was written.
+ */
+const RENDERED_LINE_LIMIT = 2_000;
+
+/**
+ * One stored field, as one line of the seed.
+ *
+ * The seed is a structured document — headings, then bullets — and it is read
+ * by an agent that will act on it. A stored field carrying newlines therefore
+ * does not merely look untidy: `\n### task_b — completed` inside an objective
+ * renders as a section of the document, attributed to a task that never
+ * wrote it, and nothing downstream can tell the forgery from the record. Every
+ * value goes through here, so a field can only ever be the line it was put on.
+ */
+function oneLine(value: string): string {
+  const flattened = value
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const points = [...flattened];
+  if (points.length <= RENDERED_LINE_LIMIT) {
+    return flattened;
+  }
+  // Sliced by code point rather than by unit: a cut through a surrogate pair
+  // would put a lone half of a character into a prompt.
+  return (
+    `${points.slice(0, RENDERED_LINE_LIMIT).join("")}… ` +
+    `[cut here; the recorded value is ${points.length} characters]`
+  );
+}
+
+/**
+ * A field that was never recorded, said out loud.
+ *
+ * The rule this file is written to is that a reader can check every line.
+ * Rendering an empty field as an empty string breaks it in the quietest
+ * possible way: `Objective: ` reads as a handoff whose objective was nothing,
+ * and a successor cannot tell that apart from a field nobody filled in.
+ */
+function stated(value: string | undefined, missing: string): string {
+  const text = value === undefined ? "" : oneLine(value);
+  return text.length === 0 ? missing : text;
+}
+
+/**
+ * A revision, short enough to read and never blank.
+ *
+ * Twelve characters is what a person compares; `unknown` is what an unset
+ * revision has to say, because a bare `Canonical at handoff:` with nothing
+ * after it invites a reader to assume the repository was empty.
+ */
+function shortRevision(revision: string): string {
+  const trimmed = revision.trim();
+  return trimmed.length === 0 ? "unknown" : trimmed.slice(0, 12);
+}
+
 /** How full the window got, in the words the figures allow. */
 function occupancyPhrase(pressure: AgentContextPressure): string {
   const occupied = pressure.occupiedTokens ?? pressure.peakTokens;
@@ -102,8 +167,8 @@ function completedEvidence(input: HandoffInput): HandoffEvidence[] {
       kind: "canonical_promotion",
       reference: integration.canonicalVersion.revision,
       detail:
-        `promoted from ${integration.previousVersion.revision.slice(0, 12)} ` +
-        `to ${integration.canonicalVersion.revision.slice(0, 12)}`,
+        `promoted from ${shortRevision(integration.previousVersion.revision)} ` +
+        `to ${shortRevision(integration.canonicalVersion.revision)}`,
     });
   } else if (integration !== undefined) {
     evidence.push({
@@ -203,7 +268,9 @@ function openItems(input: HandoffInput): HandoffOpenItem[] {
     items.push({
       item: "the task did not settle cleanly",
       blockedBy: [],
-      reason: input.failure,
+      // A failure recorded with no text still happened. Saying so beats a
+      // line that trails off, which reads as a failure nobody could name.
+      reason: stated(input.failure, "no failure text was recorded"),
     });
   }
   return items;
@@ -253,9 +320,16 @@ function gotchas(input: HandoffInput): string[] {
 
   for (const entry of integration?.validation ?? []) {
     if (entry.exitCode !== 0) {
+      const output =
+        entry.stderr.trim().slice(-300) || entry.stdout.trim().slice(-300);
       found.push(
         `"${entry.command.label}" fails here (exit ${entry.exitCode}); ` +
-          `its output ends: ${entry.stderr.trim().slice(-300) || entry.stdout.trim().slice(-300)}`,
+          (output.length === 0
+            ? // A gate that failed silently is a different problem from one
+              // whose output was never kept, and "its output ends:" followed
+              // by nothing claims the first while meaning the second.
+              "no output was captured from it"
+            : `its output ends: ${output}`),
       );
     }
   }
@@ -274,7 +348,7 @@ function gotchas(input: HandoffInput): string[] {
   }
   if (integration?.replayedFrom !== undefined) {
     found.push(
-      `this result was written against ${integration.replayedFrom.slice(0, 12)} ` +
+      `this result was written against ${shortRevision(integration.replayedFrom)} ` +
         "and replayed onto a newer revision; the advance was checked as " +
         "unrelated, but a reader comparing revisions will see the gap",
     );
@@ -316,7 +390,7 @@ function nextSteps(input: HandoffInput, open: HandoffOpenItem[]): string[] {
   if (input.contextPressure !== undefined) {
     steps.push(
       `continue the objective from a fresh workspace at ` +
-        `${input.canonicalRevision.slice(0, 12)}; nothing from the stopped ` +
+        `${shortRevision(input.canonicalRevision)}; nothing from the stopped ` +
         "attempt was promoted",
     );
   }
@@ -349,16 +423,60 @@ export function buildTaskHandoff(input: HandoffInput): TaskHandoff {
 }
 
 /**
+ * What the reader should treat as unknown rather than as absent.
+ *
+ * The seed is the only thing a fresh session knows about the work before it,
+ * and an agent told "nothing was handed over" behaves very differently from
+ * one told "I could not read what was handed over" — the first starts from a
+ * clean sheet on purpose, the second knows to go and look. A read that lost
+ * part of the log therefore has to say so inside the text it produces; there
+ * is nowhere else for a successor to find out.
+ */
+export interface HandoffContextNotes {
+  /** Records on the log, under the handoff type, that could not be read. */
+  unreadable?: number;
+  /** A leg of the log could not be read at all, so its contents are unknown. */
+  incomplete?: boolean;
+}
+
+function unknownNotice(unreadable: number, incomplete: boolean): string {
+  const parts: string[] = [];
+  if (unreadable > 0) {
+    parts.push(
+      `${unreadable} handoff record${unreadable === 1 ? "" : "s"} on this ` +
+        `repository's log could not be read`,
+    );
+  }
+  if (incomplete) {
+    parts.push("part of the log could not be read at all");
+  }
+  return (
+    `**Unknown:** ${parts.join(", and ")}. What those tasks left is missing ` +
+    "from everything below, so this is an incomplete record rather than an " +
+    "empty one: treat what it does not mention as unknown, not as settled."
+  );
+}
+
+/**
  * Renders a handoff as the context a fresh session is seeded with.
  *
  * Plain text on purpose: it is going into a prompt, and a successor should be
  * able to read the same thing a human reviewer reads. References are kept
  * inline so any claim can be checked without another round trip.
+ *
+ * Every stored field is rendered through `oneLine`, because this is a
+ * structured document being built out of values the control plane stored but
+ * did not constrain: an objective carrying a newline and a `###` would
+ * otherwise render as a section of the document attributed to a task that
+ * never wrote one.
  */
 export function renderHandoffContext(
   handoffs: readonly TaskHandoff[],
+  notes: HandoffContextNotes = {},
 ): string {
-  if (handoffs.length === 0) {
+  const unreadable = notes.unreadable ?? 0;
+  const incomplete = notes.incomplete ?? false;
+  if (handoffs.length === 0 && unreadable === 0 && !incomplete) {
     return "";
   }
   const lines: string[] = [
@@ -367,12 +485,22 @@ export function renderHandoffContext(
     "Projected from the coordination record, not from anyone's recollection.",
     "Every reference below can be checked against the run it names.",
   ];
+  // Ahead of the handoffs themselves, and not as a footnote: what is missing
+  // changes how everything after it should be read.
+  if (unreadable > 0 || incomplete) {
+    lines.push("", unknownNotice(unreadable, incomplete));
+  }
   for (const handoff of handoffs) {
     lines.push(
       "",
-      `### ${handoff.taskId} — ${handoff.reason}`,
-      `Objective: ${handoff.objective}`,
-      `Canonical at handoff: ${handoff.canonicalRevision.slice(0, 12)}`,
+      // Dated in the heading, because staleness is the failure this file
+      // cannot detect for the reader: a note and the revision it names are
+      // both facts about a moment, and without that moment a successor has no
+      // way to weigh a month-old plan against what it can see now.
+      `### ${oneLine(handoff.taskId)} — ${oneLine(handoff.reason)} ` +
+        `(recorded ${stated(handoff.createdAt, "at an unrecorded time")})`,
+      `Objective: ${stated(handoff.objective, "not recorded")}`,
+      `Canonical at handoff: ${shortRevision(handoff.canonicalRevision)}`,
     );
     const section = (title: string, entries: readonly string[]): void => {
       if (entries.length === 0) {
@@ -380,7 +508,7 @@ export function renderHandoffContext(
       }
       lines.push("", `**${title}**`);
       for (const entry of entries) {
-        lines.push(`- ${entry}`);
+        lines.push(`- ${oneLine(entry)}`);
       }
     };
     section(
@@ -415,7 +543,22 @@ export function renderHandoffContext(
   return `${lines.join("\n")}\n`;
 }
 
-/** Recognises a stored audit payload as a handoff record. */
+/**
+ * Recognises a stored audit payload as a handoff record.
+ *
+ * Every required field is checked, not a representative few, because saying
+ * yes here is what licenses the rest of this file to dereference them: the
+ * renderer slices `canonicalRevision`, the store keys its deduplication on
+ * `createdAt`, and a heading is built from `reason`. A payload recognised on
+ * a partial match is therefore not read half-well, it throws part-way through
+ * seeding — and every caller treats a throw from the seed as "no handoffs",
+ * so a truncated record would quietly take the whole repository's memory with
+ * it. Refusing it instead costs exactly that one record, the read reports it
+ * as one it could not read, and the rest of the log still reaches the
+ * successor.
+ *
+ * "Every field" includes what is inside the lists: see `isListOf`.
+ */
 export function isTaskHandoff(value: unknown): value is TaskHandoff {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -425,9 +568,75 @@ export function isTaskHandoff(value: unknown): value is TaskHandoff {
     candidate.version === 1 &&
     typeof candidate.taskId === "string" &&
     typeof candidate.objective === "string" &&
-    Array.isArray(candidate.completed) &&
-    Array.isArray(candidate.open) &&
-    Array.isArray(candidate.nextSteps)
+    typeof candidate.repositoryId === "string" &&
+    typeof candidate.reason === "string" &&
+    typeof candidate.canonicalRevision === "string" &&
+    typeof candidate.createdAt === "string" &&
+    isListOf(candidate.completed, isEvidence) &&
+    isListOf(candidate.open, isOpenItem) &&
+    isListOf(candidate.decisions, isDecision) &&
+    isListOf(candidate.gotchas, isString) &&
+    isListOf(candidate.nextSteps, isString)
+  );
+}
+
+/**
+ * The same question, one level down.
+ *
+ * An array is not a checked field; it is a promise about twelve more. The
+ * renderer walks `completed` for `kind`, `reference` and `detail`, calls
+ * `blockedBy.join` on every open item, and reads `decision` and `rationale`
+ * off every decision — so a record whose lists are the right shape and whose
+ * *entries* are not is accepted here and then throws in the middle of
+ * rendering a seed. The coordinator renders its own task's note outside the
+ * guard it wraps the read in, so that throw does not cost a seed, it costs
+ * the run. Checking an array without checking what is in it is the same bug
+ * as checking six fields out of twelve, one level down.
+ */
+function isListOf<T>(
+  value: unknown,
+  entry: (candidate: unknown) => candidate is T,
+): value is T[] {
+  return Array.isArray(value) && value.every((element) => entry(element));
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function isEvidence(value: unknown): value is HandoffEvidence {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const entry = value as Partial<HandoffEvidence>;
+  return (
+    typeof entry.kind === "string" &&
+    typeof entry.reference === "string" &&
+    typeof entry.detail === "string"
+  );
+}
+
+function isOpenItem(value: unknown): value is HandoffOpenItem {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const entry = value as Partial<HandoffOpenItem>;
+  return (
+    typeof entry.item === "string" &&
+    typeof entry.reason === "string" &&
+    isListOf(entry.blockedBy, isString)
+  );
+}
+
+function isDecision(value: unknown): value is HandoffDecision {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const entry = value as Partial<HandoffDecision>;
+  return (
+    typeof entry.decision === "string" &&
+    typeof entry.rationale === "string" &&
+    (entry.reference === undefined || typeof entry.reference === "string")
   );
 }
 
