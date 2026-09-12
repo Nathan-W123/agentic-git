@@ -1,4 +1,4 @@
-import type { CoordinationStore } from "@coord/persistence";
+import type { AuditEventFilter, CoordinationStore } from "@coord/persistence";
 import type { SequencedAuditEvent, TaskHandoff } from "@coord/shared-types";
 
 import {
@@ -50,6 +50,55 @@ export async function recordTaskHandoff(
   });
 }
 
+/**
+ * How many audit rows one read of the log asks for.
+ *
+ * The log answers a page, not a table: `listAuditEvents` returns at most
+ * `limit` rows — five hundred when none is asked for, five thousand at the
+ * very most — ordered oldest first. So a single unsized read of a log that has
+ * outgrown one page answers with the *oldest* rows and never with the newest,
+ * which is the one way this module can fail without saying so: the seed would
+ * show a successor the handoffs from the repository's first week and nothing
+ * to suggest a newer one exists. Every read here is therefore a walk, and it
+ * asks for the largest page the store will answer so the walk is as short as
+ * the store allows. A log that fits in one page — which is every deployment
+ * until it is not — still costs exactly one round trip.
+ */
+export const AUDIT_PAGE_SIZE = 5_000;
+
+/**
+ * Every audit row matching a filter, oldest first.
+ *
+ * Stops when a page comes back short, which is the log saying there is no
+ * more. Also stops when a page does not advance the cursor, so a store that
+ * ignores `afterSequence` costs one extra read rather than looping forever on
+ * the same page.
+ */
+async function readAuditPages(
+  read: (filter: AuditEventFilter) => Promise<SequencedAuditEvent[]>,
+  filter: AuditEventFilter,
+): Promise<SequencedAuditEvent[]> {
+  const all: SequencedAuditEvent[] = [];
+  let afterSequence = 0;
+  for (;;) {
+    const page = await read({
+      ...filter,
+      afterSequence,
+      limit: AUDIT_PAGE_SIZE,
+    });
+    all.push(...page);
+    const last = page.at(-1);
+    if (
+      page.length < AUDIT_PAGE_SIZE ||
+      last === undefined ||
+      last.sequence <= afterSequence
+    ) {
+      return all;
+    }
+    afterSequence = last.sequence;
+  }
+}
+
 export interface HandoffQuery {
   taskId?: string;
   projectId?: string;
@@ -76,18 +125,24 @@ export async function findTaskHandoffs(
   store: CoordinationStore,
   query: HandoffQuery = {},
 ): Promise<TaskHandoff[]> {
-  const filter = {
+  const filter: AuditEventFilter = {
     types: [HANDOFF_AUDIT_TYPE],
     ...(query.taskId === undefined ? {} : { taskId: query.taskId }),
     ...(query.projectId === undefined ? {} : { projectId: query.projectId }),
   };
   const limit = query.limit ?? 5;
-  const live = await store.listAuditEvents(filter);
+  const live = await readAuditPages(
+    (page) => store.listAuditEvents(page),
+    filter,
+  );
   const fromLive = collectHandoffs(live, query);
   if (fromLive.length >= limit) {
     return fromLive.slice(0, limit);
   }
-  const archived = await store.listArchivedAuditEvents(filter).catch(() => []);
+  const archived = await readAuditPages(
+    (page) => store.listArchivedAuditEvents(page),
+    filter,
+  ).catch(() => []);
   if (archived.length === 0) {
     return fromLive.slice(0, limit);
   }
@@ -179,7 +234,7 @@ export async function contextHandoffsUsed(
   store: CoordinationStore,
   taskId: string,
 ): Promise<number> {
-  const events = await store.listAuditEvents({
+  const events = await readAuditPages((page) => store.listAuditEvents(page), {
     types: [HANDOFF_AUDIT_TYPE],
     taskId,
   });
