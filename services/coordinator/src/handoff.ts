@@ -553,8 +553,11 @@ export function renderHandoffContext(
  * a partial match is therefore not read half-well, it throws part-way through
  * seeding — and every caller treats a throw from the seed as "no handoffs",
  * so a truncated record would quietly take the whole repository's memory with
- * it. Refusing it instead costs exactly that one record, and the rest of the
- * log still reaches the successor.
+ * it. Refusing it instead costs exactly that one record, the read reports it
+ * as one it could not read, and the rest of the log still reaches the
+ * successor.
+ *
+ * "Every field" includes what is inside the lists: see `isListOf`.
  */
 export function isTaskHandoff(value: unknown): value is TaskHandoff {
   if (typeof value !== "object" || value === null) {
@@ -569,11 +572,71 @@ export function isTaskHandoff(value: unknown): value is TaskHandoff {
     typeof candidate.reason === "string" &&
     typeof candidate.canonicalRevision === "string" &&
     typeof candidate.createdAt === "string" &&
-    Array.isArray(candidate.completed) &&
-    Array.isArray(candidate.open) &&
-    Array.isArray(candidate.decisions) &&
-    Array.isArray(candidate.gotchas) &&
-    Array.isArray(candidate.nextSteps)
+    isListOf(candidate.completed, isEvidence) &&
+    isListOf(candidate.open, isOpenItem) &&
+    isListOf(candidate.decisions, isDecision) &&
+    isListOf(candidate.gotchas, isString) &&
+    isListOf(candidate.nextSteps, isString)
+  );
+}
+
+/**
+ * The same question, one level down.
+ *
+ * An array is not a checked field; it is a promise about twelve more. The
+ * renderer walks `completed` for `kind`, `reference` and `detail`, calls
+ * `blockedBy.join` on every open item, and reads `decision` and `rationale`
+ * off every decision — so a record whose lists are the right shape and whose
+ * *entries* are not is accepted here and then throws in the middle of
+ * rendering a seed. The coordinator renders its own task's note outside the
+ * guard it wraps the read in, so that throw does not cost a seed, it costs
+ * the run. Checking an array without checking what is in it is the same bug
+ * as checking six fields out of twelve, one level down.
+ */
+function isListOf<T>(
+  value: unknown,
+  entry: (candidate: unknown) => candidate is T,
+): value is T[] {
+  return Array.isArray(value) && value.every((element) => entry(element));
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function isEvidence(value: unknown): value is HandoffEvidence {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const entry = value as Partial<HandoffEvidence>;
+  return (
+    typeof entry.kind === "string" &&
+    typeof entry.reference === "string" &&
+    typeof entry.detail === "string"
+  );
+}
+
+function isOpenItem(value: unknown): value is HandoffOpenItem {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const entry = value as Partial<HandoffOpenItem>;
+  return (
+    typeof entry.item === "string" &&
+    typeof entry.reason === "string" &&
+    isListOf(entry.blockedBy, isString)
+  );
+}
+
+function isDecision(value: unknown): value is HandoffDecision {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const entry = value as Partial<HandoffDecision>;
+  return (
+    typeof entry.decision === "string" &&
+    typeof entry.rationale === "string" &&
+    (entry.reference === undefined || typeof entry.reference === "string")
   );
 }
 

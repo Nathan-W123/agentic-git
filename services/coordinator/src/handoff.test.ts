@@ -7,6 +7,7 @@ import type {
   CoordinatorDecision,
   IntegrationResult,
   PlanAdmission,
+  TaskHandoff,
 } from "@coord/shared-types";
 
 import {
@@ -586,4 +587,64 @@ test("a field too large for a window is cut, and the cut is declared", () => {
     false,
   );
   assert.ok(rendered.length < 12_000, String(rendered.length));
+});
+
+test("a list whose entries are damaged is not a whole handoff either", () => {
+  // An array is not one checked field, it is a promise about the fields
+  // inside it. The renderer reads `kind`, `reference` and `detail` off every
+  // piece of evidence, joins `blockedBy` on every open item, and reads
+  // `decision` and `rationale` off every decision — so a record with the
+  // right lists and the wrong entries is accepted and then throws in the
+  // middle of rendering. That is the same failure as recognising a record on
+  // six fields out of twelve, one level down, and it is worse where it lands:
+  // a task's own note is rendered outside the guard the read is wrapped in,
+  // so the throw costs the run rather than the seed.
+  const whole = buildTaskHandoff(
+    input({
+      integration: integration(),
+      changeSet: changeSet(["src/a.ts"]),
+      admission: admission({ status: "approved_with_constraints" }),
+      withheldFiles: ["src/shared.ts"],
+      followUpTaskIds: ["task_followup"],
+    }),
+  );
+  assert.equal(isTaskHandoff(whole), true);
+  assert.ok(whole.completed.length > 0 && whole.open.length > 0);
+  assert.ok(whole.decisions.length > 0 && whole.nextSteps.length > 0);
+
+  for (const damaged of [
+    { ...whole, completed: [{ kind: "validation", reference: "tests" }] },
+    { ...whole, completed: [null] },
+    { ...whole, open: [{ item: "something", reason: "because" }] },
+    { ...whole, open: [{ item: "something", blockedBy: [7], reason: "because" }] },
+    { ...whole, decisions: [{ decision: "admitted" }] },
+    { ...whole, decisions: [{ decision: "admitted", rationale: "ok", reference: 3 }] },
+    { ...whole, gotchas: [{ note: "not a string" }] },
+    { ...whole, nextSteps: [null] },
+  ]) {
+    assert.equal(isTaskHandoff(damaged), false, JSON.stringify(damaged));
+  }
+
+  // What accepting one would cost, in the two ways it goes wrong. An open
+  // item with no `blockedBy` throws where the renderer joins it, part-way
+  // through a document, which is how one damaged row used to take a whole
+  // repository's memory with it. A piece of evidence with no `detail` does
+  // not throw — it hands the successor a line of evidence whose detail is
+  // the word "undefined", which is the worse half of the pair, because
+  // nothing anywhere reports it.
+  assert.throws(() =>
+    renderHandoffContext([
+      { ...whole, open: [{ item: "something", reason: "because" }] } as unknown as TaskHandoff,
+    ]),
+  );
+  assert.match(
+    renderHandoffContext([
+      {
+        ...whole,
+        completed: [{ kind: "validation", reference: "tests" }],
+      } as unknown as TaskHandoff,
+    ]),
+    /validation \[tests\] — undefined/u,
+  );
+  assert.doesNotThrow(() => renderHandoffContext([whole]));
 });

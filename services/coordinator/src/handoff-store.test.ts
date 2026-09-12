@@ -751,3 +751,35 @@ test("two tasks handing off at the same moment both keep their note", async () =
     ["task_one", "task_two"],
   );
 });
+
+test("a record whose open items are damaged is reported, not rendered", async () => {
+  // The predicate that says "this is a handoff" is what licenses everything
+  // downstream to walk it, and the lists are the part a truncated payload
+  // damages without changing the shape of the record. Rendering one throws
+  // where the open items are joined — in the coordinator that happens outside
+  // the guard the read is wrapped in, so it costs the run and not just the
+  // seed. Skipped and counted is the whole of what this module can honestly
+  // do with it.
+  const store = freshStore();
+  const written = handoff({ taskId: "task_damaged" });
+  await store.appendAudit(undefined, {
+    type: HANDOFF_AUDIT_TYPE,
+    taskId: "task_damaged",
+    data: {
+      repositoryId: "repo_1",
+      handoff: {
+        ...written,
+        open: [{ item: "the shared file was not reached", reason: "held" }],
+      },
+    },
+  });
+  await recordTaskHandoff(store, handoff({ taskId: "task_intact", now: () => AT(1) }));
+
+  const read = await readTaskHandoffs(store, { repositoryId: "repo_1" });
+  assert.deepEqual(
+    read.handoffs.map((entry) => entry.taskId),
+    ["task_intact"],
+  );
+  assert.equal(read.unreadable, 1);
+  assert.match(await seedContextForTask(store, { repositoryId: "repo_1" }), /Unknown:/u);
+});
