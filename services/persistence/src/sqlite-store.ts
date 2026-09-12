@@ -321,8 +321,44 @@ function integer(row: Row, column: string): number {
   return value;
 }
 
+/**
+ * A JSON column, or a failure that says which column.
+ *
+ * `JSON.parse` alone raises "Unexpected token o in JSON at position 1", which
+ * names neither the column nor the row and leaves whoever is holding the
+ * pager reading the stack to find out which of a dozen JSON columns on the
+ * query's table was the unreadable one.
+ */
 function parseJson<T>(row: Row, column: string): T {
-  return JSON.parse(text(row, column)) as T;
+  const raw = text(row, column);
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    throw new Error(
+      `Column ${column} does not hold readable JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/**
+ * A JSON column that has to be a list.
+ *
+ * `parseJson<string[]>` is a cast, not a check: a column holding `{}` or `7`
+ * came back typed as an array and blew up at whatever `.map` or `.includes`
+ * first touched it, a stack frame or a service away from the row that was
+ * wrong. Refused here instead — a column nobody can read is an unknown, and
+ * an unknown reported as an empty list would read as "this worker supports no
+ * adapters" or "this token carries no scopes", which are answers, and wrong
+ * ones.
+ */
+function parseJsonArray<T>(row: Row, column: string): T[] {
+  const parsed = parseJson<unknown>(row, column);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Column ${column} was expected to hold a JSON array`);
+  }
+  return parsed as T[];
 }
 
 function toRepositoryContext(row: Row): RepositoryContext {
@@ -1443,7 +1479,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       userId: text(row, "user_id"),
       organizationId: optionalText(row, "organization_id"),
       name: text(row, "name"),
-      adapters: parseJson<string[]>(row, "adapters_json"),
+      adapters: parseJsonArray<string>(row, "adapters_json"),
       version: text(row, "version"),
       registeredAt: text(row, "registered_at"),
       lastSeenAt: text(row, "last_seen_at"),
@@ -2037,16 +2073,19 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   public async deleteExpiredApiTokens(now: string): Promise<number> {
-    const before = this.db
-      .prepare("SELECT COUNT(*) AS total FROM api_tokens")
-      .get() as Row;
-    this.db
-      .prepare("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?")
-      .run(now);
-    const after = this.db
-      .prepare("SELECT COUNT(*) AS total FROM api_tokens")
-      .get() as Row;
-    return integer(before, "total") - integer(after, "total");
+    // What the DELETE removed, not how much smaller the table got. The two
+    // are the same number only while nothing else is writing: another process
+    // minting a token between the counts made the sweep under-report, and one
+    // revoking enough of them made it report a sweep that never happened. The
+    // caller logs this figure as "expired credentials removed", so it has to
+    // be the credentials this statement removed.
+    return Number(
+      this.db
+        .prepare(
+          "DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?",
+        )
+        .run(now).changes,
+    );
   }
 
   private toApiToken(row: Row): ApiTokenRecord {
@@ -2056,7 +2095,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       organizationId: optionalText(row, "organization_id"),
       name: text(row, "name"),
       secretHash: text(row, "secret_hash"),
-      scopes: parseJson<string[]>(row, "scopes_json"),
+      scopes: parseJsonArray<string>(row, "scopes_json"),
       createdAt: text(row, "created_at"),
       createdBySession: optionalText(row, "created_by_session"),
       createdByToken: optionalText(row, "created_by_token"),
@@ -2385,7 +2424,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       name: text(row, "name"),
       transport: text(row, "transport") as McpServerTransport,
       ...(command === undefined ? {} : { command }),
-      args: parseJson<string[]>(row, "args_json"),
+      args: parseJsonArray<string>(row, "args_json"),
       ...(url === undefined ? {} : { url }),
       values: parseJson<Record<string, string>>(row, "values_json"),
       // Names only. The triples in `secrets_json` leave this store through
@@ -2516,6 +2555,16 @@ export class SqliteCoordinationStore implements CoordinationStore {
     userId: string,
     options: { limit?: number; editorVendor?: string } = {},
   ): Promise<McpSessionRecord[]> {
+    // See `listDirectMessages`: `LIMIT -1` is SQLite for "all of them", so an
+    // unchecked negative turns a bounded read into an unbounded one.
+    if (
+      options.limit !== undefined &&
+      (!Number.isSafeInteger(options.limit) || options.limit < 0)
+    ) {
+      throw new RangeError(
+        "MCP session limit must be a non-negative safe integer",
+      );
+    }
     // The vendor orders rather than filters, and binds as NULL when there is
     // none: NULL matches nothing under `=`, so every row falls into the same
     // bucket and the ordering collapses to plain recency. Somebody whose only
@@ -2568,7 +2617,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       values.push(
         JSON.stringify(
           mergeMcpSessionTasks(
-            parseJson<McpSessionTask[]>(existing, "tasks_json"),
+            parseJsonArray<McpSessionTask>(existing, "tasks_json"),
             patch.noteTasks.tasks,
             patch.noteTasks.max,
           ),
@@ -3173,7 +3222,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       branch: optionalText(row, "branch"),
       objective: text(row, "objective"),
       agentId: text(row, "agent_id"),
-      validationCommands: parseJson<ValidationCommand[]>(
+      validationCommands: parseJsonArray<ValidationCommand>(
         row,
         "validation_commands_json",
       ),
@@ -4656,6 +4705,20 @@ export class SqliteCoordinationStore implements CoordinationStore {
     otherId: string,
     filter: DirectMessageFilter = {},
   ): Promise<DirectMessage[]> {
+    // A negative or fractional limit is a caller bug, and SQLite's reading of
+    // one is the worst possible: `LIMIT -1` means *no limit*, so a page size
+    // that came out of an arithmetic slip hands back the entire conversation
+    // instead of the tail of it. Absent still means unlimited — that is what
+    // the `?? -1` below says on purpose — but a number that was asked for has
+    // to be a number this can honour.
+    if (
+      filter.limit !== undefined &&
+      (!Number.isSafeInteger(filter.limit) || filter.limit < 0)
+    ) {
+      throw new RangeError(
+        "Direct message limit must be a non-negative safe integer",
+      );
+    }
     const conditions = ["project_id = ?", "pair_key = ?"];
     const values: string[] = [projectId, directPairKey(viewerId, otherId)];
     if (filter.before !== undefined) {
@@ -5558,7 +5621,21 @@ public async recordBranchClaim(
   public async holdEditorFile(
     input: HoldEditorFileInput,
   ): Promise<EditorHold> {
+    // Checked the way a work lease checks its own TTL. A hold is a promise
+    // about a window of time, and every way of getting this wrong ends
+    // somewhere worse than a refusal: zero or negative writes a hold that has
+    // already lapsed and reads back as nobody editing the file, while a
+    // non-finite or absurd one runs `toISOString` off the end of the
+    // representable range and surfaces as a bare "Invalid time value" from
+    // inside the store.
+    if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs < 1) {
+      throw new RangeError("Editor hold TTL must be a positive integer");
+    }
     const now = new Date();
+    const expiresAt = new Date(now.getTime() + input.ttlMs);
+    if (Number.isNaN(expiresAt.getTime())) {
+      throw new RangeError("Editor hold TTL is too large to express as a date");
+    }
     const branch = input.branch ?? "";
     const hold: EditorHold = {
       repositoryId: input.repositoryId,
@@ -5568,7 +5645,7 @@ public async recordBranchClaim(
       ranges: (input.ranges ?? []).map((range) => ({ ...range })),
       acquiredAt: now.toISOString(),
       renewedAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
+      expiresAt: expiresAt.toISOString(),
     };
     // `acquired_at` is kept from the row that is already there. "Since when"
     // is what a reader wants beside a name, and a renewal every few seconds
@@ -6552,7 +6629,7 @@ public async recordBranchClaim(
       clientVersion: optionalText(row, "client_version"),
       protocolVersion: text(row, "protocol_version"),
       focus: optionalJson<McpSessionFocus>(row, "focus_json"),
-      tasks: parseJson<McpSessionTask[]>(row, "tasks_json"),
+      tasks: parseJsonArray<McpSessionTask>(row, "tasks_json"),
       createdAt: text(row, "created_at"),
       lastSeenAt: text(row, "last_seen_at"),
       expiresAt: text(row, "expires_at"),
@@ -6592,7 +6669,7 @@ public async recordBranchClaim(
       status: text(row, "status") as ApprovalRequest["status"],
       requestedBy: text(row, "requested_by"),
       requiredRole: text(row, "required_role") as ApprovalRequest["requiredRole"],
-      reasons: parseJson<string[]>(row, "reasons_json"),
+      reasons: parseJsonArray<string>(row, "reasons_json"),
       ...(changeSetId === undefined ? {} : { changeSetId }),
       ...(scopeChangeId === undefined ? {} : { scopeChangeId }),
       requestedAt: text(row, "requested_at"),
@@ -6638,7 +6715,7 @@ public async recordBranchClaim(
       id: text(row, "id"),
       objective: text(row, "objective"),
       agentId: text(row, "agent_id"),
-      validationCommands: parseJson<ValidationCommand[]>(
+      validationCommands: parseJsonArray<ValidationCommand>(
         row,
         "validation_commands_json",
       ),
@@ -6659,7 +6736,7 @@ public async recordBranchClaim(
       taskIds: [text(row, "first_task_id"), text(row, "second_task_id")],
       score: integer(row, "score"),
       disposition: text(row, "disposition") as ConflictDisposition,
-      evidence: parseJson<ConflictEvidence[]>(row, "evidence_json"),
+      evidence: parseJsonArray<ConflictEvidence>(row, "evidence_json"),
       explanation: text(row, "explanation"),
     }));
   }
@@ -6688,13 +6765,13 @@ public async recordBranchClaim(
         baseVersion: integer(row, "base_version"),
         baseRevision: text(row, "base_revision"),
         patches,
-        commandsRun: parseJson<CommandResult[]>(row, "commands_run_json"),
-        tests: parseJson<TestResult[]>(row, "tests_json"),
-        dependenciesChanged: parseJson<string[]>(row, "dependencies_changed_json"),
-        symbolsChanged: parseJson<string[]>(row, "symbols_changed_json"),
+        commandsRun: parseJsonArray<CommandResult>(row, "commands_run_json"),
+        tests: parseJsonArray<TestResult>(row, "tests_json"),
+        dependenciesChanged: parseJsonArray<string>(row, "dependencies_changed_json"),
+        symbolsChanged: parseJsonArray<string>(row, "symbols_changed_json"),
         riskAssessment: {
           level: text(row, "risk_level") as RiskLevel,
-          reasons: parseJson<string[]>(row, "risk_reasons_json"),
+          reasons: parseJsonArray<string>(row, "risk_reasons_json"),
         },
         agentExplanation: text(row, "agent_explanation"),
         createdAt: text(row, "created_at"),
@@ -6709,7 +6786,7 @@ public async recordBranchClaim(
     return rows.map((row) => {
       const candidate = optionalText(row, "candidate_revision");
       const replayedFrom = optionalText(row, "replayed_from");
-      const cleanupWarnings = parseJson<string[]>(
+      const cleanupWarnings = parseJsonArray<string>(
         row,
         "cleanup_warnings_json",
       );
@@ -6729,7 +6806,7 @@ public async recordBranchClaim(
           branch: text(row, "canonical_branch"),
           createdAt: text(row, "canonical_created_at"),
         },
-        validation: parseJson<CommandResult[]>(row, "validation_json"),
+        validation: parseJsonArray<CommandResult>(row, "validation_json"),
         ...(candidate === undefined ? {} : { candidateRevision: candidate }),
         ...(replayedFrom === undefined ? {} : { replayedFrom }),
         ...(cleanupWarnings.length === 0 ? {} : { cleanupWarnings }),

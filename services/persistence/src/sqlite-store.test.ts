@@ -326,3 +326,237 @@ test("an empty database path is refused rather than opened as a scratch database
     /needs a path/u,
   );
 });
+
+/**
+ * The sweep used to answer with how much smaller the table got, which is a
+ * different number from how many credentials it removed as soon as anything
+ * else is writing. The caller reports this figure as tokens expired.
+ */
+test("expiring tokens counts what the sweep deleted, not how much the table shrank", async () => {
+  await withDatabase(async (databasePath) => {
+    const store = SqliteCoordinationStore.open(databasePath);
+    const user = await store.createUser({
+      email: "owner@example.com",
+      displayName: "Owner",
+      passwordDigest: "digest",
+    });
+    for (const id of ["tok_first", "tok_second"]) {
+      await store.createApiToken({
+        id,
+        userId: user.id,
+        organizationId: undefined,
+        name: id,
+        secretHash: "hash",
+        scopes: [],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        createdBySession: undefined,
+        createdByToken: undefined,
+        editorVendor: undefined,
+        expiresAt: "2026-02-01T00:00:00.000Z",
+        lastUsedAt: undefined,
+        lastUsedIp: undefined,
+        revokedAt: undefined,
+        revokedReason: undefined,
+      });
+    }
+    await store.close();
+
+    // Stands in for another process minting a token while the sweep runs: for
+    // every row the delete removes, one appears. The table is exactly as big
+    // afterwards as it was before, so a before-and-after count reads zero.
+    const db = new DatabaseSync(databasePath);
+    db.exec(
+      `CREATE TRIGGER api_tokens_replace AFTER DELETE ON api_tokens
+       BEGIN
+         INSERT INTO api_tokens
+           (id, user_id, name, secret_hash, scopes_json, created_at, expires_at)
+         VALUES ('replacement_' || old.id, old.user_id, old.name, old.secret_hash,
+                 '[]', old.created_at, NULL);
+       END`,
+    );
+    db.close();
+
+    const reopened = SqliteCoordinationStore.open(databasePath);
+    try {
+      assert.equal(
+        await reopened.deleteExpiredApiTokens("2026-06-01T00:00:00.000Z"),
+        2,
+      );
+      // And the expired pair really is gone, whatever else arrived.
+      assert.equal(await reopened.getApiToken("tok_first"), undefined);
+      assert.equal(await reopened.getApiToken("tok_second"), undefined);
+    } finally {
+      await reopened.close();
+    }
+  });
+});
+
+/**
+ * A JSON column read as a list used to be a cast and nothing more, so a column
+ * holding an object came back typed as an array and failed at whatever `.map`
+ * or `.includes` touched it next — a service away from the row that was wrong.
+ * An unreadable column is an unknown, and an unknown must not arrive as an
+ * empty list either: "this worker supports no adapters" is an answer.
+ */
+test("a list column holding something else is reported, not handed back as a list", async () => {
+  await withDatabase(async (databasePath) => {
+    const store = SqliteCoordinationStore.open(databasePath);
+    const organization = await store.createOrganization({
+      slug: "acme",
+      name: "Acme",
+    });
+    const user = await store.createUser({
+      email: "worker@example.com",
+      displayName: "Worker",
+      passwordDigest: "digest",
+    });
+    const worker = await store.registerWorker({
+      userId: user.id,
+      organizationId: organization.id,
+      name: "laptop",
+      adapters: ["claude"],
+      version: "1.0.0",
+    });
+    await store.close();
+
+    const db = new DatabaseSync(databasePath);
+    db.prepare("UPDATE workers SET adapters_json = ? WHERE id = ?").run(
+      '{"claude":true}',
+      worker.id,
+    );
+    db.close();
+
+    const reopened = SqliteCoordinationStore.open(databasePath);
+    try {
+      await assert.rejects(
+        reopened.getWorker(worker.id),
+        /adapters_json.*JSON array/su,
+      );
+      // Unreadable JSON says which column too, rather than a bare parser
+      // complaint that names no row and no table.
+      const broken = new DatabaseSync(databasePath);
+      broken.prepare("UPDATE workers SET adapters_json = ? WHERE id = ?").run(
+        "not json",
+        worker.id,
+      );
+      broken.close();
+      await assert.rejects(
+        reopened.listWorkers(),
+        /adapters_json does not hold readable JSON/u,
+      );
+    } finally {
+      await reopened.close();
+    }
+  });
+});
+
+/**
+ * A hold is a promise about a window of time. Zero or less wrote one that had
+ * already lapsed — indistinguishable, on the next read, from nobody editing
+ * the file at all — and a lifetime past the representable range surfaced as a
+ * bare "Invalid time value" thrown from inside the store.
+ */
+test("an editor hold needs a lifetime it can honour", async () => {
+  const store = SqliteCoordinationStore.open(":memory:");
+  try {
+    for (const ttlMs of [0, -1_000, Number.NaN, 1.5]) {
+      await assert.rejects(
+        store.holdEditorFile({
+          repositoryId: REPOSITORY.id,
+          userId: "user_1",
+          file: "src/index.ts",
+          ttlMs,
+        }),
+        RangeError,
+      );
+    }
+    await assert.rejects(
+      store.holdEditorFile({
+        repositoryId: REPOSITORY.id,
+        userId: "user_1",
+        file: "src/index.ts",
+        ttlMs: Number.MAX_SAFE_INTEGER,
+      }),
+      /too large/u,
+    );
+    // Nothing was taken, so the file still reads as unheld.
+    assert.deepEqual(await store.listEditorHolds(REPOSITORY.id), []);
+
+    const hold = await store.holdEditorFile({
+      repositoryId: REPOSITORY.id,
+      userId: "user_1",
+      file: "src/index.ts",
+      ttlMs: 60_000,
+    });
+    assert.ok(hold.expiresAt > hold.acquiredAt);
+    assert.equal((await store.listEditorHolds(REPOSITORY.id)).length, 1);
+  } finally {
+    await store.close();
+  }
+});
+
+/**
+ * `LIMIT -1` is SQLite for "no limit", so a page size that came out of an
+ * arithmetic slip used to hand back the entire conversation instead of the
+ * tail of it — the largest possible answer to a request for the smallest.
+ */
+test("a negative page size is refused rather than read as unbounded", async () => {
+  const store = SqliteCoordinationStore.open(":memory:");
+  try {
+    const organization = await store.createOrganization({
+      slug: "acme",
+      name: "Acme",
+    });
+    const project = await store.createProject({
+      organizationId: organization.id,
+      slug: "web",
+      name: "Web",
+    });
+    const author = await store.createUser({
+      email: "author@example.com",
+      displayName: "Author",
+      passwordDigest: "digest",
+    });
+    const reader = await store.createUser({
+      email: "reader@example.com",
+      displayName: "Reader",
+      passwordDigest: "digest",
+    });
+    for (let index = 0; index < 4; index += 1) {
+      await store.appendDirectMessage({
+        projectId: project.id,
+        authorId: author.id,
+        recipientId: reader.id,
+        content: `message ${index}`,
+      });
+    }
+
+    for (const limit of [-1, -25, 1.5, Number.NaN]) {
+      await assert.rejects(
+        store.listDirectMessages(project.id, author.id, reader.id, { limit }),
+        RangeError,
+      );
+    }
+    // An absent limit still means the whole conversation, and a real one
+    // still pages.
+    assert.equal(
+      (await store.listDirectMessages(project.id, author.id, reader.id)).length,
+      4,
+    );
+    assert.equal(
+      (
+        await store.listDirectMessages(project.id, author.id, reader.id, {
+          limit: 2,
+        })
+      ).length,
+      2,
+    );
+
+    await assert.rejects(
+      store.listMcpSessions(author.id, { limit: -1 }),
+      RangeError,
+    );
+  } finally {
+    await store.close();
+  }
+});
