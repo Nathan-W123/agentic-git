@@ -189,3 +189,23 @@ covers what only a live daemon can answer: that a container on the gateway's
 network cannot reach a non-allowlisted host, that it **cannot bypass the proxy
 at all**, and that a credential mount exposes one file rather than a home
 directory. It probes with DNS and TCP only — no model call, no token spend.
+
+## Why there is no warm container
+
+Warm starts keep a landed task's *directory* per repository, and never its
+container. Every sandboxed command is its own `docker run --rm`, so no
+container outlives the command it was started for — and a container that did
+would be holding a bind mount of a directory the next task owns, which is
+exactly the cross-task leak the warm-workspace scrub exists to prevent. The
+per-task egress gateway is the only Docker object that could sensibly be kept
+warm, and it is unwired, as the section above records.
+
+What the Docker path does gain from warm starts is the mounted worktree
+itself: it is the same directory, scrubbed, with its dependency trees intact.
+What it does not gain is the control plane's dependency-install step. A
+sandbox with no `sandbox.egressAllowlist` and no explicit `sandbox.network`
+denies the network, so an install inside one cannot reach a registry and would
+fail on every single landing; the pool skips it and reports `skipped` rather
+than attempting it and reporting a per-task error. A project that has
+configured egress gets the install, inside its own container. See
+[warm starts](warm-starts.md).

@@ -27,11 +27,13 @@
     "@coord/adapter-generic-cli": "*",
     "@coord/agent-protocol": "*",
     "@coord/cli": "*",
+    "@coord/coordinator": "*",
     "@coord/persistence": "*",
     "@coord/repository-service": "*",
     "@coord/shared-types": "*",
     "@coord/workspace-manager": "*"
   },
+  "// coordinator": "@coord/coordinator is a runtime import (worker.ts takes BLANKET_DECLARATION_REASON from it, so both askers word an in-process claim the same way) and the tests read handoffs back through it. It belongs in dependencies, not below: it pulls in no native ML, and the worker loads it on every run.",
   "//": "@coord/api-gateway is a test-only import (worker.test.ts builds an in-process gateway to run the protocol against). It is a devDependency and must stay one: as a runtime dependency it drags @coord/local-triage -> @huggingface/transformers -> onnxruntime-node, over 600 MB of native ML that a worker never loads, into anything that packages this worker for a desktop.",
   "devDependencies": {
     "@coord/api-gateway": "*"

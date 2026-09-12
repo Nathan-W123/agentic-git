@@ -333,6 +333,16 @@ export interface CodexAdapterOptions {
   planningTimeoutMs?: number;
   executionTimeoutMs?: number;
   maxOutputBytes?: number;
+  /**
+   * The model's context window, when the deployment configured one.
+   *
+   * Reported through {@link getCapabilities} and nothing more here: this
+   * adapter sees a total per exec, not occupancy per request, so there is
+   * nothing mid-run for it to judge against the window. Declared anyway
+   * because a driver that reads capabilities should see the same field for
+   * every vendor that has one.
+   */
+  maximumContextTokens?: number;
   ignoreUserConfig?: boolean;
   /**
    * Native Windows sandbox backend. The stronger `elevated` backend is the
@@ -1386,6 +1396,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   public async getCapabilities(): Promise<AgentCapabilities> {
+    const maximumContextTokens = this.options.maximumContextTokens;
     return {
       canPlan: true,
       canEditFiles: true,
@@ -1393,6 +1404,14 @@ export class CodexAdapter implements AgentAdapter {
       canUseTools: true,
       supportsStreaming: true,
       supportsPause: false,
+      ...(maximumContextTokens === undefined ? {} : { maximumContextTokens }),
+      // What this adapter reads is `turn.completed`, one event per exec: it
+      // says what a round cost, not how full the window is, so a driver must
+      // not wait on this vendor to ask to be handed off. Stated as what the
+      // adapter reads rather than as a measured fact about the CLI — the
+      // fixture it is tested against is hand-written and `codex exec --json`
+      // has not been exercised here.
+      contextObservation: "per_round",
     };
   }
 
@@ -2559,6 +2578,13 @@ export class CodexAdapter implements AgentAdapter {
     // first JSON event. Preserve only the two small accounting/session events
     // as they stream so a very chatty tool run cannot discard either end of
     // the metadata we need.
+    //
+    // This is also the whole of what this vendor can say about context, and
+    // why the adapter declares `contextObservation: "per_round"` rather than
+    // `"live"`: `turn.completed` arrives once per exec with usage summed over
+    // the turn, which is a round's cost and not the window's occupancy. A
+    // per-request usage event, if the CLI ever emits one, would be read
+    // exactly here and fed to a monitor the way the Claude profile does.
     let pendingJsonLine = "";
     let jsonMetadata = "";
     const observeJson = (chunk: string): void => {
@@ -2701,8 +2727,15 @@ export class CodexAdapter implements AgentAdapter {
       ...(input.priorContext === undefined || input.priorContext.trim() === ""
         ? []
         : [
-            "Notes left by earlier work in this repository. Treat as background,",
-            "not as fact — verify anything you rely on against the workspace:",
+            // Two provenances now share this slot — handoffs the control
+            // plane projected and a note the repository's people wrote —
+            // so the label names both. The old sentence claimed the first
+            // alone, which became untrue the day the second arrived, and an
+            // adapter that grepped the text for a heading to tell them apart
+            // would couple two packages on a string.
+            "Background about this repository — notes left by earlier work and",
+            "by the people who work here. Treat as background, not as fact —",
+            "verify anything you rely on against the workspace:",
             input.priorContext.trim(),
           ]),
       `Canonical revision: ${input.canonicalVersion.revision}`,

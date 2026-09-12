@@ -590,7 +590,16 @@ interface AgentCapabilities {
   supportsStreaming: boolean;
   supportsPause: boolean;
   maximumContextTokens?: number;
+  contextObservation?: "live" | "per_round" | "none";
 }
+
+contextObservation says whether the adapter can read how full its context
+window is while a task is running: live is per-turn occupancy mid-run,
+per_round is a total only when each invocation exits, and none is nothing
+before the task ends. Absent reads as none. A live adapter may stop its own run
+at a tool boundary and emit a context-handoff event; the control plane then
+requeues the task with a handoff rather than letting it degrade inside an
+overflowing window.
 
 Required adapter interface
 
@@ -668,6 +677,28 @@ Example coordinator response
     "Use the existing EmailService API"
   ],
   "blocked_by": []
+}
+
+Context-handoff event
+
+An agent that can observe its own context window reports when it has stopped
+because that window is nearly full. It is neither a completion nor a failure:
+no completion follows, no changeset is collected, and the task goes back to the
+queue seeded with the handoff the control plane projects from the figures
+below.
+
+{
+  "event": "context_handoff_requested",
+  "reason": "context is 84% full (50400 of 60000 tokens)",
+  "pressure": {
+    "occupiedTokens": 50400,
+    "peakTokens": 50400,
+    "maximumContextTokens": 60000,
+    "turns": 12,
+    "compactions": 0,
+    "droppedTokens": 0,
+    "stale": true
+  }
 }
 
 Scope-change event

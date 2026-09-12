@@ -405,6 +405,11 @@ export class GenericCliAdapter implements AgentAdapter {
       canUseTools: false,
       supportsStreaming: true,
       supportsPause: true,
+      // A generic agent reports no usage at all until its run ends, and the
+      // wire protocol has no event it could send to ask for a handoff — the
+      // parser refuses an event it does not know, which is the correct
+      // reading of "none" rather than a gap.
+      contextObservation: "none",
     };
   }
 
@@ -800,6 +805,19 @@ export class GenericCliAdapter implements AgentAdapter {
       repositoryId: record.input.repositoryId,
       canonicalVersion: record.input.canonicalVersion,
       validationCommands: record.input.task.validationCommands,
+      // The additive sibling fields that comment promised. The vendor
+      // adapters render these into their own prompts; this adapter writes no
+      // prompt, so the agent is handed them whole and decides for itself.
+      // Neither is folded into `objective`, for the reason above, and neither
+      // is sent at all when there is nothing in it — an older agent that
+      // validates its `start` strictly sees exactly the message it always
+      // saw.
+      ...(record.input.task.context === undefined
+        ? {}
+        : { context: record.input.task.context }),
+      ...(record.input.priorContext === undefined
+        ? {}
+        : { priorContext: record.input.priorContext }),
       ...(workspace === undefined
         ? {}
         : {

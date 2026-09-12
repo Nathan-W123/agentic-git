@@ -30,6 +30,8 @@ import type {
   CoordinationStore,
   McpServerRecord,
   McpServerScope,
+  McpSessionRecord,
+  McpSessionTask,
   SubChannel,
   SubChannelVisibility,
   Organization,
@@ -84,6 +86,8 @@ import {
   mcpServersEnabled,
   projectBudgets,
   readsAsReportRequest,
+  renderRepositoryContext,
+  REPOSITORY_CONTEXT_MAX_CHARS,
   requestFromObjective,
   ROLE_CONTEXT_PREFIX,
   uniqueStrings,
@@ -115,7 +119,11 @@ import {
   verifyWebhookSignature,
   type StripeClient,
 } from "./stripe.js";
-import { billableSeats, paymentsEnabled, TRIAL_DAYS } from "./billing.js";
+import {
+  billableSeats,
+  paymentsEnabled,
+  TRIAL_DAYS,
+} from "./billing.js";
 import {
   arbitrationLine,
   arbitrationReleaseLine,
@@ -140,13 +148,34 @@ import {
   permissionsForRole,
   type Permission,
 } from "./authorization.js";
-import { handleMcpMessage, mcpRefusal, type McpTool } from "./mcp.js";
+import {
+  handleMcpMessage,
+  mcpRefusal,
+  MCP_PROTOCOL_VERSION,
+  type McpTool,
+} from "./mcp.js";
 import {
   createMcpTools,
+  taskBelongsTo,
   type McpAgent,
   type McpRepository,
   type McpToolDeps,
 } from "./mcp-tools.js";
+import {
+  McpBriefSeedCache,
+  McpSessionHandle,
+  MCP_BRIEF_HANDOFFS,
+  MCP_BRIEF_RECENT_TASKS,
+  MCP_CONTEXT_HANDOFFS,
+  MCP_CONTEXT_MAX_CHARS,
+  MCP_INSTRUCTIONS_MAX_CHARS,
+  MCP_SESSION_IDLE_MS,
+  newMcpSessionId,
+  renderSessionBrief,
+  STANDING_INSTRUCTIONS,
+  type McpBriefSeed,
+  type SessionBriefTask,
+} from "./mcp-session.js";
 import {
   createMcpWorkTools,
   editorBehind,
@@ -548,6 +577,44 @@ export interface WatchedChannelTask {
   opener?: { authorId: string; content: string };
   /** Whether substantive run narration has begun, after which all of it stays here. */
   threaded: boolean;
+}
+
+/**
+ * The sentence `/context` says when the repository gate turns somebody away,
+ * or `undefined` when the failure was not a refusal at all.
+ *
+ * The gate is a route's gate, so it answers in status codes; a room answers
+ * in sentences, and the wrong sentence sends somebody after a permission
+ * that was never the problem. A token refused for its scopes holds the
+ * permission and would read "ask for manage_project" as nonsense, and an
+ * archived project refuses the very people the other sentence tells to try
+ * again. Anything that is not one of the gate's four refusals is not this
+ * function's to translate.
+ */
+function repositoryContextRefusal(error: unknown): string | undefined {
+  const code =
+    error instanceof AuthenticationError || error instanceof HttpError
+      ? error.code
+      : undefined;
+  if (code === "token_scope_missing") {
+    return (
+      "That API token is not scoped to `manage_project`, so it cannot set " +
+      "the standing context — the same refusal `PUT .../context` gives it."
+    );
+  }
+  if (code === "project_archived") {
+    return (
+      "This project is archived and read-only, so the standing context " +
+      "cannot be changed until it is unarchived."
+    );
+  }
+  if (code === "forbidden" || code === "not_found") {
+    return (
+      "Setting the standing context takes the manage_project permission, " +
+      "or having created the repository — the same rule as renaming it."
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -1517,6 +1584,17 @@ export class ApiGateway {
    * infrastructure in front of every one of them.
    */
   private readonly manifests = new McpManifestCache();
+  /**
+   * The gathered half of an MCP client's handshake brief, held for a minute.
+   *
+   * `initialize` is the one method here that reads the store, and a CLI client
+   * opens a session per task. The reads that make that expensive — the whole
+   * handoff log for one repository — are cached per person and repository; see
+   * `mcp-session.ts` for why a store-level limit would not do instead.
+   */
+  private readonly mcpBriefSeeds = new McpBriefSeedCache();
+  /** How long an idle `Mcp-Session-Id` stays accepted. See the option's doc. */
+  private readonly mcpSessionTtlMs: number;
   /** Delivers password-reset links and registration confirmation codes. */
   readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
@@ -1642,6 +1720,17 @@ export class ApiGateway {
         positiveInteger(process.env["COORD_MCP_RATE_LIMIT_PER_MINUTE"]) ??
         240,
     });
+    // Read into a variable first rather than multiplied inside the `??` chain
+    // above it: `positiveInteger` answers `undefined` for an unset or
+    // mistyped value, `undefined * 3_600_000` does not compile, and the `NaN`
+    // a looser expression would produce is not something `??` rescues — the
+    // default would silently never apply.
+    const ttlHours = positiveInteger(
+      process.env["COORD_MCP_SESSION_TTL_HOURS"],
+    );
+    this.mcpSessionTtlMs =
+      options.mcpSessionTtlMs ??
+      (ttlHours === undefined ? MCP_SESSION_IDLE_MS : ttlHours * 3_600_000);
     this.server = createServer((request, response) => {
       void this.handle(request, response);
     });
@@ -2540,13 +2629,21 @@ export class ApiGateway {
   /**
    * The tools this caller may drive over MCP.
    *
-   * Built per request because every one of them closes over the principal: a
-   * tool has no session and no state of its own, so the token that arrived is
-   * the only thing that says who is asking.
+   * Built per request because every one of them closes over the principal. A
+   * tool now has a *session* when the client presented one — a focus and a
+   * short list of what it did — but the token that arrived is still the only
+   * thing that says who is asking: the session id is not a credential and is
+   * refused outright unless it belongs to this principal. See `mcp-session.ts`.
    */
-  mcpTools(principal: AuthenticatedPrincipal): McpTool[] {
+  mcpTools(
+    principal: AuthenticatedPrincipal,
+    session?: McpSessionHandle,
+  ): McpTool[] {
     const deps: McpToolDeps = {
       store: this.options.store,
+      ...(session === undefined ? {} : { session }),
+      sessionBrief: async ({ full }) =>
+        await this.mcpSessionBrief(principal, session, { full }),
       assertScope: (permission) => {
         assertTokenScope(principal, permission as Permission);
       },
@@ -2561,10 +2658,28 @@ export class ApiGateway {
           input.repositoryId,
           input.channel,
         );
-        // Posted first, and without a mention, so nothing is dispatched by
-        // the room: the task below is created against the vendor directly.
-        // The room still sees what was asked for, which is the half of this
-        // path that was never about who runs it.
+        // What the room has settled lately, read before the objective is
+        // posted so the post cannot be read back as background to itself.
+        // Every mention-dispatched task gets this from `dispatchOneMention`;
+        // this path submits directly and so has to add it by hand, or the
+        // one task filed by the person at the keyboard is the one that
+        // starts from nothing. Computed after the post it would need
+        // `exclude: [posted.message.id]` purely because of ordering.
+        const memo = await this.channelMemoFor({
+          repositoryId: input.repositoryId,
+          viewerId: principal.user.id,
+          request: input.objective,
+          exclude: [],
+        });
+        // Posted without a mention, so `dispatchOneMention` never runs for
+        // it: the task below is created against the vendor directly, and the
+        // room still sees what was asked for, which is the half of this path
+        // that was never about who runs it. Not quite nothing, though — a
+        // mention-less post falls through to the auto-claim path, and when
+        // the room's model accepts it a second task for the same objective
+        // can be dispatched beside this one. That is older than this memo
+        // and left as it is; the memo only means the two carry different
+        // context.
         const posted = await this.postChannelMessageAndDispatch({
           projectId: input.projectId,
           repositoryId: input.repositoryId,
@@ -2577,6 +2692,7 @@ export class ApiGateway {
           projectId: input.projectId,
           repositoryId: input.repositoryId,
           objective: input.objective,
+          ...(memo === undefined ? {} : { context: memo }),
           // No `agentId`. This is the shape the field exists for: the caller
           // knows which vendor should run it and has no business knowing the
           // deployment's configured agent names.
@@ -2730,20 +2846,333 @@ export class ApiGateway {
         });
         return cancelled.length === 0 ? "already_finished" : "cancelled";
       },
-      outcomeFor: async (taskId) => {
-        const events = await this.options.store
-          .listAuditEvents({
-            taskId,
-            types: ["canonical_promoted", "task_reported", "task_failed"],
-          })
-          .catch(() => []);
-        const last = events.at(-1);
-        return last === undefined
-          ? undefined
-          : narrateTaskEvent(last.event.type, last.event.data);
+      setRepositoryContext: async (input) => {
+        // The HTTP route's gate, with its refusal folded into the answer:
+        // the tool reads a word and says a sentence, where a thrown 403
+        // would reach the model as an error about nothing in particular.
+        try {
+          await this.authorizeRepositoryOwnerAction(
+            principal,
+            input.projectId,
+            input.repositoryId,
+            "manage_project",
+          );
+        } catch (error) {
+          if (
+            (error instanceof HttpError && error.status === 403) ||
+            (error instanceof AuthenticationError && error.statusCode === 403)
+          ) {
+            return "forbidden";
+          }
+          throw error;
+        }
+        const saved = await this.options.store.saveRepositoryContext({
+          repositoryId: input.repositoryId,
+          content: input.content,
+          updatedBy: principal.user.id,
+          ...(input.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: input.expectedVersion }),
+        });
+        if (saved.outcome === "saved") {
+          await this.options.store.appendAudit(undefined, {
+            type: "repository_context_changed",
+            data: {
+              projectId: input.projectId,
+              repositoryId: input.repositoryId,
+              version: saved.context.version,
+              cleared: input.content === "",
+              chars: input.content.length,
+              actorId: principal.user.id,
+            },
+          });
+        }
+        return saved;
       },
+      outcomeFor: async (taskId) => await this.mcpTaskOutcome(taskId),
     };
-    return [...createMcpTools(deps), ...createMcpWorkTools(this.workDeps(principal))];
+    return [
+      ...createMcpTools(deps),
+      ...createMcpWorkTools(this.workDeps(principal, session)),
+    ];
+  }
+
+  /**
+   * How a task ended, in the words the rest of the control plane uses.
+   *
+   * One copy, read by `task_status` and by the brief a returning client is
+   * handed. Two would drift, and the half that drifted would be the one
+   * telling somebody their work landed when it had not.
+   */
+  private async mcpTaskOutcome(taskId: string): Promise<string | undefined> {
+    const events = await this.options.store
+      .listAuditEvents({
+        taskId,
+        types: ["canonical_promoted", "task_reported", "task_failed"],
+      })
+      .catch(() => []);
+    const last = events.at(-1);
+    return last === undefined
+      ? undefined
+      : narrateTaskEvent(last.event.type, last.event.data);
+  }
+
+  /**
+   * A fresh MCP session for a client that has just handshaken.
+   *
+   * Built but not stored: the route writes the row only once
+   * `handleMcpMessage` has actually answered the `initialize` with a result,
+   * because a malformed handshake is refused inside that function and must not
+   * leave a session id in a client's hands that this server never recorded.
+   * What it writes is `handle.row` rather than this literal, because the brief
+   * runs in between and may have adopted the focus an earlier session left.
+   */
+  openMcpSession(
+    principal: AuthenticatedPrincipal,
+    params: {
+      protocolVersion?: string;
+      clientName?: string;
+      clientVersion?: string;
+    },
+  ): McpSessionHandle {
+    const now = new Date();
+    const record: McpSessionRecord = {
+      id: newMcpSessionId(),
+      userId: principal.user.id,
+      // Recorded for diagnostics only. Continuity is looked up by person, so
+      // rotating a token keeps somebody's history rather than starting it over.
+      tokenId: principal.token?.id,
+      editorVendor: editorBehind(principal.token),
+      clientName: params.clientName,
+      clientVersion: params.clientVersion,
+      protocolVersion: params.protocolVersion ?? MCP_PROTOCOL_VERSION,
+      // Empty here rather than seeded from the last session: continuity is
+      // `mcpSessionBrief`'s decision, because that is the one place the
+      // earlier focus is re-authorized before anything is told to rely on it.
+      focus: undefined,
+      tasks: [],
+      createdAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + this.mcpSessionTtlMs).toISOString(),
+      endedAt: undefined,
+    };
+    return new McpSessionHandle(record);
+  }
+
+  /**
+   * The session an `Mcp-Session-Id` names, when this caller may continue it.
+   *
+   * Answers `undefined` for missing, ended, lapsed and somebody else's alike,
+   * and the route turns every one of them into the same 404. Telling those
+   * cases apart would confirm to a stranger that an id exists, and the client's
+   * move is identical in all four: initialize again.
+   */
+  async resolveMcpSession(
+    principal: AuthenticatedPrincipal,
+    id: string,
+  ): Promise<McpSessionHandle | undefined> {
+    const record = await this.options.store
+      .getMcpSession(id)
+      .catch(() => undefined);
+    if (
+      record === undefined ||
+      record.endedAt !== undefined ||
+      record.userId !== principal.user.id ||
+      record.expiresAt <= new Date().toISOString()
+    ) {
+      return undefined;
+    }
+    return new McpSessionHandle(record);
+  }
+
+  /** Writes back what a session-bearing request changed, and slides its expiry. */
+  async touchMcpSession(handle: McpSessionHandle): Promise<void> {
+    await this.options.store.updateMcpSession(
+      handle.id,
+      handle.patch(new Date(), this.mcpSessionTtlMs),
+    );
+  }
+
+  /**
+   * Ends a session on the client's own `DELETE`. False when there was nothing
+   * of this caller's to end.
+   *
+   * The row stays. Ending means "this client is done", not "forget this": the
+   * next handshake is still seeded from what this session did.
+   */
+  async endMcpSession(
+    principal: AuthenticatedPrincipal,
+    id: string,
+  ): Promise<boolean> {
+    const handle = await this.resolveMcpSession(principal, id);
+    if (handle === undefined) {
+      return false;
+    }
+    const now = new Date();
+    await this.options.store.updateMcpSession(id, {
+      ...handle.patch(now, this.mcpSessionTtlMs),
+      endedAt: now.toISOString(),
+    });
+    return true;
+  }
+
+  /**
+   * What a returning MCP client is told: the handshake's `instructions`, and
+   * what `session_context` answers.
+   *
+   * Every line is projected from rows this caller can already read, and each
+   * of them is re-checked here rather than trusted because it was recorded:
+   * the project is re-authorized, so a focus from last week cannot outlive a
+   * revoked grant, and each task is re-checked against its submitter.
+   */
+  async mcpSessionBrief(
+    principal: AuthenticatedPrincipal,
+    current?: McpSessionHandle,
+    options: { full?: boolean } = {},
+  ): Promise<string> {
+    const full = options.full === true;
+    const vendor = editorBehind(principal.token);
+    // Three rows. A brief is a reminder rather than an archive, and the vendor
+    // orders them so a returning Codex client is seeded from what Codex did.
+    const previous = await this.options.store
+      .listMcpSessions(principal.user.id, {
+        limit: 3,
+        ...(vendor === undefined ? {} : { editorVendor: vendor }),
+      })
+      .catch(() => []);
+    const earlier = previous.filter((row) => row.id !== current?.id);
+    // The focus this client set, or the one the last session left behind.
+    const inherited =
+      current?.focus === undefined
+        ? earlier.find((row) => row.focus !== undefined)
+        : undefined;
+    const candidate = current?.focus ?? inherited?.focus;
+    // Re-authorized before it is printed, not only before it is read from: a
+    // focus from last week must not outlive a revoked grant, and a brief that
+    // names a repository this account can no longer reach would have every
+    // defaulted tool call refused by `findRepository` a moment later.
+    const reachable =
+      candidate === undefined
+        ? false
+        : await authorizeProject(
+            this.options.store,
+            principal,
+            candidate.projectId,
+            "view",
+          ).then(
+            () => true,
+            () => false,
+          );
+    const focus = reachable ? candidate : undefined;
+    // Adopted, not merely rendered. The brief tells the client its tools
+    // default to this repository, and on a reconnect the session being told
+    // that is a row created seconds ago with nothing in it — so without this
+    // the very next `submit_task` refuses for want of a repository the client
+    // has just been told it has. The handle carries it into the row the route
+    // writes, and into every later request on the same id.
+    if (
+      focus !== undefined &&
+      current !== undefined &&
+      current.focus === undefined
+    ) {
+      current.setFocus(focus);
+    }
+
+    // Newest first, this session before older ones, deduped, and cut to the
+    // handful that will be printed *before* anything is looked up: each line
+    // costs a task read and an audit read, and a brief is on the path a client
+    // takes at the start of every task.
+    const candidates: McpSessionTask[] = [];
+    const seen = new Set<string>();
+    for (const tasks of [
+      ...(current === undefined ? [] : [current.tasks]),
+      ...earlier.map((row) => row.tasks),
+    ]) {
+      for (const note of [...tasks].reverse()) {
+        if (seen.has(note.taskId)) {
+          continue;
+        }
+        seen.add(note.taskId);
+        candidates.push(note);
+      }
+    }
+    const recentTasks: SessionBriefTask[] = [];
+    for (const note of candidates.slice(0, MCP_BRIEF_RECENT_TASKS)) {
+      const task = await this.options.store
+        .getSubmittedTask(note.taskId)
+        .catch(() => undefined);
+      if (task === undefined) {
+        continue;
+      }
+      // Owned by this person, or unowned and taken by this session. An
+      // unowned task is one the CLI filed (`claimableBy` lets an editor lease
+      // those), and somebody who was leased it was meant to run it and is
+      // meant to be reminded of it. A task owned by somebody *else* stays
+      // hidden however this session came across it: a session row is never a
+      // way to read another person's work.
+      if (
+        !taskBelongsTo(task, principal.user.id) &&
+        !(note.via === "take_task" && task.submittedBy === undefined)
+      ) {
+        continue;
+      }
+      const outcome = await this.mcpTaskOutcome(task.id);
+      recentTasks.push({
+        taskId: task.id,
+        objective: note.objective,
+        repositoryId: note.repositoryId,
+        state: describeTaskState(task.status),
+        ...(outcome === undefined ? {} : { outcome }),
+      });
+    }
+
+    let seed: McpBriefSeed = { handoffContext: "", standingContext: "" };
+    if (focus !== undefined) {
+      const load = async (): Promise<McpBriefSeed> => ({
+        handoffContext:
+          (await this.options.operations
+            .handoffContextFor?.({
+              projectId: focus.projectId,
+              repositoryId: focus.repositoryId,
+              limit: full ? MCP_CONTEXT_HANDOFFS : MCP_BRIEF_HANDOFFS,
+            })
+            .catch(() => undefined)) ?? "",
+        standingContext: renderRepositoryContext(
+          await this.options.store
+            .getRepositoryContext(focus.repositoryId)
+            .catch(() => undefined),
+        ),
+      });
+      // Cached for the handshake, which a client performs once per task and
+      // which must stay cheap; read fresh for `session_context`, which is a
+      // deliberate call asking for what is true now.
+      seed = full
+        ? await load()
+        : await this.mcpBriefSeeds.get(
+            principal.user.id,
+            focus.repositoryId,
+            load,
+          );
+    }
+
+    return renderSessionBrief({
+      standing: STANDING_INSTRUCTIONS,
+      ...(focus === undefined ? {} : { focus }),
+      ...(inherited === undefined
+        ? {}
+        : {
+            resumedFrom: {
+              ...(inherited.clientName === undefined
+                ? {}
+                : { clientName: inherited.clientName }),
+              lastSeenAt: inherited.lastSeenAt,
+            },
+          }),
+      recentTasks,
+      handoffContext: seed.handoffContext,
+      standingContext: seed.standingContext,
+      maxChars: full ? MCP_CONTEXT_MAX_CHARS : MCP_INSTRUCTIONS_MAX_CHARS,
+    });
   }
 
   /**
@@ -2860,7 +3289,10 @@ export class ApiGateway {
    * that admits worker registration, and a token handed to an editor to do
    * one task must not be able to take everybody else's.
    */
-  private workDeps(principal: AuthenticatedPrincipal): McpWorkDeps {
+  private workDeps(
+    principal: AuthenticatedPrincipal,
+    session?: McpSessionHandle,
+  ): McpWorkDeps {
     const operation = (): EditorWorkOperations => {
       const editorWork = this.options.operations.editorWork;
       if (editorWork === undefined) {
@@ -2925,6 +3357,7 @@ export class ApiGateway {
       assertScope: (permission) => {
         assertTokenScope(principal, permission as Permission);
       },
+      ...(session === undefined ? {} : { session }),
       // From the token this request arrived on, never from the model. See
       // `editorBehind`: the connection already knows, and asking the caller
       // to tell us was asking it to repeat something it could get wrong.
@@ -3119,9 +3552,25 @@ export class ApiGateway {
             userId: principal.user.id,
             vendor: input.vendor,
           });
+          // The repository's standing context, rendered with the same
+          // function every planning prompt uses, so an editor is told what
+          // an agent would have been. Read defensively: a brief must not
+          // fail for want of a note.
+          const standingContext = renderRepositoryContext(
+            await this.options.store
+              .getRepositoryContext(taken.repositoryId)
+              .catch(() => undefined),
+          );
           return {
             taskId: taken.taskId,
             objective: taken.objective,
+            ...(taken.context === undefined ? {} : { context: taken.context }),
+            ...(standingContext === "" ? {} : { standingContext }),
+            // Carried out of this loop rather than recovered later: a session
+            // focus is a project and a repository, and this is the one place
+            // that knows which project the lease came from.
+            projectId,
+            repositoryId: taken.repositoryId,
             repository: taken.repositoryId,
             branch: taken.branch,
             baseRevision: taken.baseRevision,
@@ -4443,7 +4892,18 @@ export class ApiGateway {
   private async runSlashCommand(input: {
     projectId: string;
     repositoryId: string;
-    senderId: string;
+    /**
+     * Who typed it, as the request authenticated them.
+     *
+     * The whole principal rather than a bare user id because a command can
+     * be a repository-administrative act — `/context` sets the standing
+     * context every task in the repository is planned with — and an API
+     * token's scopes are part of who its holder is. Handed a user id alone,
+     * this path could only restate the role half of the route's gate, and a
+     * token scoped to `view` would have set from the room what `PUT
+     * .../context` refuses it.
+     */
+    principal: AuthenticatedPrincipal;
     command: SlashCommand;
     rest: string;
     /**
@@ -4459,6 +4919,7 @@ export class ApiGateway {
     channelId?: string;
   }): Promise<SlashCommandDispatch> {
     const { projectId, repositoryId } = input;
+    const senderId = input.principal.user.id;
     // Read before either word's own branch: whichever was typed first is the
     // one `parseSlashCommand` returned, and acting on that one alone is
     // exactly what this is here to stop — a `/push` that publishes over the
@@ -4468,7 +4929,7 @@ export class ApiGateway {
       const queued = await this.queuePushAfterRunningWork({
         projectId,
         repositoryId,
-        actorId: input.senderId,
+        actorId: senderId,
         ...(input.channelId === undefined ? {} : { channelId: input.channelId }),
       });
       // `/queue @Eos land the retry fix /push` is two instructions on one
@@ -4486,11 +4947,21 @@ export class ApiGateway {
       );
       return { handled: true };
     }
+    if (input.command.name === "context") {
+      await this.runContextCommand({
+        projectId,
+        repositoryId,
+        principal: input.principal,
+        rest: input.rest,
+        ...(input.channelId === undefined ? {} : { channelId: input.channelId }),
+      });
+      return { handled: true };
+    }
     if (input.command.name === "stop") {
       // `/cancel` with the code put back. Stopping is entirely its job — the
       // same operation, the same targeting, the same summary — and the only
       // thing this adds is undoing what the stopped tasks had already landed.
-      await this.cancelFromChannel({ ...input, undo: true });
+      await this.cancelFromChannel({ ...input, senderId, undo: true });
       return { handled: true };
     }
     // `/retry` acts on the task a thread is following, and a message in the
@@ -4506,7 +4977,7 @@ export class ApiGateway {
       return { handled: true };
     }
     if (input.command.name === "cancel") {
-      await this.cancelFromChannel(input);
+      await this.cancelFromChannel({ ...input, senderId });
       return { handled: true };
     }
     if (input.command.name === "push") {
@@ -4544,7 +5015,7 @@ export class ApiGateway {
       const result = await operation({
         projectId,
         repositoryId,
-        actorId: input.senderId,
+        actorId: senderId,
       });
       if (result.detail?.syncConflict !== true) {
         await this.postChannelSystemMessage(
@@ -4577,6 +5048,115 @@ export class ApiGateway {
       }
     }
     return { handled: false };
+  }
+
+  /**
+   * `/context`: shows, sets or clears the repository's standing context.
+   *
+   * Answered in the room it was typed in, as `/help` is: a channel message,
+   * in the repository's own room or a work sub-channel's, is where this is
+   * read as a command at all — a thread reply goes to that thread's agent,
+   * as it does for `/plan` and `/help`. A repository-wide act rather than a
+   * per-room one — the note reaches every task in the repository, whichever
+   * channel it was set from — so it is confirmed where it was said and takes
+   * effect everywhere.
+   *
+   * Setting goes through {@link authorizeRepositoryOwnerAction}, the same
+   * call the `PUT .../context` route makes, rather than a by-user-id
+   * restatement of it: the two gates cannot drift apart if there is only
+   * one, and the scope check an API token is entitled to comes free with it.
+   * The refusal is spoken in the room and names the rule, because a person
+   * who typed a note and got silence would type it again.
+   */
+  private async runContextCommand(input: {
+    projectId: string;
+    repositoryId: string;
+    principal: AuthenticatedPrincipal;
+    rest: string;
+    channelId?: string;
+  }): Promise<void> {
+    const { projectId, repositoryId, channelId } = input;
+    const senderId = input.principal.user.id;
+    const say = async (content: string): Promise<void> =>
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        content,
+        channelId,
+      );
+    const rest = input.rest.trim();
+    if (rest === "") {
+      const rendered = renderRepositoryContext(
+        await this.options.store.getRepositoryContext(repositoryId),
+      );
+      await say(
+        rendered === ""
+          ? "Nothing is set. `/context <note>` sets what every agent in this " +
+              "repository is told before it plans."
+          : rendered,
+      );
+      return;
+    }
+    try {
+      await this.authorizeRepositoryOwnerAction(
+        input.principal,
+        projectId,
+        repositoryId,
+        "manage_project",
+      );
+    } catch (error) {
+      // Only the gate's own refusals are turned into a sentence. Anything
+      // else — a store that threw, a bug — is rethrown to the dispatcher,
+      // which logs it loudly; reporting a fault as "you are not allowed"
+      // would send somebody after a permission that was never the problem.
+      const refusal = repositoryContextRefusal(error);
+      if (refusal === undefined) {
+        throw error;
+      }
+      await say(refusal);
+      return;
+    }
+    const content = rest === "clear" ? "" : rest;
+    if (content.length > REPOSITORY_CONTEXT_MAX_CHARS) {
+      await say(
+        `That note is ${content.length} characters; the standing context ` +
+          `is capped at ${REPOSITORY_CONTEXT_MAX_CHARS} because every ` +
+          "planning prompt in this repository pays for it.",
+      );
+      return;
+    }
+    const saved = await this.options.store.saveRepositoryContext({
+      repositoryId,
+      content,
+      updatedBy: senderId,
+    });
+    if (saved.outcome === "stale") {
+      // Unpinned saves cannot be stale; said anyway rather than assumed,
+      // because a silent no-op is the one ending a command must never have.
+      await say("The standing context moved as it was being set; try again.");
+      return;
+    }
+    await this.options.store.appendAudit(undefined, {
+      type: "repository_context_changed",
+      data: {
+        projectId,
+        repositoryId,
+        version: saved.context.version,
+        cleared: content === "",
+        chars: content.length,
+        actorId: senderId,
+      },
+    });
+    const author =
+      (await this.options.store.getUser(senderId))?.displayName ?? "somebody";
+    await say(
+      content === ""
+        ? `Standing context cleared by ${author} (v${saved.context.version}). ` +
+            "Tasks in this repository no longer see a note."
+        : `Standing context v${saved.context.version} set by ${author} ` +
+            `(${content.length} chars). Every task in this repository sees ` +
+            "it from now on.",
+    );
   }
 
   /** Whether a `/queue /push` is waiting on this repository's running work. */
@@ -4991,7 +5571,7 @@ export class ApiGateway {
         repositoryId,
         channelId: channel.id,
         content,
-        senderId: principal.user.id,
+        principal,
         referencedMessageId: message.id,
       });
     } catch (error) {
@@ -5030,12 +5610,19 @@ export class ApiGateway {
      */
     channelId?: string;
     content: string;
-    senderId: string;
+    /**
+     * Who posted it, as the request authenticated them.
+     *
+     * Carried whole rather than as a bare user id because a slash command can
+     * administer the repository (`/context`), and that gate has to see the
+     * credential's scopes as well as the person's role.
+     */
+    principal: AuthenticatedPrincipal;
     /** The stored channel root that caused this dispatch. */
     referencedMessageId: string;
   }): Promise<ChannelDispatch> {
-    const { projectId, repositoryId, channelId, senderId, referencedMessageId } =
-      input;
+    const { projectId, repositoryId, channelId, referencedMessageId } = input;
+    const senderId = input.principal.user.id;
     // A command says *how* to treat the request; an "@" says who it is for.
     // Different questions, so they compose: the command word is taken out
     // here — wherever in the message it was written — and everything left
@@ -5055,7 +5642,7 @@ export class ApiGateway {
       const dispatched = await this.runSlashCommand({
         projectId,
         repositoryId,
-        senderId,
+        principal: input.principal,
         command: parsed.command,
         rest: parsed.rest,
         content: input.content,
@@ -5845,9 +6432,11 @@ export class ApiGateway {
       input.trigger !== "answer_followup" &&
       readsAsQuestion(content)
     ) {
-      let taskObjective: string | undefined;
+      let answered:
+        | { answer: string; taskObjective: string | undefined }
+        | undefined;
       try {
-        taskObjective = await this.answerInChannel(
+        answered = await this.answerInChannel(
           candidate,
           content,
           projectId,
@@ -5878,7 +6467,22 @@ export class ApiGateway {
         }).catch(() => undefined);
         throw error;
       }
-      if (taskObjective !== undefined) {
+      const taskObjective = answered?.taskObjective;
+      if (answered !== undefined && taskObjective !== undefined) {
+        // The exchange that scoped this work. The objective the model wrote
+        // is one sentence distilled from its own answer to the question;
+        // without the two of them the agent that runs it is handed the
+        // distillation alone, and "the cap you described" has nothing to
+        // point at. Carried as `context` rather than as `threadMessageId`:
+        // the latter would make this dispatch a continuation — title,
+        // opener and bump behaviour for a thread that is brand new. And
+        // built here from what was just said rather than read back from
+        // the store, because the answer is a flat message referencing the
+        // question, which is not a place `threadContextFor` looks.
+        const exchange = this.renderThreadContext({
+          lines: [content, answered.answer],
+          request: taskObjective,
+        });
         await this.dispatchOneMention({
           projectId,
           repositoryId,
@@ -5889,6 +6493,7 @@ export class ApiGateway {
           ...(input.referencedMessageId !== undefined
             ? { referencedMessageId: input.referencedMessageId }
             : {}),
+          ...(exchange === undefined ? {} : { context: exchange }),
           trigger: "answer_followup",
           ...(input.brief === true ? { brief: true } : {}),
         });
@@ -6506,18 +7111,38 @@ export class ApiGateway {
     if (root === undefined) {
       return undefined;
     }
+    return this.renderThreadContext({
+      lines: [
+        { kind: root.kind, content: root.content },
+        ...root.replies.map((reply) => ({
+          kind: reply.kind,
+          content: reply.content,
+        })),
+      ]
+        // The run narrating itself. Feeding an agent back its own progress
+        // commentary is noise somebody already paid for once.
+        .filter((entry) => entry.kind !== "progress")
+        .map((entry) => entry.content),
+      request: input.request,
+    });
+  }
+
+  /**
+   * A conversation, oldest first, in the shape a task carries it.
+   *
+   * The rendering half of {@link threadContextFor}, on its own so the one
+   * exchange that is not a thread — a question and the flat answer that
+   * proposed the work — is worded exactly as a thread would be. Two
+   * headings for the same thing would teach the adapters two things.
+   */
+  private renderThreadContext(input: {
+    lines: readonly string[];
+    /** The request itself, which is about to become the objective. */
+    request: string;
+  }): string | undefined {
     const asked = collapseWhitespace(input.request);
-    const lines = [
-      { kind: root.kind, content: root.content },
-      ...root.replies.map((reply) => ({
-        kind: reply.kind,
-        content: reply.content,
-      })),
-    ]
-      // The run narrating itself. Feeding an agent back its own progress
-      // commentary is noise somebody already paid for once.
-      .filter((entry) => entry.kind !== "progress")
-      .map((entry) => collapseWhitespace(entry.content))
+    const lines = input.lines
+      .map((line) => collapseWhitespace(line))
       // The request being dispatched is already the objective; repeating it
       // here would only tell the model the same thing twice.
       .filter((line) => line.length > 0 && line !== asked);
@@ -6787,6 +7412,13 @@ export class ApiGateway {
    * semantics simply ignore it. This is the same answer shape as the
    * one-to-one panel — a chat completion on the agent owner's credential —
    * just addressed to a room instead of a person.
+   *
+   * Returns what was said as well as the objective, because the answer is
+   * the only record of why that objective exists: it is posted as a flat
+   * message referencing the question, not as a reply under it, so nothing
+   * that reads a thread back will ever find it. `undefined` when nothing
+   * was answered here — routed to a machine, refused, or an echo of the
+   * question — and there is then no objective either.
    */
   private async answerInChannel(
     candidate: ChannelMentionCandidate,
@@ -6800,7 +7432,9 @@ export class ApiGateway {
      * other instructions rather than mixed into the sender's message.
      */
     directive?: string,
-  ): Promise<string | undefined> {
+  ): Promise<
+    { answer: string; taskObjective: string | undefined } | undefined
+  > {
     // Answered on its owner's machine, when there is one and when this
     // deployment has said it will not answer here.
     //
@@ -6840,6 +7474,12 @@ export class ApiGateway {
         ...(referencedMessageId === undefined
           ? {}
           : { answerTo: referencedMessageId }),
+        // No `context`, and that is only right because every caller of this
+        // method is at the channel root today. The worker's `answerQuestion`
+        // renders `task.context` when it is present, so a question routed
+        // from inside a thread must pass `context: await
+        // this.threadContextFor(...)` here, or the machine answering it will
+        // not know what "it" refers to.
       });
       this.notifyWorkers(projectId);
       return undefined;
@@ -6927,7 +7567,9 @@ export class ApiGateway {
           : ECHOED_REQUEST_REPLY),
       ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     });
-    return said === undefined ? undefined : parsed.taskObjective;
+    return said === undefined
+      ? undefined
+      : { answer: said, taskObjective: parsed.taskObjective };
   }
 
   /**

@@ -1243,6 +1243,83 @@ test("a contended remote task is told where the objective already lives", async 
 });
 
 /**
+ * The repository's standing context rides the claim answer, claim or no claim.
+ *
+ * A claimed task skips planning but still executes here, and the note is
+ * about working here; `planningContext` is the only thing a claim withholds.
+ * A lease whose base revision cannot be resolved still gets nothing at all —
+ * the worker cannot run it either.
+ */
+test("the claim carries the standing context whether or not the repository was claimed", async () => {
+  const real = await sharedRepository();
+  try {
+    // Nothing set: no field, so an old worker sees the answer it always saw.
+    // Its own store, because a solo claim is only solo once per repository.
+    const empty = await seed(real.repository);
+    const solo = await leaseFor(empty.store, empty.worker, "work on quiet", real.version);
+    const bare = await claimWorkRepository(
+      empty.store,
+      { leaseId: solo.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+    assert.ok(bare.plan, "the solo task should have been given the repository");
+    assert.equal(bare.standingContext, undefined);
+
+    const { store, worker } = await seed(real.repository);
+    await store.saveRepositoryContext({
+      repositoryId: "repo_a",
+      content: "Run `npm test` before reporting.",
+      updatedBy: "user_nathan",
+    });
+
+    // Claimed: the plan comes, the planning hints do not, the note does.
+    const claimedLease = await leaseFor(store, worker, "work on quiet", real.version);
+    const claimed = await claimWorkRepository(
+      store,
+      { leaseId: claimedLease.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+    assert.ok(claimed.plan, "the solo task should have been given the repository");
+    assert.equal(claimed.planningContext, undefined);
+    assert.match(String(claimed.standingContext), /Standing context for this repository/u);
+    assert.match(String(claimed.standingContext), /Run `npm test` before reporting\./u);
+
+    // Contended: no plan, and the note comes beside the planning hints.
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a prefix to candidateOne",
+      real.version,
+    );
+    const contended = await claimWorkRepository(
+      store,
+      { leaseId: second.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+    assert.equal(contended.plan, undefined);
+    assert.ok(contended.planningContext);
+    assert.match(String(contended.standingContext), /Run `npm test` before reporting\./u);
+
+    // A lease against a revision the repository does not have gets nothing,
+    // note included: there is no run to seed.
+    const unresolvable = await leaseFor(store, worker, "work on quiet", {
+      ...real.version,
+      revision: "f".repeat(40),
+    });
+    assert.deepEqual(
+      await claimWorkRepository(
+        store,
+        { leaseId: unresolvable.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+        { blanketClaims: true },
+      ),
+      {},
+    );
+  } finally {
+    await real.cleanup();
+  }
+});
+
+/**
  * The other front door.
  *
  * Everything above drives the arrival through `LeasePlanAuthority.admit`,

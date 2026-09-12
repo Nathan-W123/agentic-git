@@ -47,6 +47,26 @@ interface AgentConfigBase {
    * only for non-secret values or externally managed short-lived credentials.
    */
   env?: Record<string, string>;
+  /**
+   * The model's context window, in tokens.
+   *
+   * Absent means occupancy is never judged: nothing in a vendor CLI's stream
+   * says how large the window is, and a figure guessed from a model name is
+   * wrong the week the vendor changes it. Without this an agent that can
+   * observe its window still notices a compaction the CLI already performed,
+   * which needs no threshold — it is the tool stating it could not fit.
+   */
+  maximumContextTokens?: number;
+  /**
+   * Whether a run may stop itself when its context window is nearly full and
+   * be requeued with a handoff. Defaults to true.
+   *
+   * Set false to keep a live-observing agent running to the end regardless:
+   * the handoff costs the attempt's unfinished edits, and a deployment that
+   * would rather have a degraded answer than a restart can say so. It has no
+   * effect on an agent that cannot observe its window.
+   */
+  contextHandoff?: boolean;
 }
 
 export interface GenericCliAgentConfig extends AgentConfigBase {
@@ -424,6 +444,33 @@ function assertAgentTimeout(
   return value;
 }
 
+/**
+ * Context windows are large and getting larger, so the ceiling is generous;
+ * the point of it is to refuse a figure that is a typo or a unit mistake —
+ * a window in characters, or one with a stray zero — before it silently
+ * disables the occupancy check by putting the threshold out of reach.
+ */
+const MAX_CONTEXT_WINDOW_TOKENS = 100_000_000;
+
+function assertMaximumContextTokens(
+  name: string,
+  value: number | undefined,
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    !Number.isSafeInteger(value) ||
+    value <= 0 ||
+    value > MAX_CONTEXT_WINDOW_TOKENS
+  ) {
+    fail(
+      `agent "${name}" needs "maximumContextTokens" to be a positive integer of at most ${MAX_CONTEXT_WINDOW_TOKENS}`,
+    );
+  }
+  return value;
+}
+
 export function assertProjectIdentifier(value: unknown, where: string): string {
   if (typeof value !== "string" || !IDENTIFIER.test(value)) {
     fail(
@@ -554,6 +601,12 @@ function assertAgent(name: string, value: unknown): AgentConfig {
   ) {
     fail(`agent "${name}" needs "args" to be an array of strings`);
   }
+  if (
+    agent.contextHandoff !== undefined &&
+    typeof agent.contextHandoff !== "boolean"
+  ) {
+    fail(`agent "${name}" needs "contextHandoff" to be true or false`);
+  }
   if (agent.env !== undefined) {
     if (typeof agent.env !== "object" || agent.env === null) {
       fail(`agent "${name}" needs "env" to be an object`);
@@ -584,6 +637,13 @@ function assertAgent(name: string, value: unknown): AgentConfig {
     ) === undefined
       ? {}
       : { executionTimeoutMs: agent.executionTimeoutMs }),
+    ...(assertMaximumContextTokens(name, agent.maximumContextTokens) ===
+    undefined
+      ? {}
+      : { maximumContextTokens: agent.maximumContextTokens }),
+    ...(agent.contextHandoff === undefined
+      ? {}
+      : { contextHandoff: agent.contextHandoff }),
   };
   if (agent.adapter === "codex") {
     const codexAgent = agent as Partial<CodexAgentConfig>;
@@ -1079,6 +1139,20 @@ export class CoordinatorProject {
 
   public get integrationRoot(): string {
     return path.join(this.directory, "integration");
+  }
+
+  /**
+   * Where the warm repository index is kept between restarts.
+   *
+   * Not one of the scratch roots above, and deliberately named apart from
+   * them: crash recovery wipes `workspaceRoot`, `planningRoot` and
+   * `integrationRoot` at boot because each holds a half-finished run's
+   * directories. This holds a cache of something that is still true — the
+   * index of a revision that is still canonical — and clearing it would give
+   * back exactly the cold first task the file exists to avoid.
+   */
+  public get indexRoot(): string {
+    return path.join(this.directory, "index");
   }
 
   /** Creates the project directory and a starter config if none exists. */

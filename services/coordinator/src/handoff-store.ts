@@ -1,5 +1,5 @@
 import type { CoordinationStore } from "@coord/persistence";
-import type { TaskHandoff } from "@coord/shared-types";
+import type { SequencedAuditEvent, TaskHandoff } from "@coord/shared-types";
 
 import {
   HANDOFF_AUDIT_TYPE,
@@ -65,7 +65,12 @@ export interface HandoffQuery {
  *
  * Reads the archive as well as the live log, because a handoff that has been
  * compacted out of the live log is still the best record of what happened and
- * a successor has no other way to learn it.
+ * a successor has no other way to learn it — but only when the live log did
+ * not already answer the question. `audit_events` is indexed by task, and
+ * `audit_archive` is indexed by checkpoint, so the archive leg is a filtered
+ * scan; a caller asking for one recent note is the common case and should not
+ * pay for it. The price of the short circuit is that the rarer call makes two
+ * round trips instead of one, which is the cheaper half of the trade.
  */
 export async function findTaskHandoffs(
   store: CoordinationStore,
@@ -76,16 +81,32 @@ export async function findTaskHandoffs(
     ...(query.taskId === undefined ? {} : { taskId: query.taskId }),
     ...(query.projectId === undefined ? {} : { projectId: query.projectId }),
   };
-  const [live, archived] = await Promise.all([
-    store.listAuditEvents(filter),
-    store.listArchivedAuditEvents(filter).catch(() => []),
-  ]);
+  const limit = query.limit ?? 5;
+  const live = await store.listAuditEvents(filter);
+  const fromLive = collectHandoffs(live, query);
+  if (fromLive.length >= limit) {
+    return fromLive.slice(0, limit);
+  }
+  const archived = await store.listArchivedAuditEvents(filter).catch(() => []);
+  if (archived.length === 0) {
+    return fromLive.slice(0, limit);
+  }
+  return collectHandoffs([...live, ...archived], query).slice(0, limit);
+}
 
+/**
+ * The handoffs in a batch of audit rows, newest first and deduplicated.
+ *
+ * Newest first because a successor wants the most recent state of the world,
+ * and a stale handoff read first is worse than no handoff at all.
+ */
+function collectHandoffs(
+  entries: readonly SequencedAuditEvent[],
+  query: HandoffQuery,
+): TaskHandoff[] {
   const handoffs: TaskHandoff[] = [];
   const seen = new Set<string>();
-  // Newest first: a successor wants the most recent state of the world, and a
-  // stale handoff read first is worse than no handoff at all.
-  for (const entry of [...live, ...archived].sort(
+  for (const entry of [...entries].sort(
     (left, right) => right.sequence - left.sequence,
   )) {
     const candidate = entry.event.data["handoff"];
@@ -114,7 +135,7 @@ export async function findTaskHandoffs(
     seen.add(key);
     handoffs.push(candidate);
   }
-  return handoffs.slice(0, query.limit ?? 5);
+  return handoffs;
 }
 
 /**
@@ -128,4 +149,40 @@ export async function seedContextForTask(
   query: HandoffQuery = {},
 ): Promise<string> {
   return renderHandoffContext(await findTaskHandoffs(store, query));
+}
+
+/**
+ * How many times one task may stop itself for context pressure.
+ *
+ * Two handoffs is a task that twice filled a window and was twice reseeded
+ * with everything the control plane knows about it. A third stop is a task
+ * that does not fit, and the honest ending for that is a failure that says so
+ * rather than a queue it circles forever.
+ */
+export const MAX_CONTEXT_HANDOFFS = 2;
+
+/**
+ * How many context handoffs this task has already spent.
+ *
+ * Counted from the audit log rather than from a column, because that is where
+ * the handoffs themselves live and a second source of truth for the same fact
+ * is a second thing to keep in step. The trade is the one stated above: a
+ * pruned archive segment resets the count, which costs at most one more budget
+ * for that task — cheaper than two migrations and a parity test for a number
+ * the log already holds.
+ *
+ * Reads the live log only. A task requeued for pressure is re-leased within
+ * minutes, so the archive would only matter for one left idle longer than the
+ * deployment's audit retention, and this runs on the lease path.
+ */
+export async function contextHandoffsUsed(
+  store: CoordinationStore,
+  taskId: string,
+): Promise<number> {
+  const events = await store.listAuditEvents({
+    types: [HANDOFF_AUDIT_TYPE],
+    taskId,
+  });
+  return events.filter((entry) => entry.event.data["reason"] === "long_running")
+    .length;
 }

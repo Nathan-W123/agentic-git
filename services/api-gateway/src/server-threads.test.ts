@@ -784,6 +784,84 @@ test("a request that merely opens a thread carries nothing; the follow-up in it 
   );
 });
 
+test("a long thread reaches the task cut to budget, and says where the cut is", async (t) => {
+  // The thread is carried under `THREAD_CONTEXT_TOKEN_BUDGET`, and what the
+  // budget could not hold is not dropped silently: the notice sits after the
+  // opening message, where the gap always starts, so the agent that reads
+  // history was omitted says so instead of answering from the half it holds.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "thread-context-elision");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "Rewrote src/retry.ts to back off exponentially.",
+  });
+  // Each reply is well under the per-entry cap, so entries are cut, not
+  // truncated; together they are several times the whole budget. Worded
+  // about nothing the request mentions, so relevance cannot recall them.
+  const aside =
+    "the tokenizer emits unicode escapes verbatim while the lexer folds " +
+    "surrogate pairs before the grammar sees them, and the printer keeps " +
+    "trailing commas wherever the original source had them, which is why " +
+    "the snapshot fixtures for the formatter differ between the two runs";
+  const filler = Array.from(
+    { length: 18 },
+    (_, index) => `Note ${String(index + 1)}: ${aside}; ${aside}.`,
+  );
+  for (const content of filler) {
+    await runtime.store.addChannelReply({
+      repositoryId,
+      messageId: root.id,
+      kind: "agent",
+      authorId: `${ownerId}:anthropic`,
+      content,
+    });
+  }
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: root.id,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "The config loader still retries in a tight loop.",
+  });
+
+  runtime.chatAnswer.text = "On it — updating the config loader.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "now update the config loader the same way" } },
+  );
+  assert.equal(replied.status, 201);
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "asking for work inside the long thread never dispatched anything",
+  );
+  const context = runtime.submittedTasks[0]?.context ?? "";
+  const bullets = context
+    .split("\n")
+    .filter((line) => line.startsWith("- "));
+  // The opening message first, the notice right after it, the newest last.
+  assert.match(bullets[0] ?? "", /Rewrote src\/retry\.ts/u);
+  assert.match(bullets[1] ?? "", /earlier messages? from this thread omitted here/u);
+  assert.match(bullets.at(-1) ?? "", /config loader still retries/u);
+  // Something really was left out, and the notice counts it: the thread
+  // had the root, the filler and the last reply; the bullets hold what was
+  // kept plus the notice itself.
+  const entries = filler.length + 2;
+  const kept = bullets.length - 1;
+  assert.ok(kept < entries, context);
+  const omitted = Number(/\((\d+) earlier/u.exec(bullets[1] ?? "")?.[1]);
+  assert.equal(omitted, entries - kept, context);
+});
+
 test("a follow-up to a busy thread agent queues behind its active task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

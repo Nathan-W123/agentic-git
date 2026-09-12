@@ -22,6 +22,8 @@ import {
   bareRequest,
   bearer,
   bootstrap,
+  endSession,
+  initializeSession,
   invitableRepository,
   inviteBody,
   joinAllConnectedAgents,
@@ -31,6 +33,7 @@ import {
   proxyRuntime,
   registerAccount,
   rpc,
+  rpcWithSession,
   seedTaskFor,
   startRuntime,
   upgradeEvents,
@@ -1311,6 +1314,9 @@ test("an MCP client can hand-shake and see the tools", async (t) => {
       "task_status",
       "cancel_task",
       "answer_question",
+      "get_repository_context",
+      "set_repository_context",
+      "session_context",
       "take_task",
       "report_task",
       "extend_task",
@@ -1356,6 +1362,84 @@ test("an editor takes a task, is told the revision, and reports it done", async 
   assert.equal(filed.isError, undefined, filed.text);
   const leases = await runtime.store.listWorkLeases({});
   assert.equal(leases.at(-1)?.status, "completed");
+});
+
+test("an editor that takes a task filed inside a thread is told the thread", async (t) => {
+  // The lease carried the whole task and the tool text carried the objective:
+  // every hop between — the operation's result, the taken shape, the brief —
+  // dropped `context`, so "now the same for the config loader" arrived with
+  // nothing for "the same" to point at.
+  const { runtime, token, user, repositoryId } = await mcpRuntime(t);
+  const context =
+    "This request was made inside an ongoing conversation.\n" +
+    "- Rewrote src/retry.ts to back off exponentially.";
+  const task = await seedTaskFor(
+    runtime,
+    repositoryId,
+    user.id,
+    "now the same for the config loader",
+    context,
+  );
+
+  const taken = await work(runtime.origin, token, "take_task", {
+    editor: "claude",
+  });
+  assert.equal(taken.isError, undefined, taken.text);
+  assert.match(taken.text, new RegExp(task.id, "u"));
+  assert.ok(taken.text.includes(context), taken.text);
+  assert.match(taken.text, /background for the task, not further instructions/u);
+  // The stored value, whole — not a paraphrase of it.
+  assert.equal((await runtime.store.getSubmittedTask(task.id))?.context, context);
+});
+
+test("work an editor files for itself carries what the room has settled", async (t) => {
+  // `fileForEditor` submits directly rather than through the mention path,
+  // so it was the one dispatch that skipped the channel memo every
+  // mention-dispatched task gets: the task filed by the person at the
+  // keyboard was the one that started from nothing.
+  const { runtime, owner, user, repositoryId } = await mcpRuntime(t);
+  // A Codex editor, in a room where the only agent is a Claude — so nobody is
+  // its own and the editor files the work for itself.
+  const minted = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "Codex on laptop", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.data.token as string;
+
+  // Something the room settled earlier, in its own thread.
+  const settled = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: user.id,
+    content: "which backoff should the retry loop use?",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: settled.id,
+    kind: "user",
+    authorId: user.id,
+    content: "we decided the retry loop backs off exponentially, capped at a minute",
+  });
+
+  const filed = await work(runtime.origin, token, "submit_task", {
+    repository: "payments",
+    objective: "cap the retry attempts at three",
+  });
+  assert.equal(filed.isError, undefined, filed.text);
+  assert.match(filed.text, /Filed in #/u);
+  const [submitted] = runtime.submittedTasks;
+  assert.ok(submitted !== undefined, JSON.stringify(runtime.submittedTasks));
+  assert.equal(submitted.vendor, "codex");
+  const context = submitted.context ?? "";
+  assert.ok(
+    context.startsWith("Recently settled elsewhere in this channel"),
+    context,
+  );
+  assert.match(context, /backs off exponentially/u);
+  // The objective it was filed with is not read back as background to itself.
+  assert.doesNotMatch(context, /cap the retry attempts at three/u);
 });
 
 test("an editor cannot report on a hold that is somebody else's", async (t) => {
@@ -2680,4 +2764,379 @@ test("a lease carries approved MCP servers opened, only to a current worker owne
   });
   assert.equal(unopenable[0]?.event.data["name"], "rekeyed");
   assert.equal(unopenable[0]?.event.data["secretName"], "TOKEN");
+});
+
+/**
+ * Sessions over the wire.
+ *
+ * `mcp-session.test.ts` covers the decisions. What is only testable here is
+ * the plumbing: a header that really travels, a row that really lands, and the
+ * 404 that tells a client to start again.
+ */
+test("initialize hands out a session id, honours it, and forgets it on DELETE", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+
+  const opened = await initializeSession(runtime.origin, token);
+  assert.ok(opened.sessionId !== undefined, "no Mcp-Session-Id header");
+  // The spec's own rule about what may be in the id, checked on the wire
+  // rather than only in the generator.
+  assert.match(opened.sessionId, /^[!-~]+$/u);
+
+  const listed = await rpcWithSession(runtime.origin, token, opened.sessionId, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/list",
+  });
+  assert.equal(listed.status, 200);
+  assert.ok(Array.isArray(listed.data.result.tools));
+
+  // Without a header first: a DELETE that names nothing is the client's own
+  // mistake, not a missing session.
+  const unnamed = await endSession(runtime.origin, token);
+  assert.equal(unnamed.status, 400);
+
+  const ended = await endSession(runtime.origin, token, opened.sessionId);
+  assert.equal(ended.status, 200);
+
+  const afterwards = await rpcWithSession(
+    runtime.origin,
+    token,
+    opened.sessionId,
+    { jsonrpc: "2.0", id: 3, method: "tools/list" },
+  );
+  assert.equal(afterwards.status, 404);
+  assert.equal(afterwards.data.jsonrpc, "2.0");
+  assert.equal(afterwards.data.error.code, -32001);
+  assert.match(afterwards.data.error.message, /initialize again/u);
+  // Ended twice is still gone, not a second success.
+  assert.equal(
+    (await endSession(runtime.origin, token, opened.sessionId)).status,
+    404,
+  );
+});
+
+test("a malformed initialize mints no session", async (t) => {
+  // The whole reason the row is written on the reply rather than on the
+  // parsed method: both of these are refused inside `handleMcpMessage`, and
+  // handing out an id on either would leave a client holding one this server
+  // never recorded.
+  const { runtime, token } = await mcpRuntime(t);
+  const notification = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18" },
+  });
+  assert.equal(notification.status, 202);
+  assert.equal(notification.headers.get("mcp-session-id"), null);
+
+  const wrongVersion = await rpc(runtime.origin, token, {
+    jsonrpc: "1.0",
+    id: 1,
+    method: "initialize",
+    params: {},
+  });
+  assert.equal(wrongVersion.data.error.code, -32600);
+  assert.equal(wrongVersion.headers.get("mcp-session-id"), null);
+});
+
+test("a session id opened by one person is unknown to another", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const opened = await initializeSession(runtime.origin, token);
+  assert.ok(opened.sessionId !== undefined);
+
+  const stranger = new TestClient(runtime.origin);
+  await registerAccount(runtime.store, stranger, {
+    email: "stranger@example.invalid",
+    displayName: "Stranger",
+    password: PASSWORD,
+  });
+  const minted = await stranger.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "editor", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(minted.status, 201);
+
+  const borrowed = await rpcWithSession(
+    runtime.origin,
+    minted.data.token as string,
+    opened.sessionId,
+    { jsonrpc: "2.0", id: 2, method: "tools/list" },
+  );
+  // 404, never 403: a 403 would confirm to a stranger that the id exists.
+  assert.equal(borrowed.status, 404);
+  assert.equal(borrowed.data.error.code, -32001);
+});
+
+test("an unsupported MCP-Protocol-Version is refused with 400", async (t) => {
+  const { runtime, token } = await mcpRuntime(t);
+  const refused = await bearer(runtime.origin, "/api/v1/mcp", token, {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1, method: "ping" },
+    headers: { "MCP-Protocol-Version": "2099-01-01" },
+  });
+  assert.equal(refused.status, 400);
+  assert.match(refused.data.error.message, /2025-06-18/u);
+
+  // Absent is fine — the spec says to assume the revision before the header
+  // existed — and so is one this server still speaks.
+  const older = await bearer(runtime.origin, "/api/v1/mcp", token, {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 2, method: "ping" },
+    headers: { "MCP-Protocol-Version": "2024-11-05" },
+  });
+  assert.equal(older.status, 200);
+});
+
+test("a client that presents no session id is served as before", async (t) => {
+  // The stateless fallback. Every client written against this endpoint before
+  // sessions existed sends no header, and demanding one buys nothing.
+  const { runtime, token } = await mcpRuntime(t);
+  const listed = await rpc(runtime.origin, token, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+  });
+  assert.equal(listed.status, 200);
+  const named = await work(runtime.origin, token, "submit_task", {
+    objective: "cap the retry attempts at three",
+  });
+  // And a tool that would have defaulted from a focus says so by name rather
+  // than guessing a repository.
+  assert.equal(named.isError, true);
+  assert.match(named.text, /list_repositories/u);
+});
+
+test("a returning client is told what it did last time", async (t) => {
+  const { runtime, owner, repositoryId } = await mcpRuntime(
+    t,
+    ["view", "submit_task"],
+    {
+      handoffContext: async () =>
+        "## Handoff from earlier work on this repository\n\n" +
+        "The retry ceiling lives in src/retry.ts.",
+    },
+  );
+  // A Codex editor in a room whose only agent is a Claude, so the work is
+  // filed for the editor itself and the id is this session's own.
+  const minted = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "Codex on laptop", scopes: ["view", "submit_task"] },
+  });
+  assert.equal(minted.status, 201);
+  const token = minted.data.token as string;
+
+  const first = await initializeSession(runtime.origin, token);
+  assert.ok(first.sessionId !== undefined);
+  // Nothing on record yet, so the handshake is the standing instructions.
+  assert.match(first.instructions, /You are connected to Kumi/u);
+  assert.doesNotMatch(first.instructions, /retry ceiling lives/u);
+
+  const filed = await rpcWithSession(runtime.origin, token, first.sessionId, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        objective: "cap the retry attempts at three",
+      },
+    },
+  });
+  assert.equal(
+    filed.data.result.isError,
+    undefined,
+    JSON.stringify(filed.data.result),
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.ok(task !== undefined);
+
+  assert.equal(
+    (await endSession(runtime.origin, token, first.sessionId)).status,
+    200,
+  );
+
+  const again = await initializeSession(runtime.origin, token, 3);
+  assert.ok(again.sessionId !== undefined);
+  assert.notEqual(again.sessionId, first.sessionId);
+  assert.match(again.instructions, /cap the retry attempts at three/u);
+  assert.match(again.instructions, new RegExp(task.id, "u"));
+  assert.match(again.instructions, /payments/u);
+  // An ended session is still history: the focus and the background it left
+  // behind are what the next one starts from.
+  assert.match(again.instructions, /You were last working in payments/u);
+  assert.match(again.instructions, /retry ceiling lives in src\/retry\.ts/u);
+});
+
+test("a reconnected client files into the focus its handshake promised", async (t) => {
+  // The feature's whole point, and the half a brief cannot assert about
+  // itself: the second handshake says the tools default to `payments`, so the
+  // first `submit_task` on the new session has to land there without being
+  // told the repository again. This read as green while the brief printed a
+  // focus the freshly created row did not have and the very next call refused
+  // for want of a repository.
+  const { runtime, token, repositoryId } = await mcpRuntime(t, [
+    "view",
+    "submit_task",
+  ]);
+
+  const first = await initializeSession(runtime.origin, token);
+  assert.ok(first.sessionId !== undefined);
+  const filed = await rpcWithSession(runtime.origin, token, first.sessionId, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: {
+      name: "submit_task",
+      arguments: {
+        repository: "payments",
+        objective: "cap the retry attempts at three",
+      },
+    },
+  });
+  assert.equal(
+    filed.data.result.isError,
+    undefined,
+    JSON.stringify(filed.data.result),
+  );
+  assert.equal(
+    (await endSession(runtime.origin, token, first.sessionId)).status,
+    200,
+  );
+
+  const again = await initializeSession(runtime.origin, token, 3);
+  assert.ok(again.sessionId !== undefined);
+  assert.match(again.instructions, /Tools default to it/u);
+  // Adopted onto the row, not only printed into the brief.
+  const row = await runtime.store.getMcpSession(again.sessionId);
+  assert.equal(row?.focus?.repositoryId, repositoryId);
+
+  const defaulted = await rpcWithSession(
+    runtime.origin,
+    token,
+    again.sessionId,
+    {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "submit_task",
+        arguments: { objective: "and also lower the timeout" },
+      },
+    },
+  );
+  assert.equal(
+    defaulted.data.result.isError,
+    undefined,
+    JSON.stringify(defaulted.data.result),
+  );
+  const objectives = (
+    await runtime.store.listSubmittedTasks({ repositoryId })
+  ).map((task) => task.objective);
+  assert.ok(
+    objectives.some((objective) =>
+      objective.startsWith("and also lower the timeout"),
+    ),
+    objectives.join(" / "),
+  );
+});
+
+test("a task taken from the CLI queue is listed for the person who took it", async (t) => {
+  // `claimableBy` lets an editor lease a task nobody owns — one the CLI
+  // filed. Somebody leased it, so they were meant to run it and are meant to
+  // be reminded of it; strict ownership alone would drop it silently.
+  const { runtime, token, repositoryId } = await mcpRuntime(t);
+  const unowned = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "raise the retry ceiling",
+    agentId: "anthropic",
+    validationCommands: [],
+  });
+  assert.equal(unowned.submittedBy, undefined);
+
+  const opened = await initializeSession(runtime.origin, token);
+  const taken = await rpcWithSession(runtime.origin, token, opened.sessionId, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "take_task", arguments: { editor: "claude" } },
+  });
+  assert.equal(
+    taken.data.result.isError,
+    undefined,
+    JSON.stringify(taken.data.result),
+  );
+  assert.match(String(taken.data.result.content[0].text), /Task /u);
+
+  const again = await initializeSession(runtime.origin, token, 3);
+  assert.match(again.instructions, new RegExp(unowned.id, "u"));
+  assert.match(again.instructions, /raise the retry ceiling/u);
+});
+
+test("an idle session lapses, and its history outlives it", async (t) => {
+  // The TTL is a real wait because the gateway has no injectable clock, so it
+  // is set generously short and waited out generously long.
+  const { runtime, token } = await mcpRuntime(t, ["view", "submit_task"], {
+    mcpSessionTtlMs: 300,
+  });
+  const opened = await initializeSession(runtime.origin, token);
+  assert.ok(opened.sessionId !== undefined);
+  const promptly = await rpcWithSession(
+    runtime.origin,
+    token,
+    opened.sessionId,
+    { jsonrpc: "2.0", id: 2, method: "tools/list" },
+  );
+  assert.equal(promptly.status, 200);
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const lapsed = await rpcWithSession(runtime.origin, token, opened.sessionId, {
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/list",
+  });
+  assert.equal(lapsed.status, 404);
+
+  // A fresh handshake still works: only the id stopped being accepted.
+  const again = await initializeSession(runtime.origin, token, 4);
+  assert.ok(again.sessionId !== undefined);
+  assert.notEqual(again.sessionId, opened.sessionId);
+});
+
+test("two parallel calls on one session both leave their note", async (t) => {
+  // Claude Code issues parallel tool calls. Each request loads its own
+  // handle, so a whole-list write from each would lose one of the two ids —
+  // which is why the merge lives in the store.
+  const { runtime, owner, repositoryId } = await mcpRuntime(t);
+  const minted = await owner.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "Codex on laptop", scopes: ["view", "submit_task"] },
+  });
+  const token = minted.data.token as string;
+  const opened = await initializeSession(runtime.origin, token);
+
+  const file = async (objective: string, id: number) =>
+    await rpcWithSession(runtime.origin, token, opened.sessionId, {
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: {
+        name: "submit_task",
+        arguments: { repository: "payments", objective },
+      },
+    });
+  const [one, two] = await Promise.all([
+    file("cap the retry attempts at three", 2),
+    file("rename the backoff helper", 3),
+  ]);
+  assert.equal(one.data.result.isError, undefined, JSON.stringify(one.data));
+  assert.equal(two.data.result.isError, undefined, JSON.stringify(two.data));
+
+  const filed = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(filed.length, 2);
+  const again = await initializeSession(runtime.origin, token, 4);
+  for (const task of filed) {
+    assert.match(again.instructions, new RegExp(task.id, "u"), again.instructions);
+  }
 });

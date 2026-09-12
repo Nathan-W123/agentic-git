@@ -37,6 +37,24 @@ export interface StartMessage {
   validationCommands: ValidationCommand[];
   /** Disposable canonical workspace available during planning. */
   workspacePath?: string;
+  /**
+   * The conversation this task was asked inside, oldest first, when there
+   * was one — `SubmittedTask.context` on the control plane. Background for
+   * what `objective` refers to ("the same thing", "that file"), not a second
+   * set of instructions. Absent for a task that was not asked in a thread.
+   */
+  context?: string;
+  /**
+   * Notes from earlier work — the thread again, then what the control plane
+   * already knows about the repository (handoffs, likely files, recent
+   * touches) — `StartTaskInput.priorContext`. Advisory: it was true at some
+   * earlier revision, and the workspace is what is true now. Absent when
+   * there is nothing to say.
+   *
+   * Both fields are additive and optional, so an agent that ignores unknown
+   * keys is unaffected; `objective` stays the stored objective verbatim.
+   */
+  priorContext?: string;
 }
 
 export interface PlanRequestMessage {

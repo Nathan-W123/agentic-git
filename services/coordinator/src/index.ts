@@ -6,6 +6,7 @@ export * from "./conflict-detector.js";
 export * from "./coordinator.js";
 export * from "./handoff.js";
 export * from "./handoff-store.js";
+export * from "./repository-context.js";
 export * from "./hunks.js";
 export * from "./metrics.js";
 export * from "./policy.js";

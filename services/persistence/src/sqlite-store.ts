@@ -25,6 +25,7 @@ import {
   type IntegrationResult,
   type IntegrationStatus,
   type ProjectId,
+  type RepositoryContext,
   type ResourceLease,
   type RiskLevel,
   type ScopeChangeDecision,
@@ -95,6 +96,9 @@ import type {
   McpServerRecord,
   McpServerScope,
   McpServerSecrets,
+  McpSessionFocus,
+  McpSessionRecord,
+  McpSessionTask,
   MergeSubChannelInput,
   Organization,
   OrganizationMembership,
@@ -109,6 +113,8 @@ import type {
   RunStatus,
   SaveSubChannelReviewInput,
   SaveWorkLeasePlanInput,
+  SaveRepositoryContextInput,
+  SaveRepositoryContextResult,
   SaveWorkLeasePlanResult,
   SessionRecord,
   SignupIntentRecord,
@@ -147,6 +153,7 @@ import {
   applyMcpSecretsPatch,
   directPairKey,
   mcpSecretNames,
+  mergeMcpSessionTasks,
   normalizeMcpRepositoryIds,
   parseChangedFiles,
   repositoryConflicts,
@@ -237,6 +244,16 @@ function integer(row: Row, column: string): number {
 
 function parseJson<T>(row: Row, column: string): T {
   return JSON.parse(text(row, column)) as T;
+}
+
+function toRepositoryContext(row: Row): RepositoryContext {
+  return {
+    repositoryId: text(row, "repository_id"),
+    content: text(row, "content"),
+    updatedBy: text(row, "updated_by"),
+    updatedAt: text(row, "updated_at"),
+    version: integer(row, "version"),
+  };
 }
 
 function optionalJson<T>(row: Row, column: string): T | undefined {
@@ -2348,6 +2365,142 @@ export class SqliteCoordinationStore implements CoordinationStore {
     );
   }
 
+  public async createMcpSession(
+    session: McpSessionRecord,
+    options: { keepPerUser?: number } = {},
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO mcp_sessions
+           (id, user_id, token_id, editor_vendor, client_name, client_version,
+            protocol_version, focus_json, tasks_json, created_at, last_seen_at,
+            expires_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        session.id,
+        session.userId,
+        session.tokenId ?? null,
+        session.editorVendor ?? null,
+        session.clientName ?? null,
+        session.clientVersion ?? null,
+        session.protocolVersion,
+        session.focus === undefined ? null : JSON.stringify(session.focus),
+        JSON.stringify(session.tasks),
+        session.createdAt,
+        session.lastSeenAt,
+        session.expiresAt,
+        session.endedAt ?? null,
+      );
+    const keep = options.keepPerUser;
+    if (keep === undefined || keep <= 0) {
+      return;
+    }
+    // Pruned on the way in rather than on a timer. A CLI client opens a
+    // session per task, so this table grows with the work somebody does; a
+    // sweep would be a handle held open for the life of the process to tidy
+    // rows only the next handshake will ever read.
+    this.db
+      .prepare(
+        `DELETE FROM mcp_sessions
+          WHERE user_id = ?
+            AND id NOT IN (
+              SELECT id FROM mcp_sessions
+               WHERE user_id = ?
+               ORDER BY last_seen_at DESC, rowid DESC
+               LIMIT ?)`,
+      )
+      .run(session.userId, session.userId, keep);
+  }
+
+  public async getMcpSession(
+    id: string,
+  ): Promise<McpSessionRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM mcp_sessions WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toMcpSession(row);
+  }
+
+  public async listMcpSessions(
+    userId: string,
+    options: { limit?: number; editorVendor?: string } = {},
+  ): Promise<McpSessionRecord[]> {
+    // The vendor orders rather than filters, and binds as NULL when there is
+    // none: NULL matches nothing under `=`, so every row falls into the same
+    // bucket and the ordering collapses to plain recency. Somebody whose only
+    // history is Claude Code still gets it when Codex connects.
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM mcp_sessions
+          WHERE user_id = ?
+          ORDER BY CASE WHEN editor_vendor = ? THEN 0 ELSE 1 END,
+                   last_seen_at DESC, rowid DESC
+          LIMIT ?`,
+      )
+      .all(userId, options.editorVendor ?? null, options.limit ?? 20) as Row[];
+    return rows.map((row) => this.toMcpSession(row));
+  }
+
+  public async updateMcpSession(
+    id: string,
+    patch: {
+      lastSeenAt: string;
+      expiresAt: string;
+      focus?: McpSessionFocus | undefined;
+      noteTasks?: { tasks: readonly McpSessionTask[]; max: number };
+      endedAt?: string;
+    },
+  ): Promise<void> {
+    const assignments = ["last_seen_at = ?", "expires_at = ?"];
+    const values: unknown[] = [patch.lastSeenAt, patch.expiresAt];
+    if ("focus" in patch) {
+      assignments.push("focus_json = ?");
+      values.push(patch.focus === undefined ? null : JSON.stringify(patch.focus));
+    }
+    if (patch.endedAt !== undefined) {
+      assignments.push("ended_at = ?");
+      values.push(patch.endedAt);
+    }
+    if (patch.noteTasks !== undefined) {
+      // Read, merged and written inside this method, which SQLite runs to
+      // completion before anything else touches the row. The caller sends
+      // only what it added: an editor issues parallel tool calls, and two
+      // requests each writing a whole list computed from their own read
+      // would each persist their own stale copy and lose a task id.
+      const existing = this.db
+        .prepare("SELECT tasks_json FROM mcp_sessions WHERE id = ?")
+        .get(id) as Row | undefined;
+      if (existing === undefined) {
+        return;
+      }
+      assignments.push("tasks_json = ?");
+      values.push(
+        JSON.stringify(
+          mergeMcpSessionTasks(
+            parseJson<McpSessionTask[]>(existing, "tasks_json"),
+            patch.noteTasks.tasks,
+            patch.noteTasks.max,
+          ),
+        ),
+      );
+    }
+    values.push(id);
+    this.db
+      .prepare(
+        `UPDATE mcp_sessions SET ${assignments.join(", ")} WHERE id = ?`,
+      )
+      .run(...(values as never[]));
+  }
+
+  public async deleteStaleMcpSessions(before: string): Promise<number> {
+    return Number(
+      this.db
+        .prepare("DELETE FROM mcp_sessions WHERE last_seen_at < ?")
+        .run(before).changes,
+    );
+  }
+
   /**
    * Deleting a repository deletes everything scoped to it, execution history
    * included.
@@ -2426,6 +2579,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .run(id);
       this.db
         .prepare("DELETE FROM auditor_cursors WHERE repository_id = ?")
+        .run(id);
+      this.db
+        .prepare("DELETE FROM repository_contexts WHERE repository_id = ?")
         .run(id);
       this.db
         .prepare("DELETE FROM repository_grants WHERE repository_id = ?")
@@ -5915,6 +6071,65 @@ public async recordBranchClaim(
       .run(repositoryId, paused ? 1 : 0, new Date().toISOString());
   }
 
+  public async getRepositoryContext(
+    repositoryId: string,
+  ): Promise<RepositoryContext | undefined> {
+    const row = this.db
+      .prepare(
+        `SELECT repository_id, content, updated_by, updated_at, version
+           FROM repository_contexts WHERE repository_id = ?`,
+      )
+      .get(repositoryId) as Row | undefined;
+    return row === undefined ? undefined : toRepositoryContext(row);
+  }
+
+  public async saveRepositoryContext(
+    input: SaveRepositoryContextInput,
+  ): Promise<SaveRepositoryContextResult> {
+    // Read-then-write under the same write lock, so a pinned save that
+    // passes the version check cannot be overtaken between the check and
+    // the upsert. `node:sqlite` is synchronous on one connection, which
+    // makes the pair atomic by itself; the transaction is what makes it
+    // visibly so, and what the Postgres store mirrors.
+    const owned = this.begin();
+    try {
+      const current = await this.getRepositoryContext(input.repositoryId);
+      if (
+        input.expectedVersion !== undefined &&
+        (current?.version ?? 0) !== input.expectedVersion
+      ) {
+        this.commit(owned);
+        return { outcome: "stale", current };
+      }
+      this.db
+        .prepare(
+          `INSERT INTO repository_contexts
+             (repository_id, content, updated_by, updated_at, version)
+           VALUES (?, ?, ?, ?, 1)
+           ON CONFLICT(repository_id) DO UPDATE SET
+             content = excluded.content,
+             updated_by = excluded.updated_by,
+             updated_at = excluded.updated_at,
+             version = repository_contexts.version + 1`,
+        )
+        .run(
+          input.repositoryId,
+          input.content,
+          input.updatedBy,
+          input.updatedAt ?? new Date().toISOString(),
+        );
+      const saved = await this.getRepositoryContext(input.repositoryId);
+      this.commit(owned);
+      if (saved === undefined) {
+        throw new Error("The standing context vanished as it was saved");
+      }
+      return { outcome: "saved", context: saved };
+    } catch (error) {
+      this.rollback(owned);
+      throw error;
+    }
+  }
+
   private toChannelMessageBase(
     row: Row,
   ): Omit<ChannelMessage, "replies" | "reactions"> {
@@ -6229,6 +6444,24 @@ public async recordBranchClaim(
       lastSeenAt: text(row, "last_seen_at"),
       ipAddress: text(row, "ip_address"),
       userAgent: text(row, "user_agent"),
+    };
+  }
+
+  private toMcpSession(row: Row): McpSessionRecord {
+    return {
+      id: text(row, "id"),
+      userId: text(row, "user_id"),
+      tokenId: optionalText(row, "token_id"),
+      editorVendor: optionalText(row, "editor_vendor"),
+      clientName: optionalText(row, "client_name"),
+      clientVersion: optionalText(row, "client_version"),
+      protocolVersion: text(row, "protocol_version"),
+      focus: optionalJson<McpSessionFocus>(row, "focus_json"),
+      tasks: parseJson<McpSessionTask[]>(row, "tasks_json"),
+      createdAt: text(row, "created_at"),
+      lastSeenAt: text(row, "last_seen_at"),
+      expiresAt: text(row, "expires_at"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 

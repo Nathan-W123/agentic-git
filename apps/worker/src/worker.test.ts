@@ -1,14 +1,27 @@
 import assert from "node:assert/strict";
 import type { PowerState } from "./power.js";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
 import type { CodexProcessRunner } from "@coord/adapter-codex";
+import type { PromptCliProcessRunner } from "@coord/adapter-prompt-cli";
 import { CoordinatorProject, mcpServerDigest } from "@coord/cli/project";
-import { workerOperations } from "@coord/cli/worker-operations";
+import {
+  MAX_CONTEXT_HANDOFFS,
+  workerOperations,
+} from "@coord/cli/worker-operations";
+import { findTaskHandoffs } from "@coord/coordinator";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
@@ -25,7 +38,11 @@ interface CachedPlanEntry {
 }
 
 import { WorkerClient } from "./client.js";
-import { Worker, workerScratchPath } from "./worker.js";
+import {
+  Worker,
+  workerScratchPath,
+  type IterationResult,
+} from "./worker.js";
 
 /**
  * The whole hosted-execution loop over real HTTP: a worker leases a task from
@@ -74,6 +91,14 @@ const AGENT = [
   "function finish(message) {",
   '  const file = path.join(message.workspacePath, ...target().split("/"));',
   '  fs.writeFileSync(file, "export const " + symbolName() + " = 2;\\n", "utf8");',
+  // What an agent leaves in a directory besides its edit: an install worth
+  // keeping and a secret that must not reach the next lease. Written only
+  // when the objective asks, so every other test is unchanged by it.
+  '  if (started.objective.includes("leave artefacts")) {',
+  '    fs.mkdirSync(path.join(message.workspacePath, "node_modules"), { recursive: true });',
+  '    fs.writeFileSync(path.join(message.workspacePath, "node_modules", "x.js"), "1\\n", "utf8");',
+  '    fs.writeFileSync(path.join(message.workspacePath, ".env"), "SECRET=1\\n", "utf8");',
+  "  }",
   "  send({",
   '    type: "done",',
   "    symbolsChanged: [symbolName()],",
@@ -208,6 +233,14 @@ async function startRuntime(t: TestContext): Promise<Runtime> {
       "utf8",
     );
   }
+  // A real .gitignore, because a warm slot's whole risk is what git does not
+  // see: without one, an agent's `.env` is untracked-but-visible and never
+  // reaches the case the scrub exists for.
+  await writeFile(
+    path.join(sourcePath, ".gitignore"),
+    ".env\nnode_modules/\n",
+    "utf8",
+  );
   await repositories.commitAll(sourcePath, "seed");
   const canonical = await repositories.importLocalRepository(
     sourcePath,
@@ -319,6 +352,49 @@ async function waitFor<T>(
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+/** Every warm slot directory under a worker's workspace root, in any repository. */
+async function warmSlots(runtime: Runtime): Promise<string[]> {
+  const warmRoot = path.join(runtime.root, "w", "warm");
+  const owners = await readdir(warmRoot).catch(() => []);
+  const found: string[] = [];
+  for (const owner of owners) {
+    const slots = await readdir(path.join(warmRoot, owner)).catch(() => []);
+    for (const slot of slots) {
+      found.push(path.join(warmRoot, owner, slot));
+    }
+  }
+  return found.sort();
+}
+
+/**
+ * Lands one task in the repository and answers with the slot it left behind,
+ * scrubbed and ready — the precondition of every test about what the *next*
+ * lease does with it.
+ */
+async function landedWarmSlot(runtime: Runtime, worker: Worker): Promise<string> {
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "edit src/value.js leave artefacts",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const landed = await worker.runOnce();
+  assert.equal(landed.accepted, true, landed.reason);
+  // Waiting on the scrub's own observable effect rather than on a timer: the
+  // pool owns the directory before it has finished settling it.
+  return await waitFor(async () => {
+    const [slot] = await warmSlots(runtime);
+    if (slot === undefined) {
+      return undefined;
+    }
+    const gone = await access(path.join(slot, ".env")).then(
+      () => false,
+      () => true,
+    );
+    return gone ? slot : undefined;
+  }, "the warm slot to be scrubbed");
 }
 
 test("lease ids cannot select or collapse the worker scratch root", () => {
@@ -1183,6 +1259,245 @@ test("a Codex worker uses the clone Git directory and configured model args", as
   assert.equal(
     settled?.plan?.plan.intent,
     "Increase the exported constant in the value module",
+  );
+});
+
+test("a remote worker keeps the thread as the conversation and planning hints as notes, and opens a conversational session", async (t) => {
+  // The worker used to join the thread and the control plane's planning
+  // hints into one string and pass it in both of the adapter's slots. The
+  // adapters read `task.context` back in every execution round as "the
+  // conversation this was asked inside", so a file list was presented to the
+  // model as something somebody said. And the worker never said the turn
+  // was conversational, so a Codex turn of a conversation was opened
+  // `--ephemeral` and the next turn had nothing to resume.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+
+  const thread =
+    "This request was made inside an ongoing conversation.\n" +
+    "- Rewrote src/value.js to export the value from a loader.";
+  const hints = "Files that declare the names the objective uses: src/value.js";
+  class ControlPlaneWithHints extends WorkerClient {
+    public override async claimRepository(
+      ...args: Parameters<WorkerClient["claimRepository"]>
+    ): ReturnType<WorkerClient["claimRepository"]> {
+      return { ...(await super.claimRepository(...args)), planningContext: hints };
+    }
+  }
+
+  const prompts: Array<{ args: string[]; prompt: string }> = [];
+  // The plan names the task it is for; set once each task has an id.
+  let taskId = "";
+  const runner: CodexProcessRunner = async (_executable, args, options) => {
+    const prompt = options?.input ?? "";
+    prompts.push({ args: [...args], prompt });
+    if (!prompt.includes("Implement the approved task")) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          taskId,
+          objective: "raise the value",
+          expectedFiles: ["src/value.js"],
+          expectedSymbols: ["value"],
+          dependencies: [],
+          commands: [],
+          externalAccess: [],
+          riskLevel: "low",
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    const cwd = options?.cwd;
+    assert.ok(cwd);
+    await writeFile(
+      path.join(cwd, "src", "value.js"),
+      "export const value = 5;\n",
+    );
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "raised in a conversation",
+      }),
+      stderr: "",
+      durationMs: 1,
+    };
+  };
+  const worker = makeWorker(runtime, {
+    client: new ControlPlaneWithHints({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+    codexRunner: runner,
+  });
+  await worker.register();
+
+  const conversational = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "now raise the value the same way",
+    agentId: "local",
+    validationCommands: [],
+    context: thread,
+    conversationId: "msg_thread_root",
+  });
+  taskId = conversational.id;
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(prompts.length, 2, JSON.stringify(prompts.map((p) => p.args)));
+  const [planning, execution] = prompts;
+  assert.ok(planning !== undefined && execution !== undefined);
+
+  // Planning is told both, thread first: it is about this request, where the
+  // hints are about the repository.
+  assert.ok(planning.prompt.includes(thread), planning.prompt);
+  assert.ok(planning.prompt.includes(hints), planning.prompt);
+  assert.ok(
+    planning.prompt.indexOf(thread) < planning.prompt.indexOf(hints),
+    planning.prompt,
+  );
+  // Execution is told the conversation and nothing that was not said in it.
+  assert.ok(execution.prompt.includes(thread), execution.prompt);
+  assert.equal(execution.prompt.includes(hints), false, execution.prompt);
+  // And the session was opened to be continued.
+  for (const { args } of prompts) {
+    assert.equal(args.includes("--ephemeral"), false, args.join(" "));
+  }
+
+  // A one-shot task on the same worker is still hermetic.
+  prompts.length = 0;
+  const once = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value once more",
+    agentId: "local",
+    validationCommands: [],
+  });
+  taskId = once.id;
+  const oneShot = await worker.runOnce();
+  assert.equal(oneShot.accepted, true, oneShot.reason);
+  assert.ok(prompts.length > 0);
+  for (const { args } of prompts) {
+    assert.equal(args.includes("--ephemeral"), true, args.join(" "));
+  }
+});
+
+test("a remote worker plans with the repository's standing context, between the thread and the hints, and executes without it", async (t) => {
+  // The claim route carries the note the repository's people wrote; the
+  // worker is the production path and used to be the one that never saw it.
+  // It rides in `priorContext` only — thread, then note, then hints, the
+  // in-process order — so the planning prompt reads it as background and no
+  // execution round is shown it as something said in the conversation.
+  // Planning-only is the limit of phase 1 on every path, and this pins it so
+  // it cannot regress silently into the transcript.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+  await runtime.store.saveRepositoryContext({
+    repositoryId: runtime.repositoryId,
+    content: "Run `npm test` before reporting; the value lives in src/value.js.",
+    updatedBy: "user_nathan",
+  });
+
+  const thread =
+    "This request was made inside an ongoing conversation.\n" +
+    "- Rewrote src/value.js to export the value from a loader.";
+  const hints = "Files that declare the names the objective uses: src/value.js";
+  class ControlPlaneWithHints extends WorkerClient {
+    public override async claimRepository(
+      ...args: Parameters<WorkerClient["claimRepository"]>
+    ): ReturnType<WorkerClient["claimRepository"]> {
+      // The real claim answer, note included, with the hints the estimator
+      // would have added on a repository large enough to anchor.
+      return { ...(await super.claimRepository(...args)), planningContext: hints };
+    }
+  }
+
+  const prompts: Array<{ args: string[]; prompt: string }> = [];
+  let taskId = "";
+  const runner: CodexProcessRunner = async (_executable, args, options) => {
+    const prompt = options?.input ?? "";
+    prompts.push({ args: [...args], prompt });
+    if (!prompt.includes("Implement the approved task")) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          taskId,
+          objective: "raise the value",
+          expectedFiles: ["src/value.js"],
+          expectedSymbols: ["value"],
+          dependencies: [],
+          commands: [],
+          externalAccess: [],
+          riskLevel: "low",
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    const cwd = options?.cwd;
+    assert.ok(cwd);
+    await writeFile(
+      path.join(cwd, "src", "value.js"),
+      "export const value = 6;\n",
+    );
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "raised",
+      }),
+      stderr: "",
+      durationMs: 1,
+    };
+  };
+  const worker = makeWorker(runtime, {
+    client: new ControlPlaneWithHints({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+    codexRunner: runner,
+  });
+  await worker.register();
+
+  const submitted = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+    context: thread,
+    conversationId: "msg_thread_root",
+  });
+  taskId = submitted.id;
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(prompts.length, 2, JSON.stringify(prompts.map((p) => p.args)));
+  const [planning, execution] = prompts;
+  assert.ok(planning !== undefined && execution !== undefined);
+
+  const heading = "## Standing context for this repository";
+  const threadAt = planning.prompt.indexOf(thread);
+  const noteAt = planning.prompt.indexOf(heading);
+  const hintsAt = planning.prompt.indexOf(hints);
+  assert.ok(threadAt >= 0 && noteAt >= 0 && hintsAt >= 0, planning.prompt);
+  assert.ok(threadAt < noteAt && noteAt < hintsAt, planning.prompt);
+  assert.ok(
+    planning.prompt.includes("Run `npm test` before reporting"),
+    planning.prompt,
+  );
+  // Execution is told the conversation, and nothing that was not said in it.
+  assert.ok(execution.prompt.includes(thread), execution.prompt);
+  assert.equal(execution.prompt.includes(heading), false, execution.prompt);
+  assert.equal(
+    execution.prompt.includes("Run `npm test` before reporting"),
+    false,
+    execution.prompt,
   );
 });
 
@@ -2305,4 +2620,497 @@ test("a blocked plan is narrowed against the refusal, not resubmitted", async (t
     ["src/other.js", "src/value.js"],
     ["src/value.js"],
   ]);
+});
+
+/**
+ * One real `compact_boundary` event, copied verbatim from
+ * `adapters/prompt-cli/src/recorded-stream.fixture.ts` — which was recorded
+ * from a run that really did compact — rather than written to match the
+ * parser. It is the whole of what a stopped round needs to emit: the tool has
+ * already discarded history by the time this line is printed.
+ */
+const COMPACT_BOUNDARY_LINE = JSON.stringify({
+  type: "system",
+  subtype: "compact_boundary",
+  compact_metadata: {
+    trigger: "auto",
+    pre_tokens: 69_478,
+    post_tokens: 22_823,
+    cumulative_dropped_tokens: 46_655,
+    duration_ms: 41_749,
+  },
+});
+
+/**
+ * A Claude-shaped CLI that plans, then fills its window instead of finishing.
+ *
+ * Injected rather than spawned: what is under test is what this worker
+ * *decides* when a session stops itself, and that must not depend on a vendor
+ * CLI being installed on the machine running the suite. The execution round
+ * waits to be aborted and answers the way a killed process does — exit 130,
+ * `aborted: true` — which is the shape the adapter tells a deliberate stop
+ * apart from a cancellation by.
+ */
+function fillsItsWindow(prompts: string[]): PromptCliProcessRunner {
+  return async (_executable, args, options = {}) => {
+    const prompt = String(options.input ?? "");
+    prompts.push(prompt);
+    if (args.includes("--permission-mode")) {
+      const taskId = /Task id: (\S+)/u.exec(prompt)?.[1] ?? "";
+      const plan = {
+        taskId,
+        objective: "raise the value",
+        expectedFiles: ["src/value.js"],
+        expectedSymbols: ["value"],
+        dependencies: [],
+        commands: [],
+        externalAccess: [],
+        riskLevel: "low",
+      };
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "```json\n" + JSON.stringify(plan) + "\n```",
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    options.onStdout?.(`${COMPACT_BOUNDARY_LINE}\n`);
+    // Bounded, so a round nobody stops finishes the way an unstoppable agent
+    // does — with the edit it was asked for — instead of hanging the suite.
+    // The injected runner has no timeout of its own; the real one's is the
+    // process's.
+    const deadline = Date.now() + 2_000;
+    while (options.signal?.aborted !== true && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    if (options.signal?.aborted !== true) {
+      await writeFile(
+        path.join(String(options.cwd), "src", "value.js"),
+        "export const value = 2;\n",
+        "utf8",
+      );
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: JSON.stringify({
+            outcome: "completed",
+            symbolsChanged: ["value"],
+            explanation: "raised the value",
+            requestId: "",
+            additionalFiles: [],
+            additionalSymbols: [],
+            additionalApis: [],
+            additionalSchemas: [],
+            additionalConfigKeys: [],
+            additionalTests: [],
+            additionalServices: [],
+            reason: "",
+          }),
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    return {
+      exitCode: 130,
+      stdout: "",
+      stderr: "",
+      durationMs: 1,
+      aborted: true,
+    };
+  };
+}
+
+/** A client that can hide the handoff budget, as an older control plane does. */
+class BudgetHidingClient extends WorkerClient {
+  public hideBudget = false;
+
+  public override async lease(
+    ...args: Parameters<WorkerClient["lease"]>
+  ): Promise<Awaited<ReturnType<WorkerClient["lease"]>>> {
+    const assignment = await super.lease(...args);
+    if (assignment === undefined || !this.hideBudget) {
+      return assignment;
+    }
+    const { contextHandoffsRemaining: _remaining, ...rest } = assignment;
+    return rest;
+  }
+}
+
+async function claudeShapedAgent(runtime: Runtime): Promise<void> {
+  runtime.project.config.agents = {
+    ...runtime.project.config.agents,
+    claude: { adapter: "claude", maximumContextTokens: 60_000 },
+  };
+  await runtime.project.save();
+}
+
+test("a session that filled its window is handed off, not failed", async (t) => {
+  // The whole point of the status: nothing went wrong, so nothing is failed.
+  // The lease is released — which is what returns the row to the queue — and
+  // the attempt after it is told where the last one got to rather than
+  // starting from the objective alone.
+  const runtime = await startRuntime(t);
+  await claudeShapedAgent(runtime);
+  const prompts: string[] = [];
+  // A fresh worker per attempt, which is what a requeued task meets: whoever
+  // polls next. One long-lived worker would answer its own second attempt out
+  // of the plan it cached for the first, which is a different path.
+  const attempt = async (): Promise<IterationResult> => {
+    const worker = makeWorker(runtime, {
+      promptCliRunner: fillsItsWindow(prompts),
+    });
+    await worker.register();
+    return await worker.runOnce();
+  };
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    // Vague on purpose: an objective naming a real path is granted the
+    // repository and never plans, and the planning prompt is where a handoff
+    // is delivered today.
+    objective: "raise the value",
+    agentId: "claude",
+    validationCommands: [],
+  });
+
+  const first = await attempt();
+  assert.equal(first.worked, true);
+  assert.equal(first.taskId, task.id);
+  assert.equal(first.handedOff, true, first.reason);
+  assert.equal(first.deferred, true);
+  assert.match(first.reason ?? "", /compacted its own context/u);
+
+  // Released and requeued, with the figures and the note on the record.
+  const leases = await runtime.store.listWorkLeases({});
+  assert.equal(leases[0]?.status, "released");
+  assert.equal(
+    (await runtime.store.listSubmittedTasks())[0]?.status,
+    "submitted",
+  );
+  const handedOff = (await runtime.store.listAudit()).find(
+    (event) => event.type === "task_handed_off",
+  );
+  assert.ok(handedOff, "the figures must be recorded before they are cited");
+  assert.equal(handedOff.taskId, task.id);
+  assert.equal(
+    (handedOff.data["pressure"] as { compactions: number }).compactions,
+    1,
+  );
+  const handoffs = await findTaskHandoffs(runtime.store, { taskId: task.id });
+  assert.equal(handoffs[0]?.reason, "long_running");
+
+  // The second attempt plans with the first attempt's note in front of it.
+  const second = await attempt();
+  assert.equal(second.handedOff, true, second.reason);
+  const planningPrompts = prompts.filter((prompt) =>
+    prompt.includes("Task id:"),
+  );
+  assert.equal(planningPrompts.length, 2, `${prompts.length} prompts in all`);
+  assert.match(String(planningPrompts[1]), /long_running/u);
+  assert.match(String(planningPrompts[1]), /stopped itself before finishing/u);
+
+  // Third time the budget is gone, so the run is not allowed to stop itself:
+  // a stop it could not be requeued from is a failure dressed up as a
+  // handoff, and the honest ending is whatever the attempt reaches.
+  const third = await attempt();
+  assert.equal(third.handedOff, undefined);
+  assert.equal(third.accepted, true, third.reason);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks())[0]?.status,
+    "integrated",
+  );
+  assert.equal(
+    (await runtime.store.listAudit()).filter(
+      (event) => event.type === "task_handed_off",
+    ).length,
+    MAX_CONTEXT_HANDOFFS,
+  );
+});
+
+test("a worker whose control plane never mentioned a budget never stops itself", async (t) => {
+  // The compatibility rule, enforced where the permission is granted:
+  // `contextHandoffsRemaining` on the assignment is how a worker knows a
+  // `handed_off` result will be answered rather than refused with a 400, and
+  // a 400 here would strand the lease until it expired. Absent, the adapter
+  // is simply never allowed to stop, so the run ends exactly as it did before
+  // this feature existed — compacted context and all.
+  const runtime = await startRuntime(t);
+  await claudeShapedAgent(runtime);
+  const client = new BudgetHidingClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+  });
+  client.hideBudget = true;
+  const worker = makeWorker(runtime, {
+    client,
+    promptCliRunner: fillsItsWindow([]),
+  });
+  await worker.register();
+
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "claude",
+    validationCommands: [],
+  });
+
+  const result = await worker.runOnce();
+  assert.equal(result.taskId, task.id);
+  assert.equal(result.handedOff, undefined);
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks())[0]?.status,
+    "integrated",
+  );
+  assert.equal(
+    (await runtime.store.listAudit()).some(
+      (event) => event.type === "task_handed_off",
+    ),
+    false,
+    "a control plane that never offered a budget must not be sent a handoff",
+  );
+});
+
+/**
+ * The worker is the product's primary executor, so its per-lease cost is the
+ * one that matters most: every lease used to clone into its own scratch and
+ * delete it in a `finally`, which meant the checkout was paid again per task
+ * and whatever the agent installed died with the lease.
+ *
+ * A landed lease's directory is kept instead, outside every scratch, scrubbed
+ * by the same rule the control plane uses.
+ */
+test("a landed lease leaves its directory warm for the next one", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+  const warmRoot = path.join(runtime.root, "w", "warm");
+
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "edit src/value.js leave artefacts",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const first = await worker.runOnce();
+  assert.equal(first.accepted, true, first.reason);
+
+  // The slot appears, and is scrubbed asynchronously once the pool owns it.
+  // Waiting on the scrub's own observable effect rather than on a timer.
+  const slot = await waitFor(async () => {
+    const repositories = await readdir(warmRoot).catch(() => []);
+    const owner = repositories[0];
+    if (owner === undefined) {
+      return undefined;
+    }
+    const slots = await readdir(path.join(warmRoot, owner)).catch(() => []);
+    const candidate = slots[0];
+    if (candidate === undefined) {
+      return undefined;
+    }
+    const slotPath = path.join(warmRoot, owner, candidate);
+    const gone = await access(path.join(slotPath, ".env")).then(
+      () => false,
+      () => true,
+    );
+    return gone ? slotPath : undefined;
+  }, "the warm slot to be scrubbed");
+
+  // The install survived; the secret did not.
+  await access(path.join(slot, "node_modules", "x.js"));
+  await assert.rejects(access(path.join(slot, ".env")));
+
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((entry) => String(entry)).join(" "));
+  };
+  let second;
+  try {
+    await runtime.store.submitTask({
+      repositoryId: runtime.repositoryId,
+      objective: "edit src/extra.js",
+      agentId: "local",
+      validationCommands: [],
+    });
+    second = await worker.runOnce();
+  } finally {
+    console.log = log;
+  }
+  assert.equal(second.accepted, true, second.reason);
+  assert.ok(
+    lines.some((line) => line.includes("workspace hit")),
+    `the second lease did not take the warm slot: ${lines.join(" | ")}`,
+  );
+  assert.ok(
+    lines.some((line) => line.includes("checkout(warm)")),
+    `the run did not name its warm checkout: ${lines.join(" | ")}`,
+  );
+
+  await worker.stop();
+});
+
+test("a lease that does not land leaves no warm slot behind", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "edit src/value.js leave artefacts",
+    agentId: "local",
+    // Accepted by the control plane and then refused by the gate: the worker
+    // reads `integrationStatus` rather than `accepted` for exactly this, and
+    // a directory nobody verified anything about is not one to hand on.
+    validationCommands: [
+      {
+        executable: process.execPath,
+        args: ["-e", "process.exit(1)"],
+        label: "always fails",
+      },
+    ],
+  });
+  await worker.runOnce();
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const warmRoot = path.join(runtime.root, "w", "warm");
+  const owners = await readdir(warmRoot).catch(() => []);
+  const slots = await Promise.all(
+    owners.map(async (owner) =>
+      (await readdir(path.join(warmRoot, owner)).catch(() => [])).length,
+    ),
+  );
+  assert.deepEqual(
+    slots.filter((count) => count > 0),
+    [],
+  );
+  // The scratch went, exactly as it always did.
+  const scratchRoots = (await readdir(path.join(runtime.root, "w"))).filter(
+    (entry) => entry.startsWith("lease-"),
+  );
+  assert.deepEqual(scratchRoots, []);
+
+  await worker.stop();
+});
+
+/**
+ * A question is leased from the same queue as work, ahead of it, and runs the
+ * same planning and execution machinery — so it reached the pool too, took
+ * the repository's slot, and then ended at the `return` in the question
+ * branch, which is before anything that could hand a directory back. The slot
+ * was gone from the pool and still on disk, and only the next worker start
+ * removed it.
+ */
+test("a question leaves the repository's warm slot for the next task", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+  const slot = await landedWarmSlot(runtime, worker);
+
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((entry) => String(entry)).join(" "));
+  };
+  let asked;
+  try {
+    await runtime.store.submitTask({
+      repositoryId: runtime.repositoryId,
+      objective: "what holds the value?",
+      agentId: "local",
+      validationCommands: [],
+      kind: "question",
+      answerTo: "msg_root",
+    });
+    asked = await worker.runOnce();
+  } finally {
+    console.log = log;
+  }
+  assert.equal(asked.accepted, true, asked.reason);
+
+  // Not a miss either: a question that consulted the pool at all would have
+  // been handed the slot, and the only honest outcome for it is to leave the
+  // pool alone.
+  assert.deepEqual(
+    lines.filter((line) => line.includes("[warm]")),
+    [],
+    `the question went to the pool: ${lines.join(" | ")}`,
+  );
+  assert.deepEqual(await warmSlots(runtime), [slot]);
+  // Still the directory the landed task paid for, install and all.
+  await access(path.join(slot, "node_modules", "x.js"));
+
+  await worker.stop();
+});
+
+/**
+ * The take happens near the start of `plan`, and a great deal after it can
+ * throw — the claim request below, a sandbox that will not start, a lost
+ * lease. The pool has already spliced its entry out by then, and the
+ * directory lives outside the lease's scratch, so a teardown that could only
+ * see a planning result it never got left a full checkout on disk forever,
+ * and the pool a slot short, until the process was restarted.
+ */
+test("a lease that fails while planning gives the warm slot back", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new WorkerClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+  });
+  // The first call this lease makes after it has been handed the directory,
+  // failed on the second lease only. A control plane that answers it with a
+  // 500 really does throw here, and everything between the take and the end
+  // of `plan` fails the same way.
+  const realClaim = client.claimRepository.bind(client);
+  let breakPlanning = false;
+  client.claimRepository = async (leaseId) => {
+    if (breakPlanning) {
+      throw new Error("the control plane could not prepare this claim");
+    }
+    return await realClaim(leaseId);
+  };
+  const worker = makeWorker(runtime, { client });
+  await worker.register();
+  await landedWarmSlot(runtime, worker);
+
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((entry) => String(entry)).join(" "));
+  };
+  let second;
+  try {
+    breakPlanning = true;
+    await runtime.store.submitTask({
+      repositoryId: runtime.repositoryId,
+      objective: "edit src/extra.js",
+      agentId: "local",
+      validationCommands: [],
+    });
+    second = await worker.runOnce();
+  } finally {
+    console.log = log;
+  }
+  assert.equal(second.accepted, false, lines.join(" | "));
+
+  assert.ok(
+    lines.some((line) => line.includes("workspace hit")),
+    `the failing lease never took the slot, so this proves nothing: ${lines.join(" | ")}`,
+  );
+  assert.deepEqual(await warmSlots(runtime), []);
+  const scratchRoots = (await readdir(path.join(runtime.root, "w"))).filter(
+    (entry) => entry.startsWith("lease-"),
+  );
+  assert.deepEqual(scratchRoots, []);
+
+  await worker.stop();
 });

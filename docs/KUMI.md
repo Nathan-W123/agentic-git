@@ -320,8 +320,18 @@ Add one line to Claude Code or Codex, then type *"have Kumi fix the login
 redirect"* in your editor. It lands in a Kumi channel thread, gets coordinated
 like anything else, and runs.
 
-Five tools: `submit_task`, `task_status`, `cancel_task`,
-`list_repositories`, `answer_question`.
+Twelve tools. Five to file and follow work — `list_repositories`,
+`submit_task`, `task_status`, `cancel_task`, `answer_question`; two for the
+repository's standing context, the note every agent planning there is handed —
+`get_repository_context`, `set_repository_context`; one for what this account
+has been doing — `session_context`; and four for an editor doing the work
+itself — `take_task`, `report_task`, `extend_task`, `task_progress`.
+
+A client that reconnects does not start from nothing: the endpoint issues an
+`Mcp-Session-Id`, and `initialize` answers with `instructions` carrying the
+repository that connection was last working in, the tasks it filed or took and
+how they ended, and that repository's handoffs and standing context. See
+[editor work](protocol/editor-work.md).
 
 Hand-rolled JSON-RPC 2.0 — no SDK dependency.
 
@@ -349,7 +359,7 @@ services/
   api-gateway         HTTP + WebSocket; auth, routing, channels, MCP
   coordinator         admission, claims, arbitration
   workspace-manager   worktrees, isolation, changeset collection
-  persistence         three interchangeable stores
+  persistence         two interchangeable stores
   repository-service  git
   code-intelligence   symbol indexing
   integration-service canonical merge
@@ -364,9 +374,9 @@ adapters/
 
 ### Persistence
 
-Three implementations — **in-memory**, **SQLite**, **Postgres** — behind one
-interface, verified by a shared contract test suite run against all three.
-**57 forward migrations.**
+Two implementations — **SQLite** (`:memory:` for tests and the in-process
+default) and **Postgres** — behind one interface, verified by a shared
+contract test suite run against both. **67 forward migrations.**
 
 ### Tenancy
 

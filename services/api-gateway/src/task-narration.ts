@@ -732,6 +732,15 @@ export function narrateTaskEvent(
     }
     case "replan_requested":
       return "Something moved underneath me; re-planning against the latest code.";
+    case "task_handed_off":
+      // Deliberately not in `CHANNEL_TERMINAL_EVENTS`: the task is not over,
+      // it is between attempts, and retiring the thread's state here would
+      // leave the run that follows with nowhere to report.
+      return (
+        "My context window was nearly full, so I stopped at a safe point, " +
+        "wrote down where I had got to, and put this back in the queue to " +
+        "carry on fresh."
+      );
     case "lease_expired":
       // Not a failure: the task goes back in the queue and is picked up
       // again. But it is the one ending that used to say nothing at all —

@@ -653,3 +653,54 @@ test("absent consent is a refusal, and a list is only what it names", () => {
     false,
   );
 });
+
+test("a context window is a positive count of tokens, and handoff is a switch", () => {
+  // The window is never guessed from a model name, so a typo here is the one
+  // way it goes wrong: a figure in characters, or one with a stray zero, puts
+  // the occupancy threshold out of reach and silently disables the check the
+  // operator thought they had turned on.
+  const config = assertProjectConfig({
+    ...VALID,
+    agents: {
+      claude: {
+        adapter: "claude",
+        maximumContextTokens: 200_000,
+        contextHandoff: false,
+      },
+      codex: { adapter: "codex", maximumContextTokens: 272_000 },
+    },
+    defaultAgent: "claude",
+  });
+  assert.deepEqual(config.agents.claude, {
+    adapter: "claude",
+    maximumContextTokens: 200_000,
+    contextHandoff: false,
+  });
+  assert.deepEqual(config.agents.codex, {
+    adapter: "codex",
+    maximumContextTokens: 272_000,
+  });
+  for (const bad of [0, -1, 1.5, 100_000_001]) {
+    assert.throws(
+      () =>
+        assertProjectConfig({
+          ...VALID,
+          agents: {
+            claude: { adapter: "claude", maximumContextTokens: bad },
+          },
+        }),
+      /"maximumContextTokens" to be a positive integer/u,
+      `accepted ${bad}`,
+    );
+  }
+  assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        agents: {
+          claude: { adapter: "claude", contextHandoff: "no" } as never,
+        },
+      }),
+    /"contextHandoff" to be true or false/u,
+  );
+});

@@ -82,8 +82,11 @@ import {
 import { registerBlanketHolder } from "./blanket-holders.js";
 import {
   GitWorktreeWorkspaceManager,
+  warmBackendFor,
   type AdvanceWorkspaceInput,
   type TaskWorkspace,
+  type WarmDependencies,
+  type WarmWorkspacePool,
   type WorkspaceManager,
 } from "@coord/workspace-manager";
 
@@ -94,7 +97,13 @@ import {
 } from "./approval-service.js";
 import { InMemoryAuditLog } from "./audit-log.js";
 import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
-import { seedContextForTask } from "./handoff-store.js";
+import { buildTaskHandoff, renderHandoffContext } from "./handoff.js";
+import {
+  contextHandoffsUsed,
+  findTaskHandoffs,
+  MAX_CONTEXT_HANDOFFS,
+  recordTaskHandoff,
+} from "./handoff-store.js";
 import { OwnershipService } from "./ownership-service.js";
 import {
   type ChangeSetSplit,
@@ -105,6 +114,10 @@ import {
   approvedSchemaResources,
   structuralConflict,
 } from "./plan-admission.js";
+import {
+  derivePitfalls,
+  standingContextForTask,
+} from "./repository-context.js";
 import {
   assessReplay,
   residualAdvance,
@@ -394,6 +407,15 @@ interface PlannedTask extends CoordinatedTask {
    * freeze has something to narrow to before the agent's first write.
    */
   blanketEstimate?: readonly string[];
+  /**
+   * Set when the session stopped itself on a full context window.
+   *
+   * Carried on the entry rather than thrown, because an event handler that
+   * threw would reach the failure path and record a `task_failed` — and this
+   * is the opposite of a failure. The execution block reads it after the
+   * event chain drains and requeues the task instead of collecting changes.
+   */
+  contextHandoff?: Extract<AgentEvent, { event: "context_handoff_requested" }>;
 }
 
 interface PreparedTask extends PlannedTask {
@@ -659,6 +681,16 @@ export interface CoordinatorDependencies {
    * which is all a single-invocation caller needs.
    */
   conversations?: ConversationRegistry;
+  /**
+   * Where a landed task's directory goes instead of being destroyed.
+   *
+   * Injectable for the reason the conversation registry is: a coordinator is
+   * built per run, and a warm directory is only worth keeping because it
+   * outlives the run that made it. A long-lived host makes one pool per
+   * process; absent, every task creates and destroys its own workspace
+   * exactly as before.
+   */
+  warmWorkspaces?: WarmWorkspacePool;
   /**
    * Who arbitrates this run's plans against work running *outside* it.
    *
@@ -1308,6 +1340,16 @@ export class Coordinator {
   private readonly questions: QuestionController | undefined;
   private readonly questionDeadlineMs: number;
   private readonly conversations: ConversationRegistry;
+  /** See {@link CoordinatorDependencies.warmWorkspaces}. */
+  private readonly warmWorkspaces: WarmWorkspacePool | undefined;
+  /**
+   * Whether this run's starting revision was already indexed when it began.
+   *
+   * Read once per run and then written onto every `task_started`, because
+   * there is no run-level audit event to hang it on. A five-task run
+   * therefore reports it five times — see the note on `WarmStartMetrics`.
+   */
+  private indexStart: "warm" | "cold" = "cold";
   private readonly planAuthority: PlanAuthority | undefined;
   private readonly actionAuthority: ActionAuthority | undefined;
   private readonly cancellations: TaskCancellationRegistry | undefined;
@@ -1355,6 +1397,7 @@ export class Coordinator {
           ? {}
           : { maxSessions: dependencies.maxConversationSessions }),
       });
+    this.warmWorkspaces = dependencies.warmWorkspaces;
     this.planAuthority = dependencies.planAuthority;
     this.actionAuthority = dependencies.actionAuthority;
     this.cancellations = dependencies.cancellations;
@@ -1379,6 +1422,15 @@ export class Coordinator {
     const initialVersion = await this.repositories.getCanonicalVersion(
       input.repository,
     );
+    // Asked once, before anything is planned, because that is the question:
+    // did this run's first planning read have to walk the repository, or was
+    // the revision already indexed by the promotion that created it?
+    this.indexStart = (await this.intelligence.isWarm(
+      input.repository,
+      initialVersion.revision,
+    ))
+      ? "warm"
+      : "cold";
     const recorder =
       this.store === undefined
         ? undefined
@@ -2004,16 +2056,50 @@ export class Coordinator {
           // and wrote down. The handoffs have been recorded at every task
           // boundary all along; this is the first thing to read them back.
           //
+          // One read, deliberately. `findTaskHandoffs` reads the whole
+          // type-filtered audit log whatever `limit` it is given — the
+          // filter has no repository column — so the five handoffs the seed
+          // shows and the twenty-five the pitfall tallies count come out of
+          // the same array rather than costing the log twice per task.
+          //
           // Never allowed to stop a run: seeding is an advantage, and a task
           // that cannot read old notes should still do the work.
-          const seeded =
+          const handoffs =
             this.store === undefined
-              ? ""
-              : await seedContextForTask(this.store, {
+              ? []
+              : await findTaskHandoffs(this.store, {
                   repositoryId: input.repository.id,
                   ...(input.projectId === undefined
                     ? {}
                     : { projectId: input.projectId }),
+                  limit: 25,
+                }).catch(() => []);
+          // This task's own record, when it has one — it was requeued after
+          // stopping itself on a full window, and the note it left is where
+          // the work actually got to. Read out of the array already fetched,
+          // and lifted out of the repository-wide seed below so the same
+          // handoff is not shown twice under two headings; the seed's limit
+          // of five is a window a task's own note could otherwise fall out
+          // of entirely.
+          const own = handoffs.filter(
+            (handoff) => handoff.taskId === entry.task.id,
+          );
+          const ownHandoff = renderHandoffContext(own.slice(0, 1));
+          const seeded = renderHandoffContext(
+            handoffs
+              .filter((handoff) => handoff.taskId !== entry.task.id)
+              .slice(0, 5),
+          );
+          const pitfalls = derivePitfalls(handoffs);
+          // What the people who work here wrote for every agent that plans
+          // here. The one block of prior context a person authored — see
+          // `repository-context.ts` for why that squares with the
+          // evidence-only rule the handoffs keep.
+          const standing =
+            this.store === undefined
+              ? ""
+              : await standingContextForTask(this.store, {
+                  repositoryId: input.repository.id,
                 }).catch(() => "");
           // The conversation this request was asked inside, ahead of what
           // earlier tasks left behind. Both are background rather than fact,
@@ -2022,6 +2108,18 @@ export class Coordinator {
           // gets its meaning — while a handoff is about the repository in
           // general. Nearest first, so the thing being asked for survives any
           // truncation the model does at the far end.
+          //
+          // The same rule orders the rest, with one deliberate exception.
+          // The turn-start note and the leases are about this task and
+          // follow the thread. The standing note comes next, ahead of the
+          // file estimates and recent touches: it is about the repository in
+          // general, but it is the one block a person wrote and stands
+          // behind, where the estimates are the control plane's guesses —
+          // and it is the order the remote worker builds after
+          // `claimRepository` (`worker.ts`), which has no estimates of its
+          // own and must not end up with a different prompt for the same
+          // task. Then the handoffs, older per-task projections, and the
+          // derived tallies last because they are the least specific.
           // What other in-flight tasks already hold, told to the agent
           // *before* it plans. Admission would trim or defer a plan that
           // reaches into leased files anyway — this makes the agent route
@@ -2134,9 +2232,12 @@ export class Coordinator {
             entry.task.context?.trim() ?? "",
             turnStart.note,
             leaseNote,
+            ownHandoff,
+            standing,
             likelyFiles,
             recentTouchPoints(recentlyTouched),
             seeded,
+            pitfalls,
           ]
             .filter((part) => part !== "")
             .join("\n\n");
@@ -3695,18 +3796,42 @@ export class Coordinator {
       // most of what makes a second turn faster than a first. The advance
       // lands exactly on waveVersion, so the changeset base check below
       // holds for a continued turn the same way it does for a fresh one.
-      workspace =
-        entry.resumed === undefined
-          ? await this.workspaces.create({
-              taskId: entry.task.id,
-              rootPath: input.workspaceRoot,
-              repository: input.repository,
-              baseVersion: waveVersion,
-            })
-          : await this.advanceWorkspace(entry.resumed.workspace, {
-              taskId: entry.task.id,
-              baseVersion: waveVersion,
-            });
+      //
+      // A task that is not resuming anything asks the pool first. What comes
+      // back is a directory a task that landed left behind, scrubbed to a
+      // verified-clean checkout and re-based on this wave's canonical, so it
+      // is the same starting point `create` would have produced minus the
+      // checkout — and, where the host prepares them, minus the install too.
+      let workspaceStart: "warm" | "cold" | "resumed";
+      let dependencies: WarmDependencies | undefined;
+      if (entry.resumed === undefined) {
+        const warm = await this.warmWorkspaces?.take({
+          taskId: entry.task.id,
+          rootPath: input.workspaceRoot,
+          repository: input.repository,
+          baseVersion: waveVersion,
+        });
+        workspace =
+          warm?.workspace ??
+          (await this.workspaces.create({
+            taskId: entry.task.id,
+            rootPath: input.workspaceRoot,
+            repository: input.repository,
+            baseVersion: waveVersion,
+          }));
+        workspaceStart = warm === undefined ? "cold" : "warm";
+        dependencies = warm?.dependencies;
+      } else {
+        workspace = await this.advanceWorkspace(entry.resumed.workspace, {
+          taskId: entry.task.id,
+          baseVersion: waveVersion,
+        });
+        // Not "warm": a conversation keeping its own directory between turns
+        // is a different mechanism with different rules — it keeps untracked
+        // files on purpose — and counting it as a pool hit would make the
+        // pool look like it was working on a deployment where it is off.
+        workspaceStart = "resumed";
+      }
       entry.decision.workspaceId = workspace.id;
       this.taskWorkspacePaths.set(entry.task.id, workspace.path);
       this.taskWorkspaces.set(entry.task.id, workspace);
@@ -3724,6 +3849,9 @@ export class Coordinator {
         workspaceId: workspace.id,
         baseRevision: waveVersion.revision,
         planRevision: entry.planRevision,
+        workspaceStart,
+        indexStart: this.indexStart,
+        ...(dependencies === undefined ? {} : { dependencies }),
       });
 
       const eventErrors: unknown[] = [];
@@ -3869,6 +3997,21 @@ export class Coordinator {
         } catch {
           // Unpriced work still lands.
         }
+      }
+      // The session stopped itself rather than finishing. Nothing is
+      // collected: the edits of a stopped round are half-finished by
+      // definition, and the requeued task starts from a fresh workspace with
+      // a handoff naming where the work got to.
+      if (entry.contextHandoff !== undefined) {
+        return await this.handOffForContext(
+          input,
+          entry,
+          waveVersion,
+          workspace,
+          entry.contextHandoff,
+          recorder,
+          runAudit,
+        );
       }
       let changeSet = await entry.adapter.collectChanges(entry.session.id);
       if (
@@ -4117,6 +4260,118 @@ export class Coordinator {
   }
 
   /**
+   * Returns a task to the queue because its window filled, or fails it
+   * because it has done that too often.
+   *
+   * The remote driver does the same thing in `requeueForContextHandoff`, and
+   * the two must not drift: the audit event is written *first*, so every
+   * figure the handoff cites has a record to be checked against, and the
+   * handoff is written before the task is requeued, so the next attempt
+   * cannot start without it. In process there is no lease to release — the
+   * runner that owns the durable row reads a `queued` result and releases or
+   * retries it, which is the same primitive an empty admission already uses.
+   *
+   * The budget is counted from the audit log by the same helper the remote
+   * path uses, so a task that hands off once in process and once on a worker
+   * has spent two of its two.
+   */
+  private async handOffForContext(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    waveVersion: CanonicalVersion,
+    workspace: TaskWorkspace,
+    event: Extract<AgentEvent, { event: "context_handoff_requested" }>,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<TaskExecutionResult> {
+    const store = this.store;
+    const used =
+      store === undefined
+        ? 0
+        : await contextHandoffsUsed(store, entry.task.id).catch(() => 0);
+    const attempt = used + 1;
+    const pressure = {
+      ...event.pressure,
+      attempt,
+      budget: MAX_CONTEXT_HANDOFFS,
+    };
+    let explanation =
+      used >= MAX_CONTEXT_HANDOFFS
+        ? `The context window filled ${used} times already, which is the ` +
+          "budget for one task; the objective does not fit and was failed " +
+          "rather than requeued again"
+        : "The context window was nearly full, so the run stopped at a tool " +
+          "boundary and the task was returned to the queue with a handoff";
+    const cleanupFailure = await this.cleanupTask(
+      entry,
+      workspace,
+      recorder,
+      runAudit,
+    );
+    if (cleanupFailure !== undefined) {
+      explanation += `; ${cleanupFailure}`;
+    }
+    const exhausted = used >= MAX_CONTEXT_HANDOFFS;
+    await this.trace(
+      recorder,
+      runAudit,
+      exhausted ? "task_failed" : "task_handed_off",
+      entry.task.id,
+      {
+        repositoryId: input.repository.id,
+        ...(input.projectId === undefined
+          ? {}
+          : { projectId: input.projectId }),
+        ...(exhausted
+          ? { stage: "context_handoff_budget", error: explanation }
+          : {
+              reason: event.reason,
+              remaining: MAX_CONTEXT_HANDOFFS - attempt,
+            }),
+        pressure: event.pressure,
+        attempt,
+      },
+    );
+    if (store !== undefined) {
+      // Best effort, like every other handoff write: a task that could not
+      // leave a note is still a task whose ending must be reported.
+      await recordTaskHandoff(
+        store,
+        buildTaskHandoff({
+          taskId: entry.task.id,
+          objective: entry.task.objective,
+          repositoryId: input.repository.id,
+          ...(input.projectId === undefined
+            ? {}
+            : { projectId: input.projectId }),
+          canonicalRevision: waveVersion.revision,
+          ...(entry.admission === undefined
+            ? {}
+            : { admission: entry.admission }),
+          decision: entry.decision,
+          reason: exhausted ? "failed" : "long_running",
+          ...(exhausted ? { failure: explanation } : {}),
+          contextPressure: pressure,
+        }),
+      ).catch(() => undefined);
+    }
+    await recorder?.status(
+      entry.task.id,
+      exhausted ? "failed" : "queued",
+      explanation,
+    );
+    return {
+      task: entry.task,
+      plan: entry.plan,
+      decision: exhausted
+        ? entry.decision
+        : { ...entry.decision, decision: "queued", explanation },
+      status: exhausted ? "failed" : "queued",
+      explanation,
+    };
+  }
+
+  /**
    * Puts an agent's question to whoever is watching, and bounds the wait.
    *
    * The deadline is the whole design. A question costs more than a message:
@@ -4248,6 +4503,19 @@ export class Coordinator {
         recorder,
         runAudit,
       );
+      return;
+    }
+    if (event.event === "context_handoff_requested") {
+      // Recorded here and acted on after the event chain drains. Handled
+      // explicitly rather than left to the scope-change fallthrough below,
+      // which would read `additionalFiles` off an event that has none and
+      // fail the task with a TypeError instead of requeueing it.
+      entry.contextHandoff = event;
+      await this.trace(recorder, runAudit, "agent_progress", entry.task.id, {
+        message: `context handoff requested: ${event.reason}`,
+        pressure: event.pressure,
+        occurredAt: event.occurredAt,
+      });
       return;
     }
     if (event.event === "replan_proposed") {
@@ -5290,6 +5558,14 @@ export class Coordinator {
             files: result.changeSet.patches.map((patch) => patch.path),
           },
         );
+        // Index the revision that has just become canonical, now, while
+        // nothing is waiting on it. The next run's planning is its first
+        // reader and reads it on the critical path; `describeCanonicalAdvance`
+        // only builds it when some task is already waiting, so for a
+        // promotion that lands with nobody waiting this build is new work
+        // rather than a duplicate of work already happening. Nothing waits
+        // for it — see {@link CodeIntelligenceService.prewarm}.
+        this.intelligence.prewarm(input.repository, integration.canonicalVersion);
         await this.holdOnBranch(input, result, integration);
         // Only now, with the granted half durably in canonical, does the half
         // that was withheld become work of its own. Queued earlier it would
@@ -5489,6 +5765,10 @@ export class Coordinator {
         result.workspace,
         recorder,
         runAudit,
+        // The one settlement that knows the task landed. `empty` settles as
+        // integrated too — a task that found nothing to do still leaves a
+        // directory nobody has damaged.
+        { retainWorkspace: taskResult.status === "integrated" },
       );
     }
     if (cleanupFailure !== undefined) {
@@ -6200,6 +6480,7 @@ export class Coordinator {
     workspace: TaskWorkspace | undefined,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
+    options: { retainWorkspace?: boolean } = {},
   ): Promise<string | undefined> {
     const taskId = entry.task.id;
     const failures: string[] = [];
@@ -6223,7 +6504,23 @@ export class Coordinator {
     } catch (error) {
       failures.push(`agent session: ${errorMessage(error)}`);
     }
-    if (workspace !== undefined) {
+    // Only a task that landed offers its directory back, and only the caller
+    // that knows the outcome asks for it. Every other caller of this method
+    // is a failure path — a planning refusal, an execution failure, the park
+    // fallback — and a failed task's agent process can outlive the cancel
+    // above, so its directory may still be being written to. `retain` is
+    // synchronous about ownership: false means the pool declined and this
+    // teardown still owns the directory.
+    const backend =
+      this.warmWorkspaces === undefined
+        ? undefined
+        : warmBackendFor(this.workspaces);
+    const retained =
+      options.retainWorkspace === true &&
+      workspace !== undefined &&
+      backend !== undefined &&
+      this.warmWorkspaces?.retain(backend, workspace) === true;
+    if (workspace !== undefined && !retained) {
       try {
         await this.workspaces.destroy(workspace);
       } catch (error) {

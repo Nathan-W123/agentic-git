@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { McpSessionRecord } from "@coord/persistence";
+
 import { McpArgumentError } from "./mcp.js";
+import { McpSessionHandle } from "./mcp-session.js";
 import {
   createMcpWorkTools,
   editorBehind,
   splitUnifiedDiff,
+  takenTaskBrief,
+  type McpTakenTask,
   type McpWorkDeps,
 } from "./mcp-work.js";
 
@@ -292,6 +297,8 @@ test("a task that was taken comes back with the revision and how to reach it", a
     take: async () => ({
       taskId: "task-9",
       objective: "Fix the login redirect",
+      projectId: "project_local",
+      repositoryId: "payments",
       repository: "payments",
       branch: "main",
       baseRevision: "a".repeat(40),
@@ -310,6 +317,52 @@ test("a task that was taken comes back with the revision and how to reach it", a
   assert.match(text, /mcp\/bundle\/ticket-1/u);
   assert.match(text, /npm test/u);
   assert.match(text, /report_task/u);
+});
+
+test("a taken task's brief carries the conversation it was asked inside, between the objective and the repository", () => {
+  // A follow-up filed inside a thread — "now the same for the config loader"
+  // — reached an editor as that one sentence. The vendor adapters had been
+  // given the thread since it was first carried; the editor path was the one
+  // that dropped it, at every hop from the lease to this brief.
+  const bare: McpTakenTask = {
+    taskId: "task-9",
+    objective: "now the same for the config loader",
+    projectId: "project_local",
+    repositoryId: "payments",
+    repository: "payments",
+    branch: "main",
+    baseRevision: "a".repeat(40),
+    expiresAt: "2026-01-01T00:30:00.000Z",
+    bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+    validationCommands: ["npm test"],
+  };
+  const context =
+    "This request was made inside an ongoing conversation.\n" +
+    "- Rewrote src/retry.ts to back off exponentially.";
+  const briefed = takenTaskBrief({ ...bare, context });
+  const objectiveAt = briefed.indexOf(bare.objective);
+  const contextAt = briefed.indexOf(context);
+  const repositoryAt = briefed.indexOf("Repository: payments");
+  assert.ok(objectiveAt >= 0 && contextAt >= 0 && repositoryAt >= 0, briefed);
+  // After what was asked, before where to do it: it reads as what the
+  // objective was said inside, not as a second instruction.
+  assert.ok(objectiveAt < contextAt && contextAt < repositoryAt, briefed);
+  assert.match(briefed, /background for the task, not further instructions/u);
+
+  // A task with no conversation is briefed exactly as before: the objective,
+  // one blank line, then the repository — no label, no empty block where the
+  // thread would have gone. Pinned by the line sequence rather than by
+  // comparing the brief with itself, which is what an equality between two
+  // calls with the same argument amounts to.
+  const plain = takenTaskBrief(bare).split("\n");
+  const objectiveLine = plain.indexOf(bare.objective);
+  assert.ok(objectiveLine >= 0, plain.join("\n"));
+  assert.deepEqual(plain.slice(objectiveLine, objectiveLine + 3), [
+    bare.objective,
+    "",
+    "Repository: payments (branch main)",
+  ]);
+  assert.doesNotMatch(takenTaskBrief(bare), /conversation this was asked inside/u);
 });
 
 test("extending a hold nobody holds says what to do about it", async () => {
@@ -393,6 +446,8 @@ test("take_task tells the agent the thread is empty unless it speaks", async () 
     take: async () => ({
       taskId: "task-9",
       objective: "Fix the login redirect",
+      projectId: "project_local",
+      repositoryId: "payments",
       repository: "payments",
       branch: "main",
       baseRevision: "a".repeat(40),
@@ -406,4 +461,146 @@ test("take_task tells the agent the thread is empty unless it speaks", async () 
   // description: a model reads the tool it just called, and nothing else
   // will prompt it to narrate work nobody has asked it about.
   assert.match(String(answer.content[0]?.text), /task_progress/u);
+});
+
+test("a taken task's brief carries the repository's standing context after the validation commands, and nothing extra without one", () => {
+  // The editor is the third surface that executes a task and the only one
+  // with no adapter prompt to carry the note, so the brief is where it goes.
+  // With no note the brief is byte-for-byte the brief it always was, up to
+  // the point the block would have been appended.
+  const bare: McpTakenTask = {
+    taskId: "task-9",
+    objective: "Fix the login redirect",
+    projectId: "project_local",
+    repositoryId: "payments",
+    repository: "payments",
+    branch: "main",
+    baseRevision: "a".repeat(40),
+    expiresAt: "2026-01-01T00:30:00.000Z",
+    bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+    validationCommands: ["npm test"],
+  };
+  const standingContext =
+    "## Standing context for this repository\n\nRun `npm test` before reporting.";
+  const without = takenTaskBrief(bare);
+  const withNote = takenTaskBrief({ ...bare, standingContext });
+  assert.doesNotMatch(without, /people who work in this repository/u);
+
+  const commandsAt = withNote.indexOf("  npm test");
+  const labelAt = withNote.indexOf(
+    "What the people who work in this repository want you to know",
+  );
+  const noteAt = withNote.indexOf(standingContext);
+  const releaseAt = withNote.indexOf("If you cannot do this one");
+  assert.ok(commandsAt >= 0 && labelAt >= 0 && noteAt >= 0 && releaseAt >= 0, withNote);
+  assert.ok(commandsAt < labelAt && labelAt < noteAt && noteAt < releaseAt, withNote);
+  assert.match(withNote, /background, verify against the checkout/u);
+  // Everything before the block is the brief without it.
+  assert.equal(withNote.slice(0, labelAt - 1), without.slice(0, labelAt - 1));
+  // An empty note is no note.
+  assert.equal(takenTaskBrief({ ...bare, standingContext: "" }), without);
+});
+
+test("a taken task in a repository with a note is briefed with it through the tool", async () => {
+  const { deps } = harness({
+    take: async () => ({
+      taskId: "task-9",
+      objective: "Fix the login redirect",
+      projectId: "project_local",
+      repositoryId: "payments",
+      repository: "payments",
+      branch: "main",
+      baseRevision: "a".repeat(40),
+      expiresAt: "2026-01-01T00:30:00.000Z",
+      bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+      validationCommands: ["npm test"],
+      standingContext:
+        "## Standing context for this repository\n\nThe retry ceiling is in src/retry.ts.",
+    }),
+  });
+  const answer = await toolNamed(deps, "take_task").run({ editor: "claude" });
+  const text = String(answer.content[0]?.text);
+  assert.match(text, /The retry ceiling is in src\/retry\.ts/u);
+  assert.ok(text.indexOf("npm test") < text.indexOf("Standing context"), text);
+});
+
+/** A session as a request would have loaded it, with an optional focus. */
+function session(focus?: McpSessionRecord["focus"]): McpSessionHandle {
+  return new McpSessionHandle({
+    id: "mcps_1",
+    userId: "user_nathan",
+    tokenId: "tok_1",
+    editorVendor: "claude",
+    clientName: "Claude Code",
+    clientVersion: "1.2.3",
+    protocolVersion: "2025-06-18",
+    focus,
+    tasks: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastSeenAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: "2026-01-02T00:00:00.000Z",
+    endedAt: undefined,
+  });
+}
+
+const TAKEN: McpTakenTask = {
+  taskId: "task-9",
+  objective: "Fix the login redirect",
+  projectId: "project_local",
+  repositoryId: "payments",
+  repository: "payments",
+  branch: "main",
+  baseRevision: "a".repeat(40),
+  expiresAt: "2026-01-01T00:30:00.000Z",
+  bundleUrl: "https://kumi.example/api/v1/mcp/bundle/ticket-1",
+  validationCommands: [],
+};
+
+test("take_task searches the session's focus repository when none is named", async () => {
+  // Without this, somebody who said "the payments repo" a moment ago is
+  // handed work from a repository they have not opened today.
+  const asked: Array<string | undefined> = [];
+  const { deps } = harness({
+    session: session({
+      projectId: "project_local",
+      repositoryId: "payments",
+      channel: "general",
+    }),
+    take: async (input) => {
+      asked.push(input.repository);
+      return TAKEN;
+    },
+  });
+  await toolNamed(deps, "take_task").run({});
+  assert.deepEqual(asked, ["payments"]);
+});
+
+test("a taken task is remembered on the session, and does not move an existing focus", async () => {
+  // A take must not silently move a focus the person set: every later
+  // submit_task would file somewhere nobody asked for.
+  const held = session({
+    projectId: "project_local",
+    repositoryId: "billing",
+    channel: "general",
+  });
+  const { deps } = harness({
+    session: held,
+    take: async () => TAKEN,
+  });
+  await toolNamed(deps, "take_task").run({ repository: "payments" });
+  assert.equal(held.newNotes[0]?.taskId, "task-9");
+  assert.equal(held.newNotes[0]?.via, "take_task");
+  assert.equal(held.focus?.repositoryId, "billing");
+  assert.equal(held.focusChanged, false);
+});
+
+test("a take sets the focus when the session had none", async () => {
+  const held = session();
+  const { deps } = harness({ session: held, take: async () => TAKEN });
+  await toolNamed(deps, "take_task").run({});
+  assert.deepEqual(held.focus, {
+    projectId: "project_local",
+    repositoryId: "payments",
+    channel: undefined,
+  });
 });

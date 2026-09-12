@@ -1,5 +1,6 @@
 export * from "./docker-workspace-manager.js";
 export * from "./egress-gateway.js";
+export * from "./warm-pool.js";
 export * from "./user-credentials.js";
 export * from "./vendor-credentials.js";
 export * from "./vendor-sandbox.js";
@@ -85,6 +86,16 @@ export interface AdvanceWorkspaceInput {
   baseVersion: CanonicalVersion;
 }
 
+/**
+ * Whether a directory is safe to hand to a task that did not create it.
+ *
+ * Deliberately not a boolean: a directory that fails verification is destroyed
+ * rather than reused, and the operator needs to know which paths refused to
+ * go, or an agent-created nested repository silently costs a warm slot every
+ * time and nobody can tell why.
+ */
+export type ScrubResult = { clean: true } | { clean: false; reason: string };
+
 export interface ChangeSetMetadata {
   expectedFiles?: string[];
   symbolsChanged: string[];
@@ -120,6 +131,37 @@ export interface WorkspaceManager {
     workspace: TaskWorkspace,
     input: AdvanceWorkspaceInput,
   ): Promise<TaskWorkspace>;
+  /**
+   * Returns a directory to a verified-clean checkout of its own base, so a
+   * task that did not create it can be given it.
+   *
+   * This is the opposite trade from {@link advance}, which keeps untracked
+   * files on purpose. Between two turns of one conversation that is right —
+   * the files belong to the same task. Between two *different* tasks it is a
+   * leak: an untracked file the last agent left is staged intent-to-add by
+   * `collectChangeSet` and arrives in the next task's changeset as work it
+   * never did.
+   *
+   * So: `reset --hard` to the base commit hash, `git clean -fdxq` with one
+   * `-e` per {@link EPHEMERAL_CLEAN_EXCLUDES} entry, then verify with
+   * `git status --porcelain=v1 -z --ignored --untracked-files=all`. Both the
+   * `-x` and the `--ignored` are load-bearing and were found the hard way:
+   * without `-x`, `clean` honours .gitignore and leaves a landed task's
+   * `.env` and logs in place, and without `--ignored`, `status` cannot even
+   * see them to report the leak. A single `-f` is deliberate — a nested git
+   * repository an agent created survives it, and is then caught by the
+   * verification and the directory destroyed, which is safer than deleting
+   * somebody's clone.
+   *
+   * No worktree lock: none of these three commands enumerates the mirror's
+   * worktree registrations, so none can race a teardown, for the same reason
+   * {@link advance} and `collectChangeSet` run unlocked.
+   *
+   * Optional so that the structural fakes implementing this interface in
+   * tests (integration-service's `TrackingWorkspaceManager`, among others)
+   * keep compiling; a backend without it is simply never pooled.
+   */
+  scrub?(workspace: TaskWorkspace): Promise<ScrubResult>;
   runInWorkspace(
     workspace: TaskWorkspace,
     spec: SandboxLaunchSpec,
@@ -303,6 +345,34 @@ const EPHEMERAL_DIRECTORY_NAMES = new Set([
   "venv",
 ]);
 
+/**
+ * What `git clean` is told to spare when a workspace is scrubbed for reuse.
+ *
+ * The directory names above are only half of what {@link
+ * isEphemeralWorkspacePath} treats as ephemeral; the rest are file-shaped
+ * (`*.tsbuildinfo`, a Yarn offline cache, `.DS_Store`). Those are not
+ * directory names, so deriving the excludes from the set alone would have
+ * `clean` delete a multi-gigabyte Yarn cache that the verification step would
+ * then have ignored — the two halves of scrub disagreeing, at the expense of
+ * exactly the artefacts the pool exists to keep.
+ *
+ * The patterns are gitignore syntax: a bare name matches at any depth, and
+ * a doubled-star prefix is needed to reach a nested `.yarn` tree. This list and
+ * {@link isEphemeralWorkspacePath} must stay in agreement — if `clean`
+ * removes something the filter spares the pool merely loses it, but if
+ * `clean` spares something the filter flags, every retained directory fails
+ * verification and is destroyed. change-set.test.ts pins the agreement.
+ */
+export const EPHEMERAL_CLEAN_EXCLUDES: readonly string[] = [
+  ...EPHEMERAL_DIRECTORY_NAMES,
+  "*.tsbuildinfo",
+  "**/.yarn/cache",
+  "**/.yarn/unplugged",
+  "**/.yarn/install-state.gz",
+  ".DS_Store",
+  "Thumbs.db",
+];
+
 export function workspaceDirectoryName(
   taskId: TaskId,
   workspaceId: string,
@@ -360,6 +430,11 @@ export function isEphemeralWorkspacePath(
     repositoryPath.endsWith(".tsbuildinfo") ||
     repositoryPath.startsWith(".yarn/cache/") ||
     repositoryPath.startsWith(".yarn/unplugged/") ||
+    // Both forms. Only the nested one was matched, so a repository-root
+    // `.yarn/install-state.gz` — the ordinary place Yarn writes it — was
+    // spared by `EPHEMERAL_CLEAN_EXCLUDES` and then flagged as residue here,
+    // which would have failed the verification of every Yarn workspace.
+    repositoryPath === ".yarn/install-state.gz" ||
     repositoryPath.endsWith("/.yarn/install-state.gz") ||
     repositoryPath.includes("/.yarn/cache/") ||
     repositoryPath.includes("/.yarn/unplugged/") ||
@@ -368,6 +443,44 @@ export function isEphemeralWorkspacePath(
     repositoryPath === "Thumbs.db" ||
     repositoryPath.endsWith("/Thumbs.db")
   );
+}
+
+/**
+ * What a `git status --porcelain=v1 -z --ignored` still reports after a scrub,
+ * minus the artefacts the scrub deliberately kept.
+ *
+ * `??` and `!!` are untracked and ignored paths; after `clean -fdxq` with the
+ * ephemeral excludes the only ones left should be those excludes, and
+ * anything else is a leak into the next task. Any *other* status code is
+ * reported whatever the path, because it means the `reset --hard` did not
+ * take and a dirty tracked file is never ephemeral.
+ *
+ * An entry can name a directory rather than a file — `?? nested/` is how an
+ * agent's own git clone shows up, and git collapses whole ignored trees the
+ * same way — so both the bare and the trailing-slash form are offered to
+ * {@link isEphemeralWorkspacePath}: `node_modules` matches by segment while
+ * `.yarn/cache/` only matches with its slash.
+ */
+export function parseStatusResidue(output: string): string[] {
+  const residue: string[] = [];
+  for (const entry of output.split("\0")) {
+    if (entry.length < 4) {
+      continue;
+    }
+    const code = entry.slice(0, 2);
+    // Not `normalizeRepositoryPath`: that one throws on anything it dislikes,
+    // and a verification step is the last place that should turn a surprising
+    // path into an exception instead of a refusal.
+    const raw = entry.slice(3).replaceAll("\\", "/");
+    const bare = raw.endsWith("/") ? raw.slice(0, -1) : raw;
+    const spared =
+      (code === "??" || code === "!!") &&
+      (isEphemeralWorkspacePath(bare) || isEphemeralWorkspacePath(raw));
+    if (!spared) {
+      residue.push(bare);
+    }
+  }
+  return residue;
 }
 
 function literalPathspec(repositoryPath: string): string {
@@ -753,6 +866,65 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       taskId: input.taskId,
       baseVersion: input.baseVersion,
       createdAt: new Date().toISOString(),
+    };
+  }
+
+  /** See {@link WorkspaceManager.scrub} for why each of the three steps is there. */
+  public async scrub(workspace: TaskWorkspace): Promise<ScrubResult> {
+    // The same guard as `advance`, for the same reason: these revisions come
+    // from our own store and anything that is not a bare commit hash has no
+    // business reaching a `reset --hard`.
+    const revision = workspace.baseVersion.revision;
+    if (!/^[0-9a-f]{4,64}$/iu.test(revision)) {
+      return {
+        clean: false,
+        reason: `base revision is not a commit hash: ${revision}`,
+      };
+    }
+    const reset = await this.git.run(
+      ["-C", workspace.path, "reset", "--hard", "--quiet", revision],
+      { allowFailure: true },
+    );
+    if (reset.exitCode !== 0) {
+      return { clean: false, reason: `reset failed: ${reset.stderr.trim()}` };
+    }
+    const clean = await this.git.run(
+      [
+        "-C",
+        workspace.path,
+        "clean",
+        "-fdxq",
+        ...EPHEMERAL_CLEAN_EXCLUDES.flatMap((pattern) => ["-e", pattern]),
+      ],
+      { allowFailure: true },
+    );
+    if (clean.exitCode !== 0) {
+      return { clean: false, reason: `clean failed: ${clean.stderr.trim()}` };
+    }
+    const status = await this.git.run(
+      [
+        "-C",
+        workspace.path,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--ignored",
+        "--untracked-files=all",
+      ],
+      { allowFailure: true },
+    );
+    if (status.exitCode !== 0) {
+      return { clean: false, reason: `status failed: ${status.stderr.trim()}` };
+    }
+    const residue = parseStatusResidue(status.stdout);
+    if (residue.length === 0) {
+      return { clean: true };
+    }
+    return {
+      clean: false,
+      reason: `${residue.length} path(s) survived the scrub: ${residue
+        .slice(0, 5)
+        .join(", ")}`,
     };
   }
 

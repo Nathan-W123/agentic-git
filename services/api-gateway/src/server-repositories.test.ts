@@ -28,6 +28,7 @@ import {
   DEFAULT_PROJECT_ID,
   SqliteCoordinationStore,
 } from "@coord/persistence";
+import { REPOSITORY_CONTEXT_MAX_CHARS } from "@coord/shared-types";
 
 test("an investigator says why a task failed, and retries when told to", async (t) => {
   // A failure ended with one line and nobody read it. The reason was in the
@@ -696,6 +697,110 @@ test("a workspace picture is the workspace's: set only by a manager, read by eve
   assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
   assert.equal(cleared.data.repository.picture, undefined);
   assert.equal(cleared.data.repository.displayName, "Lattice");
+});
+
+test("a repository's standing context is set by a manager, read by everyone, and pinned by version", async (t) => {
+  // The note is injected into every planning prompt in the repository, so
+  // setting it is repository administration — the rename/picture gate — and
+  // reading it is open to anyone whose tasks are being told it.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  await invitableRepository(owner, "ctx-repo");
+  const contextPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/ctx-repo/context`;
+
+  // Nothing yet, said as null rather than as a 404: the repository exists.
+  const before = await owner.request(contextPath);
+  assert.equal(before.status, 200, JSON.stringify(before.data));
+  assert.equal(before.data.context, null);
+
+  const set = await owner.request(contextPath, {
+    method: "PUT",
+    body: { content: "Run `npm test` before reporting." },
+  });
+  assert.equal(set.status, 200, JSON.stringify(set.data));
+  assert.equal(set.data.context.version, 1);
+  assert.equal(set.data.context.updatedBy, bootstrapped.user.id);
+  const stored = await runtime.store.getRepositoryContext("ctx-repo");
+  assert.equal(stored?.content, "Run `npm test` before reporting.");
+  assert.equal(stored?.version, 1);
+  const audited = await runtime.store.listAuditEvents({
+    types: ["repository_context_changed"],
+  });
+  assert.equal(audited.length, 1);
+  assert.equal(audited[0]?.event.data["version"], 1);
+  assert.equal(audited[0]?.event.data["actorId"], bootstrapped.user.id);
+
+  // A developer reads it, because their tasks are being told it.
+  const developer = await runtime.store.createUser({
+    email: "ctx-dev@example.com",
+    displayName: "Context Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: developer.id,
+    role: "developer",
+  });
+  const devClient = await loginAs(runtime.origin, developer.email);
+  const read = await devClient.request(contextPath);
+  assert.equal(read.status, 200, JSON.stringify(read.data));
+  assert.equal(read.data.context.content, "Run `npm test` before reporting.");
+
+  // Reading it is not setting it: a developer who neither created the
+  // repository nor holds manage_project is refused, as for renaming.
+  const refused = await devClient.request(contextPath, {
+    method: "PUT",
+    body: { content: "nope" },
+  });
+  assert.equal(refused.status, 403);
+  assert.equal(
+    (await runtime.store.getRepositoryContext("ctx-repo"))?.content,
+    "Run `npm test` before reporting.",
+  );
+
+  // A second save moves the version; a save pinned to the version somebody
+  // read before it is refused rather than silently overwriting it.
+  const second = await owner.request(contextPath, {
+    method: "PUT",
+    body: { content: "Run `npm test`; the retry ceiling is in src/retry.ts.", expectedVersion: 1 },
+  });
+  assert.equal(second.status, 200, JSON.stringify(second.data));
+  assert.equal(second.data.context.version, 2);
+  const stale = await owner.request(contextPath, {
+    method: "PUT",
+    body: { content: "an edit made against version 1", expectedVersion: 1 },
+  });
+  assert.equal(stale.status, 409, JSON.stringify(stale.data));
+  assert.equal(stale.data.error.code, "stale_version");
+  assert.equal(
+    (await runtime.store.getRepositoryContext("ctx-repo"))?.version,
+    2,
+  );
+
+  // Over the cap is refused as a bad request, and nothing is stored.
+  const oversized = await owner.request(contextPath, {
+    method: "PUT",
+    body: { content: "x".repeat(REPOSITORY_CONTEXT_MAX_CHARS + 1) },
+  });
+  assert.equal(oversized.status, 400);
+  assert.equal(
+    (await runtime.store.getRepositoryContext("ctx-repo"))?.version,
+    2,
+  );
+
+  // An empty note clears it; the version keeps counting through the clear.
+  const cleared = await owner.request(contextPath, {
+    method: "PUT",
+    body: { content: "" },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+  assert.equal(cleared.data.context.content, "");
+  assert.equal(cleared.data.context.version, 3);
+  const clearedAudit = (
+    await runtime.store.listAuditEvents({ types: ["repository_context_changed"] })
+  ).at(-1);
+  assert.equal(clearedAudit?.event.data["cleared"], true);
 });
 
 test("a repository is reported by the name it was renamed to, and the rename moves nothing else", async (t) => {

@@ -204,3 +204,27 @@ test("/queue carries a follow-up objective and is discoverable", () => {
   );
   assert.match(formatSlashHelp(), /\/queue @agent/u);
 });
+
+test("/context carries the note as typed, with its interior line breaks", () => {
+  // The note is what is left once the command word is lifted out. A leading
+  // line break after the word is trimmed like any other leading whitespace;
+  // the breaks *inside* a note somebody laid out as a list survive, because
+  // reflowing them would rewrite what they wrote.
+  const set = parseSlashCommand("/context Conventions:\n- run npm test");
+  assert.equal(set?.command.name, "context");
+  assert.equal(set?.rest, "Conventions:\n- run npm test");
+  assert.equal(set?.command.takesObjective, false);
+
+  // `clear` is the one reserved word; bare `/context` is a question.
+  assert.equal(parseSlashCommand("/context clear")?.rest, "clear");
+  assert.equal(parseSlashCommand("/context")?.rest, "");
+
+  assert.match(formatSlashHelp(), /\/context/u);
+  assert.ok(
+    slashCommandsMatching("/con").some((entry) => entry.name === "context"),
+  );
+  // Before `help`, so the list still ends with the command that lists the
+  // others.
+  const names = SLASH_COMMANDS.map((entry) => entry.name);
+  assert.equal(names.indexOf("context"), names.indexOf("help") - 1);
+});

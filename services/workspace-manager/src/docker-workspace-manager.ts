@@ -20,6 +20,7 @@ import {
   type ChangeSetMetadata,
   type CreateWorkspaceInput,
   type SandboxLaunchSpec,
+  type ScrubResult,
   type TaskWorkspace,
   type WorkspaceCommandOptions,
   type WorkspaceManager,
@@ -388,6 +389,24 @@ export class DockerWorkspaceManager
       });
     }
     return { ...(await inner(workspace, input)), isolation: "docker" };
+  }
+
+  /**
+   * Delegated for the reason `advance` is: scrubbing is git work on the host
+   * worktree, and the git mask this class writes beside the directory is not
+   * inside it, so a reset and a clean never touch it.
+   *
+   * A host backend that cannot scrub refuses rather than claiming a clean
+   * directory it did not verify — the pool then destroys it, which is the
+   * safe direction.
+   */
+  public async scrub(workspace: TaskWorkspace): Promise<ScrubResult> {
+    return (
+      (await this.worktrees.scrub?.(workspace)) ?? {
+        clean: false,
+        reason: "host backend cannot scrub",
+      }
+    );
   }
 
   public async collectChangeSet(

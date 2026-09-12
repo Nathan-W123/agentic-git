@@ -1,143 +1,234 @@
 # Handoff — thread context into tasks, and per-agent activity
 
-Two pieces of work, written before building rather than after. They belong
+Two pieces of work, written before building and rewritten after. They belong
 together: both are about an agent knowing what it already knows, and the
-second is a few lines once you are already in the file.
+second was a few lines once the first was in the file.
 
-Neither is started. Everything below was read out of the code.
+Both are built. Piece 1 landed in `dfa266a` (2026-09-02, the commit that added
+migration `submitted-task-context`); the gaps it left — the remote worker, the
+`generic-cli` adapter, the editor path, work proposed by an answer — were
+closed afterwards, and this page records the whole of what is there now.
+Everything below was read out of the code; identifiers are function and type
+names rather than line numbers, because the lines moved between the first
+draft of this page and the second.
 
-## Background: what an agent currently knows
+## Background: what an agent knows
 
-Three separate channels carry context, and they do not overlap.
+Five channels carry context, and they reach different places.
 
 | | Carries | Reaches |
 | --- | --- | --- |
-| Handoffs | What earlier tasks completed, decided, and warned about | The next **task** in that repository |
-| Thread history | The last `THREAD_CONTEXT_LINES` (24) of a thread | An agent **answering a question** |
-| `priorContext` | The rendered handoffs | The **planning prompt** |
+| Handoffs | What earlier tasks completed, decided, and warned about | The next **task** in that repository, as planning notes |
+| Thread history | The part of a thread `selectThreadContext` keeps under `THREAD_CONTEXT_TOKEN_BUDGET` (1,600 tokens; 400 per entry; older entries recalled by relevance at or above `THREAD_CONTEXT_RELEVANCE_MIN`, 0.12), with an explicit elided-history notice where it cut | An agent **answering a question** in the thread, and a **task** dispatched from inside it |
+| Channel memo | One line per conversation the room recently settled (`channel-memo.ts`, a few hundred tokens) | Every **mention-dispatched task**, and work an editor files for itself |
+| Standing context | The note the repository's people wrote for every agent (`repository_contexts`, versioned and audited; see [repository-standing-context.md](../architecture/repository-standing-context.md)) | Every **task** in that repository, as planning notes, and an editor's `take_task` brief |
+| `priorContext` | All of the above that applies, thread first, then the standing context, then the control plane's planning hints and the handoffs | The **planning prompt** |
 
 Handoff seeding was wired up on 2026-08-10 (`c4015dd`): `seedContextForTask`
 had existed and been tested since the handoff work, and nothing in production
-called it. The coordinator now calls it and passes the result as
-`StartTaskInput.priorContext`, which both prompt adapters put in the planning
+called it. The coordinator calls it and passes the result as
+`StartTaskInput.priorContext`, which the prompt adapters put in the planning
 prompt, labelled as background rather than fact.
 
-**Threads share context for talking, not for working.** `answerAsAgent` puts
-thread history in the prompt when an agent *answers*. A task dispatched from
-inside a thread gets `withRoleContext(role, message)` and nothing else — so
-"now do the same for the other file" arrives at the agent with no idea what
-"the same" refers to. That is the gap.
+**Threads share context for talking and for working.** `answerAsAgent` puts
+thread history in the prompt when an agent *answers*; `dispatchOneMention`
+puts it on the task when an agent is asked to *do* something — so "now do the
+same for the other file" arrives at the agent with the messages that say what
+"the same" is. That was the gap, and it is closed on every path listed below.
 
 ## Piece 1 — thread history into a task
 
 ### Why it is not a prompt tweak
 
-The objective is the only text that travels from the channel to the agent, and
-it is deliberately clean: it is what somebody asked for, and it is rendered in
-the channel, in task lists, and in thread titles. Prepending a transcript to it
-makes every request unreadable in the three places people actually read it —
-which is why handoff context was given its own field rather than folded in.
-
-So thread history needs its own field too, and that field has to survive the
-trip: gateway → `submitTask` → the store → `runPendingTasks` → `TaskDefinition`
-→ the adapter.
+The objective is deliberately clean: it is what somebody asked for, and it is
+rendered in the channel, in task lists and in thread titles. Prepending a
+transcript to it makes every request unreadable in the three places people
+actually read it — which is why handoff context was given its own field
+rather than folded in, and why thread history has one too. The gateway alone
+writes it: `routes/tasks.ts` still accepts an objective and an agent and
+nothing else, because context is something the room computes, never something
+a client asserts.
 
 ### The path, in order
 
-1. **`submitted_tasks` gains a `context TEXT` column.** Migration 25 in both
-   `schema.ts` and `postgres-schema.ts` (24 is `bumped_at`). Nullable; every
-   existing row predates it and has nothing to say.
-2. **`SubmitTaskInput` and `SubmittedTask` gain `context?: string`**
-   (`services/persistence/src/store.ts`), written and read in all three
-   backends. The SQL ones need it in the insert and in `toSubmittedTask`; the
-   in-memory one stores it on the record.
-3. **`ApiOperations.submitTask` gains `context?: string`**
-   (`services/api-gateway/src/server.ts`), passed through by `taskSubmit` in
-   `apps/web/src/index.ts`.
-4. **`TaskDefinition` gains `context?: string`** (`packages/shared-types`), and
-   `commands.ts:709` — the one place a `SubmittedTask` becomes a
-   `TaskDefinition` — copies it across. `worker-operations.ts:718` and
-   `recovery.ts:204` build definitions too; check each.
-5. **The coordinator merges it with the handoff seed.** `coordinator.ts` already
-   computes `priorContext` from `seedContextForTask`; the task's own context
-   joins it — thread first, since it is about *this* request, handoffs second.
+1. **Persistence.** Migration `submitted-task-context` in `schema.ts` and
+   `postgres-schema.ts` adds `submitted_tasks.context TEXT`, nullable. It is
+   `SubmitTaskInput.context` and `SubmittedTask.context` in `store.ts`,
+   written in `submitTask` and read in `toSubmittedTask` in both stores.
+   There is no in-memory store to cover: what tests call in-memory is
+   `SqliteCoordinationStore.open(":memory:")`. `store-contract.test.ts`
+   pins the round trip on both backends ("a task's context survives being
+   claimed", "a task submitted with no context has none").
+2. **Gateway to store.** `ApiOperations.submitTask` carries `context`;
+   `apps/web/src/index.ts` passes it to `taskSubmit` in
+   `apps/cli/src/commands.ts`, which trims and stores it. The test harness
+   records every call in `runtime.submittedTasks`, `context` included.
+3. **Store to `TaskDefinition`.** `TaskDefinition.context` lives in
+   `packages/shared-types`. It is copied wherever a `SubmittedTask` becomes a
+   definition: the local run loop in `commands.ts`, and `worker-operations.ts`
+   in `authority.admit`, the integration definition, and the deferred-scope
+   and conflict follow-up re-submits. `recovery.ts` builds no definitions
+   (it only integrates), and `benchmark.ts` starts fixtures whose definitions
+   carry whatever the scenario put there.
+4. **The two adapter slots** are `StartTaskInput.priorContext` and
+   `StartTaskInput.conversational` in `packages/agent-protocol` — not in
+   shared-types. `task.context` is the conversation and nothing else;
+   `priorContext` is the conversation first, then everything else planning
+   should know. The coordinator (`coordinator.ts`, where it builds
+   `startInput`) joins `[thread, turn note, lease note, standing context,
+   likely files, recent touch points, handoffs, derived pitfalls]` into
+   `priorContext`, passes `task` through with its context untouched, and
+   sets `conversational: true` for a turn of a conversation. The remote
+   worker (`worker.ts`, after `claimRepository`) does the same with
+   `[thread, standingContext, planningContext]`, and sets `conversational`
+   from `SubmittedTask.conversationId`. It used to join the two and pass the
+   join in both slots, which presented the control plane's file estimates to
+   the model as something somebody said, and it never set `conversational`,
+   so every conversational turn on a worker opened as a one-shot. On a
+   worker the flag is the whole of it so far: the session is opened
+   resumable (Codex is run without `--ephemeral`), but nothing on the worker
+   resumes it — there is no `continueTask` or `resumeToken` call in
+   `worker.ts`, and each turn of a conversation arrives as a fresh `startTask`
+   carrying the thread in `task.context`. Vendor-side continuity between
+   turns exists only on the in-process coordinator, which keeps the session
+   on its `OpenConversation` and calls `continueTask` when the adapter has
+   one; a reader should not expect it on a worker host.
+5. **Adapters.** `codex` and `prompt-cli` render `priorContext` in the planning
+   prompt ("Background about this repository — notes left by earlier work and
+   by the people who work here") and `task.context`
+   through `conversationContextLines` in the execution and replan rounds, and
+   raw in the forced-question round. `generic-cli` builds no prompt: it
+   forwards both as the optional `context` and `priorContext` fields of its
+   `start` message (`StartMessage` in `protocol.ts`, sent by `spawnAgent`),
+   absent when empty, so an agent written before them sees the message it
+   always saw. `docs/protocol/generic-cli.md` documents them.
+6. **The remote path** is `leaseWork` in `worker-operations.ts` handing
+   `task: leased.task` — the whole `SubmittedTask` — to the assignment,
+   `routes/workers.ts` sending it, and `worker.ts` building `startTask` from
+   it as above.
 
 ### Where the gateway gets the history
 
-`dispatchOneMention` already knows: `input.threadMessageId` is set both for an
-explicit reply inside a thread and for an auto-merge (`findThreadToContinue`).
-`getChannelMessage(repositoryId, messageId, viewerId)` returns the root with
-its replies.
+`dispatchOneMention` computes `continuing`: the explicit `threadMessageId`
+when somebody asked inside a thread, otherwise — for a plain mention — a
+thread named outright (`findThreadByName`) or one the request closely
+resembles (`findThreadToContinue`, held to `THREAD_MERGE_MIN_OVERLAP`). Only
+when `continuing` is set does `threadContextFor` run: it reads the root and
+its replies, drops `progress` replies (the run narrating itself) and the
+request being dispatched (it is already the objective), and hands the rest to
+`renderThreadContext`, which selects under the budget, splices the
+`elidedHistoryNotice` after the opening message, and adds the heading the
+adapters know. `channelMemoFor` runs for every dispatch, excluding the thread
+being carried in full. The task's `context` is memo, then thread; a brand-new
+request gets the memo alone, and its `context` is `undefined` when the room
+has settled nothing.
 
-Two things to get right:
+Three other dispatches carry context by their own route, because they do not
+go through a mention:
 
-- **Leave `progress` replies out.** They are the run narrating itself — see
-  `ChannelEntryKind`. Feeding an agent its own previous commentary is noise it
-  paid for once already.
-- **Cap it.** `THREAD_CONTEXT_LINES` (24) is the number `answerAsAgent` uses and
-  there is no reason to differ. A thread can be long and the agent pays per
-  token.
+- **Work proposed by an answer.** When `answerInChannel` answers a question
+  and its `ANSWER_TASK:` line proposes work, the dispatch (trigger
+  `answer_followup`) carries the question and the answer, rendered by the same
+  `renderThreadContext`. The answer is a flat message referencing the
+  question rather than a reply under it, so nothing that reads the thread back
+  would find it; `answerInChannel` returns what it said for this reason.
+- **Work an editor files for itself.** `fileForEditor` in the gateway's MCP
+  deps submits directly, bypassing `dispatchOneMention`, so it computes
+  `channelMemoFor` itself — before posting, so the post cannot be read back as
+  background to itself. Its mention-less post can still be auto-claimed by
+  the room's model, a possible second task for the same objective that
+  predates the memo and is left as it was.
+- **Work an editor takes.** `EditorWorkOperations.take` returns `context`
+  (from `takeEditorWork` in `worker-operations.ts`), `takeForEditor` forwards
+  it onto `McpTakenTask`, and `takenTaskBrief` prints it between the
+  objective and the repository line, labelled as background.
 
-### The judgement call
+### What is not carried
 
-Only dispatch from *inside* a thread should carry it. A brand-new request that
-merely happens to open a thread has no history worth carrying, and an
-auto-merged one should carry the thread it was merged into — which falls out
-naturally, because `threadMessageId` is set in exactly those cases.
+- A question routed to its owner's machine (`kind: "question"`, filed by
+  `answerInChannel` under `COORD_LOCAL_AGENTS_ONLY`) carries no context. Right
+  today, because every caller is at the channel root; the comment at the
+  submit says what an in-thread caller must add.
+- MCP `submit_task` cannot file inside an existing thread — `post` always
+  opens a root — so an editor continuing a conversation gets the thread only
+  when `findThreadToContinue` merges the request into it. A `reply_to`
+  argument that reuses `addChannelReply` and `answerThreadReply` is the shape
+  of the fix; see "Still open".
 
 ## Piece 2 — activity per agent, not per person
 
-`maybeAutoClaimTask` (and `bestFitFor`, copied from it on 2026-08-10) score
-each candidate on its role, its name, and its owner's recent objectives. The
-grouping key is `task.submittedBy`.
+`maybeAutoClaimTask` and `bestFitFor` score each candidate on its role, its
+name, and its owner's recent objectives. `submittedBy` is always the agent's
+**owner** — `dispatchOneMention` submits every task with `actorId:
+candidate.userId`, deliberately, so that work somebody else's agent takes never
+spends the sender's account — and so two agents owned by one person used to
+share one work history.
 
-`submittedBy` is always the **agent's owner** — `dispatchOneMention` submits
-every task with `actorId: candidate.userId`, deliberately, so that work
-somebody else's agent takes never spends the sender's account. Org-wide
-visibility changes who may *mention* an agent, not whose account it runs on.
-
-**So two agents owned by one person share one work history.** Connect an
-org-wide Claude and an org-wide Codex, let the team use both, and every task
-groups under you — both agents then score identically on activity, and the
-signal cannot say which of them did what. With org agents that is the ordinary
-case, not the edge case.
-
-### The fix needs no schema change
-
-`SubmittedTask.agentId` is already the deployment's configured agent id, which
-`resolveAgentIdForVendor` derived from the mentioned agent's vendor. And
-`ApiOperations.listAgents()` returns `{ id, adapter }` for every configured
-agent, where `adapter` is `codex` / `claude` / `gemini` / `generic-cli`.
-
-So the gateway can:
-
-1. call `listAgents()` and build `adapter → agentId`;
-2. group recent objectives by `(submittedBy, agentId)` rather than by
-   `submittedBy`;
-3. look each candidate up by `(candidate.userId, agentIdFor(candidate.vendor))`.
-
-`listAgents` is optional on `ApiOperations`. Where it is absent, fall back to
-grouping by owner — the behaviour that exists today, which is wrong only in
-the way described above and not worse than before.
-
-### One thing already fixed
+`agentActivityIn` now keys activity by `(submittedBy, vendor)`: the vendor is
+the `adapter` of the configured agent from `listAgents()`, falling back to the
+vendor name inside the agent id. `bestFitFor` and `maybeAutoClaimTask` look
+each candidate up by `(candidate.userId, candidate.vendor)`. `listAgents` is
+optional on `ApiOperations`; a task whose vendor cannot be read either way
+contributes to nobody's queue rather than to everybody's, so it can never make
+an idle agent look busy. The test is `server-channel.test.ts` "a second
+request goes to a free agent, not the one already working".
 
 `dfac400` corrected the ordering: the store returns submitted tasks oldest
 first and both callers took the first 25 per owner, so "recent activity" was
-each owner's *earliest* work, frozen after 25 tasks. `recentFirst` now sorts
-newest first. Do not reintroduce it by reading `listSubmittedTasks` directly.
+each owner's *earliest* work. `recentFirst` sorts newest first; do not
+reintroduce it by reading `listSubmittedTasks` directly.
 
 ## Verifying
 
-`server.test.ts` has the fixtures: `startRuntime` fakes `submitTask` and
-records every call, so a test can assert the context that travelled with a
-task without running an agent. The thread path is exercised by posting a
-channel message, waiting for the thread, then replying to it — the pattern in
-*"approving a finding with 'yes, do it' dispatches the fix"*.
+The recorder is `runtime.submittedTasks` in `test-harness.ts`: `startRuntime`
+fakes `submitTask` and records every call, so a test asserts the context that
+travelled with a task without running an agent.
 
-For piece 2, the fixture's `listAgents` already returns one `generic-cli`
-agent; a test wanting two vendors will need to extend it.
+- Thread dispatch: `server-threads.test.ts` "animation work asked for inside a
+  thread is dispatched with its context", "a request that merely opens a
+  thread carries nothing; the follow-up in it does", and "a long thread
+  reaches the task cut to budget, and says where the cut is".
+- Auto-merge: `server-tasks.test.ts` "work merged into a resembling thread
+  carries that thread with it".
+- Answer follow-up: `server-channel.test.ts` "work proposed by an answer
+  carries the question and the answer that scoped it".
+- Editor path: `server-mcp.test.ts` "an editor that takes a task filed inside
+  a thread is told the thread" and "work an editor files for itself carries
+  what the room has settled"; `mcp-work.test.ts` pins `takenTaskBrief`
+  directly. `seedTaskFor` in the harness takes a `context` argument for this.
+- Remote worker: `apps/worker/src/worker.test.ts` "a remote worker keeps the
+  thread as the conversation and planning hints as notes, and opens a
+  conversational session", through the injected `codexRunner`, which sees the
+  prompt and the argv. The `FAKE_CLAUDE` stand-in in the same file logs argv
+  only; the Claude prompt goes over stdin.
+- `generic-cli`: `generic-cli-adapter.test.ts` "the start message carries the
+  conversation and prior notes as their own fields, and only when there are
+  any", read back from the fixture agent's `FIXTURE_START_LOG`.
 
 Run suites **serially** (`--concurrency=1`). Several gateway tests drive real
 HTTP and time out under a parallel workspace run — they fail at 26–48s where
 they normally pass in 100ms, and the failure looks like a bug in the diff.
+
+## Still open
+
+- MCP `submit_task` has no way to file inside a thread. The fix is a
+  `reply_to` argument naming an earlier task id: look the task up, refuse
+  when it is another repository's or has no `conversationId`, then
+  `addChannelReply` and an awaited `answerThreadReply` (the route's version is
+  fire-and-forget except for `/push`). `answerThreadReply` picks the thread's
+  named or owning agent, not `submit_task`'s own-editor rule, so a thread
+  that names nobody needs the caller's own agent prepended as a mention, or a
+  refusal.
+- `fileForEditor`'s mention-less post can be auto-claimed beside the task it
+  files. Either post with a flag that suppresses auto-claim or accept the
+  twin; today the two carry different context.
+- `threadContextFor` drops only `progress` replies. Whether `system` and
+  `plan` replies belong in a task's context is undecided.
+- The planning-prompt heading in the adapters was reworded when the standing
+  context landed; it names both provenances now, and still does not mention
+  the thread that leads the block. Cosmetic.
+- Routed questions could carry the channel memo even at the root; cheap, but
+  it changes the prompt the worker's `answerQuestion` sees.
+- The per-run `tasks` table (`saveTask` in `worker-operations.ts`) does not
+  record context. No agent reads it; a dashboard might, and it would be a
+  new migration.

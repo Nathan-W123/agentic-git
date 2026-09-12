@@ -653,6 +653,121 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a repository's standing context is versioned, pinnable, and its own row`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      assert.equal(await store.getRepositoryContext(REPOSITORY.id), undefined);
+
+      // The first save is version 1 and everything round-trips as written.
+      const first = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "Run `npm test` before reporting.",
+        updatedBy: "user_nathan",
+        updatedAt: "2026-09-01T10:00:00.000Z",
+      });
+      assert.equal(first.outcome, "saved");
+      assert.deepEqual(await store.getRepositoryContext(REPOSITORY.id), {
+        repositoryId: REPOSITORY.id,
+        content: "Run `npm test` before reporting.",
+        updatedBy: "user_nathan",
+        updatedAt: "2026-09-01T10:00:00.000Z",
+        version: 1,
+      });
+
+      // A second save moves the version on by one.
+      const second = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "Run `npm test`; the retry ceiling is in src/retry.ts.",
+        updatedBy: "user_sam",
+      });
+      assert.equal(second.outcome, "saved");
+      assert.equal(
+        second.outcome === "saved" ? second.context.version : undefined,
+        2,
+      );
+
+      // A save pinned to the version somebody read before the second save
+      // landed is refused, says what is current, and changes nothing.
+      const stale = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "overwriting what Sam wrote",
+        updatedBy: "user_nathan",
+        expectedVersion: 1,
+      });
+      assert.equal(stale.outcome, "stale");
+      assert.equal(
+        stale.outcome === "stale" ? stale.current?.version : undefined,
+        2,
+      );
+      const kept = await store.getRepositoryContext(REPOSITORY.id);
+      assert.equal(kept?.content, "Run `npm test`; the retry ceiling is in src/retry.ts.");
+      assert.equal(kept?.updatedBy, "user_sam");
+      assert.equal(kept?.version, 2);
+
+      // Pinned to the current version, it goes through.
+      const pinned = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "Pinned edit.",
+        updatedBy: "user_nathan",
+        expectedVersion: 2,
+      });
+      assert.equal(pinned.outcome, "saved");
+      assert.equal((await store.getRepositoryContext(REPOSITORY.id))?.version, 3);
+
+      // Clearing keeps the row and the count: an editor holding version 3
+      // must not be able to pin a write against a note that was cleared and
+      // rewritten as a fresh version 1.
+      const cleared = await store.saveRepositoryContext({
+        repositoryId: REPOSITORY.id,
+        content: "",
+        updatedBy: "user_nathan",
+      });
+      assert.equal(cleared.outcome, "saved");
+      const afterClear = await store.getRepositoryContext(REPOSITORY.id);
+      assert.equal(afterClear?.content, "");
+      assert.equal(afterClear?.version, 4);
+
+      // `saveRepository` is first-insert-wins and knows nothing of this row.
+      await store.saveRepository(REPOSITORY);
+      assert.equal((await store.getRepositoryContext(REPOSITORY.id))?.version, 4);
+
+      // Expecting "there was none" on a repository that has none is a match.
+      const OTHER = { id: "repo_2", path: "/other.git", branch: "main" };
+      await store.saveRepository(OTHER);
+      const fresh = await store.saveRepositoryContext({
+        repositoryId: OTHER.id,
+        content: "first note",
+        updatedBy: "user_nathan",
+        expectedVersion: 0,
+      });
+      assert.equal(fresh.outcome, "saved");
+      // And expecting one that is not there is stale, with nothing current.
+      const OTHER_TOO = { id: "repo_3", path: "/third.git", branch: "main" };
+      await store.saveRepository(OTHER_TOO);
+      const missing = await store.saveRepositoryContext({
+        repositoryId: OTHER_TOO.id,
+        content: "note",
+        updatedBy: "user_nathan",
+        expectedVersion: 1,
+      });
+      assert.equal(missing.outcome, "stale");
+      assert.equal(
+        missing.outcome === "stale" ? missing.current : "present",
+        undefined,
+      );
+
+      // Removing the repository takes the note with it, as it takes the
+      // auditor's cursor and the grants.
+      await store.removeRepository(REPOSITORY.id);
+      assert.equal(await store.getRepositoryContext(REPOSITORY.id), undefined);
+      assert.equal((await store.getRepositoryContext(OTHER.id))?.version, 1);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a replayed result remembers what it was replayed from`, async () => {
     const { store, cleanup } = await backend.open();
     try {
@@ -7471,6 +7586,168 @@ for (const backend of backends) {
     await store.close();
     await store.close();
     await cleanup();
+  });
+
+  test(`${backend.name}: an MCP session round-trips, prefers a vendor, is pruned per person, merges notes, and ends`, async () => {
+    // A returning editor is seeded from these rows, so every property the
+    // brief depends on is pinned here: that the focus and the task list come
+    // back as they went in, that the vendor the caller connected from orders
+    // the history rather than filtering it, that a client opening a session
+    // per task cannot grow the table without bound, and above all that two
+    // parallel tool calls both leave their note — an editor issues them
+    // together, and a whole-list write from each would lose one.
+    const { store, cleanup } = await backend.open();
+    try {
+      const nathan = await store.createUser({
+        email: "mcp-sessions@example.invalid",
+        displayName: "Nathan",
+        passwordDigest: "unused",
+      });
+      const sam = await store.createUser({
+        email: "mcp-sessions-sam@example.invalid",
+        displayName: "Sam",
+        passwordDigest: "unused",
+      });
+      const session = (
+        id: string,
+        lastSeenAt: string,
+        editorVendor: string | undefined,
+        userId = nathan.id,
+      ) => ({
+        id,
+        userId,
+        tokenId: "tok_1",
+        editorVendor,
+        clientName: "Claude Code",
+        clientVersion: "1.2.3",
+        protocolVersion: "2025-06-18",
+        focus: undefined,
+        tasks: [],
+        createdAt: lastSeenAt,
+        lastSeenAt,
+        expiresAt: "2026-01-02T00:00:00.000Z",
+        endedAt: undefined,
+      });
+
+      await store.createMcpSession(session("mcps_1", "2026-01-01T00:00:00.000Z", "claude"));
+      await store.createMcpSession(session("mcps_2", "2026-01-01T01:00:00.000Z", "codex"));
+      await store.createMcpSession(session("mcps_other", "2026-01-01T02:00:00.000Z", "claude", sam.id));
+      // Newest last-seen first, and only this person's.
+      assert.deepEqual(
+        (await store.listMcpSessions(nathan.id)).map((row) => row.id),
+        ["mcps_2", "mcps_1"],
+      );
+      // The vendor is a preference, not a filter: the Claude Code row is
+      // still listed when Codex connects, just behind Codex's own.
+      assert.deepEqual(
+        (
+          await store.listMcpSessions(nathan.id, { editorVendor: "codex" })
+        ).map((row) => row.id),
+        ["mcps_2", "mcps_1"],
+      );
+      assert.deepEqual(
+        (
+          await store.listMcpSessions(nathan.id, { editorVendor: "claude" })
+        ).map((row) => row.id),
+        ["mcps_1", "mcps_2"],
+      );
+
+      const read = await store.getMcpSession("mcps_2");
+      assert.equal(read?.userId, nathan.id);
+      assert.equal(read?.clientName, "Claude Code");
+      assert.equal(read?.protocolVersion, "2025-06-18");
+      // Absent stays absent: a focus that came back as null or "" would read
+      // as one that had been set.
+      assert.equal(read?.focus, undefined);
+      assert.equal(read?.endedAt, undefined);
+      assert.deepEqual(read?.tasks, []);
+
+      const note = (taskId: string, at: string) => ({
+        taskId,
+        objective: `do ${taskId}`,
+        repositoryId: REPOSITORY.id,
+        channel: undefined,
+        via: "submit_task" as const,
+        at,
+      });
+      // Two writes that each know only about their own note, which is what
+      // two parallel tool calls on one session look like.
+      await store.updateMcpSession("mcps_2", {
+        lastSeenAt: "2026-01-01T01:05:00.000Z",
+        expiresAt: "2026-01-02T01:05:00.000Z",
+        focus: {
+          projectId: DEFAULT_PROJECT_ID,
+          repositoryId: REPOSITORY.id,
+          channel: "general",
+        },
+        noteTasks: { tasks: [note("task_a", "2026-01-01T01:05:00.000Z")], max: 3 },
+      });
+      await store.updateMcpSession("mcps_2", {
+        lastSeenAt: "2026-01-01T01:06:00.000Z",
+        expiresAt: "2026-01-02T01:06:00.000Z",
+        noteTasks: { tasks: [note("task_b", "2026-01-01T01:06:00.000Z")], max: 3 },
+      });
+      const noted = await store.getMcpSession("mcps_2");
+      assert.deepEqual(
+        noted?.tasks.map((task) => task.taskId),
+        ["task_a", "task_b"],
+      );
+      assert.deepEqual(noted?.focus, {
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryId: REPOSITORY.id,
+        channel: "general",
+      });
+      assert.equal(noted?.lastSeenAt, "2026-01-01T01:06:00.000Z");
+
+      // The same task noted twice is stored once and moves to the end, and
+      // the cap drops the oldest rather than refusing the newest.
+      await store.updateMcpSession("mcps_2", {
+        lastSeenAt: "2026-01-01T01:07:00.000Z",
+        expiresAt: "2026-01-02T01:07:00.000Z",
+        noteTasks: {
+          tasks: [
+            note("task_a", "2026-01-01T01:07:00.000Z"),
+            note("task_c", "2026-01-01T01:07:00.000Z"),
+            note("task_d", "2026-01-01T01:07:00.000Z"),
+          ],
+          max: 3,
+        },
+      });
+      assert.deepEqual(
+        (await store.getMcpSession("mcps_2"))?.tasks.map((task) => task.taskId),
+        ["task_a", "task_c", "task_d"],
+      );
+
+      // Ending is "this client is done", not "forget this": the row and its
+      // history stay, which is what the next handshake reads.
+      await store.updateMcpSession("mcps_2", {
+        lastSeenAt: "2026-01-01T01:08:00.000Z",
+        expiresAt: "2026-01-02T01:08:00.000Z",
+        endedAt: "2026-01-01T01:08:00.000Z",
+      });
+      const ended = await store.getMcpSession("mcps_2");
+      assert.equal(ended?.endedAt, "2026-01-01T01:08:00.000Z");
+      assert.equal(ended?.tasks.length, 3);
+
+      // Pruned on the way in, and only this person's rows.
+      await store.createMcpSession(
+        session("mcps_3", "2026-01-01T03:00:00.000Z", "claude"),
+        { keepPerUser: 2 },
+      );
+      assert.deepEqual(
+        (await store.listMcpSessions(nathan.id)).map((row) => row.id),
+        ["mcps_3", "mcps_2"],
+      );
+      assert.equal(await store.getMcpSession("mcps_1"), undefined);
+      assert.equal((await store.getMcpSession("mcps_other"))?.userId, sam.id);
+
+      assert.equal(await store.deleteStaleMcpSessions("2026-01-01T02:00:00.000Z"), 1);
+      assert.equal(await store.getMcpSession("mcps_2"), undefined);
+      assert.equal((await store.getMcpSession("mcps_3"))?.id, "mcps_3");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
   });
 
   test(`${backend.name}: a probe that cannot fail is not a probe`, async () => {

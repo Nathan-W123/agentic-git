@@ -1901,6 +1901,81 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "integration-replayed-from",
     statements: [`ALTER TABLE integrations ADD COLUMN replayed_from TEXT`],
   },
+  {
+    /**
+     * The standing context: a short note the people who work in a
+     * repository write for every agent that plans there — conventions, the
+     * validation commands that actually work, the pitfalls. Every task in
+     * the repository is handed it as prior context, on the in-process path,
+     * over the worker claim route, and in an editor's brief.
+     *
+     * Its own table rather than a column on `repositories`. `listRepositories`
+     * is `SELECT *` on every rail load and already carries a 256 KiB picture,
+     * and a versioned, attributed note has facts of its own — who, when, and
+     * which version an editor is pinning a write to. Keyed by repository like
+     * `auditor_cursors` (migration 22) and removed by the same cascade.
+     *
+     * `version` starts at 1 and rises by one per save, clears included: a
+     * clear that deleted the row would let a stale editor pin a write
+     * against a rewritten note that happens to be version 1 again.
+     */
+    version: 67,
+    name: "repository-standing-context",
+    statements: [
+      `CREATE TABLE repository_contexts (
+         repository_id TEXT PRIMARY KEY,
+         content TEXT NOT NULL DEFAULT '',
+         updated_by TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         version INTEGER NOT NULL DEFAULT 1
+       )`,
+    ],
+  },
+  {
+    /**
+     * What an MCP client was doing the last time it connected: the repository
+     * and room it was working in, and the handful of tasks it filed or took.
+     * A returning editor is seeded from this on its `initialize`, so a person
+     * who reconnects does not start from nothing.
+     *
+     * A table rather than memory. The gateway keeps presence, bundle tickets
+     * and manifest caches in a map on the reasoning that losing them to a
+     * restart is not a fault; this is the opposite case. A deploy is exactly
+     * when a client reconnects, and in a Postgres deployment the store is the
+     * one component every process shares.
+     *
+     * No outcome column. How each task ended is read live when the brief is
+     * written, so the record cannot contradict the run it describes.
+     *
+     * Bounded by count, not by time: `mcp_sessions_by_user` is what the
+     * prune-on-create subquery walks, and an expiry sweep would need a timer
+     * held open for the life of the process. `expires_at` governs whether the
+     * id is still accepted; the row outlives it as history either way, which
+     * is why `mcp_sessions_by_expiry` exists for the operator sweep rather
+     * than for a deletion the runtime performs.
+     */
+    version: 68,
+    name: "mcp-sessions",
+    statements: [
+      `CREATE TABLE mcp_sessions (
+         id TEXT PRIMARY KEY,
+         user_id TEXT NOT NULL REFERENCES users(id),
+         token_id TEXT,
+         editor_vendor TEXT,
+         client_name TEXT,
+         client_version TEXT,
+         protocol_version TEXT NOT NULL,
+         focus_json TEXT,
+         tasks_json TEXT NOT NULL DEFAULT '[]',
+         created_at TEXT NOT NULL,
+         last_seen_at TEXT NOT NULL,
+         expires_at TEXT NOT NULL,
+         ended_at TEXT
+       )`,
+      `CREATE INDEX mcp_sessions_by_user ON mcp_sessions(user_id, last_seen_at)`,
+      `CREATE INDEX mcp_sessions_by_expiry ON mcp_sessions(expires_at)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),
