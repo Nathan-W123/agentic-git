@@ -415,7 +415,19 @@ export function renderHandoffContext(
   return `${lines.join("\n")}\n`;
 }
 
-/** Recognises a stored audit payload as a handoff record. */
+/**
+ * Recognises a stored audit payload as a handoff record.
+ *
+ * Every required field is checked, not a representative few, because saying
+ * yes here is what licenses the rest of this file to dereference them: the
+ * renderer slices `canonicalRevision`, the store keys its deduplication on
+ * `createdAt`, and a heading is built from `reason`. A payload recognised on
+ * a partial match is therefore not read half-well, it throws part-way through
+ * seeding — and every caller treats a throw from the seed as "no handoffs",
+ * so a truncated record would quietly take the whole repository's memory with
+ * it. Refusing it instead costs exactly that one record, and the rest of the
+ * log still reaches the successor.
+ */
 export function isTaskHandoff(value: unknown): value is TaskHandoff {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -425,8 +437,14 @@ export function isTaskHandoff(value: unknown): value is TaskHandoff {
     candidate.version === 1 &&
     typeof candidate.taskId === "string" &&
     typeof candidate.objective === "string" &&
+    typeof candidate.repositoryId === "string" &&
+    typeof candidate.reason === "string" &&
+    typeof candidate.canonicalRevision === "string" &&
+    typeof candidate.createdAt === "string" &&
     Array.isArray(candidate.completed) &&
     Array.isArray(candidate.open) &&
+    Array.isArray(candidate.decisions) &&
+    Array.isArray(candidate.gotchas) &&
     Array.isArray(candidate.nextSteps)
   );
 }

@@ -382,6 +382,21 @@ test("a non-handoff audit payload is ignored rather than half-parsed", async () 
   });
   assert.deepEqual(await findTaskHandoffs(store, { taskId: "task_a" }), []);
   assert.equal(isTaskHandoff({ version: 1 }), false);
+
+  // Half-parsed is the failure to avoid, so every field a reader goes on to
+  // dereference is required rather than a representative few of them. A
+  // record accepted on a partial match throws part-way through rendering,
+  // and a throw out of the seed reaches every caller as "this repository has
+  // no handoffs at all".
+  const whole = buildTaskHandoff(
+    input({ integration: integration(), changeSet: changeSet(["src/a.ts"]) }),
+  ) as unknown as Record<string, unknown>;
+  assert.equal(isTaskHandoff(whole), true);
+  for (const field of Object.keys(whole)) {
+    const damaged = { ...whole };
+    delete damaged[field];
+    assert.equal(isTaskHandoff(damaged), false, `${field} was not required`);
+  }
 });
 
 test("a context handoff names where the run stopped and what to do next", async () => {
