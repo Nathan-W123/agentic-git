@@ -30,6 +30,38 @@ const FAILED_PREFIX = "FAILED with exit";
 export const DERIVED_PITFALLS_HEADING = "## Derived from the coordination record";
 
 /**
+ * Where the "we could not read the note" block begins.
+ *
+ * A third heading rather than a note that reads oddly, for the same reason
+ * the derived block has its own: the three have different provenances — a
+ * person, the record, and nothing at all — and a reader must be able to tell
+ * which one is speaking.
+ */
+export const UNREADABLE_CONTEXT_HEADING =
+  "## Standing context for this repository: could not be read";
+
+/**
+ * What a task is told when the note could not be read.
+ *
+ * Not `""`. `""` is what a repository with no note renders, and a consumer
+ * that cannot tell the two apart reads a failed read as "nobody has written
+ * anything here, so there is nothing to obey" — which is the one wrong
+ * answer this block can produce, and worse than no block at all. So the
+ * failure is stated, in the prompt, in the slot the note would have taken.
+ */
+export const UNREADABLE_STANDING_CONTEXT = [
+  UNREADABLE_CONTEXT_HEADING,
+  "",
+  "The standing context for this repository could not be read from the " +
+    "coordination record. Whether the people who work here have written one, " +
+    "and what it says, is unknown — which is not the same as there being " +
+    "none, and must not be read as this repository having no conventions.",
+  "",
+  "Check the workspace itself before assuming one, and say in the plan that " +
+    "the standing context was unavailable.",
+].join("\n");
+
+/**
  * Validation commands that keep failing across tasks, as a block of their own.
  *
  * Computed at read time from handoffs the coordinator already fetched and
@@ -105,7 +137,7 @@ export function derivePitfalls(handoffs: readonly TaskHandoff[]): string {
 }
 
 /**
- * The curated block for one repository, or `""`.
+ * The curated block for one repository, `""`, or a notice that it is unknown.
  *
  * Never throws: seeding is an advantage, and a task that cannot read the note
  * should still do the work. That is the rule the coordinator already applies
@@ -113,13 +145,25 @@ export function derivePitfalls(handoffs: readonly TaskHandoff[]): string {
  * `.catch(() => [])`, because `findTaskHandoffs` — and `seedContextForTask`
  * over it — do throw. The guard is inside this one instead: it has a single
  * caller and no second meaning to preserve for anybody else.
+ *
+ * What the guard must not do is answer `""`. `""` is a repository with no
+ * note, a claim about the record; a store that would not answer is a claim
+ * about nothing, and the consumer of both is a prompt that reads the absence
+ * of a note as the absence of anything to obey. So the two are different
+ * strings, and the failure says what it is. The whole read is guarded, not
+ * just the promise: a store implementation that throws before it returns one
+ * escapes a `.catch`, and a row that renders badly — a `content` that came
+ * back as something other than text — is a read that did not succeed either.
  */
 export async function standingContextForTask(
   store: CoordinationStore,
   query: { repositoryId: string },
 ): Promise<string> {
-  const context = await store
-    .getRepositoryContext(query.repositoryId)
-    .catch(() => undefined);
-  return renderRepositoryContext(context);
+  try {
+    return renderRepositoryContext(
+      await store.getRepositoryContext(query.repositoryId),
+    );
+  } catch {
+    return UNREADABLE_STANDING_CONTEXT;
+  }
 }
