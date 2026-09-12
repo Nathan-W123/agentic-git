@@ -1545,15 +1545,14 @@ test("a task that is merely waiting its turn is left alone", async (t) => {
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
-  await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "@Claude (Owner) the first thing" },
-  });
-  const [queued] = await runtime.store.listSubmittedTasks({ repositoryId });
-  assert.ok(queued !== undefined);
-
-  // A live lease anywhere in this repository means work is moving and this
-  // row is behind it.
+  // A live lease anywhere in this repository means work is moving and any
+  // queued row is behind it. It is established *before* the queued row exists,
+  // and that order is the point: the sweep runs every 40ms and `stalledTaskMs`
+  // is 0, so a queued task is eligible the instant it appears. Creating it
+  // first left a window — as wide as the HTTP round trip and the two store
+  // writes below — in which a sweep could find it with nothing in flight and
+  // narrate it. The window is only reachable on a machine that spends more
+  // than 40ms on this setup, which is why it failed on CI and never here.
   const worker = await runtime.store.registerWorker({
     userId: ownerId,
     organizationId: DEFAULT_ORGANIZATION_ID,
@@ -1577,6 +1576,23 @@ test("a task that is merely waiting its turn is left alone", async (t) => {
     ttlMs: 60_000,
   });
   assert.ok(leased !== undefined, "the second task should have been leased");
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) the first thing" },
+  });
+  // The dispatch behind that POST is fire-and-forget, so the row it submits
+  // may not be written yet when the request returns.
+  let waiting:
+    | Awaited<ReturnType<typeof runtime.store.listSubmittedTasks>>[number]
+    | undefined;
+  await waitFor(async () => {
+    const tasks = await runtime.store.listSubmittedTasks({ repositoryId });
+    waiting = tasks.find((task) => task.id !== busy.id);
+    return waiting !== undefined;
+  }, "the mention never produced a queued task");
+  const queued = waiting;
+  assert.ok(queued !== undefined);
 
   await new Promise((resolve) => setTimeout(resolve, 160));
   const messages = await runtime.store.listChannelMessages(repositoryId, ownerId);
