@@ -317,3 +317,19 @@ test("the shape is what a person reads; the digest is what decides", () => {
     shapes("export function sign(secret: string): string {}").get("sign")?.shape,
   );
 });
+
+test("a digest does not depend on the machine's locale", () => {
+  // Members are hashed in the order they are sorted, and `localeCompare`
+  // follows the process locale: ICU puts `a` before `B`, code points put `B`
+  // first. The same file hashed differently on a machine set to Danish.
+  const file = ts.createSourceFile(
+    "m.ts",
+    "export interface M { B: string; a: number }",
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const declaration = file.statements[0];
+  assert.ok(declaration !== undefined && ts.isInterfaceDeclaration(declaration));
+  // `B` before `a`: code points, not ICU's case-insensitive collation.
+  assert.equal(shapeOf(declaration, "M", file)?.shape, " {B: string; a: number}");
+});

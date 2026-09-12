@@ -907,3 +907,26 @@ test("smaller spellings that are not contract: an annotation line, PHP's implici
   assert.ok(sameDigest("kotlin", "class G {\n    val x: Int get() = 5\n}\n", "class G {\n    val x: Int\n        get() = 5\n}\n", "G"));
   assert.equal(shapeOf(braceShapes("class G {\n    val x: Int\n        get() = 5\n}\n", "kotlin"), "G"), "class G {val x: Int}");
 });
+
+test("`final` on a Java parameter binds a local name, so it is not contract", () => {
+  const digest = (source: string) =>
+    braceShapes(source, "java")?.find((shape) => shape.symbol === "f")?.digest;
+  // Adding `final`, and renaming a parameter that has it, are both invisible
+  // to a caller — who passes by position.
+  const plain = digest("public class M {\n  public int f(int x) { return x; }\n}");
+  assert.equal(digest("public class M {\n  public int f(final int x) { return x; }\n}"), plain);
+  assert.equal(digest("public class M {\n  public int f(final int y) { return y; }\n}"), plain);
+  assert.equal(digest("public class M {\n  public int f(@Nullable final int y) { return 0; }\n}"), plain);
+  // The type still is.
+  assert.notEqual(digest("public class M {\n  public int f(final long x) { return 0; }\n}"), plain);
+});
+
+test("a Scala type alias carries what it stands for", () => {
+  const digest = (source: string) =>
+    braceShapes(source, "scala")?.find((shape) => shape.symbol === "Id")?.digest;
+  assert.notEqual(digest("object M {\n  opaque type Id = String\n}\n"), undefined);
+  assert.notEqual(
+    digest("object M {\n  opaque type Id = Int\n}\n"),
+    digest("object M {\n  opaque type Id = String\n}\n"),
+  );
+});

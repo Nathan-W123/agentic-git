@@ -153,9 +153,12 @@ const DIALECTS: Record<BraceLanguage, BraceDialect> = {
   },
   java: {
     lineComments: ["//"],
-    quotes: ['"', "'"],
+    // The text block first: a `"""` read as `""` plus a stray quote made
+    // every file holding a SQL literal unreadable, so its contracts were
+    // unknown and a route inside it moved without anything noticing.
+    quotes: ['"""', '"', "'"],
     declarations: [
-      /^[ \t]*(?:@[\w.]+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed|synchronized|native|strictfp|default)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_]\w*)/gmu,
+      /^[ \t]*(?:@[\w.]+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed|synchronized|native|strictfp|default)\s+)*(?:class|@?interface|enum|record)\s+([A-Za-z_]\w*)/gmu,
       /^[ \t]*(?:@[\w.]+(?:\([^)]*\))?[ \t]+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|strictfp|default)\s+)+(?:<[^>]*>\s*)?[\w.<>\[\],? ]+\s+([A-Za-z_]\w*)\s*\(/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
@@ -220,7 +223,7 @@ const DIALECTS: Record<BraceLanguage, BraceDialect> = {
   },
   swift: {
     lineComments: ["//"],
-    quotes: ['"'],
+    quotes: ['"""', '"'],
     declarations: [
       // `class func` is a function, not a type named `func`; an operator
       // function is named by its symbol.
@@ -233,7 +236,7 @@ const DIALECTS: Record<BraceLanguage, BraceDialect> = {
   },
   kotlin: {
     lineComments: ["//"],
-    quotes: ['"'],
+    quotes: ['"""', '"'],
     charLiterals: true,
     declarations: [
       // The type-parameter list may nest one level (`<T : Comparable<T>>`),
@@ -248,11 +251,15 @@ const DIALECTS: Record<BraceLanguage, BraceDialect> = {
   },
   scala: {
     lineComments: ["//"],
-    quotes: ['"'],
+    quotes: ['"""', '"'],
     charLiterals: true,
     declarations: [
       /^[ \t]*(?:@\w+(?:\([^)]*\))?[ \t]+)*(?:(?:private|protected|final|override|implicit|sealed|abstract|case|lazy|inline|transparent|infix)\s+)*def\s+([A-Za-z_]\w*|[^\s\w(\[]+)/gmu,
       /^[ \t]*(?:@\w+(?:\([^)]*\))?[ \t]+)*(?:(?:private|protected|final|sealed|abstract|case|implicit|open|opaque)\s+)*(?:class|trait|object|enum)\s+([A-Za-z_]\w*)/gmu,
+      // `type Alias = Int` and Scala 3's `opaque type Id = String` publish a
+      // name a caller writes, so a change to what it stands for is a change
+      // to the contract.
+      /^[ \t]*(?:@\w+(?:\([^)]*\))?[ \t]+)*(?:(?:private|protected|final|sealed|abstract|implicit|open|opaque|infix|transparent)\s+)*type\s+([A-Za-z_]\w*)/gmu,
     ],
     attached: ATTACHED_ANNOTATION,
     statements:
@@ -353,12 +360,16 @@ function blankNonCodeWithSpans(
     }
     const quote = dialect.quotes.find((mark) => rest.startsWith(mark));
     if (quote !== undefined) {
+      // A triple-quoted string spans lines and, in the language that has
+      // the most of them, has no escapes at all. Reading a backslash as one
+      // would end a Kotlin raw string early.
+      const multiline = quote.length > 1;
       let at = index + quote.length;
       for (;;) {
         if (at >= source.length) {
           return undefined;
         }
-        if (source[at] === "\\") {
+        if (source[at] === "\\" && !multiline) {
           at += 2;
           continue;
         }
@@ -370,7 +381,7 @@ function blankNonCodeWithSpans(
         // at all — an apostrophe in a comment the dialect does not know about,
         // or a Rust lifetime. Refusing the file is better than swallowing the
         // rest of it.
-        if (source[at] === "\n" && quote !== "`") {
+        if (source[at] === "\n" && quote !== "`" && !multiline) {
           return undefined;
         }
         at += 1;

@@ -331,6 +331,12 @@ function withoutName(parameter: string, language: BraceLanguage): string {
   if (!TYPE_FIRST.has(language) || /[()]/u.test(parameter)) {
     return parameter;
   }
+  // `final` on a Java parameter binds the local name and says nothing to a
+  // caller — but it left the name in the comparable form, so adding it, or
+  // renaming a parameter that had it, moved the digest.
+  if (language === "java") {
+    parameter = parameter.replace(/^(?:final\s+|@[\w.]+(?:\([^)]*\))?\s+)+/u, "");
+  }
   const array = /^(.*?)((?:\s*\[[^\]]*\])+)$/u.exec(parameter);
   const core = (array?.[1] ?? parameter).trim();
   const suffix = array?.[2]?.replace(/\s+/gu, "") ?? "";
@@ -387,6 +393,26 @@ function comparableParameter(
     }
   }
   return at === -1 ? type : `${type} = ?`;
+}
+
+/**
+ * What follows an `=`, to the end of the statement it belongs to: the rest
+ * of the line, and every line after it while a bracket is still open.
+ */
+function statementAfter(code: string, at: number): string {
+  const lines = code.slice(at + 1).split("\n");
+  const brackets = new Brackets();
+  let out = "";
+  for (const line of lines) {
+    out += (out === "" ? "" : " ") + line;
+    for (let index = 0; index < line.length; index += 1) {
+      brackets.step(line, index);
+    }
+    if (brackets.depth === 0) {
+      break;
+    }
+  }
+  return normalize(out);
 }
 
 /**
@@ -953,6 +979,23 @@ export function braceShapes(
       if (isSpecifier(head, value)) {
         head = `${head} = ${value}`;
       }
+    }
+    // A type alias is what it stands for. `type Id = String` has no body, so
+    // read as an ordinary type it hashed as `type Id {}` — the same for
+    // every alias in the file, and unmoved when the aliased type changed.
+    if (declaration.terminator === "=" && /(?:^|\s)type\s/u.test(head)) {
+      const aliased = `${head} = ${statementAfter(code, declaration.headEnd)}`;
+      pieces.set(declaration.name, [
+        ...(pieces.get(declaration.name) ?? []),
+        {
+          kind: "type",
+          head: aliased,
+          comparableHead: canonical(aliased),
+          ordered: false,
+          inferred: false,
+        },
+      ]);
+      continue;
     }
     // A Java record's components are its accessors, so their names stay.
     const stripNames = POSITIONAL.has(language) && !/\brecord\b/u.test(head);

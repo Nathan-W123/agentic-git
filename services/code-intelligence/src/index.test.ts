@@ -1454,10 +1454,12 @@ test("the declaration index is built from bodies, manifests and filenames, warm 
       "src/main/java/com/acme/Models.java":
         "package com.acme;\npublic class Models {\n}\nclass A {\n    public static class Builder {}\n}\nclass B {\n    public static class Builder {}\n}\n",
       "src/main/java/com/acme/Builder.java": "package com.acme;\npublic class Builder {}\n",
-      // A text block the scanner cannot read: the header still names the
-      // package, and the filename is the clue.
+      // A body the scanner cannot read — a text block holding an escaped
+      // `"""` — where the header still names the package, so the filename
+      // is the only clue left. An ordinary text block is read now; this is
+      // the shape that still defeats the blanker.
       "src/main/java/com/acme/db/Queries.java":
-        'package com.acme.db;\npublic class Queries {\n    static final String ALL = """\n        SELECT 1\n        """;\n}\n',
+        'package com.acme.db;\npublic class Queries {\n    static final String ALL = """\n        say \\"""hi\n        """;\n}\n',
       "src/main/java/com/acme/app/Main.java":
         "package com.acme.app;\nimport com.acme.Builder;\nimport com.acme.db.Queries;\npublic class Main {}\n",
       // A declared bin target beside the library that shares its module

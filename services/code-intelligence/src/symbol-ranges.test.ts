@@ -426,3 +426,45 @@ test("declarations the patterns used to miss", () => {
     ["Factory:type", "make:function", "==:function"],
   );
 });
+
+test("a triple-quoted string is a string, so the file around it is still read", () => {
+  // A Java text block read as `""` plus a stray quote swallowed the rest of
+  // the file: every contract in it went unknown, and a route inside it could
+  // move without anything noticing.
+  for (const [language, source] of [
+    ["java", 'public class Q {\n  String q = """\n    SELECT 1 { }\n    """;\n  public int n() { return 1; }\n}'],
+    ["kotlin", 'class Q {\n  val q = """\n    SELECT 1 { }\n  """\n  fun n(): Int = 1\n}'],
+    ["scala", 'class Q {\n  val q = """\n    SELECT 1 { }\n  """\n  def n(): Int = 1\n}'],
+    ["swift", 'struct Q {\n  let q = """\n  SELECT 1 { }\n  """\n  func n() -> Int { 1 }\n}'],
+  ] as const) {
+    assert.deepEqual(
+      braceSymbolRanges(source, language)?.map((range) => range.name),
+      ["Q", "n"],
+      language,
+    );
+  }
+  // Kotlin's raw string has no escapes at all, so a trailing backslash does
+  // not extend it.
+  assert.deepEqual(
+    braceSymbolRanges('class Q {\n  val path = """C:\\"""\n  fun n(): Int = 1\n}', "kotlin")?.map(
+      (range) => range.name,
+    ),
+    ["Q", "n"],
+  );
+});
+
+test("an annotation type and a type alias are declarations", () => {
+  assert.deepEqual(
+    braceSymbolRanges('public @interface Audited {\n  String value();\n}\n', "java")?.map(
+      (range) => range.name,
+    ),
+    ["Audited"],
+  );
+  // Scala's `type X = Y` publishes a name a caller writes.
+  assert.deepEqual(
+    braceSymbolRanges("object M {\n  type Alias = Int\n  opaque type Id = String\n}\n", "scala")?.map(
+      (range) => range.name,
+    ),
+    ["M", "Alias", "Id"],
+  );
+});

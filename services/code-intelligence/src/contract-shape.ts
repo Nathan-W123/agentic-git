@@ -184,7 +184,12 @@ function isPublic(node: ts.ClassElement): boolean {
  * invalidated consumers over a reorder would be one people route around.
  */
 function members(entries: readonly string[]): string {
-  return [...entries].sort((left, right) => left.localeCompare(right)).join("; ");
+  // Code-point order, not `localeCompare`: the digest is hashed from this,
+  // and a collation that follows the process locale made the same file hash
+  // differently on a machine set to Danish or Czech.
+  return [...entries]
+    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+    .join("; ");
 }
 
 /**
