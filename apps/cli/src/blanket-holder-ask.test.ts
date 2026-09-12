@@ -466,13 +466,24 @@ async function settle(
   finished: Promise<unknown>,
   budgetMs = 20_000,
 ): Promise<"finished" | "hung"> {
-  return await Promise.race([
-    finished.then(() => "finished" as const),
-    new Promise<"hung">((resolve) => {
-      const timer = setTimeout(() => resolve("hung"), budgetMs);
-      timer.unref?.();
-    }),
-  ]);
+  // The budget is refed on purpose, and cleared the moment the work wins.
+  // An unref'd timer cannot keep the loop alive, so a run that stalls with
+  // nothing else pending drained the loop instead of reaching the deadline:
+  // the file died with "Promise resolution is still pending but the event
+  // loop has already resolved" — the runner's way of saying the process left
+  // while a test was still awaiting — rather than returning "hung" and
+  // failing on the sentence below. The hang detector has to outlive the hang.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      finished.then(() => "finished" as const),
+      new Promise<"hung">((resolve) => {
+        timer = setTimeout(() => resolve("hung"), budgetMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Whether two inclusive line ranges share a line. */

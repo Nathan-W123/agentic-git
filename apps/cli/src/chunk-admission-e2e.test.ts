@@ -299,9 +299,11 @@ class HolderAgent implements AgentAdapter {
     this.replans.push(structuredClone(request));
     const delay = this.options.replanDelayMs ?? 0;
     if (delay > 0) {
+      // Refed: while this adapter is "thinking" the delay may be the only
+      // thing pending, and an unref'd timer would let the loop drain out from
+      // under the round it is pacing.
       await new Promise((resolve) => {
-        const timer = setTimeout(resolve, delay);
-        timer.unref?.();
+        setTimeout(resolve, delay);
       });
     }
     return {
@@ -602,13 +604,22 @@ async function settle(
   finished: Promise<unknown>,
   budgetMs = 20_000,
 ): Promise<string> {
-  return await Promise.race([
-    finished.then(() => "finished"),
-    new Promise<string>((resolve) => {
-      const timer = setTimeout(() => resolve("hung"), budgetMs);
-      timer.unref?.();
-    }),
-  ]);
+  // Refed, and cleared as soon as the work wins: an unref'd budget cannot
+  // hold the event loop open, so a stalled run drained it and the file died
+  // with "Promise resolution is still pending but the event loop has already
+  // resolved" instead of returning "hung". See the twin in
+  // `blanket-holder-ask.test.ts` for the whole reasoning.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      finished.then(() => "finished"),
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve("hung"), budgetMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 test("an arrival is chunk-admitted to the one file a claim does not cover", async () => {
@@ -797,6 +808,10 @@ test("a partially admitted agent is told what it was granted", async () => {
       }),
       workingChangePollMs: NEVER_TICKS_MS,
     });
+    // Refed and cleared on the way out, for the reason the racing helper
+    // above records: an unref'd ceiling cannot survive the stall it is here
+    // to bound.
+    let budget: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       coordinator
         .run({
@@ -807,10 +822,10 @@ test("a partially admitted agent is told what it was granted", async () => {
         })
         .catch((error: unknown) => error),
       new Promise((resolve) => {
-        const timer = setTimeout(resolve, 90_000);
-        timer.unref?.();
+        budget = setTimeout(resolve, 90_000);
       }),
     ]);
+    clearTimeout(budget);
 
     assert.equal(
       agent.contexts.length,
