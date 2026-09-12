@@ -213,13 +213,16 @@ test("task credential homes share a lease and persist rotation on close", async 
     submittedTask({ id: "task-2" as TaskId, submittedBy: "alice" }),
     { credentials },
   );
+  // Refed, and cleared below: an unref'd stall detector cannot outlive the
+  // stall, so the loop drained instead of this resolving to `stalled`.
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
   const raced = await Promise.race([
     secondPromise,
     new Promise<typeof stalled>((resolve) => {
-      const timer = setTimeout(() => resolve(stalled), 5_000);
-      timer.unref();
+      stallTimer = setTimeout(() => resolve(stalled), 5_000);
     }),
   ]);
+  clearTimeout(stallTimer);
   assert.notEqual(
     raced,
     stalled,

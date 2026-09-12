@@ -1112,16 +1112,22 @@ test("stopping a worker hands its lease back immediately", async (t) => {
   assert.equal(lease?.plan?.admission.status, "approved");
 
   await worker.stop();
+  // Refed, and cleared once the iteration wins. Unref'd, this deadline could
+  // not fire on the hang it names: a stalled cancel left nothing else pending,
+  // the loop drained, and the file ended with "Promise resolution is still
+  // pending but the event loop has already resolved" rather than this error.
+  let stopDeadline: ReturnType<typeof setTimeout> | undefined;
   const result = await Promise.race([
     iteration,
     new Promise<never>((_resolve, reject) => {
-      const timeout = setTimeout(
+      stopDeadline = setTimeout(
         () => reject(new Error("The cancelled agent did not stop")),
         10_000,
       );
-      timeout.unref?.();
     }),
-  ]);
+  ]).finally(() => {
+    clearTimeout(stopDeadline);
+  });
   assert.equal(result.accepted, false);
   assert.equal(
     (await runtime.store.listWorkLeases({}))[0]?.status,
