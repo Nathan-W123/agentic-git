@@ -179,6 +179,27 @@ function generalChannelId(repositoryId: string): string {
   return `subchan_general_${repositoryId}`;
 }
 
+/**
+ * Where a channel message sits in its room: its bump if it has one, and
+ * otherwise when it was written.
+ *
+ * The same expression the transcript is ordered and paged by, read off a row
+ * rather than computed in SQL, so a page boundary can be compared against it
+ * without a second round trip.
+ */
+function channelPosition(row: Row): string {
+  const bumped = row["bumped_at"];
+  if (typeof bumped === "string") {
+    return bumped;
+  }
+  const created = row["created_at"];
+  if (typeof created !== "string") {
+    throw new Error("A channel message has no created_at to be ordered by");
+  }
+  return created;
+}
+
+
 function text(row: Row, column: string): string {
   const value = row[column];
   if (typeof value !== "string") {
@@ -4463,14 +4484,58 @@ export class PostgresCoordinationStore implements CoordinationStore {
     }
     // Position, not time — see `bumpChannelMessage`. The cursor above pages
     // on the same expression so it agrees with the order it is paging.
+    const scope = [...values];
     const rows = await this.rows(
       `SELECT * FROM channel_messages WHERE ${clauses.join(" AND ")}
        ORDER BY COALESCE(bumped_at, created_at) DESC, id DESC
        LIMIT ${bind(values, limit)}`,
       values,
     );
-    const bases = rows.reverse().map((row) => this.toChannelMessageBase(row));
+    // A page must not stop in the middle of a group of messages that share a
+    // position — see the SQLite store's copy of this for the full reasoning.
+    // The short of it: the cursor a caller pages on is that position and
+    // nothing else, and the next page asks for messages strictly before it,
+    // so a boundary drawn inside a group leaves the rest of the group on
+    // neither page. Messages posted in one millisecond are all it takes.
+    const completed =
+      rows.length === limit && rows.length > 0
+        ? await this.completeChannelPage(rows, clauses, scope)
+        : rows;
+    const bases = completed
+      .reverse()
+      .map((row) => this.toChannelMessageBase(row));
     return await this.hydrateChannelMessages(bases, viewerId);
+  }
+
+  /**
+   * Replaces a page's trailing position group with the whole of it.
+   *
+   * The rows above the boundary are already complete, so only the group at
+   * the boundary is re-read. A page can come back longer than the limit asked
+   * for; that is the point — the limit is a page size, and returning fewer
+   * than all the messages at one position is what loses them.
+   */
+  private async completeChannelPage(
+    rows: Row[],
+    clauses: readonly string[],
+    scope: readonly unknown[],
+  ): Promise<Row[]> {
+    const last = rows[rows.length - 1];
+    if (last === undefined) {
+      return [...rows];
+    }
+    const boundary = channelPosition(last);
+    const values = [...scope];
+    const group = await this.rows(
+      `SELECT * FROM channel_messages
+        WHERE ${[...clauses, `COALESCE(bumped_at, created_at) = ${bind(values, boundary)}`].join(" AND ")}
+        ORDER BY COALESCE(bumped_at, created_at) DESC, id DESC`,
+      values,
+    );
+    return [
+      ...rows.filter((row) => channelPosition(row) !== boundary),
+      ...group,
+    ];
   }
 
   public async countChannelMessages(
@@ -4838,6 +4903,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     }
     // Newest first with a limit, then reversed — see the SQLite store: the
     // page a conversation wants is the most recent N.
+    const scope = [...values];
     values.push(filter.limit ?? null);
     const result = await this.query(
       `SELECT * FROM direct_messages
@@ -4846,7 +4912,43 @@ export class PostgresCoordinationStore implements CoordinationStore {
        LIMIT $${values.length}`,
       values,
     );
-    return result.rows.reverse().map((row) => this.toDirectMessage(row));
+    const rows = await this.completeDirectPage(
+      result.rows,
+      conditions,
+      scope,
+      filter.limit,
+    );
+    return rows.reverse().map((row) => this.toDirectMessage(row));
+  }
+
+  /**
+   * Replaces a conversation page's oldest timestamp group with the whole of
+   * it — the same rule, and the same reason, as `completeChannelPage`. Two
+   * messages sent in one millisecond are ordinary in a conversation between
+   * an agent and a person, and `before` pages on the timestamp alone.
+   */
+  private async completeDirectPage(
+    rows: Row[],
+    conditions: readonly string[],
+    scope: readonly unknown[],
+    limit: number | undefined,
+  ): Promise<Row[]> {
+    const last = rows[rows.length - 1];
+    if (limit === undefined || rows.length !== limit || last === undefined) {
+      return rows;
+    }
+    const boundary = text(last, "created_at");
+    const values = [...scope, boundary];
+    const group = await this.query(
+      `SELECT * FROM direct_messages
+        WHERE ${[...conditions, `created_at = $${values.length}`].join(" AND ")}
+        ORDER BY created_at DESC, id DESC`,
+      values,
+    );
+    return [
+      ...rows.filter((row) => text(row, "created_at") !== boundary),
+      ...group.rows,
+    ];
   }
 
   public async listDirectConversations(

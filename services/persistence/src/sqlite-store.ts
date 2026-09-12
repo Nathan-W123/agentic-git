@@ -181,6 +181,27 @@ function generalChannelId(repositoryId: string): string {
 }
 
 
+/**
+ * Where a channel message sits in its room: its bump if it has one, and
+ * otherwise when it was written.
+ *
+ * The same expression the transcript is ordered and paged by, read off a row
+ * rather than computed in SQL, so a page boundary can be compared against it
+ * without a second round trip.
+ */
+function channelPosition(row: Row): string {
+  const bumped = row["bumped_at"];
+  if (typeof bumped === "string") {
+    return bumped;
+  }
+  const created = row["created_at"];
+  if (typeof created !== "string") {
+    throw new Error("A channel message has no created_at to be ordered by");
+  }
+  return created;
+}
+
+
 /** One prepared statement, as `node:sqlite` hands it back. */
 type PreparedStatement = ReturnType<DatabaseSync["prepare"]>;
 
@@ -4504,8 +4525,57 @@ export class SqliteCoordinationStore implements CoordinationStore {
          ORDER BY COALESCE(bumped_at, created_at) DESC, rowid DESC LIMIT ?`,
       )
       .all(...values, limit) as Row[];
-    const bases = rows.reverse().map((row) => this.toChannelMessageBase(row));
+    // A page must not stop in the middle of a group of messages that share a
+    // position. The cursor a caller pages on is that position and nothing
+    // else — the client reads it off the oldest message it holds — and the
+    // next page asks for messages strictly before it. So a boundary drawn
+    // inside a group leaves the rest of that group on neither page: not on
+    // this one, because the limit cut them off, and not on the next, because
+    // they are not *before* the cursor. They are simply gone from the
+    // transcript, with nothing to say they ever existed. Messages posted in
+    // one millisecond are all it takes.
+    //
+    // Only the oldest group can be cut, and only when the page filled up.
+    const completed =
+      rows.length === limit && rows.length > 0
+        ? this.completeChannelPage(rows, clauses, values)
+        : rows;
+    const bases = completed
+      .reverse()
+      .map((row) => this.toChannelMessageBase(row));
     return this.hydrateChannelMessages(bases, viewerId);
+  }
+
+  /**
+   * Replaces a page's trailing position group with the whole of it.
+   *
+   * The rows above the boundary are already complete, so only the group at
+   * the boundary is re-read. A page can therefore come back longer than the
+   * limit asked for; that is the point — the limit is a page size, and
+   * returning fewer than all the messages at a position is the thing that
+   * loses them.
+   */
+  private completeChannelPage(
+    rows: Row[],
+    clauses: readonly string[],
+    values: readonly (string | number)[],
+  ): Row[] {
+    const last = rows[rows.length - 1];
+    if (last === undefined) {
+      return [...rows];
+    }
+    const boundary = channelPosition(last);
+    const group = this.db
+      .prepare(
+        `SELECT * FROM channel_messages
+          WHERE ${[...clauses, "COALESCE(bumped_at, created_at) = ?"].join(" AND ")}
+          ORDER BY COALESCE(bumped_at, created_at) DESC, rowid DESC`,
+      )
+      .all(...values, boundary) as Row[];
+    return [
+      ...rows.filter((row) => channelPosition(row) !== boundary),
+      ...group,
+    ];
   }
 
   public async countChannelMessages(
@@ -4762,7 +4832,41 @@ export class SqliteCoordinationStore implements CoordinationStore {
          LIMIT ?`,
       )
       .all(...values, filter.limit ?? -1) as Row[];
-    return rows.reverse().map((row) => this.toDirectMessage(row));
+    return this.completeDirectPage(rows, conditions, values, filter.limit)
+      .reverse()
+      .map((row) => this.toDirectMessage(row));
+  }
+
+  /**
+   * Replaces a conversation page's oldest timestamp group with the whole of
+   * it — the same rule, and the same reason, as `completeChannelPage`. Two
+   * messages sent in one millisecond are ordinary in a conversation between
+   * an agent and a person, and `before` pages on the timestamp alone, so a
+   * page that stopped inside such a group left the rest of it on no page at
+   * all.
+   */
+  private completeDirectPage(
+    rows: Row[],
+    conditions: readonly string[],
+    values: readonly string[],
+    limit: number | undefined,
+  ): Row[] {
+    const last = rows[rows.length - 1];
+    if (limit === undefined || rows.length !== limit || last === undefined) {
+      return rows;
+    }
+    const boundary = text(last, "created_at");
+    const group = this.db
+      .prepare(
+        `SELECT * FROM direct_messages
+          WHERE ${[...conditions, "created_at = ?"].join(" AND ")}
+          ORDER BY created_at DESC, id DESC`,
+      )
+      .all(...values, boundary) as Row[];
+    return [
+      ...rows.filter((row) => text(row, "created_at") !== boundary),
+      ...group,
+    ];
   }
 
   public async listDirectConversations(

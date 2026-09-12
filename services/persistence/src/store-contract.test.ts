@@ -4866,6 +4866,136 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a channel page never steps over messages that share a position`, async () => {
+    const { store, cleanup, writeRawColumn } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const posted: string[] = [];
+      for (let index = 0; index < 6; index += 1) {
+        const message = await store.appendChannelMessage({
+          repositoryId: REPOSITORY.id,
+          projectId: DEFAULT_PROJECT_ID,
+          authorId: "user_1",
+          content: `line ${String(index)}`,
+        });
+        posted.push(message.id);
+      }
+      // Three of them said in one millisecond, which is what a burst from one
+      // agent looks like. `created_at` is written by the store from the
+      // clock, so the only way to arrange it is to write the column directly.
+      const at = (index: number): string =>
+        `2026-01-01T00:00:0${String(index)}.000Z`;
+      const positions = [at(0), at(1), at(1), at(1), at(2), at(3)];
+      for (const [index, id] of posted.entries()) {
+        await writeRawColumn(
+          "channel_messages",
+          "created_at",
+          positions[index] ?? at(0),
+          id,
+        );
+      }
+
+      // The client pages exactly this way: read a page, take the position of
+      // the oldest message it got, ask for what is before that. The cursor is
+      // the position and nothing else, so a page that stopped in the middle
+      // of the three left the other two on neither page — not on this one,
+      // and not on the next, because they are not *before* the cursor. They
+      // were simply gone from the transcript.
+      const first = await store.listChannelMessages(REPOSITORY.id, "user_1", {
+        limit: 3,
+      });
+      const cursor = first[0]?.createdAt;
+      assert.ok(cursor !== undefined);
+      const second = await store.listChannelMessages(REPOSITORY.id, "user_1", {
+        limit: 3,
+        before: cursor,
+      });
+
+      const seen = new Set([...first, ...second].map((entry) => entry.id));
+      const missing = posted.filter((id) => !seen.has(id));
+      assert.deepEqual(
+        missing,
+        [],
+        `${String(missing.length)} message(s) are on no page at all`,
+      );
+      // And the page is still ordered oldest first, including across the
+      // group it had to widen to take in.
+      assert.deepEqual(
+        first.map((entry) => entry.createdAt),
+        [...first.map((entry) => entry.createdAt)].sort(),
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a conversation page never steps over messages sent in one millisecond`, async () => {
+    const { store, cleanup, writeRawColumn } = await backend.open();
+    try {
+      const alice = await store.createUser({
+        email: "page-alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const bob = await store.createUser({
+        email: "page-bob@example.invalid",
+        displayName: "Bob",
+        passwordDigest: "unused",
+      });
+      const sent: string[] = [];
+      for (let index = 0; index < 6; index += 1) {
+        const message = await store.appendDirectMessage({
+          projectId: DEFAULT_PROJECT_ID,
+          authorId: alice.id,
+          recipientId: bob.id,
+          content: `line ${String(index)}`,
+        });
+        sent.push(message.id);
+      }
+      const at = (index: number): string =>
+        `2026-01-01T00:00:0${String(index)}.000Z`;
+      const stamps = [at(0), at(1), at(1), at(1), at(2), at(3)];
+      for (const [index, id] of sent.entries()) {
+        await writeRawColumn(
+          "direct_messages",
+          "created_at",
+          stamps[index] ?? at(0),
+          id,
+        );
+      }
+
+      // Same cursor, same failure: `before` compares on `created_at` alone,
+      // so a page boundary inside a group of messages that share one drops
+      // the rest of the group out of the conversation entirely.
+      const first = await store.listDirectMessages(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+        bob.id,
+        { limit: 3 },
+      );
+      const cursor = first[0]?.createdAt;
+      assert.ok(cursor !== undefined);
+      const second = await store.listDirectMessages(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+        bob.id,
+        { limit: 3, before: cursor },
+      );
+
+      const seen = new Set([...first, ...second].map((entry) => entry.id));
+      const missing = sent.filter((id) => !seen.has(id));
+      assert.deepEqual(
+        missing,
+        [],
+        `${String(missing.length)} message(s) are on no page at all`,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: direct messages are private to the two people in them`, async () => {
     const { store, cleanup } = await backend.open();
     try {
@@ -5501,7 +5631,16 @@ for (const backend of backends) {
       const listed = await store.listChannelMessages("repo_counted", alice.id, {
         limit: 200,
       });
-      assert.equal(listed.length, 200);
+      // At least the page that was asked for, and fewer than the room holds.
+      // Not exactly 200: a page is not allowed to stop inside a group of
+      // messages that share a position, because the cursor the next page is
+      // read with is that position and nothing else — so the rest of the
+      // group would be on no page at all. Written in one loop, several of
+      // these share a millisecond, and the page takes in whatever its
+      // boundary group has left. Which is the point of the count below: the
+      // page is a page, and only the count is the room.
+      assert.ok(listed.length >= 200, "a full page is at least the page size");
+      assert.ok(listed.length < 205, "and still a page, not the whole room");
       assert.deepEqual(await store.countChannelMessages("repo_counted"), {
         messages: 205,
         replies: 2,

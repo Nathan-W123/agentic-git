@@ -1689,8 +1689,26 @@ export interface AddChannelReplyInput {
 }
 
 export interface ChannelMessageFilter {
-  /** Exclusive cursor: only messages created strictly before this ISO time. */
+  /**
+   * Exclusive cursor: only messages positioned strictly before this ISO time.
+   *
+   * Position, not creation: a bumped thread sorts and pages by its bump. The
+   * cursor is that value and nothing else, which is why `limit` below is a
+   * floor rather than a ceiling.
+   */
   before?: string;
+  /**
+   * How many messages a page should hold, clamped to 1–200.
+   *
+   * A full page can come back holding a few more than this. A page is not
+   * allowed to stop in the middle of a group of messages that share a
+   * position, because the next page is asked for with that position as its
+   * cursor — so the rest of the group would be on neither page, and gone from
+   * the transcript with nothing to say it ever existed. Messages posted in
+   * one millisecond are all it takes. The page takes in the whole of its
+   * boundary group instead; a reader that needs an exact total wants
+   * {@link CoordinationStore.countChannelMessages}.
+   */
   limit?: number;
   /**
    * Narrow to one sub-channel.
@@ -1769,6 +1787,14 @@ export interface CatchUpCursor {
 export interface DirectMessageFilter {
   /** Exclusive cursor: only messages created strictly before this ISO time. */
   before?: string;
+  /**
+   * How many messages a page should hold; absent means all of them.
+   *
+   * A floor rather than a ceiling for the same reason as
+   * {@link ChannelMessageFilter.limit}: a page that stopped inside a group of
+   * messages sharing one `created_at` would leave the rest of the group on no
+   * page at all, because `before` compares on that timestamp alone.
+   */
   limit?: number;
 }
 
