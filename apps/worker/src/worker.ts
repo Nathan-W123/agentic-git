@@ -327,14 +327,23 @@ function configuredConcurrency(explicit?: number): number {
  * to reproduce.
  */
 class Laps {
-  private readonly marks: [string, number][] = [];
+  private readonly marks: [string, number, boolean][] = [];
   private last = Date.now();
   private readonly startedAt = Date.now();
 
-  /** Closes the stretch since the previous mark and names it. */
-  public mark(name: string): void {
+  /**
+   * Closes the stretch since the previous mark and names it.
+   *
+   * `always` keeps a mark in the summary however short it was. The summary
+   * drops anything under 50ms as noise, which is right for a phase whose
+   * only information is how long it took — and wrong for one whose *name*
+   * says which path the run took. A warm checkout is fast by design, so the
+   * filter hid exactly the line that says the warm slot was used, on
+   * whatever machine was quick enough that day.
+   */
+  public mark(name: string, always = false): void {
     const now = Date.now();
-    this.marks.push([name, now - this.last]);
+    this.marks.push([name, now - this.last, always]);
     this.last = now;
   }
 
@@ -343,10 +352,11 @@ class Laps {
     return this.marks.at(-1)?.[0] ?? "nothing";
   }
 
+
   /** Everything measured, longest phase named first among equals. */
   public summary(): string {
     const parts = this.marks
-      .filter(([, ms]) => ms >= 50)
+      .filter(([, ms, always]) => always || ms >= 50)
       .map(([name, ms]) => `${name} ${(ms / 1000).toFixed(1)}s`);
     return `${parts.join(" · ")} · total ${(
       (Date.now() - this.startedAt) / 1000
@@ -1962,12 +1972,15 @@ export class Worker {
 
     if (warm === undefined) {
       await this.materialise(git, source, source === cache, assignment, workspacePath);
-      run.laps?.mark("checkout");
+      run.laps?.mark("checkout", true);
     } else {
       // Named apart from a cold checkout so the one line a run prints says
-      // which of the two it was. `advance` has already re-based the slot on
-      // this lease's revision, so there is nothing left to materialise.
-      run.laps?.mark("checkout(warm)");
+      // which of the two it was, and kept in the summary however fast it was
+      // — a warm checkout is fast by design, and the summary's own noise
+      // filter was dropping the mark that says so. `advance` has already
+      // re-based the slot on this lease's revision, so there is nothing left
+      // to materialise.
+      run.laps?.mark("checkout(warm)", true);
     }
 
     // Hosted execution runs untrusted agents from different tenants on shared
