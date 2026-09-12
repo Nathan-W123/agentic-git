@@ -117,6 +117,7 @@ import {
 import {
   derivePitfalls,
   standingContextForTask,
+  UNREADABLE_STANDING_CONTEXT,
 } from "./repository-context.js";
 import {
   assessReplay,
@@ -2095,12 +2096,20 @@ export class Coordinator {
           // here. The one block of prior context a person authored — see
           // `repository-context.ts` for why that squares with the
           // evidence-only rule the handoffs keep.
+          //
+          // A read that fails answers with a block saying so, not with `""`.
+          // `""` is a repository whose people have written nothing, and a
+          // planning prompt missing the note entirely is read as a
+          // repository with no conventions to keep — so the fallback here is
+          // that same notice rather than the empty string it used to be.
+          // `standingContextForTask` does not throw; the catch is what the
+          // answer would have to be if it ever did.
           const standing =
             this.store === undefined
               ? ""
               : await standingContextForTask(this.store, {
                   repositoryId: input.repository.id,
-                }).catch(() => "");
+                }).catch(() => UNREADABLE_STANDING_CONTEXT);
           // The conversation this request was asked inside, ahead of what
           // earlier tasks left behind. Both are background rather than fact,
           // but they are not equally close to the work: the thread is about

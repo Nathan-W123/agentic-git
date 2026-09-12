@@ -161,7 +161,11 @@ grepped `priorContext` for a heading would couple two packages on a string.
 1. **In process** — `standingContextForTask` in
    `services/coordinator/src/repository-context.ts`, read per planning round
    beside the handoffs, guarded so a task that cannot read the note still does
-   the work.
+   the work. The guard does not answer `""`: that is what a repository whose
+   people have written nothing renders, and a planning prompt with no standing
+   block in it reads as a repository with no conventions to keep. A read that
+   fails renders a block of its own saying so, under a third heading, because
+   "we could not read it" is an unknown and must not pass for an answer.
 2. **Remote worker** — `claimWorkRepository` in `apps/cli/src/worker-operations.ts`
    reads and renders it last, after every early return, and the claim route
    carries it as `standingContext` **whether or not a claim was granted**: the
@@ -199,13 +203,28 @@ more recorded handoffs, with counts —
     anyone; a label that keeps failing is usually an environment or setup
     pitfall worth stating in the standing context above.
 
-    - `tests` failed in 3 of the last 12 tasks that ran it (most recently task_x)
+    - `tests` failed in 3 of the last 12 tasks that ran it (most recently
+      task_x, 2026-07-29)
 
 Computed at read time by `derivePitfalls`, never persisted; a person promotes
 a line by writing it into the standing context, which is the only way it
 becomes something somebody stands behind. Its own top-level heading rather
 than a sub-heading of the curated block, because the two have opposite
 provenances and a reader must not be able to conflate them.
+
+The date is the day of the most recent failure, taken from the handoff that
+recorded it, because the block's claim is about what does not work here *now*:
+three failures last week is a broken command and three from February is one
+somebody fixed. A record that does not say when it was written is reported as
+`date unknown` rather than dated from anything else.
+
+A label is not prose anybody vouched for — the project config that supplies
+one lives in the repository being worked on, and a plan's `commands` come from
+the agent — so it is flattened to one line, its backticks neutralised and its
+length bounded before it is quoted. Left verbatim, a label carrying a newline
+and the curated block's own heading would forge, inside the block that says
+nobody wrote it, the attribution the two headings exist to keep apart. The
+block itself is capped at twenty lines and states how many it left out.
 
 One audit read, deliberately. `findTaskHandoffs` reads the whole
 type-filtered audit log whatever `limit` it is given (the filter has no
