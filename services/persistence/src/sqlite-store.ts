@@ -3994,15 +3994,20 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
       // A time bound can only cut where the sequence does, or the archive
       // would be a set of holes rather than a prefix and nothing would link.
+      //
+      // Counted rather than listed. Naming every selected id in a NOT IN
+      // needs one bound parameter per event, and SQLite refuses a statement
+      // with more than 32765 of them — so the bigger the log grew, the
+      // surer archiving was to fail with "too many SQL variables", which is
+      // exactly the log that needs archiving. The count says the same thing
+      // in two parameters: everything at or below the boundary is either in
+      // this batch or a hole, so equal totals mean an unbroken prefix. See
+      // the matching check in postgres-store.ts.
       const boundary = integer(rows[rows.length - 1] as Row, "sequence");
-      const gap = this.db
-        .prepare(
-          "SELECT COUNT(*) AS n FROM audit_events WHERE sequence <= ? AND id NOT IN (" +
-            rows.map(() => "?").join(", ") +
-            ")",
-        )
-        .get(boundary, ...rows.map((row) => text(row, "id"))) as Row;
-      if (integer(gap, "n") > 0) {
+      const covered = this.db
+        .prepare("SELECT COUNT(*) AS n FROM audit_events WHERE sequence <= ?")
+        .get(boundary) as Row;
+      if (integer(covered, "n") !== rows.length) {
         throw new Error(
           "Archiving must cover an unbroken prefix of the chain; the " +
             "requested boundary would leave earlier events behind",

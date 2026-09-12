@@ -213,3 +213,37 @@ test("concurrent stores on one file share a single audit chain", async () => {
     }
   });
 });
+
+/**
+ * SQLite refuses a statement carrying more than 32765 bound parameters, and
+ * the prefix check used to name every event it was archiving. The limit is
+ * therefore a ceiling on how much history can ever be retired — and it is the
+ * busiest log, the one that most needs archiving, that hits it first.
+ */
+test("an audit prefix larger than SQLite's parameter limit still archives", async () => {
+  const store = SqliteCoordinationStore.open(":memory:");
+  try {
+    const run = await store.createRun({
+      repository: REPOSITORY,
+      mode: "coordinated",
+      baseVersion: BASE_VERSION,
+    });
+    // One past the driver's parameter ceiling, which is where the old check
+    // stopped being expressible at all.
+    const events = 32_766;
+    for (let index = 0; index < events; index += 1) {
+      await store.appendAudit(run.id, { type: "task_submitted" });
+    }
+
+    const archived = await store.archiveAuditEvents({ throughSequence: events });
+    assert.equal(archived?.events.length, events);
+    assert.equal(archived?.checkpoint.events, events);
+    assert.equal(archived?.checkpoint.throughSequence, events);
+    // The chain still verifies across the checkpoint, which is the whole
+    // point of archiving rather than deleting.
+    assert.equal((await store.verifyAudit()).valid, true);
+    assert.deepEqual(await store.listAuditEvents(), []);
+  } finally {
+    await store.close();
+  }
+});
