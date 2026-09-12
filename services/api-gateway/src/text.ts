@@ -24,6 +24,22 @@ export function collapseWhitespace(value: string): string {
 }
 
 /**
+ * `value` cut to `limit` UTF-16 units without splitting a character.
+ *
+ * Every cut in this system is measured in code units — a token estimate, a
+ * character cap — and a cut that lands between the halves of a surrogate pair
+ * leaves a lone code unit behind. That is not a shortened message: it reaches
+ * the reader as a replacement character, so the last thing a clipped log line
+ * says is a glyph nobody wrote. Dropping the orphaned half costs one
+ * character and keeps the text something a person actually typed.
+ */
+export function clipCodeUnits(value: string, limit: number): string {
+  const cut = value.slice(0, Math.max(0, limit));
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
+/**
  * How alike two pieces of channel text are, 0 to 1.
  *
  * Jaccard over the same stopword-stripped tokens agent matching uses, so
