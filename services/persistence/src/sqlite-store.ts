@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -401,6 +402,23 @@ export class SqliteCoordinationStore implements CoordinationStore {
   private readonly db: Database;
   /** Depth of open transactions; SQLite cannot nest a real one. */
   private transactionDepth = 0;
+  /**
+   * Set for exactly the calls running inside this store's open transaction.
+   *
+   * `transactionDepth` alone cannot tell nesting from overlap: a second,
+   * unrelated caller that arrives while the first one's body is awaiting sees
+   * the same non-zero depth a genuinely nested call does. The async context
+   * is the thing that actually distinguishes them, because it follows the
+   * `await` chain of the body and nothing else.
+   */
+  private readonly inTransaction = new AsyncLocalStorage<true>();
+  /**
+   * Tail of the queue of transactions waiting for this connection.
+   *
+   * One connection, one write transaction at a time. Callers that are not
+   * inside the open one wait their turn here instead of being folded into it.
+   */
+  private writeQueue: Promise<void> = Promise.resolve();
   /** So a second `close` is a no-op rather than a throw. */
   private closed = false;
 
@@ -3918,33 +3936,41 @@ export class SqliteCoordinationStore implements CoordinationStore {
       ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     };
 
-    const owned = this.begin();
-    try {
-      const previousHash = this.latestChainHash();
-      const payloadHash = hashAuditPayload(event);
+    // Queued behind any transaction this store already has open, rather than
+    // folded into it. An append that joined somebody else's transaction was
+    // returned to its caller as recorded and then thrown away by that
+    // caller's rollback — a log that has silently lost an entry is worse than
+    // one that reported it could not write it, and the chain hash of every
+    // event after it was computed against a link that no longer exists.
+    await this.exclusively(async () => {
+      const owned = this.begin();
+      try {
+        const previousHash = this.latestChainHash();
+        const payloadHash = hashAuditPayload(event);
 
-      this.db
-        .prepare(
-          `INSERT INTO audit_events
-             (id, run_id, task_id, type, data_json, occurred_at, payload_hash, previous_hash, chain_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          event.id,
-          runId ?? null,
-          event.taskId ?? null,
-          event.type,
-          JSON.stringify(event.data),
-          event.occurredAt,
-          payloadHash,
-          previousHash,
-          chainHash(previousHash, payloadHash),
-        );
-      this.commit(owned);
-    } catch (error) {
-      this.rollback(owned);
-      throw error;
-    }
+        this.db
+          .prepare(
+            `INSERT INTO audit_events
+               (id, run_id, task_id, type, data_json, occurred_at, payload_hash, previous_hash, chain_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            event.id,
+            runId ?? null,
+            event.taskId ?? null,
+            event.type,
+            JSON.stringify(event.data),
+            event.occurredAt,
+            payloadHash,
+            previousHash,
+            chainHash(previousHash, payloadHash),
+          );
+        this.commit(owned);
+      } catch (error) {
+        this.rollback(owned);
+        throw error;
+      }
+    });
 
     return event;
   }
@@ -4470,7 +4496,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       values.push(filter.before);
     }
     // Ordered by where the message sits, which is its bump when it has one
-    // and otherwise when it was written. `before` still pages on the same
+    // and otherwise when it was written. `before` pages on the same
     // expression, so a cursor and the order it pages through agree.
     const rows = this.db
       .prepare(
@@ -6460,22 +6486,60 @@ public async recordBranchClaim(
     }
   }
 
+  /**
+   * Runs `body` with this connection's write transaction to itself.
+   *
+   * A call already inside the open transaction runs straight through, which
+   * is what makes a composite store method safe to call from a
+   * `runInTransaction` body. Every other caller waits for its turn.
+   *
+   * Without the wait, two overlapping transactions shared one: the second to
+   * arrive saw a non-zero depth, joined, and was told its work had been
+   * committed while it was still sitting inside somebody else's transaction —
+   * so the first one's rollback threw away writes a different caller had been
+   * told were saved, and the first one's commit kept writes the second had
+   * rolled back. Both of those are the store answering "saved" about a row
+   * that is not there, or "gone" about one that is, which is exactly what it
+   * must never do. Neither is reachable once independent transactions take
+   * their turns.
+   */
+  private async exclusively<T>(body: () => Promise<T>): Promise<T> {
+    if (this.inTransaction.getStore() !== undefined) {
+      return await body();
+    }
+    const ahead = this.writeQueue;
+    let release: () => void = () => undefined;
+    this.writeQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Whatever is ahead may have failed; this queue orders turns, it does not
+    // propagate outcomes.
+    await ahead.catch(() => undefined);
+    try {
+      return await this.inTransaction.run(true, body);
+    } finally {
+      release();
+    }
+  }
+
   public async runInTransaction<T>(
     body: (store: CoordinationStore) => Promise<T>,
   ): Promise<T> {
-    const owned = this.begin();
-    try {
-      const result = await body(this);
-      this.commit(owned);
-      return result;
-    } catch (error) {
+    return await this.exclusively(async () => {
+      const owned = this.begin();
       try {
-        this.rollback(owned);
-      } catch {
-        // The original failure matters more than a rollback that cannot run.
+        const result = await body(this);
+        this.commit(owned);
+        return result;
+      } catch (error) {
+        try {
+          this.rollback(owned);
+        } catch {
+          // The original failure matters more than a rollback that cannot run.
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   /**

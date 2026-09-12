@@ -3694,6 +3694,92 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a failing transaction keeps its hands off another caller's work`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      // Two callers, overlapping in time, neither inside the other. This is
+      // what any two concurrent requests against one store look like.
+      //
+      // The SQLite store told them apart by a depth counter, which cannot:
+      // the second caller arrived while the first one's body was awaiting,
+      // saw a transaction already open, and was folded into it. It was then
+      // told its work was committed while it was still sitting inside
+      // somebody else's transaction — and when that transaction rolled back,
+      // the organization this caller had been told was saved went with it.
+      // A store that answers "saved" about a row that is not there is the
+      // one failure this suite exists to prevent.
+      const failing = store.runInTransaction(async (inner) => {
+        await inner.createOrganization({ slug: "doomed", name: "Doomed" });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        throw new Error("the database went away");
+      });
+      // Nobody is awaiting this yet and a rejection without a handler is an
+      // uncaught exception, which would replace the assertions below.
+      failing.catch(() => undefined);
+      // Long enough for the first transaction to be open and waiting.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const committed = await store.runInTransaction(async (inner) => {
+        await inner.createOrganization({ slug: "survivor", name: "Survivor" });
+        return "committed";
+      });
+      assert.equal(committed, "committed");
+      await assert.rejects(failing, /database went away/u);
+
+      const slugs = (await store.listOrganizations()).map((entry) => entry.slug);
+      assert.equal(
+        slugs.includes("survivor"),
+        true,
+        "a transaction that returned is a transaction whose rows are there",
+      );
+      assert.equal(
+        slugs.includes("doomed"),
+        false,
+        "and the one that threw left nothing behind",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an audit event appended beside an open transaction survives its rollback`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      // The same overlap, seen from the audit log. `appendAudit` returns the
+      // event it wrote, which is the caller's receipt that the log has it;
+      // the log is also the thing nothing else can reconstruct. Folding the
+      // append into an unrelated open transaction made that receipt a lie
+      // whenever the transaction failed — and left every later event's
+      // `previousHash` pointing at a link that no longer exists.
+      const failing = store.runInTransaction(async (inner) => {
+        await inner.createOrganization({ slug: "doomed-audit", name: "Doomed" });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        throw new Error("the database went away");
+      });
+      failing.catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const event = await store.appendAudit(undefined, {
+        type: "task_submitted",
+        taskId: "task_beside_a_transaction",
+        data: { projectId: DEFAULT_PROJECT_ID },
+      });
+      await assert.rejects(failing, /database went away/u);
+
+      const logged = (await store.listAudit()).map((entry) => entry.id);
+      assert.equal(
+        logged.includes(event.id),
+        true,
+        "an event `appendAudit` handed back is an event the log kept",
+      );
+      // And the chain still verifies, which is the other half of the same
+      // claim: an event that vanished from the middle would break it.
+      assert.equal((await store.verifyAudit()).valid, true);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a signup intent settles exactly once`, async () => {
     const { store, cleanup } = await backend.open();
     try {
