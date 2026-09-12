@@ -247,3 +247,82 @@ test("an audit prefix larger than SQLite's parameter limit still archives", asyn
     await store.close();
   }
 });
+
+/**
+ * SQLite takes text as a NUL-terminated C string, so a string with a NUL in
+ * it used to be stored up to that point while the very same call handed the
+ * caller back the whole string it passed in. The truncation only surfaced on
+ * the next read, with nothing left to recover the lost tail from.
+ */
+test("text carrying a NUL is refused rather than quietly truncated", async () => {
+  const store = SqliteCoordinationStore.open(":memory:");
+  try {
+    const organization = await store.createOrganization({
+      slug: "acme",
+      name: "Acme",
+    });
+    const project = await store.createProject({
+      organizationId: organization.id,
+      slug: "web",
+      name: "Web",
+    });
+    const author = await store.createUser({
+      email: "author@example.com",
+      displayName: "Author",
+      passwordDigest: "digest",
+    });
+    const reader = await store.createUser({
+      email: "reader@example.com",
+      displayName: "Reader",
+      passwordDigest: "digest",
+    });
+
+    await assert.rejects(
+      store.appendDirectMessage({
+        projectId: project.id,
+        authorId: author.id,
+        recipientId: reader.id,
+        content: "before\u0000after",
+      }),
+      /NUL character/u,
+    );
+    // Nothing was written, so nobody is left holding half a sentence.
+    assert.deepEqual(
+      await store.listDirectMessages(project.id, author.id, reader.id),
+      [],
+    );
+
+    // Everything else Unicode can hold still round-trips untouched.
+    const emoji = await store.appendDirectMessage({
+      projectId: project.id,
+      authorId: author.id,
+      recipientId: reader.id,
+      content: "ship it \u{1F680} café слово",
+    });
+    const [stored] = await store.listDirectMessages(
+      project.id,
+      author.id,
+      reader.id,
+    );
+    assert.equal(stored?.content, emoji.content);
+  } finally {
+    await store.close();
+  }
+});
+
+/**
+ * An empty path is SQLite's request for a private database that is deleted
+ * when the connection closes. Every write would be accepted and reported as
+ * saved, and the whole store would be gone at shutdown without one error
+ * anywhere — which is what a blank configured path used to produce.
+ */
+test("an empty database path is refused rather than opened as a scratch database", () => {
+  assert.throws(
+    () => SqliteCoordinationStore.open(""),
+    /needs a path/u,
+  );
+  assert.throws(
+    () => SqliteCoordinationStore.open("   "),
+    /needs a path/u,
+  );
+});

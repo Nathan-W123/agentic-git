@@ -180,6 +180,85 @@ function generalChannelId(repositoryId: string): string {
 }
 
 
+/** One prepared statement, as `node:sqlite` hands it back. */
+type PreparedStatement = ReturnType<DatabaseSync["prepare"]>;
+
+/** The slice of the driver this store uses. */
+interface Database {
+  prepare(sql: string): PreparedStatement;
+  exec(sql: string): void;
+  close(): void;
+}
+
+/**
+ * Refuses a bound string that carries a NUL.
+ *
+ * SQLite's C interface takes text as a NUL-terminated pointer, so a
+ * JavaScript string with a NUL in it is stored up to that byte and the rest
+ * is dropped — silently, while the caller goes on holding the whole string it
+ * believes it wrote and the store hands the same whole string back from the
+ * same call. The next read is the first time anybody sees the truncation, by
+ * which point there is nothing left to recover it from.
+ *
+ * Refused rather than sanitised: stripping the NUL would still store
+ * something nobody asked for, and a write that cannot be made faithfully is a
+ * write that must not appear to have succeeded. JSON columns are unaffected
+ * either way — `JSON.stringify` escapes a NUL as `\u0000`, six ordinary
+ * characters — so this only ever fires on text handed straight to a column.
+ */
+function assertStorableText(parameters: readonly unknown[]): void {
+  for (const value of parameters) {
+    if (typeof value === "string" && value.includes("\u0000")) {
+      throw new Error(
+        "A text value containing a NUL character cannot be stored: SQLite " +
+          "would keep only the part before it",
+      );
+    }
+  }
+}
+
+/**
+ * Wraps the driver so every bound parameter passes {@link assertStorableText}.
+ *
+ * At the driver rather than at each caller, because the truncation is a
+ * property of every text column in the schema and a guard that has to be
+ * remembered at two hundred call sites is a guard that will be missed at one
+ * of them.
+ */
+function guardTextBinding(handle: DatabaseSync): Database {
+  return {
+    prepare(sql: string): PreparedStatement {
+      const statement = handle.prepare(sql);
+      return {
+        run: (...parameters: unknown[]) => {
+          assertStorableText(parameters);
+          return (statement.run as (...args: unknown[]) => unknown)(
+            ...parameters,
+          );
+        },
+        get: (...parameters: unknown[]) => {
+          assertStorableText(parameters);
+          return (statement.get as (...args: unknown[]) => unknown)(
+            ...parameters,
+          );
+        },
+        all: (...parameters: unknown[]) => {
+          assertStorableText(parameters);
+          return (statement.all as (...args: unknown[]) => unknown)(
+            ...parameters,
+          );
+        },
+      } as unknown as PreparedStatement;
+    },
+    exec(sql: string): void {
+      handle.exec(sql);
+    },
+    close(): void {
+      handle.close();
+    },
+  };
+}
+
 function text(row: Row, column: string): string {
   const value = row[column];
   if (typeof value !== "string") {
@@ -283,18 +362,29 @@ function clearable(
  * touching a caller.
  */
 export class SqliteCoordinationStore implements CoordinationStore {
-  private readonly db: DatabaseSync;
+  private readonly db: Database;
   /** Depth of open transactions; SQLite cannot nest a real one. */
   private transactionDepth = 0;
   /** So a second `close` is a no-op rather than a throw. */
   private closed = false;
 
-  private constructor(db: DatabaseSync) {
+  private constructor(db: Database) {
     this.db = db;
   }
 
   /** `:memory:` is accepted for tests. Any other path is created if missing. */
   public static open(databasePath: string): SqliteCoordinationStore {
+    // An empty path is SQLite's way of asking for a private database that
+    // lives only as long as the connection, so every write would be accepted,
+    // reported as saved, and gone at close with nothing raised anywhere. A
+    // store nobody can read back is not a store, and a blank
+    // `COORD_SQLITE_PATH` is how somebody gets one by accident.
+    if (databasePath.trim().length === 0) {
+      throw new Error(
+        "A SQLite coordination database needs a path; an empty one would " +
+          "open a temporary database that is discarded on close",
+      );
+    }
     if (databasePath !== ":memory:") {
       mkdirSync(path.dirname(path.resolve(databasePath)), { recursive: true });
     }
@@ -305,7 +395,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       db.exec("PRAGMA foreign_keys = ON");
       db.exec("PRAGMA synchronous = NORMAL");
       db.exec("PRAGMA busy_timeout = 5000");
-      const store = new SqliteCoordinationStore(db);
+      const store = new SqliteCoordinationStore(guardTextBinding(db));
       store.migrate();
       return store;
     } catch (error) {
