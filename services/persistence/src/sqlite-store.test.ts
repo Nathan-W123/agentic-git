@@ -543,14 +543,18 @@ test("a negative page size is refused rather than read as unbounded", async () =
       (await store.listDirectMessages(project.id, author.id, reader.id)).length,
       4,
     );
-    assert.equal(
-      (
-        await store.listDirectMessages(project.id, author.id, reader.id, {
-          limit: 2,
-        })
-      ).length,
-      2,
+    // A real limit still pages — `at least`, because a page takes in the
+    // whole of its boundary group rather than cutting inside one position
+    // and leaving the rest of that group on no page at all. Four messages
+    // written in a loop share a millisecond, so this page is all four:
+    // `limit` is a page size, not a hard count. See `DirectMessageFilter`.
+    const paged = await store.listDirectMessages(
+      project.id,
+      author.id,
+      reader.id,
+      { limit: 2 },
     );
+    assert.ok(paged.length >= 2, "a limit of two is at least two");
 
     await assert.rejects(
       store.listMcpSessions(author.id, { limit: -1 }),

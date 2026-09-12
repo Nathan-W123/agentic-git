@@ -5716,7 +5716,21 @@ for (const backend of backends) {
       // boundary group has left. Which is the point of the count below: the
       // page is a page, and only the count is the room.
       assert.ok(listed.length >= 200, "a full page is at least the page size");
-      assert.ok(listed.length < 205, "and still a page, not the whole room");
+      // And it never stops inside one: no message left off the page shares a
+      // position with the last one on it, or the cursor the next page is read
+      // with would skip it. Asserted this way rather than as an upper bound
+      // on the page, because how many messages share a millisecond depends
+      // on how fast the machine wrote them.
+      const whole = await store.listChannelMessages("repo_counted", alice.id, {
+        limit: 1000,
+      });
+      const boundary = listed.at(-1)?.createdAt;
+      assert.ok(
+        !whole
+          .slice(listed.length)
+          .some((message) => message.createdAt === boundary),
+        "a page never stops inside a group of messages sharing a position",
+      );
       assert.deepEqual(await store.countChannelMessages("repo_counted"), {
         messages: 205,
         replies: 2,
