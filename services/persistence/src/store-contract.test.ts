@@ -7763,4 +7763,183 @@ for (const backend of backends) {
     await cleanup();
   });
 
+
+  test(`${backend.name}: a rolled-back transaction takes its branch claims with it`, async () => {
+    // A branch claim is what stops two tasks touching the same symbols, so it
+    // has to be exactly as durable as the work it belongs to. Postgres wrote
+    // it on a connection of its own: the claim was committed the moment it
+    // was made, outlived the rollback of the transaction that made it, and
+    // went on blocking other tasks from work that was never done.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_txn",
+        path: "/canonical/txn.git",
+        branch: "main",
+      });
+
+      await assert.rejects(
+        store.runInTransaction(async (tx) => {
+          await tx.recordBranchClaim({
+            repositoryId: "repo_txn",
+            branch: "kumi/abandoned",
+            taskId: "task_abandoned",
+            revision: "a".repeat(40),
+            symbols: ["chargeTotal"],
+          });
+          throw new Error("the task failed after claiming");
+        }),
+        /the task failed after claiming/u,
+      );
+      assert.deepEqual(
+        await store.listBranchClaims("repo_txn"),
+        [],
+        "a claim made inside a transaction that rolled back was never made",
+      );
+
+      // The same connection the other way round. A read that goes out over a
+      // second connection cannot see what the transaction has not committed,
+      // so it answered "nothing is claimed" to the very transaction that had
+      // just claimed something — which is how two agents end up editing one
+      // symbol while each is told it has it to itself.
+      const seen = await store.runInTransaction(async (tx) => {
+        await tx.recordBranchClaim({
+          repositoryId: "repo_txn",
+          branch: "kumi/payments",
+          taskId: "task_payments",
+          revision: "b".repeat(40),
+          symbols: ["chargeTotal"],
+        });
+        return (await tx.listBranchClaims("repo_txn")).map(
+          (claim) => claim.taskId,
+        );
+      });
+      assert.deepEqual(seen, ["task_payments"]);
+      assert.deepEqual(
+        (await store.listBranchClaims("repo_txn")).map((claim) => claim.taskId),
+        ["task_payments"],
+      );
+
+      // And a release is a write like any other: rolled back, the claim is
+      // still held. Postgres had already deleted it by the time the rollback
+      // ran, and nothing put it back.
+      await assert.rejects(
+        store.runInTransaction(async (tx) => {
+          await tx.releaseBranchClaims("repo_txn", "kumi/payments");
+          throw new Error("the integration failed after releasing");
+        }),
+        /the integration failed after releasing/u,
+      );
+      assert.deepEqual(
+        (await store.listBranchClaims("repo_txn")).map((claim) => claim.taskId),
+        ["task_payments"],
+        "a release that rolled back did not release anything",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an editor hold is visible to the transaction that took it`, async () => {
+    // Same defect, the other table. "Is anybody editing this file" answered
+    // from outside the transaction that just said yes reads as nobody — and
+    // an empty hold list is not a missing answer, it is the answer that lets
+    // a second person open the file.
+    const { store, cleanup } = await backend.open();
+    try {
+      const held = await store.runInTransaction(async (tx) => {
+        await tx.holdEditorFile({
+          repositoryId: "repo_holds_txn",
+          userId: "user_nathan" as never,
+          file: "src/login.ts",
+          ttlMs: 60_000,
+        });
+        return (await tx.listEditorHolds("repo_holds_txn")).map(
+          (hold) => hold.file,
+        );
+      });
+      assert.deepEqual(held, ["src/login.ts"]);
+
+      await assert.rejects(
+        store.runInTransaction(async (tx) => {
+          await tx.releaseEditorHold({
+            repositoryId: "repo_holds_txn",
+            userId: "user_nathan" as never,
+            file: "src/login.ts",
+          });
+          throw new Error("the editor disconnected mid-save");
+        }),
+        /disconnected/u,
+      );
+      assert.deepEqual(
+        (await store.listEditorHolds("repo_holds_txn")).map((hold) => hold.file),
+        ["src/login.ts"],
+        "a release that rolled back left the file held",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: more transactions than connections still finish`, async () => {
+    // The pool holds ten connections. Every one of these transactions checks
+    // one out and then reads — and while that read went to the pool for a
+    // connection of its own, the first ten transactions held all ten and each
+    // waited for an eleventh that only it could release. Nothing timed out,
+    // nothing errored, nothing was logged: the control plane simply stopped
+    // answering. Twelve is over the pool, which is the whole point.
+    const { store, cleanup } = await backend.open();
+    // Whether the store is still safe to shut down. `close` drains the pool,
+    // so a store that is wedged would hang the whole file there rather than
+    // report the failure this test exists to report.
+    let wedged = false;
+    try {
+      await store.saveRepository({
+        id: "repo_pool",
+        path: "/canonical/pool.git",
+        branch: "main",
+      });
+      const deadlocked = Symbol("deadlocked");
+      const work = Array.from({ length: 12 }, async (_unused, index) =>
+        store.runInTransaction(async (tx) => {
+          await tx.recordBranchClaim({
+            repositoryId: "repo_pool",
+            branch: `kumi/branch-${index}`,
+            taskId: `task_${index}`,
+            revision: String(index).padStart(40, "0"),
+            symbols: [`symbol_${index}`],
+          });
+          return (await tx.listBranchClaims("repo_pool")).length;
+        }),
+      );
+      // Whatever any of these does after the deadline is no longer this
+      // test's business, but a rejection nobody is waiting for is an uncaught
+      // exception — which would replace the assertion below with a stack
+      // trace from the teardown and hide what actually went wrong.
+      for (const pending of work) {
+        pending.catch(() => undefined);
+      }
+      const finished = await Promise.race([
+        Promise.all(work),
+        new Promise<typeof deadlocked>((resolve) => {
+          const timer = setTimeout(() => resolve(deadlocked), 20_000);
+          timer.unref();
+        }),
+      ]);
+      wedged = finished === deadlocked;
+      assert.notEqual(
+        finished,
+        deadlocked,
+        "twelve concurrent transactions should not wait on each other's connections",
+      );
+      assert.equal((await store.listBranchClaims("repo_pool")).length, 12);
+    } finally {
+      if (!wedged) {
+        await store.close();
+      }
+      await cleanup();
+    }
+  });
 }

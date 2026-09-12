@@ -318,6 +318,28 @@ const MIGRATE_LOCK_KEY = 810275;
  * text so ordering and expiry comparisons behave identically.
  */
 export class PostgresCoordinationStore implements CoordinationStore {
+  /**
+   * The pool itself. Reached directly only by {@link ping}, {@link close} and
+   * the three places that legitimately check out a whole connection —
+   * {@link migrate}, {@link runInTransaction} and {@link transaction}.
+   *
+   * Every statement a public method runs goes through {@link query},
+   * {@link row} or {@link rows} instead, and the difference is not a matter of
+   * taste. `pool.query` takes *some* connection, which inside
+   * `runInTransaction` is never the one holding the transaction. Six methods
+   * did that, and each got a different wrong answer out of it: a branch claim
+   * written inside a transaction that then rolled back stayed in the table
+   * forever, a claim released inside one was gone before the rollback could
+   * put it back, and a read of either from inside the transaction that had
+   * just written it reported the file as unheld — "nobody is editing this"
+   * being precisely the answer that makes two agents edit it at once.
+   *
+   * The fourth was worse than a wrong answer. The pool tops out at ten
+   * connections, so ten concurrent transactions hold all ten; each then asked
+   * the pool for an eleventh to run its read on, and waited for a connection
+   * that only it could release. The whole control plane stopped, with no
+   * error, no timeout and nothing in the log.
+   */
   private readonly pool: pg.Pool;
   /** The connection a `runInTransaction` body must use, while one is open. */
   private readonly ambientClient = new AsyncLocalStorage<PoolClient>();
@@ -5261,7 +5283,7 @@ public async recordBranchClaim(
         : { movedResources: cloneMovedResources(input.movedResources) }),
       createdAt: new Date().toISOString(),
     };
-    await this.pool.query(
+    await this.query(
       `INSERT INTO branch_claims
          (id, repository_id, branch, task_id, revision,
           symbols, apis, schemas, config_keys, services, ranges,
@@ -5292,16 +5314,14 @@ public async recordBranchClaim(
     repositoryId: string,
     options: { exceptBranch?: string } = {},
   ): Promise<BranchClaim[]> {
-    const result = await this.pool.query(
+    const rows = await this.rows(
       `SELECT * FROM branch_claims
         WHERE repository_id = $1
           AND ($2::text IS NULL OR branch <> $2::text)
         ORDER BY created_at ASC, id ASC`,
       [repositoryId, options.exceptBranch ?? null],
     );
-    return result.rows.map((row) =>
-      postgresBranchClaim(row as Record<string, unknown>),
-    );
+    return rows.map((row) => postgresBranchClaim(row));
   }
 
   public async holdEditorFile(
@@ -5340,10 +5360,8 @@ public async recordBranchClaim(
     options: { branch?: string; exceptUser?: UserId } = {},
   ): Promise<EditorHold[]> {
     const now = new Date().toISOString();
-    await this.pool.query(`DELETE FROM editor_holds WHERE expires_at <= $1`, [
-      now,
-    ]);
-    const result = await this.pool.query(
+    await this.query(`DELETE FROM editor_holds WHERE expires_at <= $1`, [now]);
+    const rows = await this.rows(
       `SELECT * FROM editor_holds
         WHERE repository_id = $1
           AND ($2::text IS NULL OR branch = $2::text)
@@ -5351,9 +5369,7 @@ public async recordBranchClaim(
         ORDER BY file ASC, user_id ASC`,
       [repositoryId, options.branch ?? null, options.exceptUser ?? null],
     );
-    return result.rows.map((row) =>
-      postgresEditorHold(row as Record<string, unknown>),
-    );
+    return rows.map((row) => postgresEditorHold(row));
   }
 
   public async releaseEditorHold(input: {
@@ -5362,7 +5378,7 @@ public async recordBranchClaim(
     userId: UserId;
     file: string;
   }): Promise<void> {
-    await this.pool.query(
+    await this.query(
       `DELETE FROM editor_holds
         WHERE repository_id = $1 AND branch = $2 AND user_id = $3 AND file = $4`,
       [input.repositoryId, input.branch ?? "", input.userId, input.file],
@@ -5373,7 +5389,7 @@ public async recordBranchClaim(
     repositoryId: string,
     branch: string,
   ): Promise<void> {
-    await this.pool.query(
+    await this.query(
       `DELETE FROM branch_claims WHERE repository_id = $1 AND branch = $2`,
       [repositoryId, branch],
     );
