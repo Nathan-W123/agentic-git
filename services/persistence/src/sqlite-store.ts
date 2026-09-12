@@ -440,6 +440,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
    * inside the open one wait their turn here instead of being folded into it.
    */
   private writeQueue: Promise<void> = Promise.resolve();
+  /** Hands the connection to whoever is next, set while a turn is held. */
+  private releaseWriteTurn: (() => void) | undefined;
   /** So a second `close` is a no-op rather than a throw. */
   private closed = false;
 
@@ -1156,7 +1158,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     // BEGIN IMMEDIATE takes the write lock up front, so two workers polling at
     // the same moment serialise here rather than both reading the same
     // pending row and racing to claim it.
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const now = new Date();
       const nowIso = now.toISOString();
@@ -1358,7 +1360,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     // BEGIN IMMEDIATE takes the write lock before the admitted set is read, so
     // two workers arbitrating overlapping plans serialise here: the second
     // sees the first's admission and is told its view was stale.
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const row = this.db
         .prepare("SELECT * FROM work_leases WHERE id = ? AND status = 'active'")
@@ -1443,7 +1445,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     at: string,
     detail?: string,
   ): Promise<boolean> {
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const row = this.db
         .prepare("SELECT * FROM work_leases WHERE id = ? AND status = 'active'")
@@ -2086,7 +2088,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
   ): Promise<void> {
     // Revocation is recorded rather than deleted so the audit trail keeps a
     // record that the credential existed.
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       this.db
         .prepare(
@@ -2153,7 +2155,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if ((await this.getProject(input.projectId)) === undefined) {
       throw new Error(`Unknown project: ${input.projectId}`);
     }
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       this.assertMcpServerNameAvailable(input.projectId, input.name);
       // `enabled` is not a parameter: a row is born off and only
@@ -2253,7 +2255,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     id: string,
     patch: UpdateMcpServerInput,
   ): Promise<McpServerRecord> {
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const row = this.db
         .prepare("SELECT * FROM project_mcp_servers WHERE id = ?")
@@ -2368,7 +2370,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     // No foreign keys on the join table, so the attachments go explicitly
     // and in the same transaction: an orphaned join row would re-attach a
     // server later created under the same id.
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       this.db
         .prepare("DELETE FROM project_mcp_server_repositories WHERE server_id = ?")
@@ -2698,7 +2700,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
    * working state belongs to the repository it works.
    */
   public async removeRepository(id: string): Promise<void> {
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       // An MCP server's attachment goes with the repository it was attached
       // to. Left behind, the join row would re-attach the server — secrets
@@ -2898,7 +2900,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       runId: undefined,
     };
 
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       if (task.afterTaskId === undefined && input.queueAfterCurrent === true) {
         const predecessor = this.db
@@ -3011,7 +3013,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     repositoryId: string,
     projectId?: ProjectId,
   ): Promise<SubmittedTask[]> {
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const projectClause =
         projectId === undefined ? "" : " AND project_id = ?";
@@ -3394,7 +3396,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       plan: structuredClone(input.plan),
       createdAt: new Date().toISOString(),
     };
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       this.db
         .prepare(
@@ -3658,7 +3660,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   public async saveChangeSet(runId: string, changeSet: ChangeSet): Promise<void> {
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const inserted = this.db
         .prepare(
@@ -4150,7 +4152,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       );
     }
 
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const clauses: string[] = [];
       const values: (string | number)[] = [];
@@ -5215,7 +5217,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     repositoryId: string,
     messageId: string,
   ): Promise<void> {
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       // Reactions hang off replies as well as off the message, and both
       // reference it, so they go first or the delete violates the foreign
@@ -5248,7 +5250,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     messageId: string,
     input: { deletedAt: string; deletedBy: string },
   ): Promise<void> {
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       // `deleted_at IS NULL` so a second pass cannot restamp who unsaid it.
       const result = this.db
@@ -5289,7 +5291,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (row === undefined) {
       return undefined;
     }
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       this.db
         .prepare("DELETE FROM channel_message_reactions WHERE message_id = ?")
@@ -5315,7 +5317,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     repositoryId: string,
     channelId?: string,
   ): Promise<number> {
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const ids = (
         this.db
@@ -6020,7 +6022,7 @@ public async recordBranchClaim(
       throw new Error("The #general channel cannot be deleted");
     }
     await this.deleteChannelMessages(repositoryId, channelId);
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       this.db
         .prepare("DELETE FROM sub_channel_members WHERE channel_id = ?")
@@ -6393,7 +6395,7 @@ public async recordBranchClaim(
     // the upsert. `node:sqlite` is synchronous on one connection, which
     // makes the pair atomic by itself; the transaction is what makes it
     // visibly so, and what the Postgres store mirrors.
-    const owned = this.begin();
+    const owned = await this.beginExclusively();
     try {
       const current = await this.getRepositoryContext(input.repositoryId);
       if (
@@ -6576,10 +6578,52 @@ public async recordBranchClaim(
     return true;
   }
 
+  /**
+   * Opens a write transaction of this caller's own, waiting for its turn.
+   *
+   * The counterpart of `begin` for every method that opens a transaction
+   * outside `runInTransaction`. A call already inside this store's open
+   * transaction joins it, exactly as before — that is what makes these
+   * methods safe to call from a transaction body. A call that is *not*
+   * inside it now waits for the connection instead of being folded into a
+   * transaction it has no part in.
+   *
+   * `leaseNextTask` is the sharpest example of what that cost. It is
+   * synchronous from `begin` to `commit`, so nothing can interrupt it — but
+   * it could still *start* inside somebody else's open transaction, and that
+   * transaction's rollback then erased the lease it had already handed back
+   * to a worker, and put the task back on the queue. The worker went on
+   * believing it held the task; the next worker to poll was given the same
+   * one. Two agents editing one repository against one task, each told it
+   * had it alone, and nothing raised anywhere.
+   */
+  private async beginExclusively(): Promise<boolean> {
+    if (this.inTransaction.getStore() !== undefined) {
+      return this.begin();
+    }
+    const ahead = this.writeQueue;
+    let release: () => void = () => undefined;
+    this.writeQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Order of turns, not propagation of outcomes.
+    await ahead.catch(() => undefined);
+    this.releaseWriteTurn = release;
+    return this.begin();
+  }
+
+  /** Hands the connection on, if this caller was holding a turn for it. */
+  private endWriteTurn(): void {
+    const release = this.releaseWriteTurn;
+    this.releaseWriteTurn = undefined;
+    release?.();
+  }
+
   private commit(owned: boolean): void {
     this.transactionDepth = Math.max(0, this.transactionDepth - 1);
     if (owned) {
       this.db.exec("COMMIT");
+      this.endWriteTurn();
     }
   }
 
@@ -6587,6 +6631,7 @@ public async recordBranchClaim(
     this.transactionDepth = Math.max(0, this.transactionDepth - 1);
     if (owned) {
       this.db.exec("ROLLBACK");
+      this.endWriteTurn();
     }
   }
 

@@ -3742,6 +3742,82 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a lease handed to one worker is not handed to a second`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "lease-overlap@example.invalid",
+        displayName: "Lease Overlap",
+        passwordDigest: "unused",
+      });
+      const first = await store.registerWorker({
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "first-worker",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      const second = await store.registerWorker({
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "second-worker",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      await store.saveRepository(REPOSITORY);
+      await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "the only task in the queue",
+        agentId: "codex",
+        validationCommands: [],
+      });
+
+      // `leaseNextTask` is synchronous from its BEGIN to its COMMIT, so
+      // nothing can interrupt it partway — but it could still *start* inside
+      // an unrelated transaction that happened to be open, and be committed
+      // or rolled back by that transaction instead of by itself. Rolled back,
+      // the lease it had already handed to a worker was erased and the task
+      // went back on the queue: the first worker went on believing it held
+      // the task, and the next worker to poll was given the same one. Two
+      // agents editing one repository against one task, each told it had it
+      // alone.
+      const failing = store.runInTransaction(async (inner) => {
+        await inner.createOrganization({ slug: "doomed-lease", name: "Doomed" });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        throw new Error("the database went away");
+      });
+      failing.catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const granted = await store.leaseNextTask({
+        workerId: first.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      });
+      assert.ok(granted !== undefined);
+      await assert.rejects(failing, /database went away/u);
+
+      // A lease `leaseNextTask` handed back is a lease the database holds.
+      assert.notEqual(await store.getWorkLease(granted.lease.id), undefined);
+      // And the task it covers is not on offer to anybody else.
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: second.id,
+          repositoryId: REPOSITORY.id,
+          baseRevision: BASE_VERSION.revision,
+          ttlMs: 60_000,
+          repositoryParallelism: 3,
+        }),
+        undefined,
+        "the task the first worker holds was offered to a second",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: an audit event appended beside an open transaction survives its rollback`, async () => {
     const { store, cleanup } = await backend.open();
     try {
