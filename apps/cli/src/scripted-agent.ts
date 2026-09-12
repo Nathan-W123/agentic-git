@@ -8,6 +8,7 @@ import {
 } from "@coord/agent-protocol";
 import {
   createId,
+  type AgentContextPressure,
   type AgentPlan,
   type ChangeSet,
   type ReplanRequest,
@@ -50,6 +51,18 @@ export interface ScriptedAgentOptions {
   repository: CanonicalRepository;
   workspaces: WorkspaceManager;
   behavior: ScriptedAgentBehavior;
+  /**
+   * Makes this agent stop for context pressure instead of completing.
+   *
+   * The only way to drive a driver's handoff path deterministically: the
+   * vendor adapters that really observe a window need a real CLI and a real
+   * run to fill one. Absent means an ordinary agent, which is what every
+   * other scenario wants.
+   */
+  contextHandoffAfterContext?: {
+    reason: string;
+    pressure: AgentContextPressure;
+  };
 }
 
 export class ScriptedAgentAdapter implements AgentAdapter {
@@ -65,6 +78,10 @@ export class ScriptedAgentAdapter implements AgentAdapter {
       canUseTools: false,
       supportsStreaming: true,
       supportsPause: false,
+      contextObservation:
+        this.options.contextHandoffAfterContext === undefined
+          ? "none"
+          : "live",
     };
   }
 
@@ -119,6 +136,18 @@ export class ScriptedAgentAdapter implements AgentAdapter {
     }
 
     record.context = context;
+    const handOff = this.options.contextHandoffAfterContext;
+    if (handOff !== undefined) {
+      // Nothing is edited and no `completed` follows, exactly as a real
+      // adapter that stopped itself at a tool boundary leaves things.
+      this.emit(record, {
+        event: "context_handoff_requested",
+        reason: handOff.reason,
+        pressure: handOff.pressure,
+        occurredAt: new Date().toISOString(),
+      });
+      return;
+    }
     const repair = context.repair;
     this.emit(record, {
       event: "progress",

@@ -1,8 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { CoordinationStore, SubmittedTask } from "@coord/persistence";
+import type {
+  CoordinationStore,
+  McpSessionRecord,
+  SubmittedTask,
+} from "@coord/persistence";
 
+import {
+  REPOSITORY_CONTEXT_MAX_CHARS,
+  type RepositoryContext,
+} from "@coord/shared-types";
+
+import { McpArgumentError } from "./mcp.js";
+import { McpSessionHandle } from "./mcp-session.js";
 import { createMcpTools, type McpAgent, type McpToolDeps } from "./mcp-tools.js";
 
 /**
@@ -29,7 +40,11 @@ function deps(overrides: Partial<McpToolDeps> = {}): {
   return {
     posted,
     deps: {
-      store: {} as CoordinationStore,
+      // The one store method the read tool reaches for; a test that wants a
+      // note overrides `store` wholesale.
+      store: {
+        getRepositoryContext: async () => undefined,
+      } as unknown as CoordinationStore,
       assertScope: () => undefined,
       // No editor unless a test says otherwise: an ordinary token, which is
       // the case where the tools must ask rather than assume.
@@ -55,6 +70,7 @@ function deps(overrides: Partial<McpToolDeps> = {}): {
       pendingQuestionFor: async () => undefined,
       answerQuestion: async () => "not_waiting",
       cancelTask: async () => "not_found",
+      setRepositoryContext: async () => "forbidden",
       ...overrides,
     },
   };
@@ -346,6 +362,8 @@ test("an editor's own prompt goes to its own agent, unasked", async () => {
       return {
         taskId,
         objective: "fix the login redirect",
+        projectId: "project_local",
+        repositoryId: "payments",
         repository: "payments",
         branch: "main",
         baseRevision: "a".repeat(40),
@@ -468,6 +486,8 @@ test("an editor with no agent of its own files the work for itself", async () =>
       return {
         taskId,
         objective: "fix the redirect",
+        projectId: "project_local",
+        repositoryId: "payments",
         repository: "payments",
         branch: "main",
         baseRevision: "abc123",
@@ -535,4 +555,275 @@ test("an editor with its own agent still goes through the mention", async () => 
   assert.deepEqual(filed, [], "the mention path owns this case");
   assert.equal(posted.length, 1);
   assert.match(posted[0]?.content ?? "", /^@Codex \(Sam\) fix the redirect$/u);
+});
+
+/**
+ * The standing context, from an editor.
+ *
+ * Reading goes through the store after the repository is resolved, so a
+ * caller sees only what `list_repositories` would have shown them. Writing
+ * is the gated act and answers in sentences: the person in the editor cannot
+ * go and look at a 403.
+ */
+const NOTE: RepositoryContext = {
+  repositoryId: "payments",
+  content: "Run `npm test` before reporting. The retry ceiling is in src/retry.ts.",
+  updatedBy: "user_nathan",
+  updatedAt: "2026-09-01T10:00:00.000Z",
+  version: 3,
+};
+
+test("get_repository_context renders the note, and says when there is none", async () => {
+  const { run } = tool("get_repository_context", {
+    store: {
+      getRepositoryContext: async (repositoryId: string) =>
+        repositoryId === "payments" ? NOTE : undefined,
+    } as unknown as CoordinationStore,
+  });
+  const said = await run({ repository: "payments" });
+  assert.equal(said.isError, undefined);
+  const text = said.content[0]?.text ?? "";
+  assert.match(text, /## Standing context for this repository/u);
+  assert.match(text, /version 3/u);
+  assert.match(text, /The retry ceiling is in src\/retry\.ts/u);
+
+  const empty = await tool("get_repository_context").run({ repository: "payments" });
+  assert.equal(empty.isError, undefined);
+  assert.match(empty.content[0]?.text ?? "", /Nothing is set for payments/u);
+});
+
+test("set_repository_context passes the note through and reports the version", async () => {
+  const writes: Array<{ repositoryId: string; content: string; expectedVersion?: number }> = [];
+  const { run } = tool("set_repository_context", {
+    setRepositoryContext: async (input) => {
+      writes.push({
+        repositoryId: input.repositoryId,
+        content: input.content,
+        ...(input.expectedVersion === undefined
+          ? {}
+          : { expectedVersion: input.expectedVersion }),
+      });
+      return { outcome: "saved", context: { ...NOTE, content: input.content, version: 4 } };
+    },
+  });
+  const said = await run({
+    repository: "payments",
+    content: "  Run `npm test` first.  ",
+    expected_version: 3,
+  });
+  assert.equal(said.isError, undefined, JSON.stringify(said));
+  assert.deepEqual(writes, [
+    { repositoryId: "payments", content: "Run `npm test` first.", expectedVersion: 3 },
+  ]);
+  assert.match(said.content[0]?.text ?? "", /version 4/u);
+
+  // Clearing is an empty note, and is said to be a clear.
+  const cleared = await run({ repository: "payments", content: "" });
+  assert.equal(cleared.isError, undefined, JSON.stringify(cleared));
+  assert.match(cleared.content[0]?.text ?? "", /Cleared/u);
+  assert.equal(writes.at(-1)?.content, "");
+});
+
+test("set_repository_context refuses in sentences: forbidden, stale, and too long", async () => {
+  const forbidden = await tool("set_repository_context").run({
+    repository: "payments",
+    content: "anything",
+  });
+  assert.equal(forbidden.isError, true);
+  assert.match(forbidden.content[0]?.text ?? "", /manage_project/u);
+
+  const stale = await tool("set_repository_context", {
+    setRepositoryContext: async () => ({ outcome: "stale", current: NOTE }),
+  }).run({ repository: "payments", content: "anything", expected_version: 2 });
+  assert.equal(stale.isError, true);
+  assert.match(stale.content[0]?.text ?? "", /now version 3/u);
+
+  // Over the cap is refused before anything is asked of the control plane:
+  // the writer is the one party that can shorten it.
+  let asked = 0;
+  const { run } = tool("set_repository_context", {
+    setRepositoryContext: async () => {
+      asked += 1;
+      return "forbidden";
+    },
+  });
+  await assert.rejects(
+    async () =>
+      await run({
+        repository: "payments",
+        content: "x".repeat(REPOSITORY_CONTEXT_MAX_CHARS + 1),
+      }),
+    McpArgumentError,
+  );
+  assert.equal(asked, 0);
+});
+
+/**
+ * A session in the state a request would have loaded it in.
+ *
+ * Built from a record rather than mutated into place, because that is how the
+ * route builds one: every request loads its own handle and writes back only
+ * what it added.
+ */
+function session(overrides: Partial<McpSessionRecord> = {}): McpSessionHandle {
+  return new McpSessionHandle({
+    id: "mcps_1",
+    userId: "user_nathan",
+    tokenId: "tok_1",
+    editorVendor: "claude",
+    clientName: "Claude Code",
+    clientVersion: "1.2.3",
+    protocolVersion: "2025-06-18",
+    focus: undefined,
+    tasks: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastSeenAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: "2026-01-02T00:00:00.000Z",
+    endedAt: undefined,
+    ...overrides,
+  });
+}
+
+test("submit_task falls back to the session's focus repository and channel", async () => {
+  // The person said "the payments repo" once. Making them say it again on
+  // every call is the friction sessions exist to remove.
+  const held = session({
+    focus: {
+      projectId: "project_local",
+      repositoryId: "payments",
+      channel: "billing",
+    },
+  });
+  const { run, posted } = tool("submit_task", { session: held });
+  const said = await run({
+    agent: "Codex (Sam)",
+    objective: "raise the retry ceiling",
+  });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  assert.equal(posted[0]?.channel, "billing");
+  assert.match(posted[0]?.content ?? "", /^@Codex \(Sam\) /u);
+});
+
+test("submit_task with no focus and no repository is refused by name", async () => {
+  // Named tools rather than a bare complaint: a model told only that a field
+  // is missing fills it in with a guess, and the guess is a repository
+  // somebody else's work lands in.
+  const { run } = tool("submit_task");
+  await assert.rejects(
+    async () => await run({ objective: "raise the retry ceiling" }),
+    (error: unknown) =>
+      error instanceof McpArgumentError &&
+      /list_repositories/u.test(error.message),
+  );
+});
+
+test("a filed task and its room are remembered on the session", async () => {
+  const held = session();
+  const { run } = tool("submit_task", { session: held });
+  const said = await run({
+    repository: "payments",
+    agent: "Codex (Sam)",
+    objective: "raise the retry ceiling",
+  });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  assert.equal(held.newNotes[0]?.taskId, "task_1");
+  assert.equal(held.newNotes[0]?.via, "submit_task");
+  assert.equal(held.focus?.repositoryId, "payments");
+  // The room the message actually landed in, which is where a later
+  // unqualified post would go anyway.
+  assert.equal(held.focus?.channel, "general");
+});
+
+test("task_status defaults to the last task this session touched", async () => {
+  const held = session({
+    tasks: [
+      {
+        taskId: "task_old",
+        objective: "older work",
+        repositoryId: "payments",
+        channel: undefined,
+        via: "submit_task",
+        at: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        taskId: "task_1",
+        objective: "raise the retry ceiling",
+        repositoryId: "payments",
+        channel: undefined,
+        via: "submit_task",
+        at: "2026-01-01T00:01:00.000Z",
+      },
+    ],
+  });
+  const asked: string[] = [];
+  const { run } = tool("task_status", {
+    session: held,
+    store: {
+      getSubmittedTask: async (taskId: string) => {
+        asked.push(taskId);
+        return {
+          id: taskId,
+          objective: "raise the retry ceiling",
+          status: "running",
+        };
+      },
+    } as unknown as CoordinationStore,
+  });
+  const said = await run({});
+  assert.deepEqual(asked, ["task_1"]);
+  assert.match(String(said.content[0]?.text), /raise the retry ceiling/u);
+});
+
+test("cancel_task still insists on a task id", async () => {
+  // Stopping work is destructive and irreversible from here, and "whatever
+  // was last" is exactly the guess that stops the wrong run.
+  const held = session({
+    tasks: [
+      {
+        taskId: "task_1",
+        objective: "raise the retry ceiling",
+        repositoryId: "payments",
+        channel: undefined,
+        via: "submit_task",
+        at: "2026-01-01T00:01:00.000Z",
+      },
+    ],
+  });
+  const { run } = tool("cancel_task", { session: held });
+  await assert.rejects(async () => await run({}), McpArgumentError);
+});
+
+test("session_context sets the focus it is asked for and reads the brief back", async () => {
+  const held = session();
+  const { run } = tool("session_context", {
+    session: held,
+    sessionBrief: async ({ full }) =>
+      full ? "the long brief" : "the short brief",
+  });
+  const said = await run({ repository: "payments", channel: "#billing" });
+  assert.equal(said.isError, undefined, String(said.content[0]?.text));
+  assert.deepEqual(held.focus, {
+    projectId: "project_local",
+    repositoryId: "payments",
+    channel: "billing",
+  });
+  // The deliberate call gets the long form; the handshake takes the short one.
+  assert.equal(String(said.content[0]?.text), "the long brief");
+});
+
+test("session_context without a session says a focus cannot be kept", async () => {
+  // A focus with nowhere to live would be forgotten the moment the call
+  // returned, and reporting it as set is what makes a model file the next
+  // task into the wrong repository.
+  const { run } = tool("session_context");
+  const said = await run({ repository: "payments" });
+  assert.equal(said.isError, true);
+  assert.match(String(said.content[0]?.text), /session id/u);
+});
+
+test("session_context with nothing on record says so rather than answering blank", async () => {
+  const { run } = tool("session_context", { sessionBrief: async () => "" });
+  const said = await run({});
+  assert.equal(said.isError, undefined);
+  assert.match(String(said.content[0]?.text), /Nothing is on record/u);
 });

@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,9 +17,17 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 
 import { RepositoryService } from "@coord/repository-service";
-import { crossesBranches, type AgentPlan } from "@coord/shared-types";
+import {
+  crossesBranches,
+  type AgentPlan,
+  type CanonicalVersion,
+} from "@coord/shared-types";
 
-import { CodeIntelligenceService, type RepositoryIndex } from "./index.js";
+import {
+  CodeIntelligenceService,
+  INDEX_PERSISTENCE_VERSION,
+  type RepositoryIndex,
+} from "./index.js";
 
 test("indexes symbols, imports, APIs, schemas, configuration, tests, and services", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-"));
@@ -2492,4 +2508,289 @@ test("a file whose imports could not be read says so, and a plan over it is blin
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+/**
+ * The warm index on disk.
+ *
+ * A control plane that restarts re-lists and re-parses every repository on
+ * the first task's critical path, for revisions it had already indexed. What
+ * is written is keyed by revision, by the size bounds in force, and by a
+ * persistence version, and it is written from `prewarm` alone — builds for
+ * older revisions run concurrently with builds for newer ones, so "write
+ * after every build" would mean "last build to finish wins", which is not the
+ * same thing as "latest canonical wins".
+ */
+
+/** A canonical version as a promotion would present it. */
+function versionAt(revision: string, sequence: number): CanonicalVersion {
+  return {
+    revision,
+    sequence,
+    branch: "main",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+/** Waits for the fire-and-forget write `prewarm` starts. */
+async function untilPersisted(
+  service: CodeIntelligenceService,
+  writes: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (service.stats().persistedWrites >= writes) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `the persisted index was never written (writes: ${
+      service.stats().persistedWrites
+    })`,
+  );
+}
+
+test("a prewarmed index survives a new service", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-persist-"));
+  try {
+    const repositories = new RepositoryService();
+    const { repository, revision } = await seedRepository(
+      root,
+      "persist",
+      repositories,
+    );
+    const persistDirectory = path.join(root, "index");
+    const first = new CodeIntelligenceService(repositories, {
+      persistDirectory,
+    });
+    first.prewarm(repository, versionAt(revision, 1));
+    await untilPersisted(first, 1);
+    const built = await first.index(repository, revision);
+
+    const counter = countBuilds(repositories);
+    const second = new CodeIntelligenceService(repositories, {
+      persistDirectory,
+    });
+    assert.equal(await second.isWarm(repository, revision), true);
+    const restored = await second.index(repository, revision);
+    assert.equal(counter.builds, 0);
+    assert.deepEqual(
+      { ...restored, generatedAt: "" },
+      { ...built, generatedAt: "" },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The more valuable half of what comes back. The index itself is only useful
+ * while canonical has not moved; the parses are addressed by blob, so they
+ * survive an advance and the first build after a restart reads only the files
+ * that changed.
+ */
+test("a persisted index seeds the parse cache after canonical moved", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-seed-"));
+  try {
+    const repositories = new RepositoryService();
+    const { repository, revision } = await seedRepository(
+      root,
+      "seed",
+      repositories,
+    );
+    const persistDirectory = path.join(root, "index");
+    const first = new CodeIntelligenceService(repositories, {
+      persistDirectory,
+    });
+    first.prewarm(repository, versionAt(revision, 1));
+    await untilPersisted(first, 1);
+
+    await writeFile(
+      path.join(root, "source-seed", "alpha.ts"),
+      "export const seed = 3;\n",
+    );
+    await repositories.commitAll(path.join(root, "source-seed"), "change one");
+    await advanceCanonical(path.join(root, "source-seed"), repository);
+    const moved = await repositories.getCanonicalVersion(repository);
+    assert.notEqual(moved.revision, revision);
+
+    const second = new CodeIntelligenceService(repositories, {
+      persistDirectory,
+    });
+    const reads: string[][] = [];
+    const openBatchReader = repositories.openBatchReader.bind(repositories);
+    (
+      repositories as unknown as { openBatchReader: typeof openBatchReader }
+    ).openBatchReader = (...args: Parameters<typeof openBatchReader>) => {
+      const reader = openBatchReader(...args);
+      const read = reader.read.bind(reader);
+      reader.read = async (paths) => {
+        reads.push([...paths]);
+        return await read(paths);
+      };
+      return reader;
+    };
+
+    await second.index(repository, moved.revision);
+    assert.deepEqual(reads.flat(), ["alpha.ts"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an older promotion never overwrites a newer persisted revision", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-order-"));
+  try {
+    const repositories = new RepositoryService();
+    const { repository, revision } = await seedRepository(
+      root,
+      "order",
+      repositories,
+    );
+    const persistDirectory = path.join(root, "index");
+    const service = new CodeIntelligenceService(repositories, {
+      persistDirectory,
+    });
+
+    await writeFile(
+      path.join(root, "source-order", "alpha.ts"),
+      "export const order = 9;\n",
+    );
+    await repositories.commitAll(path.join(root, "source-order"), "newer");
+    await advanceCanonical(path.join(root, "source-order"), repository);
+    const newer = await repositories.getCanonicalVersion(repository);
+
+    service.prewarm(repository, versionAt(newer.revision, 2));
+    await untilPersisted(service, 1);
+
+    // The older revision is still indexable — replans and replayed results do
+    // exactly this — and prewarming it must not roll the file back.
+    await service.index(repository, revision);
+    service.prewarm(repository, versionAt(revision, 1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const [file] = await readdir(persistDirectory);
+    assert.ok(file !== undefined);
+    const persisted = JSON.parse(
+      await readFile(path.join(persistDirectory, file), "utf8"),
+    ) as { sequence: number; revision: string };
+    assert.equal(persisted.sequence, 2);
+    assert.equal(persisted.revision, newer.revision);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a plain build writes nothing to disk", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-nowrite-"));
+  try {
+    const repositories = new RepositoryService();
+    const { repository, revision } = await seedRepository(
+      root,
+      "nowrite",
+      repositories,
+    );
+    const persistDirectory = path.join(root, "index");
+    const service = new CodeIntelligenceService(repositories, {
+      persistDirectory,
+    });
+    await service.index(repository, revision);
+    assert.equal(service.stats().persistedWrites, 0);
+    await assert.rejects(readdir(persistDirectory));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A cache that can always be rebuilt is never worth repairing, and a wrong
+ * index is far worse than a missing one: it would ground plans against
+ * symbols that no longer exist and be believed.
+ */
+test("a foreign, truncated or differently bounded persisted index is ignored", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-foreign-"));
+  try {
+    const repositories = new RepositoryService();
+    const { repository, revision } = await seedRepository(
+      root,
+      "foreign",
+      repositories,
+    );
+    const persistDirectory = path.join(root, "index");
+    const writer = new CodeIntelligenceService(repositories, {
+      persistDirectory,
+    });
+    writer.prewarm(repository, versionAt(revision, 1));
+    await untilPersisted(writer, 1);
+    const [name] = await readdir(persistDirectory);
+    assert.ok(name !== undefined);
+    const filePath = path.join(persistDirectory, name);
+    const good = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(good) as Record<string, unknown>;
+
+    const rejected: Array<[string, string]> = [
+      [
+        "a newer persistence version",
+        JSON.stringify({ ...parsed, version: INDEX_PERSISTENCE_VERSION + 1 }),
+      ],
+      ["truncated json", good.slice(0, Math.floor(good.length / 2))],
+    ];
+    for (const [why, contents] of rejected) {
+      await writeFile(filePath, contents, "utf8");
+      const service = new CodeIntelligenceService(repositories, {
+        persistDirectory,
+      });
+      assert.equal(
+        await service.isWarm(repository, revision),
+        false,
+        `${why} was accepted`,
+      );
+      assert.equal(service.stats().persistedLoads, 0, `${why} was loaded`);
+    }
+
+    // Different size bounds are a different index, whatever the file says.
+    await writeFile(filePath, good, "utf8");
+    const bounded = new CodeIntelligenceService(repositories, {
+      persistDirectory,
+      maxFiles: 7,
+    });
+    assert.equal(await bounded.isWarm(repository, revision), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("prewarm builds once and a later index call hits the cache", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-prewarm-"));
+  try {
+    const repositories = new RepositoryService();
+    const { repository, revision } = await seedRepository(
+      root,
+      "prewarm",
+      repositories,
+    );
+    const counter = countBuilds(repositories);
+    const service = new CodeIntelligenceService(repositories);
+    assert.equal(await service.isWarm(repository, revision), false);
+    service.prewarm(repository, versionAt(revision, 1));
+    await service.index(repository, revision);
+    assert.equal(counter.builds, 1);
+    assert.equal(await service.isWarm(repository, revision), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a persistence directory is not range-checked like a bound", async () => {
+  const repositories = new RepositoryService();
+  assert.doesNotThrow(
+    () =>
+      new CodeIntelligenceService(repositories, {
+        persistDirectory: "/tmp/coord-index",
+      }),
+  );
+  assert.throws(
+    () => new CodeIntelligenceService(repositories, { maxFiles: 0 }),
+    RangeError,
+  );
 });

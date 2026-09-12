@@ -1,4 +1,5 @@
 import {
+  type AgentContextPressure,
   type ChangeSet,
   type CoordinatorDecision,
   type DeferredResource,
@@ -51,8 +52,32 @@ export interface HandoffInput {
   withheldFiles?: string[];
   /** Set when the task did not settle cleanly. */
   failure?: string;
+  /**
+   * The figures a session stopped itself on, as the control plane recorded
+   * them on `task_handed_off` before projecting anything from them.
+   *
+   * Numbers and the lease that carries them, never the adapter's own words:
+   * the rule at the top of this file is that a reader can check every line
+   * against the run record, and the adapter's verdict text is prose nothing
+   * in the store can be checked against. `attempt` and `budget` come from the
+   * driver, which counts the handoffs already on the log.
+   */
+  contextPressure?: AgentContextPressure & {
+    attempt: number;
+    budget: number;
+    /** The lease the figures were reported on. Absent in-process, where there is none. */
+    leaseId?: string;
+  };
   reason: HandoffReason;
   now?: () => Date;
+}
+
+/** How full the window got, in the words the figures allow. */
+function occupancyPhrase(pressure: AgentContextPressure): string {
+  const occupied = pressure.occupiedTokens ?? pressure.peakTokens;
+  return pressure.maximumContextTokens === undefined
+    ? `${occupied} tokens`
+    : `${occupied} of ${pressure.maximumContextTokens} tokens`;
 }
 
 function validationEvidence(
@@ -150,6 +175,30 @@ function openItems(input: HandoffInput): HandoffOpenItem[] {
     });
   }
 
+  // Projected from the numbers on the record rather than from what the
+  // adapter said: the audit event names the lease, so every figure in this
+  // sentence can be looked up.
+  const pressure = input.contextPressure;
+  if (pressure !== undefined) {
+    items.push({
+      item: "the run stopped itself before finishing",
+      blockedBy: [],
+      reason:
+        `context occupancy reached ${occupancyPhrase(pressure)} after ` +
+        `${pressure.turns} turns` +
+        (pressure.compactions > 0
+          ? `, with ${pressure.compactions} compaction(s) discarding ` +
+            `${pressure.droppedTokens} tokens`
+          : "") +
+        (pressure.stale
+          ? ", and a tool result had landed since that figure was reported"
+          : "") +
+        "; recorded as task_handed_off" +
+        (pressure.leaseId === undefined ? "" : ` on lease ${pressure.leaseId}`) +
+        "; workspace edits from that attempt were discarded",
+    });
+  }
+
   if (input.failure !== undefined) {
     items.push({
       item: "the task did not settle cleanly",
@@ -230,6 +279,17 @@ function gotchas(input: HandoffInput): string[] {
         "unrelated, but a reader comparing revisions will see the gap",
     );
   }
+  const pressure = input.contextPressure;
+  if (pressure !== undefined) {
+    found.push(
+      `this objective filled ${
+        pressure.maximumContextTokens === undefined
+          ? "the context window"
+          : `a ${pressure.maximumContextTokens}-token window`
+      } once already (attempt ${pressure.attempt} of ${pressure.budget}); ` +
+        "read narrowly and edit in place rather than re-reading whole files",
+    );
+  }
   for (const warning of integration?.cleanupWarnings ?? []) {
     found.push(warning);
   }
@@ -252,6 +312,13 @@ function nextSteps(input: HandoffInput, open: HandoffOpenItem[]): string[] {
   }
   if (input.integration?.status === "stale") {
     steps.push("replan from current canonical before redoing any of the work");
+  }
+  if (input.contextPressure !== undefined) {
+    steps.push(
+      `continue the objective from a fresh workspace at ` +
+        `${input.canonicalRevision.slice(0, 12)}; nothing from the stopped ` +
+        "attempt was promoted",
+    );
   }
   if (steps.length === 0 && open.length === 0) {
     steps.push("nothing outstanding from this task");

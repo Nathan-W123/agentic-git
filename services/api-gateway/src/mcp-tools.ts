@@ -23,9 +23,14 @@
 
 import type {
   CoordinationStore,
+  SaveRepositoryContextResult,
   StoredRepository,
   SubmittedTask,
 } from "@coord/persistence";
+import {
+  REPOSITORY_CONTEXT_MAX_CHARS,
+  renderRepositoryContext,
+} from "@coord/shared-types";
 
 import {
   McpArgumentError,
@@ -36,6 +41,7 @@ import {
   requiredString,
   type McpTool,
 } from "./mcp.js";
+import type { McpSessionHandle } from "./mcp-session.js";
 import { takenTaskBrief, type McpTakenTask } from "./mcp-work.js";
 
 /** An agent as a person in an editor needs to see it. */
@@ -139,6 +145,41 @@ export interface McpToolDeps {
   cancelTask(taskId: string): Promise<
     "cancelled" | "not_found" | "not_yours" | "already_finished"
   >;
+  /**
+   * Sets or clears a repository's standing context, under the same gate the
+   * HTTP route applies (`manage_project`, or the repository's creator).
+   *
+   * The only dependency the context tools add: reading goes through `store`
+   * after `findRepository`, which already limits a caller to repositories
+   * `listRepositories` showed them. Writing is the authorized act, so it
+   * lives behind the gateway, and `"forbidden"` is the answer the gate gives
+   * rather than an exception the tool would have to translate.
+   */
+  setRepositoryContext(input: {
+    projectId: string;
+    repositoryId: string;
+    content: string;
+    expectedVersion?: number;
+  }): Promise<SaveRepositoryContextResult | "forbidden">;
+  /**
+   * The session this client presented, when it presented one.
+   *
+   * Optional, and every tool treats its absence as an ordinary answer: a
+   * client that sends no `Mcp-Session-Id` is served exactly as it was before
+   * sessions existed, which is what keeps every client written against this
+   * endpoint working. See `mcp-session.ts`.
+   */
+  readonly session?: McpSessionHandle;
+  /**
+   * What a returning client is told: focus, recent tasks and their outcomes,
+   * and the focus repository's background. `full` asks for the long form,
+   * which is what `session_context` is for; the handshake takes the short one.
+   *
+   * A callback rather than something built here, because every line of it is
+   * read from the store and re-authorized against the caller, and these tools
+   * are deliberately not the gateway.
+   */
+  sessionBrief?(input: { full: boolean }): Promise<string>;
 }
 
 /** A question an agent is holding a run open for. */
@@ -270,7 +311,10 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
       properties: {
         repository: {
           type: "string",
-          description: "Repository name, as list_repositories reports it.",
+          description:
+            "Repository name, as list_repositories reports it. Optional when " +
+            "this connection already has a focus repository — the one it " +
+            "last worked in.",
         },
         agent: {
           type: "string",
@@ -304,15 +348,32 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
           description: "Agent to send it to instead, when when_offline is 'reroute'.",
         },
       },
-      required: ["repository", "objective"],
+      required: ["objective"],
       additionalProperties: false,
     },
     async run(args) {
       deps.assertScope("submit_task");
-      const named = requiredString(args, "repository", 200);
+      const focus = deps.session?.focus;
+      const named =
+        optionalString(args, "repository", 200) ?? focus?.repositoryId;
+      if (named === undefined) {
+        // Named tools rather than a bare complaint: a model told only that a
+        // field is missing fills it in with a guess, and the guess is a
+        // repository somebody else's work lands in.
+        throw new McpArgumentError(
+          '"repository" is required — this connection has no repository in ' +
+            "focus yet; list_repositories shows the names",
+        );
+      }
       const agentName = optionalString(args, "agent", 200)?.replace(/^@/u, "");
       const objective = requiredString(args, "objective");
-      const channel = optionalString(args, "channel", 200)?.replace(/^#/u, "");
+      // The remembered room only when the work is going to the remembered
+      // repository. A room name is scoped to one repository, so carrying it
+      // across to a repository the caller named explicitly would file work
+      // into whatever happens to share that slug, or into nothing at all.
+      const channel =
+        optionalString(args, "channel", 200)?.replace(/^#/u, "") ??
+        (named === focus?.repositoryId ? focus.channel : undefined);
       const whenOffline = optionalChoice(args, "when_offline", OFFLINE_CHOICES);
       const rerouteTo = optionalString(args, "reroute_to", 200)?.replace(
         /^@/u,
@@ -339,6 +400,28 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
       }
 
       const found = await findRepository(deps, named);
+      /**
+       * Remembers where this connection is working, and what it started.
+       *
+       * The room recorded is the one the message actually landed in rather
+       * than the one that was asked for: an unqualified post lands in the
+       * repository's main room, which is where a later unqualified post would
+       * go anyway, and naming it keeps the focus and the record agreeing.
+       */
+      const remember = (taskId: string, channelSlug: string): void => {
+        deps.session?.setFocus({
+          projectId: found.projectId,
+          repositoryId: found.repository.id,
+          channel: channelSlug,
+        });
+        deps.session?.noteTask({
+          taskId,
+          objective,
+          repositoryId: found.repository.id,
+          channel: channelSlug,
+          via: "submit_task",
+        });
+      };
       const roster = await deps.agentsIn({
         projectId: found.projectId,
         repositoryId: found.repository.id,
@@ -392,6 +475,7 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
           vendor: editor,
         });
         if (filed !== undefined) {
+          remember(filed.taskId, filed.channelSlug);
           const taken = await deps.takeFiledTask(filed.taskId).catch(() => undefined);
           if (taken !== undefined) {
             return mcpText(
@@ -512,6 +596,7 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
         );
       }
       const taskId = posted.taskIds[0] ?? "";
+      remember(taskId, posted.channelSlug);
       // Filed, and then taken back, when the agent that was asked is the one
       // asking. A prompt typed into Codex should be done by Codex: the person
       // is sitting in front of it, it is signed in, and handing the work to
@@ -563,14 +648,30 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        task_id: { type: "string", description: "The id submit_task returned." },
+        task_id: {
+          type: "string",
+          description:
+            "The id submit_task returned. Optional: without it, the last " +
+            "task this connection filed or took.",
+        },
       },
-      required: ["task_id"],
       additionalProperties: false,
     },
     async run(args) {
       deps.assertScope("view");
-      const taskId = requiredString(args, "task_id", 200);
+      // "How is it going" is the commonest thing anybody asks an editor about
+      // work it just filed, and the id is the one part of the exchange the
+      // person never saw. Reading it off the session is the whole point of
+      // keeping the list.
+      const taskId =
+        optionalString(args, "task_id", 200) ??
+        deps.session?.tasks.at(-1)?.taskId;
+      if (taskId === undefined) {
+        throw new McpArgumentError(
+          '"task_id" is required — this connection has not filed or taken a ' +
+            "task yet",
+        );
+      }
       const task = await deps.store.getSubmittedTask(taskId);
       if (task === undefined) {
         return mcpRefusal(`No task called "${taskId}".`);
@@ -625,6 +726,11 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
       properties: {
         task_id: { type: "string", description: "The id submit_task returned." },
       },
+      // Still required, though `task_status` next door now defaults to the
+      // last task this connection touched. Stopping work is destructive and
+      // irreversible from here, and "whatever was last" is exactly the guess
+      // that would stop the wrong run; a model that has lost the id can read
+      // it back out of session_context.
       required: ["task_id"],
       additionalProperties: false,
     },
@@ -729,7 +835,222 @@ export function createMcpTools(deps: McpToolDeps): McpTool[] {
     },
   };
 
-  return [listRepositories, submitTask, taskStatus, cancelTask, answerQuestion];
+  const getRepositoryContext: McpTool = {
+    name: "get_repository_context",
+    title: "Read a repository's standing context",
+    description:
+      "Shows the standing context for a Kumi repository: the note the people " +
+      "who work there wrote for every agent — conventions, the validation " +
+      "commands that work, known pitfalls. Every task in the repository is " +
+      "handed it before it plans.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repository: {
+          type: "string",
+          description: "The repository name, as list_repositories shows it.",
+        },
+      },
+      required: ["repository"],
+      additionalProperties: false,
+    },
+    async run(args) {
+      deps.assertScope("view");
+      const target = await findRepository(
+        deps,
+        requiredString(args, "repository", 200),
+      );
+      const found = await deps.store.getRepositoryContext(
+        target.repository.id,
+      );
+      const rendered = renderRepositoryContext(found);
+      return mcpText(
+        rendered === ""
+          ? `Nothing is set for ${repositoryLabel(target)}. ` +
+              "set_repository_context writes one."
+          : rendered,
+      );
+    },
+  };
+
+  const setRepositoryContext: McpTool = {
+    name: "set_repository_context",
+    title: "Set a repository's standing context",
+    description:
+      "Sets or clears the standing context for a Kumi repository — the note " +
+      "every agent planning there is handed. Keep it short: conventions, " +
+      "the validation commands that actually work, known pitfalls. An " +
+      "empty content clears it. Pass expected_version (from " +
+      "get_repository_context) to refuse the write if somebody else saved " +
+      "first. Needs the manage_project permission, or to have created the " +
+      "repository.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repository: {
+          type: "string",
+          description: "The repository name, as list_repositories shows it.",
+        },
+        content: {
+          type: "string",
+          description:
+            `The note, at most ${REPOSITORY_CONTEXT_MAX_CHARS} characters. ` +
+            "Empty clears it.",
+        },
+        expected_version: {
+          type: "integer",
+          description:
+            "The version you last read; the write is refused if it has " +
+            "moved. 0 means there was none.",
+        },
+      },
+      required: ["repository", "content"],
+      additionalProperties: false,
+    },
+    async run(args) {
+      deps.assertScope("manage_project");
+      const target = await findRepository(
+        deps,
+        requiredString(args, "repository", 200),
+      );
+      // Read by hand rather than through `requiredString`, which refuses an
+      // empty string, or `optionalString`, which folds one to absent: an
+      // empty note is the clear, and it has to be told apart from the
+      // argument being left out.
+      const raw = args["content"];
+      if (typeof raw !== "string") {
+        throw new McpArgumentError('"content" is required and must be text');
+      }
+      const content = raw.trim();
+      // Refused here rather than stored and truncated later: the cap is the
+      // whole promise that the note stays small enough to pay for on every
+      // planning prompt, and a writer is the one party that can shorten it.
+      if (content.length > REPOSITORY_CONTEXT_MAX_CHARS) {
+        throw new McpArgumentError(
+          `"content" is longer than ${REPOSITORY_CONTEXT_MAX_CHARS} characters`,
+        );
+      }
+      const version = args["expected_version"];
+      if (
+        version !== undefined &&
+        (typeof version !== "number" ||
+          !Number.isInteger(version) ||
+          version < 0)
+      ) {
+        throw new McpArgumentError(
+          '"expected_version" must be a non-negative whole number',
+        );
+      }
+      const outcome = await deps.setRepositoryContext({
+        projectId: target.projectId,
+        repositoryId: target.repository.id,
+        content,
+        ...(typeof version === "number" ? { expectedVersion: version } : {}),
+      });
+      if (outcome === "forbidden") {
+        return mcpRefusal(
+          `You cannot set the standing context for ${repositoryLabel(target)}: ` +
+            "that takes the manage_project permission, or having created the " +
+            "repository.",
+        );
+      }
+      if (outcome.outcome === "stale") {
+        return mcpRefusal(
+          "Somebody changed the standing context since you read it " +
+            `(it is now version ${outcome.current?.version ?? 0}). Call ` +
+            "get_repository_context and try again.",
+        );
+      }
+      return mcpText(
+        content === ""
+          ? `Cleared the standing context for ${repositoryLabel(target)} ` +
+              `(version ${outcome.context.version}).`
+          : `Standing context for ${repositoryLabel(target)} is now version ` +
+              `${outcome.context.version} (${content.length} characters). ` +
+              "Every task in this repository sees it from now on.",
+      );
+    },
+  };
+
+  const sessionContext: McpTool = {
+    name: "session_context",
+    title: "What this account was doing",
+    description:
+      "Shows what this account has been working on in Kumi: the repository " +
+      "and room this connection is focused on, the tasks it recently filed " +
+      "or took and how they ended, and the background for that repository — " +
+      "handoffs from earlier work and the standing context its people wrote. " +
+      "Naming a repository moves the focus, so later calls to submit_task, " +
+      "take_task and task_status default to it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repository: {
+          type: "string",
+          description:
+            "Optional. Focus on this repository, by the name " +
+            "list_repositories reports.",
+        },
+        channel: {
+          type: "string",
+          description:
+            "Optional. Focus on this room inside that repository. Only " +
+            "meaningful with repository.",
+        },
+      },
+      additionalProperties: false,
+    },
+    async run(args) {
+      deps.assertScope("view");
+      const named = optionalString(args, "repository", 200);
+      const channel = optionalString(args, "channel", 200)?.replace(/^#/u, "");
+      if (named !== undefined) {
+        if (deps.session === undefined) {
+          // A focus with nowhere to live would be forgotten the moment this
+          // call returned, and reporting it as set is the answer that makes a
+          // model file the next task into the wrong repository.
+          return mcpRefusal(
+            "This client did not present a session id, so a focus cannot be " +
+              "kept between calls. Reconnect to Kumi from the editor, or " +
+              "name the repository on each call.",
+          );
+        }
+        const target = await findRepository(deps, named);
+        // Resolved through the same roster read a post would do, so a room
+        // that does not exist is refused here rather than silently becoming
+        // the focus and misdirecting the next task.
+        await deps.agentsIn({
+          projectId: target.projectId,
+          repositoryId: target.repository.id,
+          ...(channel === undefined ? {} : { channel }),
+        });
+        deps.session.setFocus({
+          projectId: target.projectId,
+          repositoryId: target.repository.id,
+          channel,
+        });
+      }
+      const brief = await deps.sessionBrief?.({ full: true });
+      return mcpText(
+        brief === undefined || brief === ""
+          ? "Nothing is on record for this account yet. list_repositories " +
+              "shows where work can start."
+          : brief,
+      );
+    },
+  };
+
+  return [
+    listRepositories,
+    submitTask,
+    taskStatus,
+    cancelTask,
+    answerQuestion,
+    getRepositoryContext,
+    setRepositoryContext,
+    // Last, so the order every existing client and test reads stays as it was.
+    sessionContext,
+  ];
 }
 
 /** Exported for the gateway's own use when narrowing a task to its owner. */

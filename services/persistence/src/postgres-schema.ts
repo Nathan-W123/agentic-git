@@ -1444,4 +1444,44 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE integrations ADD COLUMN IF NOT EXISTS replayed_from TEXT`,
     ],
   },
+  {
+    // See the SQLite copy for why.
+    version: 67,
+    name: "repository-standing-context",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS repository_contexts (
+         repository_id TEXT PRIMARY KEY,
+         content TEXT NOT NULL DEFAULT '',
+         updated_by TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         version INTEGER NOT NULL DEFAULT 1
+       )`,
+    ],
+  },
+  {
+    // See the SQLite copy for why.
+    version: 68,
+    name: "mcp-sessions",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS mcp_sessions (
+         id TEXT PRIMARY KEY,
+         user_id TEXT NOT NULL REFERENCES users(id),
+         token_id TEXT,
+         editor_vendor TEXT,
+         client_name TEXT,
+         client_version TEXT,
+         protocol_version TEXT NOT NULL,
+         focus_json TEXT,
+         tasks_json TEXT NOT NULL DEFAULT '[]',
+         created_at TEXT NOT NULL,
+         last_seen_at TEXT NOT NULL,
+         expires_at TEXT NOT NULL,
+         ended_at TEXT
+       )`,
+      `CREATE INDEX IF NOT EXISTS mcp_sessions_by_user
+         ON mcp_sessions(user_id, last_seen_at)`,
+      `CREATE INDEX IF NOT EXISTS mcp_sessions_by_expiry
+         ON mcp_sessions(expires_at)`,
+    ],
+  },
 ];

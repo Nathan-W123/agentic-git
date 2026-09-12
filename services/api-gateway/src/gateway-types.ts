@@ -17,6 +17,7 @@ import type {
 } from "@coord/persistence";
 import type { ChatterFilter } from "@coord/local-triage";
 import type {
+  AgentContextPressure,
   FilePatch,
   WorkAssignment as SharedWorkAssignment,
 } from "@coord/shared-types";
@@ -729,12 +730,31 @@ export interface ApiOperations {
    * Optional, and answering `undefined` is the ordinary case rather than a
    * fault: it means the conditions were not met and the worker plans exactly
    * as it does today. A deployment that omits this behaves the same way.
+   *
+   * `standingContext` — the repository's curated note, rendered — is carried
+   * whether or not a claim was granted, so that the answer's shape does not
+   * depend on the claim decision. Only `planningContext` is withheld on a
+   * claim. A claimed task builds no planning prompt, and the note is
+   * rendered only into that prompt, so today it is carried and not read on
+   * that branch; delivering it to execution is a change to the adapters, not
+   * to this contract.
+   *
+   * `handoffContext` is the note this task's own previous attempt left when
+   * it stopped on a full context window. Carried on both branches too, and
+   * for a stronger reason than the standing note: a claimed task runs
+   * straight into execution, which is exactly where knowing that the last
+   * attempt ran out of window matters.
    */
   claimWorkRepository?(input: {
     leaseId: string;
     actorId: string;
     protocolVersion: number;
-  }): Promise<{ plan?: unknown; planningContext?: string }>;
+  }): Promise<{
+    plan?: unknown;
+    planningContext?: string;
+    standingContext?: string;
+    handoffContext?: string;
+  }>;
   /**
    * The two directions of a repository claim, folded onto the heartbeat.
    *
@@ -784,13 +804,21 @@ export interface ApiOperations {
   >;
   acceptWorkResult?(input: {
     leaseId: string;
-    status: "completed" | "failed";
+    /**
+     * `handed_off` is the session having stopped itself on a nearly full
+     * context window. The implementation releases the lease and requeues the
+     * task rather than finishing it; the editor and MCP report paths are
+     * separate contracts and keep their own three-value unions.
+     */
+    status: "completed" | "failed" | "handed_off";
     actorId: string;
     plan: unknown;
     changeSet: unknown;
     detail?: string;
     /** What the agent said, when the lease was on a question. */
     answer?: string;
+    /** The figures a `handed_off` result stopped on, and the adapter's verdict. */
+    handoff?: { reason: string; pressure: AgentContextPressure };
     // Narrowed from `unknown` only as far as this route actually reads it:
     // whether to post, and what. The body is still relayed whole to the
     // worker, so an implementation may return more than this names.
@@ -811,6 +839,25 @@ export interface ApiOperations {
    * Absent on a deployment that cannot push anywhere.
    */
   githubCredential?: GitHubCredentialOperations;
+  /**
+   * What earlier work in a repository handed on, rendered as the coordinator's
+   * `seedContextForTask` renders it for a planning prompt.
+   *
+   * Optional because the gateway does not depend on the coordinator — this is
+   * the seam that keeps it that way — and because a deployment that runs no
+   * tasks has no handoffs to read. A returning MCP client is seeded with it;
+   * absent simply means that half of the brief is empty.
+   *
+   * The implementation reads the whole live and archived handoff log per call
+   * by design (a `limit` bounds the answer, not the read), so the gateway
+   * caches what it gets back per person and repository for a minute rather
+   * than asking on every handshake.
+   */
+  handoffContextFor?(input: {
+    projectId?: string;
+    repositoryId: string;
+    limit?: number;
+  }): Promise<string>;
 }
 
 /**
@@ -852,6 +899,14 @@ export interface EditorWorkOperations {
         leaseId: string;
         taskId: string;
         objective: string;
+        /**
+         * See `SubmittedTask.context` — the conversation this was asked
+         * inside, for the editor that will do it. The objective is
+         * deliberately clean, so this is the only way "the same for the
+         * other file" reaches the editor with its referent. Absent for a
+         * task that was not asked inside a thread.
+         */
+        context?: string;
         repositoryId: string;
         branch: string;
         baseRevision: string;
@@ -1122,6 +1177,16 @@ export interface ApiGatewayOptions {
    * are different clients doing different work and they get different budgets.
    */
   mcpRateLimitPerMinute?: number;
+  /**
+   * How long an idle MCP session id stays accepted, from
+   * `COORD_MCP_SESSION_TTL_HOURS` (default 24 hours).
+   *
+   * Sliding, and about acceptance only: a lapsed id is answered 404 so the
+   * client re-initializes, while the row it named is still read for the
+   * history the next handshake is seeded with. Injected by tests, which
+   * cannot wait out a day to watch an id lapse.
+   */
+  mcpSessionTtlMs?: number;
   authRateLimitPerMinute?: number;
   /** Event poll cadence; exposed for deterministic embedded runtimes/tests. */
   webSocketPollIntervalMs?: number;

@@ -30,6 +30,18 @@ validation → promotion). Which one runs is chosen per agent in
 | `kiro` | Kiro CLI | `kiro-cli chat --no-interactive --trust-all-tools` in disposable planning and granted execution worktrees |
 | `generic-cli` | anything | Your executable speaks the NDJSON protocol in `docs/protocol/generic-cli.md` over stdin/stdout |
 
+Every adapter is handed the same two things beside the objective, and treats
+them as background rather than instructions: `task.context`, the conversation
+the task was asked inside, and `priorContext`, that conversation again followed
+by the repository's [standing context](repository-standing-context.md) and
+what earlier work in the repository left behind. The vendor adapters render
+`priorContext` into the planning prompt and `task.context` into every
+execution, replan and clarification round. A `generic-cli` agent writes its own
+prompts, so it receives them raw, as the optional `context` and `priorContext`
+fields of its `start` message (see the protocol page); both are absent when
+there is nothing to say, and an agent that ignores unknown fields is
+unaffected.
+
 `command` overrides the executable path; `args` accepts only a single
 `--model <id>` pair for vendor CLI adapters (anything else is rejected so
 configuration cannot weaken the enforced invocation mode); `env` adds
@@ -41,6 +53,17 @@ should set them explicitly. Claude agents may also set `effort` to `low`,
 `--effort` option and does not alter permissions. A Codex agent can set
 `"windowsSandbox": "unelevated"` when administrator-approved elevated setup is
 blocked by local policy; both modes retain scoped filesystem boundaries.
+
+`maximumContextTokens` declares the model's context window, in tokens. Nothing
+in a vendor CLI's stream says how large the window is, and a figure guessed
+from a model name is wrong the week the vendor changes it, so absent means
+occupancy is never judged — an agent that can watch its own window still
+notices a compaction the CLI already performed, which needs no threshold.
+`contextHandoff: false` keeps such an agent from stopping itself and being
+requeued with a handoff: the stop costs the attempt's unfinished edits, and a
+deployment that would rather have a degraded answer than a restart can say so.
+It has no effect on an agent that cannot observe its window
+(see [context-window handoff](context-window-handoff.md)).
 
 ## The workflow, end to end
 

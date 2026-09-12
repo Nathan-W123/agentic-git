@@ -19,8 +19,10 @@ import type { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
   Coordinator,
   ConversationRegistry,
+  MAX_CONTEXT_HANDOFFS,
   TaskCancellationRegistry,
   approvalPolicyForProject,
+  contextHandoffsUsed,
   type ActionAuthority,
   type CoordinatedTask,
   type PlanAuthority,
@@ -51,6 +53,7 @@ import {
   type CredentialHome,
   type UserCredentialStore,
   type VendorCliKind,
+  type WarmWorkspacePool,
   type WorkspaceManager,
   type WorkspaceSandbox,
 } from "@coord/workspace-manager";
@@ -1516,6 +1519,14 @@ function createAdapter(
    * that picked a model is saying how this request should.
    */
   override: { model?: string | undefined; effort?: string | undefined } = {},
+  /**
+   * Whether this task still has handoff budget left. False on its last
+   * attempt, where a run that stopped itself could not be requeued from the
+   * stop and would be failed instead — a failure dressed up as a handoff. The
+   * remote driver gates the same permission the same way, from
+   * `assignment.contextHandoffsRemaining`.
+   */
+  contextHandoffAllowed = true,
 ): AgentAdapter {
   const args = withModelOverride(agent.args, override.model);
   // Config carries `effort` only on the prompt-cli agents, which is where the
@@ -1565,6 +1576,9 @@ function createAdapter(
         ? {}
         : { windowsSandbox: agent.windowsSandbox }),
       ...(executionSandbox === undefined ? {} : { executionSandbox }),
+      ...(agent.maximumContextTokens === undefined
+        ? {}
+        : { maximumContextTokens: agent.maximumContextTokens }),
       ...(launchEnv === undefined ? {} : { env: launchEnv }),
     });
   }
@@ -1621,6 +1635,20 @@ function createAdapter(
         ? {}
         : { executionTimeoutMs: agent.executionTimeoutMs }),
       ...(promptEffort === undefined ? {} : { effort: promptEffort }),
+      // The in-process driver answers this event too — the coordinator
+      // records the handoff and returns the task to the queue — so a run here
+      // may stop itself on the same terms a remote one does. Without a
+      // configured window only a compaction the CLI already performed
+      // triggers it, which needs no threshold: it is the tool stating it
+      // could not fit the conversation. The budget gates the permission on
+      // both drivers, so the same task on its last attempt runs to its ending
+      // here as it would on a worker.
+      contextPressure: {
+        ...(agent.maximumContextTokens === undefined
+          ? {}
+          : { maximumContextTokens: agent.maximumContextTokens }),
+        handOff: agent.contextHandoff !== false && contextHandoffAllowed,
+      },
       ...(launchEnv === undefined ? {} : { env: launchEnv }),
     });
   }
@@ -1707,6 +1735,16 @@ export interface RunOptions {
    * and a conversation's next turn simply starts cold from the thread.
    */
   conversations?: ConversationRegistry;
+  /**
+   * Where a landed task's directory goes instead of being destroyed.
+   *
+   * Same lifecycle argument as `conversations`: a warm directory is only
+   * worth keeping because it outlives the run that made it, and a coordinator
+   * is built per run. A long-lived host makes one pool per process and passes
+   * it here. The CLI passes nothing and every task creates and destroys its
+   * own workspace, exactly as before.
+   */
+  warmWorkspaces?: WarmWorkspacePool;
   /**
    * Where a person's "stop" reaches this run's live sessions.
    *
@@ -2011,6 +2049,13 @@ export async function runPendingTasks(
       if (home !== undefined) {
         credentialHomes.push(home);
       }
+      // What the lease tells a remote worker, computed here because an
+      // in-process run has no lease to be told through. A read that fails
+      // reads as spent: the conservative answer is the run that finishes
+      // normally, not the one that stops itself and cannot be requeued.
+      const handoffsUsed = await contextHandoffsUsed(store, task.id).catch(
+        () => MAX_CONTEXT_HANDOFFS,
+      );
       tasks.push({
         task: definition,
         adapter: createAdapter(
@@ -2023,6 +2068,7 @@ export async function runPendingTasks(
           home?.env ?? process.env,
           // The room's choice, if the room made one.
           { model: task.model, effort: task.effort },
+          handoffsUsed < MAX_CONTEXT_HANDOFFS,
         ),
         // One turn of a conversation, when the row says so: the coordinator
         // resumes whatever the registry still holds for this id, and starts
@@ -2076,6 +2122,9 @@ export async function runPendingTasks(
       ...(options.conversations === undefined
         ? {}
         : { conversations: options.conversations }),
+      ...(options.warmWorkspaces === undefined
+        ? {}
+        : { warmWorkspaces: options.warmWorkspaces }),
       ...(options.cancellations === undefined
         ? {}
         : { cancellations: options.cancellations }),

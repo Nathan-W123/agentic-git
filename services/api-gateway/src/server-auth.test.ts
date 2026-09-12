@@ -54,6 +54,7 @@ test("bootstrap, sessions, CSRF, static fallback, and logout work over HTTP", as
       "retry",
       "cancel",
       "stop",
+      "context",
       "help",
     ],
   );

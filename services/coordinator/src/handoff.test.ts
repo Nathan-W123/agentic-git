@@ -383,3 +383,61 @@ test("a non-handoff audit payload is ignored rather than half-parsed", async () 
   assert.deepEqual(await findTaskHandoffs(store, { taskId: "task_a" }), []);
   assert.equal(isTaskHandoff({ version: 1 }), false);
 });
+
+test("a context handoff names where the run stopped and what to do next", async () => {
+  // The one handoff nobody is present to write: the session stopped itself,
+  // so every line of this comes from the figures the control plane recorded
+  // on `task_handed_off` first. The adapter's own verdict — "the agent
+  // compacted its own context…" — is deliberately not an input here, and must
+  // not appear anywhere in what a successor reads.
+  const store = SqliteCoordinationStore.open(":memory:");
+  const handoff = buildTaskHandoff(
+    input({
+      projectId: "project_local",
+      admission: admission(),
+      reason: "long_running",
+      contextPressure: {
+        occupiedTokens: 48_153,
+        peakTokens: 69_478,
+        maximumContextTokens: 60_000,
+        turns: 12,
+        compactions: 1,
+        droppedTokens: 46_655,
+        stale: true,
+        attempt: 1,
+        budget: 2,
+        leaseId: "lease_9",
+      },
+    }),
+  );
+
+  assert.equal(handoff.reason, "long_running");
+  const stopped = handoff.open.find((entry) =>
+    entry.item.includes("stopped itself"),
+  );
+  assert.ok(stopped !== undefined, JSON.stringify(handoff.open));
+  assert.match(stopped.reason, /48153 of 60000 tokens after 12 turns/u);
+  assert.match(stopped.reason, /1 compaction\(s\) discarding 46655 tokens/u);
+  assert.match(stopped.reason, /task_handed_off on lease lease_9/u);
+  assert.match(stopped.reason, /edits from that attempt were discarded/u);
+  assert.ok(
+    handoff.gotchas.some((entry) =>
+      /filled a 60000-token window once already \(attempt 1 of 2\)/u.test(entry),
+    ),
+    handoff.gotchas.join(" | "),
+  );
+  assert.ok(
+    handoff.nextSteps.some((entry) =>
+      entry.startsWith(`continue the objective from a fresh workspace at bbbb`),
+    ),
+    handoff.nextSteps.join(" | "),
+  );
+
+  await recordTaskHandoff(store, handoff);
+  const found = await findTaskHandoffs(store, { taskId: "task_a" });
+  assert.deepEqual(found, [handoff]);
+  const seeded = await seedContextForTask(store, { taskId: "task_a" });
+  assert.match(seeded, /task_a — long_running/u);
+  // Nothing the adapter said in words; only figures with a record behind them.
+  assert.equal(/compacted its own context/u.test(seeded), false);
+});

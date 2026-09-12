@@ -51,6 +51,11 @@ exact implemented and later-phase boundary.
   that workspace up to whatever else landed meanwhile. Every turn still plans,
   validates, and promotes like an ordinary task, and the held sessions are
   bounded by a configurable cap and idle timeout.
+- Warm starts per repository: a task that lands leaves its directory to the
+  next one — on the control plane and on every worker — scrubbed back to a
+  verified-clean checkout while what is expensive to rebuild stays, and each
+  promotion indexes the revision it created into a cache the control plane
+  reads back after a restart.
 - SQLite and PostgreSQL task queues, tenant/project isolation, approvals, full
   changesets, integration history, audit compaction, and hash-chain
   verification across archived and live events.

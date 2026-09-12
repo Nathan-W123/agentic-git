@@ -72,6 +72,16 @@ The local Phase 1 product surface is complete:
   `POST /projects/{id}/catch-up/seen`; a first visit and a quiet interval both
   answer with nothing, so the popup only appears when there is news and the
   model is never woken to say there is none.
+- MCP session continuity: `POST /api/v1/mcp` issues an `Mcp-Session-Id` on a
+  handshake that succeeded, accepts it on later requests, and ends it on
+  `DELETE`; a client that sends none is served exactly as before. The session
+  is a store row — a focus and up to twenty tasks it filed or took — and
+  `initialize` answers with `instructions` projected from the coordination
+  record: where that account was last working, how its recent tasks ended
+  (read live, never stored), and that repository's handoffs and standing
+  context. `submit_task`, `take_task` and `task_status` default from the
+  focus; `cancel_task` deliberately does not; `session_context` shows the long
+  form and moves the focus. See [editor work](../protocol/editor-work.md).
 
 The web product is still a control room rather than a collaborative IDE.
 Presence, shared cursors, PTY terminal streams, and projection of agents'
@@ -172,6 +182,57 @@ next message before the waiting is over.
 Turn-by-turn conversation is not a long-lived agent. Between turns nothing is
 running; what survives is context.
 
+What a task is told about the room it came from is carried in one field,
+`SubmittedTask.context`, that the gateway alone writes. A request made inside
+a thread carries that thread — progress narration dropped, the request itself
+dropped because it is already the objective, cut to a token budget with a
+notice where the cut is (`threadContextFor` in the gateway, over
+`selectThreadContext`); a request the gateway auto-merges into a resembling
+thread carries the thread it joined; and every mention-dispatched task, thread
+or not, carries a channel memo of one line per conversation the room settled
+lately (`channelMemoFor`). The coordinator and the remote worker place the
+thread ahead of handoff notes and planning hints in `StartTaskInput.priorContext`
+for the planning round and hand it to the execution rounds on its own as
+`task.context`; the codex and prompt-cli adapters render both, and a
+`generic-cli` agent receives them as the optional `context` and `priorContext`
+fields of its `start` message. Both runners mark a turn of a conversation
+`conversational`, but only the coordinator resumes the vendor-side session on
+the next turn: a remote worker opens the session resumable and never resumes
+it, so on a worker every turn starts a fresh `startTask` and the thread in
+`task.context` is the only continuity there is. Work an agent proposes in answer to a question
+carries that question and answer; work an editor files for itself through MCP
+carries the memo, and an editor that takes a task filed in a thread is shown
+the thread in its brief. What still travels bare: a question routed to an
+owner's machine (only ever asked at the channel root today), and an MCP
+`submit_task` call, which cannot file inside an existing thread and so joins
+one only when the gateway merges it there. See
+[docs/handoff/task-context.md](../handoff/task-context.md).
+
+Repository standing context: a curated, versioned per-repository note — the
+conventions, the validation commands that actually work, the known pitfalls —
+set by `/context`, `PUT .../repositories/:id/context` or the
+`set_repository_context` MCP tool under the rename gate, audited on every
+save, and seeded into every task's prior context ahead of the handoffs on the
+in-process, remote-worker and editor paths alike. Beside it, in process only,
+the coordinator projects validation labels that keep failing across recorded
+handoffs into a block of its own, computed at read time and never stored.
+Both reach the planning round only. See
+[repository-standing-context.md](repository-standing-context.md).
+
+## Warm Starts
+
+| Requirement | Status | Evidence |
+| --- | --- | --- |
+| A repository's index is not rebuilt on the next task's critical path | Implemented | Every live promotion — in-process and on the worker path — calls `CodeIntelligenceService.prewarm` for the revision it created, and the result is written under `.coordinator/index`, sequence-guarded so an older revision can never replace a newer file. A restart reads it back and seeds the content-addressed parse cache as well as the index, so a canonical that moved while the process was down costs only the files that changed. Control plane only. |
+| A landed task's directory is reused instead of destroyed | Implemented | `WarmWorkspacePool` in `@coord/workspace-manager`, bounded per repository, used by the control plane's in-process runs and by each remote worker. Only a task that reached canonical offers its directory; `WorkspaceManager.scrub` resets it to the base hash, cleans every untracked path including ignored ones except the ephemeral excludes, and verifies with `git status --ignored` — anything that fails is destroyed, never handed out. The next task's revision is applied on take, so a canonical advance needs no invalidation. |
+| Dependencies survive between tasks where they can | Implemented | On a worker the agent's own install survives the scrub, which is the whole of retention there. On the control plane an optional prepare step reuses the preview service's `detectInstallCommand` and runs through the workspace backend, so a sandboxed project installs inside its container; a `network: none` sandbox is skipped rather than failed. |
+| Warm and cold starts are observable | Implemented | `task_started` carries `workspaceStart` (`warm`/`cold`/`resumed`), `indexStart` and `dependencies`; `coord metrics` prints a Warm starts block and `--json` carries `warmStarts`; the control plane logs one `[warm]` line per take and the worker's `Laps` line marks `checkout(warm)`. |
+
+Knobs: `COORD_WARM_WORKSPACES_PER_REPOSITORY`, `COORD_WARM_WORKSPACE_IDLE_MS`,
+`COORD_WARM_INDEX`. Kept directories are process-lifetime only — nothing
+durable describes one, and both hosts clear their root at start. See
+[warm-starts.md](warm-starts.md).
+
 ## Repository Lifecycle
 
 - Greenfield start: `coord repo create` and the web repository form create an
@@ -239,6 +300,22 @@ Hosted execution has a protocol and a working control-plane half:
   while the spending is still happening, and `maxProjectTokensPerDay` throttles
   leasing the way the runtime budget does. Reporting is optional and never
   inferred, so an agent that says nothing is recorded as having said nothing.
+- The claim route (`POST /workers/leases/:id/claim`) also carries the
+  repository's standing context, claimed or not, so a remote task plans with
+  the same note an in-process one does. A 204 now means no plan and no
+  context of any kind; a 200 without `plan` is not a claim.
+- Context-window handoff. An agent whose CLI reports occupancy mid-run (Claude
+  Code today) stops itself at a tool boundary when its window is nearly full or
+  has already been compacted; the control plane records `task_handed_off`,
+  projects a `long_running` handoff from that record, and requeues the task
+  seeded with it on the claim answer, at most `MAX_CONTEXT_HANDOFFS` times
+  before the task is failed instead. Reporting it is gated on the assignment
+  carrying `contextHandoffsRemaining`, so an older control plane is never sent
+  a status it would refuse. Codex reports a per-round total only and Gemini
+  nothing before a task ends; each adapter declares `contextObservation`, where
+  absent reads as none. The same stream makes `reportedTokenUsage` live, so
+  `maxTaskTokens` is judged against a round while it is still running. See
+  [context-window-handoff.md](context-window-handoff.md).
 
 Container isolation for hosted execution is verified against a live Docker
 daemon, not merely implemented: `npm run verify:remote-docker` drives the whole
@@ -294,6 +371,14 @@ The following are intentionally not represented as complete:
   workspace/planning/integration worktrees, and prunes their registrations
   from the canonical mirrors. `coord recover` reports resumed tasks alongside
   failed runs.
+- Warm sandbox containers, and a dependency-install step on the remote worker.
+  Every sandboxed command is its own `docker run --rm`, and a kept container
+  would hold a mount of a directory the next task owns — which is the leak the
+  warm-workspace scrub exists to prevent. What the Docker path does gain from
+  warm starts is the mounted worktree itself. A worker-side prepare step is
+  deliberately absent rather than impossible: the agent installs, and its own
+  `node_modules` surviving the scrub is what retention already keeps. See
+  [warm-starts.md](warm-starts.md).
 - Redis/event-bus deployment, high availability, Kubernetes, Terraform,
   hybrid workers, and air-gapped release tooling. (A PostgreSQL storage
   backend exists; the rest of that deployment stack does not.)
@@ -312,6 +397,14 @@ The following are intentionally not represented as complete:
   With a sandbox configured it already runs in a container rather than as the
   control-plane process, but the tree being validated is the merge of a result
   onto current canonical, which exists only on the control plane.
+- Salvage of a context handoff's stopped attempt, and delivery of prior context
+  to a claimed task. When a run stops itself on a nearly full context window its
+  half-finished edits are discarded and the handoff says so; naming the files it
+  touched, or promoting a validated subset of them, is not built. The note the
+  control plane projects rides the claim answer whether or not a claim was
+  granted, but the adapters render prior context into the planning prompt only,
+  so a task handed its repository carries the note without reading it — the same
+  gap the repository's standing context has.
 - Collaborative IDE presence/cursors, PTY terminal streams, and projection of
   agents' unapproved in-flight edits. Per-user human overlay editing and
   bounded sandbox commands are already implemented.

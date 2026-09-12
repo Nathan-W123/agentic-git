@@ -15,6 +15,7 @@ import {
   type QuestionChoice,
   type ScopeContentionNotice,
   type StartTaskInput,
+  type ContextObservation,
 } from "@coord/agent-protocol";
 import {
   assertAgentPlan,
@@ -41,6 +42,13 @@ import type {
   TaskWorkspace,
   WorkspaceManager,
 } from "@coord/workspace-manager";
+import type { AgentContextPressure } from "@coord/shared-types";
+import {
+  assessContextPressure,
+  ContextPressureMonitor,
+  pressureSnapshot,
+  type ContextPressureThresholds,
+} from "./context-pressure.js";
 
 /**
  * Adapters for prompt-in / JSON-out coding CLIs: Claude Code and Gemini CLI.
@@ -222,6 +230,17 @@ export interface PromptCliProfile {
    * tools and letting the task report their absence as its own failure.
    */
   mcpArgs?(configPath: string): string[];
+  /**
+   * What this CLI can say about its context window while a run is in flight.
+   *
+   * Optional like `narrate` and `resumeArgs`, and for the same reason: it
+   * describes what one concrete CLI can do. `"live"` means Claude Code's
+   * `stream-json` shape specifically, because that is the shape
+   * {@link ContextPressureMonitor} reads; a second vendor that reports
+   * occupancy mid-run gets a reader beside it rather than this flag on its
+   * own. Absent reads as `"none"`.
+   */
+  contextObservation?: ContextObservation;
 }
 
 /**
@@ -402,7 +421,14 @@ const CLAUDE_SESSION_ID = /^[A-Za-z0-9-]{8,64}$/u;
 export function parseClaudeSessionId(stdout: string): string | undefined {
   let envelope: unknown;
   try {
-    envelope = JSON.parse(stdout.trim()) as unknown;
+    // Through `claudeResultEnvelope`, like `unwrap` and `parseClaudeUsage`.
+    // This read `JSON.parse(stdout)` on the whole of stdout, which is one
+    // JSON value only while the profile buffers: once both phases moved to
+    // `--output-format stream-json` every real run threw here and returned
+    // undefined, so `record.resume` was never set and the token that is
+    // documented to ride every invocation rode none of them. The unit tests
+    // did not catch it because their envelope helper emits a single line.
+    envelope = claudeResultEnvelope(stdout);
   } catch {
     return undefined;
   }
@@ -473,6 +499,10 @@ export const CLAUDE_PROFILE: PromptCliProfile = {
     ...(jsonSchema === undefined ? [] : ["--json-schema", jsonSchema]),
   ],
   narrate: readClaudeNarration,
+  // The same stream the narrator reads carries the vendor's own per-turn
+  // accounting and its `compact_boundary` line, so nothing extra is spawned
+  // or polled to watch the window fill.
+  contextObservation: "live",
   unwrap: (stdout) => {
     const envelope = claudeResultEnvelope(stdout);
     if (typeof envelope !== "object" || envelope === null) {
@@ -678,6 +708,44 @@ export interface PromptCliAdapterOptions {
    */
   mcpConfigPath?: string;
   runner?: PromptCliProcessRunner;
+  /**
+   * How this run should treat a filling context window.
+   *
+   * Observation happens whenever the profile reports `contextObservation:
+   * "live"`; this only decides what is done with what is observed. `handOff`
+   * is separate from the thresholds because the two are set by different
+   * people for different reasons — the window is a fact about the model, and
+   * whether a run may stop itself is a deployment's choice. The in-process
+   * driver passes `handOff: false`: it has no requeue path of its own to
+   * stop into, so it watches and reports and never interrupts.
+   */
+  contextPressure?: {
+    /** The model's window. Occupancy is not judged without it. */
+    maximumContextTokens?: number;
+    /** Fraction of the window that counts as "approaching". Defaults to 0.8. */
+    occupancyFraction?: number;
+    /** Whether an automatic compaction alone justifies stopping. Defaults to true. */
+    handOffOnCompaction?: boolean;
+    /** Whether a verdict may stop a round at all. */
+    handOff: boolean;
+  };
+}
+
+/**
+ * Thrown out of `run` when the observer stopped the round deliberately.
+ *
+ * A distinct type rather than a flag on the record because the abort it
+ * reports looks exactly like a cancellation from the runner's side — exit 130,
+ * `aborted: true` — and the two must not be confused: one is a person stopping
+ * a task, the other is a session asking to be resumed elsewhere.
+ */
+export class ContextHandoffStop extends Error {
+  public constructor(
+    public readonly handoff: { reason: string; pressure: AgentContextPressure },
+  ) {
+    super(handoff.reason);
+    this.name = "ContextHandoffStop";
+  }
 }
 
 interface Completion {
@@ -853,6 +921,25 @@ interface PromptCliSession {
    * conversation, having killed nothing and aborted no round.
    */
   paused: { promise: Promise<void>; resume: () => void } | undefined;
+  /**
+   * The monitor watching the invocation in flight, and which phase's bill it
+   * is running up.
+   *
+   * One per spawn rather than one per session: a monitor accumulates a single
+   * invocation's occupancy and cost, and `reportedTokenUsage` adds it to that
+   * phase's bucket so a planning round's spend is never booked as execution.
+   * Cleared by `run` once the round's envelope has been billed, so no round is
+   * counted twice and none is invisible in between.
+   */
+  contextMonitor:
+    | { phase: "planning" | "execution"; monitor: ContextPressureMonitor }
+    | undefined;
+  /**
+   * The verdict that stopped the round, set before the abort so `run` can tell
+   * this abort from a cancellation. Reset per turn, because a continued
+   * conversation that inherited one would hand off before it had run.
+   */
+  contextHandoff: { reason: string; pressure: AgentContextPressure } | undefined;
   cancelled: boolean;
 }
 
@@ -1844,6 +1931,8 @@ export class PromptCliAdapter implements AgentAdapter {
   }
 
   public async getCapabilities(): Promise<AgentCapabilities> {
+    const maximumContextTokens =
+      this.options.contextPressure?.maximumContextTokens;
     return {
       canPlan: true,
       canEditFiles: true,
@@ -1851,6 +1940,8 @@ export class PromptCliAdapter implements AgentAdapter {
       canUseTools: true,
       supportsStreaming: true,
       supportsPause: false,
+      ...(maximumContextTokens === undefined ? {} : { maximumContextTokens }),
+      contextObservation: this.profile.contextObservation ?? "none",
     };
   }
 
@@ -1893,6 +1984,8 @@ export class PromptCliAdapter implements AgentAdapter {
       contention: [],
       paused: undefined,
       resume: undefined,
+      contextMonitor: undefined,
+      contextHandoff: undefined,
       cancelled: false,
     });
     this.emit(this.sessions.get(session.id)!, {
@@ -1965,6 +2058,8 @@ export class PromptCliAdapter implements AgentAdapter {
       contention: [],
       paused: undefined,
       resume,
+      contextMonitor: undefined,
+      contextHandoff: undefined,
       cancelled: false,
     });
     this.emit(this.sessions.get(session.id)!, {
@@ -2355,27 +2450,45 @@ export class PromptCliAdapter implements AgentAdapter {
         await paused.promise;
       }
       const forceQuestion = this.forcedQuestionPending(record);
-      const stdout = await this.run(
-        record,
-        context.workspacePath,
-        [
-          ...this.profile.executionArgs(
-            this.model,
-            this.effort,
-            this.profile.name === "claude"
-              ? forceQuestion
-                ? FORCED_QUESTION_JSON_SCHEMA
-                : COMPLETION_JSON_SCHEMA
-              : undefined,
-          ),
-          ...this.mcpArgs,
-        ],
-        forceQuestion
-          ? this.forcedQuestionPrompt(record, context)
-          : this.executionPrompt(record, context),
-        this.executionTimeoutMs,
-        "execution",
-      );
+      let stdout: string;
+      try {
+        stdout = await this.run(
+          record,
+          context.workspacePath,
+          [
+            ...this.profile.executionArgs(
+              this.model,
+              this.effort,
+              this.profile.name === "claude"
+                ? forceQuestion
+                  ? FORCED_QUESTION_JSON_SCHEMA
+                  : COMPLETION_JSON_SCHEMA
+                : undefined,
+            ),
+            ...this.mcpArgs,
+          ],
+          forceQuestion
+            ? this.forcedQuestionPrompt(record, context)
+            : this.executionPrompt(record, context),
+          this.executionTimeoutMs,
+          "execution",
+        );
+      } catch (error) {
+        if (!(error instanceof ContextHandoffStop)) {
+          throw error;
+        }
+        // Neither a completion nor a failure. `record.completion` stays unset,
+        // so `collectChanges` refuses as it should — the half-finished edits
+        // of a stopped round are not a changeset, and the requeued task starts
+        // from a fresh workspace with the handoff instead.
+        this.emit(record, {
+          event: "context_handoff_requested",
+          reason: error.handoff.reason,
+          pressure: error.handoff.pressure,
+          occurredAt: new Date().toISOString(),
+        });
+        return;
+      }
       const execution = extractJsonObject(
         this.profile.unwrap(stdout),
         "the execution result",
@@ -2846,6 +2959,34 @@ export class PromptCliAdapter implements AgentAdapter {
     if (record.cancelled) {
       throw new Error(`Session ${record.session.id} was cancelled`);
     }
+    try {
+      return await this.runOnce(
+        record,
+        workingDirectory,
+        args,
+        prompt,
+        timeoutMs,
+        phase,
+      );
+    } finally {
+      // Cleared here rather than in `spawn`, and only after the envelope's
+      // usage has been pushed onto `tokenUsage`: `spawn`'s own `finally`
+      // clears `record.active` before this method reads the envelope, so a
+      // monitor dropped there would leave the finished round in neither place
+      // and a heartbeat landing in that window would under-report it.
+      record.contextMonitor = undefined;
+    }
+  }
+
+  /** The body of {@link run}, so the monitor can be cleared in one place. */
+  private async runOnce(
+    record: PromptCliSession,
+    workingDirectory: string,
+    args: readonly string[],
+    prompt: string,
+    timeoutMs: number,
+    phase: "planning" | "execution",
+  ): Promise<string> {
     // A held resume token rides on every invocation — planning, replanning
     // and each execution round alike — so the whole turn happens inside the
     // vendor session the conversation has been having, not beside it.
@@ -2858,12 +2999,30 @@ export class PromptCliAdapter implements AgentAdapter {
       resumable ? [...args, ...resumeArgs(resume)] : [...args],
       prompt,
       timeoutMs,
+      phase,
       // Both phases, now that planning streams too. A profile that does not
       // stream, or has no narrator, is unaffected: the narrator is only
       // attached where `narrate` is defined, and a lone JSON envelope simply
       // yields no line it recognises.
       true,
     );
+    // An abort the observer asked for, rather than one a person did. The
+    // round produced no result envelope, so its spend is taken from the
+    // monitor instead of being lost, and the loop above is told to stop by a
+    // type rather than by a failure message.
+    if (output.aborted === true && record.contextHandoff !== undefined) {
+      const live = record.contextMonitor;
+      if (live !== undefined) {
+        record.tokenUsage.push({
+          ...live.monitor.usage(),
+          phase: live.phase,
+          durationMs: output.durationMs,
+          at: new Date().toISOString(),
+        });
+        record.contextMonitor = undefined;
+      }
+      throw new ContextHandoffStop(record.contextHandoff);
+    }
     if (
       output.exitCode !== 0 &&
       resumable &&
@@ -2881,6 +3040,7 @@ export class PromptCliAdapter implements AgentAdapter {
         [...args],
         prompt,
         timeoutMs,
+        phase,
         phase === "execution",
       );
     }
@@ -2915,8 +3075,21 @@ export class PromptCliAdapter implements AgentAdapter {
     // Overwritten, never written once: a resumed run forks a fresh vendor
     // session id, and the newest one is what names the state as this
     // invocation left it.
+    //
+    // A planning envelope's id is kept only for a conversation. Planning runs
+    // under `--permission-mode plan`, and resuming it into execution drags the
+    // whole planning transcript into the window this feature exists to watch —
+    // a cost that bought nothing, because the driver hands the admitted plan
+    // back in the execution prompt anyway. It stayed invisible for as long as
+    // `parseClaudeSessionId` could not read a streamed envelope. A
+    // conversation is the exception and keeps the old behaviour: its turns are
+    // supposed to happen inside one vendor session, and one that dropped the
+    // planning id would answer the next message having forgotten the last.
     const vendorSession = this.profile.sessionId?.(output.stdout);
-    if (vendorSession !== undefined) {
+    if (
+      vendorSession !== undefined &&
+      (phase === "execution" || record.input.conversational === true)
+    ) {
       record.resume = vendorSession;
     }
     return output.stdout;
@@ -2969,6 +3142,93 @@ export class PromptCliAdapter implements AgentAdapter {
     };
   }
 
+  /**
+   * Watches the window fill, and stops the round at the safe moment.
+   *
+   * Evaluated after *every* chunk rather than only when `write` returns a
+   * signal. A `type:"user"` tool-result line yields no signal at all — it is
+   * not a context reading — yet it is precisely the boundary this waits for,
+   * so returning early on an empty signal list would leave the occupancy
+   * trigger unable to fire at all and only compactions would ever stop a run.
+   *
+   * Two boundaries are acted on and one is deliberately not. A
+   * `compact_boundary` is emitted between requests with nothing local in
+   * flight, so it is acted on the line it arrives on. A tool result is printed
+   * after the tool finished and while the CLI composes the next request, which
+   * is what `staleAfterToolResult` means, and a kill there interrupts a
+   * network call rather than a half-written file or a running shell. A `turn`
+   * signal on its own is never acted on: `toolResultSinceTurn` has just been
+   * reset on that line, and the model may be writing its final answer — one
+   * tool short of finishing is the worst moment to throw a round away.
+   *
+   * Re-entrancy is intended and worth stating: `abort()` runs the runner's
+   * `terminate()` synchronously — SIGKILL plus `child.stdout.destroy()` —
+   * while the `data` handler that called this observer is still on the stack.
+   * Node tolerates destroying a stream from inside its own `data` handler, the
+   * runner's promise still settles on `close`, and the runner wraps observers
+   * in try/catch, so a throw here can neither kill the process nor hang the
+   * round. A future runner that awaited its observers or re-emitted after
+   * destroy would need this abort deferred to a microtask.
+   */
+  private contextObserver(
+    record: PromptCliSession,
+    phase: "planning" | "execution",
+    monitor: ContextPressureMonitor,
+  ): (chunk: string) => void {
+    const thresholds: ContextPressureThresholds = {
+      ...(this.options.contextPressure?.maximumContextTokens === undefined
+        ? {}
+        : {
+            maximumContextTokens:
+              this.options.contextPressure.maximumContextTokens,
+          }),
+      ...(this.options.contextPressure?.occupancyFraction === undefined
+        ? {}
+        : { occupancyFraction: this.options.contextPressure.occupancyFraction }),
+      ...(this.options.contextPressure?.handOffOnCompaction === undefined
+        ? {}
+        : {
+            handOffOnCompaction:
+              this.options.contextPressure.handOffOnCompaction,
+          }),
+    };
+    return (chunk: string): void => {
+      const signals = monitor.write(chunk);
+      const pressure = monitor.pressure();
+      // Planning is read-only under `--permission-mode plan` and its output is
+      // a plan the driver already re-asks for; handing one off buys nothing.
+      // Observed all the same, because the heartbeat reports its spend.
+      if (
+        phase !== "execution" ||
+        record.cancelled ||
+        record.contextHandoff !== undefined ||
+        this.options.contextPressure?.handOff !== true
+      ) {
+        return;
+      }
+      const atBoundary =
+        signals.some((signal) => signal.kind === "compaction") ||
+        pressure.staleAfterToolResult;
+      if (!atBoundary) {
+        return;
+      }
+      const verdict = assessContextPressure(pressure, thresholds);
+      if (!verdict.shouldHandOff) {
+        return;
+      }
+      // Set before the abort, so `run` reads a deliberate stop rather than a
+      // cancellation out of the same exit code.
+      record.contextHandoff = {
+        reason: verdict.reason ?? "the context window was nearly full",
+        pressure: pressureSnapshot(
+          pressure,
+          thresholds.maximumContextTokens,
+        ),
+      };
+      record.controller?.abort();
+    };
+  }
+
   /** One process, with the record's active/controller bookkeeping around it. */
   private async spawn(
     record: PromptCliSession,
@@ -2976,11 +3236,46 @@ export class PromptCliAdapter implements AgentAdapter {
     argv: string[],
     prompt: string,
     timeoutMs: number,
+    /**
+     * Which half of the task this process is buying. The monitor is booked to
+     * it so live spend lands in the right bucket, and the observer only acts
+     * during execution.
+     */
+    phase: "planning" | "execution",
     /** Set while executing, so a streamed run can say what it is doing. */
     narrate = false,
   ): Promise<ProcessOutput> {
     const controller = new AbortController();
     record.controller = controller;
+    // A monitor per process, not per session: it accumulates one invocation's
+    // occupancy and cost. Only where the profile both streams and says it can
+    // be read — a lone JSON envelope yields no line this understands.
+    const monitor =
+      narrate &&
+      this.profile.narrate !== undefined &&
+      this.profile.contextObservation === "live"
+        ? new ContextPressureMonitor()
+        : undefined;
+    if (monitor !== undefined) {
+      record.contextMonitor = { phase, monitor };
+    }
+    // One reader over the same bytes: the narrator turns them into progress
+    // lines, the observer into a verdict on how full the window is.
+    const narrator =
+      narrate && this.profile.narrate !== undefined
+        ? this.narrator(record)
+        : undefined;
+    const observe =
+      monitor === undefined
+        ? undefined
+        : this.contextObserver(record, phase, monitor);
+    const onStdout =
+      narrator === undefined && observe === undefined
+        ? undefined
+        : (chunk: string): void => {
+            narrator?.(chunk);
+            observe?.(chunk);
+          };
     // Prefer stdin so objectives are not visible in the process list. A few
     // vendor CLIs expose non-interactive mode only through a positional
     // prompt; their profile opts into that explicitly above.
@@ -3011,9 +3306,7 @@ export class PromptCliAdapter implements AgentAdapter {
         // still sees every byte live regardless of what is retained.
         retainOutput: "tail",
         signal: controller.signal,
-        ...(narrate && this.profile.narrate !== undefined
-          ? { onStdout: this.narrator(record) }
-          : {}),
+        ...(onStdout === undefined ? {} : { onStdout }),
       },
     );
     record.active = active;
@@ -3068,7 +3361,8 @@ export class PromptCliAdapter implements AgentAdapter {
       AgentTokenUsage["phase"],
       { totalTokens: number; inputTokens: number; outputTokens: number }
     >();
-    for (const entry of this.requireSession(sessionId).tokenUsage) {
+    const record = this.requireSession(sessionId);
+    for (const entry of record.tokenUsage) {
       const current = totals.get(entry.phase) ?? {
         totalTokens: 0,
         inputTokens: 0,
@@ -3085,6 +3379,26 @@ export class PromptCliAdapter implements AgentAdapter {
         // between `totalTokens` and the two sides.
         inputTokens: current.inputTokens + entry.inputTokens,
         outputTokens: current.outputTokens + entry.outputTokens,
+      });
+    }
+    // The round in flight, which has no envelope yet and so is in no bucket.
+    // Guarded on the monitor rather than on `record.active`, because `spawn`
+    // clears `active` before `run` bills the envelope and a heartbeat landing
+    // in that gap would otherwise report a round that had just finished as
+    // having cost nothing. Booked to the monitor's own phase, so planning
+    // spend never reads as execution spend.
+    const live = record.contextMonitor;
+    if (live !== undefined) {
+      const usage = live.monitor.usage();
+      const current = totals.get(live.phase) ?? {
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+      };
+      totals.set(live.phase, {
+        totalTokens: current.totalTokens + usage.totalTokens,
+        inputTokens: current.inputTokens + usage.inputTokens,
+        outputTokens: current.outputTokens + usage.outputTokens,
       });
     }
     return [...totals].map(([phase, sums]) => ({
@@ -3262,8 +3576,15 @@ export class PromptCliAdapter implements AgentAdapter {
       ...(input.priorContext === undefined || input.priorContext.trim() === ""
         ? []
         : [
-            "Notes left by earlier work in this repository. Treat as background,",
-            "not as fact — verify anything you rely on against the workspace:",
+            // Two provenances now share this slot — handoffs the control
+            // plane projected and a note the repository's people wrote —
+            // so the label names both. The old sentence claimed the first
+            // alone, which became untrue the day the second arrived, and an
+            // adapter that grepped the text for a heading to tell them apart
+            // would couple two packages on a string.
+            "Background about this repository — notes left by earlier work and",
+            "by the people who work here. Treat as background, not as fact —",
+            "verify anything you rely on against the workspace:",
             input.priorContext.trim(),
           ]),
       `Canonical revision: ${input.canonicalVersion.revision}`,

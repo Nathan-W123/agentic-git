@@ -1347,6 +1347,12 @@ test("earlier work reaches the planning prompt as background, not as fact", asyn
   const planning = prompts[0] ?? "";
   assert.match(planning, /Gotcha: the retry counter is off by one\./u);
   assert.match(planning, /Treat as background/u);
+  // The label names both provenances the slot now carries — projected
+  // handoffs and the standing context the repository's people wrote — rather
+  // than claiming earlier work alone.
+  assert.match(planning, /Background about this repository/u);
+  assert.match(planning, /by the people who work here/u);
+  assert.doesNotMatch(planning, /Notes left by earlier work/u);
   // The objective stays the thing somebody actually asked for.
   assert.match(planning, /Objective: /u);
   await rm(fixture.root, { recursive: true, force: true });
@@ -2598,6 +2604,40 @@ test("a server Codex cannot carry is refused when the adapter is built", async (
       { name: "open", transport: "http", url: "https://x" },
       { name: "local", transport: "stdio", command: "svc" },
     ]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("codex reports a per-round total, and says that is all it can see", async () => {
+  // The asymmetry, declared rather than left to behaviour: `turn.completed`
+  // arrives once per exec with usage summed over the turn, so this adapter
+  // can say what a round cost and never how full the window is. A driver
+  // reading `per_round` knows not to wait for this vendor to ask to be
+  // handed off.
+  const fixture = await createFixture();
+  try {
+    const capabilities = await new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      maximumContextTokens: 272_000,
+    }).getCapabilities();
+    assert.equal(capabilities.contextObservation, "per_round");
+    assert.equal(capabilities.maximumContextTokens, 272_000);
+
+    // Absent rather than guessed: no `codex exec` output says how large the
+    // window is, and a figure invented here would be judged against.
+    const unconfigured = await new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+    }).getCapabilities();
+    assert.equal("maximumContextTokens" in unconfigured, false);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

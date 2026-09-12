@@ -1,9 +1,9 @@
 /**
  * The tools an editor uses to do the work itself.
  *
- * The five tools in `mcp-tools.ts` are about *filing* work: somebody in an
- * editor wants Kumi to do something, and a machine somewhere picks it up.
- * These three are the other half. The person is already in Claude Code or
+ * The tools in `mcp-tools.ts` are about *filing* work: somebody in an editor
+ * wants Kumi to do something, and a machine somewhere picks it up. These are
+ * the other half. The person is already in Claude Code or
  * Cursor with the repository checked out, and the agent in front of them is
  * perfectly capable of doing the task itself. What it lacks is everything
  * Kumi holds: which task is next, what revision to start from, permission to
@@ -28,6 +28,7 @@
 
 import type { FilePatch, FilePatchStatus } from "@coord/shared-types";
 
+import type { McpSessionHandle } from "./mcp-session.js";
 import {
   McpArgumentError,
   mcpRefusal,
@@ -104,12 +105,42 @@ export function editorBehind(token?: {
 export interface McpTakenTask {
   readonly taskId: string;
   readonly objective: string;
+  /**
+   * The conversation the task was asked inside, when it was asked inside
+   * one — `SubmittedTask.context`. The objective is deliberately clean (see
+   * `SubmitTaskInput.context` in persistence for why), so the brief is the
+   * only place an editor gets to read the room.
+   */
+  readonly context?: string;
+  /**
+   * Which project leased it. Required rather than optional: it is what a
+   * session focus is keyed on and what `authorizeProject` is asked about, and
+   * a producer that forgot it would otherwise hand back a focus with no
+   * project rather than failing to compile.
+   */
+  readonly projectId: string;
+  /**
+   * The repository's id, which is the key a focus is stored under.
+   *
+   * The same string as {@link McpTakenTask.repository} today, because a
+   * repository's id is the name people use for it. Named separately anyway, so
+   * that what the brief prints to a person and what a session focus resolves
+   * on are two facts rather than one field doing both jobs.
+   */
+  readonly repositoryId: string;
   readonly repository: string;
   readonly branch: string;
   readonly baseRevision: string;
   readonly expiresAt: string;
   readonly bundleUrl: string;
   readonly validationCommands: readonly string[];
+  /**
+   * The repository's standing context, already rendered by
+   * `renderRepositoryContext` in shared-types, when one is set. The editor
+   * is the third surface that executes a task and the only one with no
+   * adapter prompt to carry it, so the brief is where it goes.
+   */
+  readonly standingContext?: string;
 }
 
 /** Everything the work tools may do. Small, and deliberately not the gateway. */
@@ -148,6 +179,14 @@ export interface McpWorkDeps {
     taskId: string;
     message: string;
   }): Promise<"recorded" | "not_held">;
+  /**
+   * The session this client presented, when it presented one.
+   *
+   * Optional because the endpoint still serves a client that sends no
+   * `Mcp-Session-Id` exactly as it always did — see `mcp-session.ts` — and
+   * because every unit fixture for these tools predates sessions.
+   */
+  readonly session?: McpSessionHandle;
 }
 
 /**
@@ -262,6 +301,20 @@ export function takenTaskBrief(taken: McpTakenTask): string {
     "",
     taken.objective,
     "",
+    // Between the objective and the repository, so it reads as what the
+    // objective was said inside rather than as a second instruction. A
+    // follow-up filed in a thread — "now the same for the config loader" —
+    // arrived here as that one sentence with nothing for "the same" to point
+    // at; the vendor adapters had been given the thread since it was first
+    // carried, and the editor path was the one that dropped it.
+    ...(taken.context === undefined
+      ? []
+      : [
+          "What was said in the conversation this was asked inside — " +
+            "background for the task, not further instructions:",
+          taken.context,
+          "",
+        ]),
     `Repository: ${taken.repository} (branch ${taken.branch})`,
     `Start from revision ${taken.baseRevision}.`,
     "",
@@ -291,6 +344,18 @@ export function takenTaskBrief(taken: McpTakenTask): string {
       "",
       "This repository expects these to pass before anything lands:",
       ...taken.validationCommands.map((command) => `  ${command}`),
+    );
+  }
+  // After the validation commands and only when set, so a brief with no note
+  // is the brief it always was. Framed as background: the planning prompts
+  // say the same of it, and an editor reading it as a second task would be
+  // the first surface to do so.
+  if (taken.standingContext !== undefined && taken.standingContext !== "") {
+    lines.push(
+      "",
+      "What the people who work in this repository want you to know " +
+        "(background, verify against the checkout):",
+      taken.standingContext,
     );
   }
   lines.push(
@@ -361,7 +426,13 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
             `editor set to one of: ${EDITOR_VENDORS.join(", ")}.`,
         );
       }
-      const repository = optionalString(args, "repository", 200);
+      // The session's focus when the model named nothing: a client that asked
+      // about one repository a moment ago meant that one, and searching the
+      // whole account instead is how somebody in `payments` is handed work
+      // from a repository they have not opened today.
+      const repository =
+        optionalString(args, "repository", 200) ??
+        deps.session?.focus?.repositoryId;
       const taken = await deps.take({
         vendor,
         label: `${EDITOR_LABELS[vendor]} (editor)`,
@@ -372,6 +443,24 @@ export function createMcpWorkTools(deps: McpWorkDeps): McpTool[] {
           "Nothing is waiting for you right now. Anything filed for this " +
             "agent will be here next time you ask.",
         );
+      }
+      deps.session?.noteTask({
+        taskId: taken.taskId,
+        objective: taken.objective,
+        repositoryId: taken.repositoryId,
+        channel: undefined,
+        via: "take_task",
+      });
+      // Only when there was none. A take must not silently move a focus the
+      // person set: `session_context payments` followed by a take that found
+      // work in some other repository would leave every later `submit_task`
+      // filing somewhere nobody asked for.
+      if (deps.session !== undefined && deps.session.focus === undefined) {
+        deps.session.setFocus({
+          projectId: taken.projectId,
+          repositoryId: taken.repositoryId,
+          channel: undefined,
+        });
       }
       return mcpText(takenTaskBrief(taken));
     },

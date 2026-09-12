@@ -27,7 +27,11 @@ of `POST /workers/leases`. This document describes **version 4**:
 - **4** lets an assignment carry `mcpServers` — the project's approved MCP
   servers, secrets opened, for the one machine allowed to run them. A control
   plane withholds them from a worker announcing anything older and records
-  that it did.
+  that it did. Version 4 also gained two optional extensions that need no new
+  number, because each is announced by the field that carries it:
+  `contextHandoffsRemaining` on the assignment, and the `handed_off` result
+  status a worker sends only when it saw that field. See
+  [a session that filled its window](#a-session-that-filled-its-window).
 
 The floor a worker holds a control plane to is **3**, not its own version:
 everything 4 added is optional, and a control plane one release behind simply
@@ -317,7 +321,7 @@ first sweeps expired leases, so recovery needs no separate reaper process.
 | `GET` | `/api/v1/workers/leases/{id}/bundle` | Workspace contents as a Git bundle |
 | `POST` | `/api/v1/workers/leases/{id}/plan` | Submit a plan for admission |
 | `POST` | `/api/v1/workers/leases/{id}/scope` | Ask to widen the admitted scope mid-run |
-| `POST` | `/api/v1/workers/leases/{id}/result` | Return a changeset or a failure |
+| `POST` | `/api/v1/workers/leases/{id}/result` | Return a changeset, a failure, or a session that stopped on a full context window |
 | `POST` | `/api/v1/workers/leases/{id}/release` | Give the task back |
 
 Idle returns `204` rather than an empty `200` so a polling worker branches on
@@ -443,7 +447,11 @@ worse than an absent one, because a budget would then be enforced against
 fiction.
 
 The worker sends the running total up with its heartbeat, and the final figure
-with its result. Each report carries a cumulative per-phase total rather than
+with its result. An adapter that can read its vendor's stream reports the round
+it is *in the middle of* as well as the rounds it has finished — the Claude
+adapter bills the stream it already watches for context pressure — so a
+per-task cap can now stop a run that is over budget before it ends rather than
+recording the overrun afterwards. Each report carries a cumulative per-phase total rather than
 an increment, and the store keys on `(lease, phase)` and replaces, so the
 recorded bill tracks what was spent rather than how often the worker happened
 to heartbeat.
@@ -487,6 +495,28 @@ receive the revision it was *assigned*, not the current tip. The ref name is
 derived from the lease id, so concurrent bundle requests cannot collide, and it
 is returned as `bundleRef` in the assignment.
 
+### Warm slots
+
+A lease that reached canonical does not have to give its directory back. The
+reference daemon keeps a bounded number of them per repository under
+`workspaceRoot/warm/<repository>/<slot>` — outside every lease's scratch, so
+the removal that ends a lease leaves them alone — and hands one to the next
+lease in the same repository instead of cloning again. The point is less the
+checkout, which the bare cache already makes cheap, than what is in it: the
+worker never installs anything, the agent does, and that install used to die
+with the lease.
+
+A slot catches up by fetching from the bare cache and resetting to the
+assigned revision, which is why it is taken *after* the cache has absorbed the
+lease's ref. Every ref is fetched rather than the lease's own: a slot outlives
+the lease that retained it and cannot know the ref name of the lease that will
+take it next. The fetched revision is verified against the assignment before
+anything is reset to it, and the directory is scrubbed back to a verified-clean
+checkout — ignored files included — before the next lease is given it. Slots
+are cleared at daemon start and drained at stop; nothing durable describes one.
+`COORD_WARM_WORKSPACES_PER_REPOSITORY` bounds them per repository per worker,
+and `0` turns them off. See [warm starts](../architecture/warm-starts.md).
+
 ## Returning a result
 
 A completed result must carry a changeset whose `baseRevision` matches the
@@ -497,6 +527,59 @@ later.
 
 A result on a lapsed lease is refused. By then another worker may hold the
 task, and accepting both would let two workers write results for one task.
+
+The response body is the whole acceptance, not merely `{ accepted }`: it also
+carries `integrationStatus`, which is what a worker reads to decide whether to
+keep its directory warm. An accepted result whose integration conflicted or
+failed validation leaves a directory nobody has verified anything about, so
+only `integrated` retains. A control plane too old to send the field reads as
+"not landed", which costs a cold start and nothing else.
+
+## A session that filled its window
+
+An agent whose CLI reports occupancy while it runs can stop itself rather than
+carry on inside a window it has already overflowed. That is neither a
+completion nor a failure, and it has its own result status:
+
+```json
+{
+  "status": "handed_off",
+  "plan": { "…": "the admitted plan" },
+  "handoff": {
+    "reason": "the agent compacted its own context at 69478 tokens",
+    "pressure": {
+      "occupiedTokens": 48153,
+      "peakTokens": 69478,
+      "maximumContextTokens": 60000,
+      "turns": 12,
+      "compactions": 1,
+      "droppedTokens": 46655,
+      "stale": true
+    }
+  }
+}
+```
+
+`pressure` is validated field by field — every figure a finite number of zero
+or more, `stale` a boolean — because it becomes an audit record and then a
+handoff a person reads, and a `NaN` there would reach them as a sentence about
+how full a window got with nothing to tell it from a measurement. `reason` is
+the adapter's own verdict and is trace data: it is recorded on the audit event
+and never copied into the handoff, which is projected from the figures.
+
+The control plane writes `task_handed_off` first, records a `long_running`
+handoff projected from those figures, and then **releases** the lease, which
+returns the task to the queue. No changeset is collected: the edits of a
+stopped round are half-finished by definition, and the requeued task starts
+from a fresh workspace with the note on the next claim answer.
+
+A worker sends this status **only when the assignment carried
+`contextHandoffsRemaining`**. That optional field is how many more times the
+task may stop itself before the control plane fails it instead, and its
+presence is also the signal that the status will be understood: an older
+control plane answers `handed_off` with a `400`, and a `400` there would strand
+the lease until it expired. A worker that does not see the field never gives
+its agent permission to stop.
 
 ## MCP servers on the lease
 

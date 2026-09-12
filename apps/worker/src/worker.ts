@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
@@ -15,6 +15,7 @@ import {
   createGeminiAdapter,
   createKiroAdapter,
   type PromptCliEffort,
+  type PromptCliProcessRunner,
 } from "@coord/adapter-prompt-cli";
 import type {
   AgentAdapter,
@@ -53,6 +54,7 @@ import {
 import {
   DockerWorkspaceManager,
   GitWorktreeWorkspaceManager,
+  WarmWorkspacePool,
   type TaskWorkspace,
   type WorkspaceManager,
   type WorkspaceSandbox,
@@ -66,6 +68,13 @@ import {
   type WorkingChange,
 } from "./client.js";
 import { holdHost, hostAttached, signalHost } from "./host-signal.js";
+import {
+  clearWarmSlots,
+  prepareWarmSlot,
+  warmRepositoryRoot,
+  warmSlotPath,
+  WorkerWarmBackend,
+} from "./warm-workspace.js";
 import { stageMcpServers, type StagedMcpServers } from "./mcp-config.js";
 import type { WorkNudge } from "./nudge.js";
 import {
@@ -144,6 +153,14 @@ export interface WorkerOptions {
   adapters?: readonly string[];
   /** Injected only by tests or embedded runtimes. */
   codexRunner?: CodexProcessRunner;
+  /**
+   * The same, for the prompt-in / JSON-out vendors.
+   *
+   * A test of what this worker *decides* — how it reports a session that
+   * stopped on a full context window, say — must not depend on a vendor CLI
+   * being installed on the machine running it.
+   */
+  promptCliRunner?: PromptCliProcessRunner;
   /**
    * How this machine answers "am I plugged in".
    *
@@ -252,6 +269,14 @@ export interface IterationResult {
    * problem gets mistaken for a scheduling result.
    */
   transport?: boolean;
+  /**
+   * The session stopped itself because its context window was nearly full and
+   * the control plane requeued the task with a handoff. Reported apart from a
+   * failure for the reason `deferred` is: nothing went wrong, and a harness
+   * counting failures that counted this one would read a working feature as a
+   * regression.
+   */
+  handedOff?: boolean;
 }
 
 const DEFAULT_POLL_MS = 5_000;
@@ -379,6 +404,31 @@ interface PlannedWork {
 }
 
 /**
+ * What it would take to keep this lease's directory for the next one.
+ *
+ * `slotPath` is where the directory has to be for the pool to own it —
+ * already its own path when this lease started warm, and a slot to move it
+ * into when it started in scratch.
+ *
+ * Deliberately not a field on {@link PlannedWork}, which is where it first
+ * lived and where it leaked. A directory taken out of the pool is the
+ * teardown's problem from the instant `take` resolves, and `PlannedWork`
+ * exists only once `plan` has returned successfully: anything thrown in
+ * between — an unknown agent id, a sandbox that would not start, a lost
+ * lease — left the pool's own entry already spliced out and the directory,
+ * which lives outside the lease's scratch, with nothing anywhere that knew
+ * to remove it. It belongs to the run instead, from the moment there is one
+ * to belong to. See {@link Run.warmRetention}.
+ */
+interface WarmRetention {
+  backend: WorkerWarmBackend;
+  workspace: TaskWorkspace;
+  slotPath: string;
+  /** Set once the pool has taken the directory, so the teardown leaves it. */
+  retained: boolean;
+}
+
+/**
  * Whether this reads as an adapter's "nothing to say" fallback.
  *
  * All three build it the same way — `<agent name> completed <request>`, where
@@ -436,6 +486,14 @@ class Run {
    */
   public adoptedPlan: AgentPlan | undefined;
   /**
+   * Set when the agent asked to be handed off mid-execution. Read after the
+   * event chain drains, so the round's other events are answered first and
+   * the decision is made in one place rather than inside the handler.
+   */
+  public contextHandoff:
+    | Extract<AgentEvent, { event: "context_handoff_requested" }>
+    | undefined;
+  /**
    * The repository claim this run is currently holding, if it is.
    *
    * Kept because both halves of a claim's life happen outside the call that
@@ -453,6 +511,17 @@ class Run {
         workspaces: WorkspaceManager;
       }
     | undefined;
+  /**
+   * Where this run's directory would be kept, and whether the pool has it.
+   *
+   * Set inside `plan` as soon as there is a directory at all, because the
+   * teardown is the only thing that can be relied on to run: a warm slot
+   * lives outside this lease's scratch — that is what makes it survive the
+   * `finally` — so removing scratch is not enough, and a run that threw
+   * before `plan` returned had nowhere to read this from. Undefined means
+   * there is nothing outside scratch to account for.
+   */
+  public warmRetention: WarmRetention | undefined;
 
   public constructor(public readonly leaseId: string) {}
 }
@@ -487,6 +556,19 @@ export class Worker {
    * long part and touches only the run's own workspace.
    */
   private readonly cacheChains = new Map<string, Promise<unknown>>();
+  /**
+   * Directories kept warm per repository, across leases.
+   *
+   * One per worker rather than per lease, which is the point: a lease's
+   * scratch is removed in its own `finally`, and a slot has to outlive that
+   * to be worth anything. Bounded by
+   * `COORD_WARM_WORKSPACES_PER_REPOSITORY`, and cleared at start — nothing
+   * durable describes a slot, so a directory left by a previous process is
+   * not something to reason about.
+   */
+  private readonly warm = new WarmWorkspacePool({
+    log: (line) => console.log(line),
+  });
   /** See {@link WorkerOptions.powerSource}. */
   private readonly power: PowerSource;
 
@@ -890,6 +972,47 @@ export class Worker {
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
+      if ("handoff" in result) {
+        const handoff = result.handoff;
+        // Reported as `handed_off` only where the control plane said it
+        // accepts one, which is what the presence of
+        // `contextHandoffsRemaining` on the assignment means. An older
+        // control plane answers the status with a 400, and a 400 here would
+        // strand the lease until it expired — so the run is reported as the
+        // failure that older control plane would have seen anyway, with the
+        // agent's own reason as the detail rather than a silent stop.
+        const handedOff = assignment.contextHandoffsRemaining !== undefined;
+        const answer = await this.options.client.report(
+          assignment.lease.id,
+          handedOff
+            ? {
+                status: "handed_off",
+                plan: run.adoptedPlan ?? result.plan,
+                handoff: {
+                  reason: handoff.reason,
+                  pressure: handoff.pressure,
+                },
+              }
+            : {
+                status: "failed",
+                detail: handoff.reason,
+              },
+          this.spentSoFar(run),
+        );
+        laps.mark("report");
+        console.log(
+          `[worker] task ${assignment.task.id} — handed off (${handoff.reason}) — ` +
+            laps.summary(),
+        );
+        return {
+          worked: true,
+          taskId: assignment.task.id,
+          accepted: answer.accepted,
+          deferred: true,
+          ...(handedOff ? { handedOff: true } : {}),
+          reason: handoff.reason,
+        };
+      }
       const accepted = await this.options.client.report(
         assignment.lease.id,
         {
@@ -904,6 +1027,15 @@ export class Worker {
         this.spentSoFar(run),
       );
       laps.mark("report");
+      // Only a lease that reached canonical gives its directory back, which
+      // is why the whole acceptance is read rather than just `accepted`: an
+      // accepted result whose integration conflicted or failed validation
+      // leaves a workspace nobody has verified anything about. A control
+      // plane too old to say sends no `integrationStatus` at all, which reads
+      // as "not landed" and simply costs a cold start.
+      if (accepted.accepted && accepted.integrationStatus === "integrated") {
+        await this.retainWarmWorkspace(run);
+      }
       // One line, on the worker's own output, which the desktop app keeps.
       // Everything above this is where the time actually went; without it
       // "slower than the server was" is an observation with nowhere to go.
@@ -978,8 +1110,74 @@ export class Worker {
       run.adoptedPlan = undefined;
       run.session = undefined;
       run.cancellation = undefined;
+      // Before the scratch removal, and separate from it: a slot the pool did
+      // not take is outside scratch, so nothing else here would ever reach it.
+      // Read from the run rather than from a planning result, because the
+      // paths that skip one entirely — a question, or anything thrown between
+      // the take and the end of `plan` — are exactly the paths that used to
+      // leave a directory behind.
+      await this.discardWarmSlot(run);
+      run.warmRetention = undefined;
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /**
+   * Gives a landed lease's directory to the pool.
+   *
+   * A directory that started in scratch is moved into its slot first, with
+   * `rename` rather than a copy — the two are under the same workspace root
+   * and therefore the same filesystem, so the move is atomic and costs
+   * nothing, which matters because what is being moved is a checkout plus
+   * whatever the agent installed into it.
+   *
+   * The pool can still refuse (another lease filled the repository's slots
+   * while this one was reporting), and then the directory goes, because by
+   * that point it is no longer anywhere the scratch removal will find it.
+   */
+  private async retainWarmWorkspace(run: Run): Promise<void> {
+    const retention = run.warmRetention;
+    if (retention === undefined) {
+      return;
+    }
+    let workspace = retention.workspace;
+    if (retention.slotPath !== workspace.path) {
+      try {
+        await prepareWarmSlot(retention.slotPath);
+        await rename(workspace.path, retention.slotPath);
+      } catch {
+        return;
+      }
+      workspace = {
+        ...workspace,
+        path: retention.slotPath,
+        rootPath: path.dirname(retention.slotPath),
+        repository: { ...workspace.repository, path: retention.slotPath },
+      };
+      retention.workspace = workspace;
+    }
+    if (this.warm.retain(retention.backend, workspace)) {
+      retention.retained = true;
+      return;
+    }
+    await rm(retention.slotPath, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  }
+
+  /** Removes a slot the pool did not take, which nothing else would. */
+  private async discardWarmSlot(run: Run): Promise<void> {
+    const retention = run.warmRetention;
+    if (
+      retention === undefined ||
+      retention.retained ||
+      retention.workspace.path !== retention.slotPath
+    ) {
+      return;
+    }
+    await rm(retention.slotPath, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
   }
 
   /**
@@ -1043,6 +1241,15 @@ export class Worker {
       explanation: "A question declares no files, so there is nothing to admit.",
       decidedAt: new Date().toISOString(),
     });
+    if ("handoff" in result) {
+      // A question that filled its window is a question that cannot be
+      // answered in one; there is no partial answer to requeue and nothing
+      // for a handoff to carry it to, so it ends as the failure the room can
+      // act on.
+      throw new Error(
+        `The agent ran out of context before answering: ${result.handoff.reason}`,
+      );
+    }
     const said = (result.changeSet.agentExplanation ?? "").trim();
     // Every adapter falls back to "<name> completed <request>" when the model
     // returns no explanation of its own. For work that is a reasonable status
@@ -1680,15 +1887,42 @@ export class Worker {
     // reading every file git writes.
     run.laps?.mark("fetch");
 
-    const workspacePath = path.join(scratch, "workspace");
-    await this.materialise(git, source, source === cache, assignment, workspacePath);
-    run.laps?.mark("checkout");
+    // Asked for after `updateCache`, deliberately: a slot catches up by
+    // fetching from the bare cache, so the cache has to have absorbed this
+    // lease's revision before the slot can be brought to it.
+    const slotRoot = warmRepositoryRoot(
+      this.options.workspaceRoot,
+      assignment.repository.id,
+    );
+    const backend = new WorkerWarmBackend(git, new GitWorktreeWorkspaceManager(git), cache);
+    // A question is never offered a slot, because a question can never give
+    // one back. It reports no changeset, so nothing about it ever reaches
+    // canonical, so `retainWarmWorkspace` is never reached on its path — and
+    // a take it could only discard would spend the repository's one warm
+    // directory on the lease least able to use it, leaving the next real task
+    // to pay for a cold checkout. Asking questions is routine and they are
+    // served first, so this is the common case and not an edge of one.
+    const warm =
+      assignment.task.kind === "question"
+        ? undefined
+        : await this.warm.take({
+            taskId: assignment.task.id,
+            rootPath: slotRoot,
+            repository: {
+              id: assignment.repository.id,
+              path: slotRoot,
+              branch: assignment.repository.branch,
+            },
+            baseVersion: assignment.canonicalVersion,
+          });
+    const workspacePath =
+      warm?.workspace.path ?? path.join(scratch, "workspace");
 
     const workspace: TaskWorkspace = {
       id: assignment.lease.id,
       taskId: assignment.task.id,
       path: workspacePath,
-      rootPath: scratch,
+      rootPath: warm === undefined ? scratch : slotRoot,
       // The worker has no access to the canonical repository. Only the
       // workspace path and base version are read when collecting a changeset.
       repository: {
@@ -1700,6 +1934,41 @@ export class Worker {
       isolation: "git-worktree",
       createdAt: new Date().toISOString(),
     };
+
+    // Where this lease's directory would go if it lands. One that started in
+    // a slot is already in the right place; one that started in scratch is
+    // moved there afterwards, and only once the control plane has said the
+    // result reached canonical — never before, because a lease that failed
+    // may have an agent process still writing into it.
+    //
+    // Recorded on the run before anything else in this method can throw, and
+    // before the checkout below: from the instant `take` resolved, the pool
+    // has spliced its entry out and the only record that the directory exists
+    // is this one. See {@link Run.warmRetention}.
+    const retention: WarmRetention = {
+      backend,
+      workspace,
+      slotPath:
+        warm === undefined
+          ? warmSlotPath(
+              this.options.workspaceRoot,
+              assignment.repository.id,
+              assignment.lease.id,
+            )
+          : workspacePath,
+      retained: false,
+    };
+    run.warmRetention = retention;
+
+    if (warm === undefined) {
+      await this.materialise(git, source, source === cache, assignment, workspacePath);
+      run.laps?.mark("checkout");
+    } else {
+      // Named apart from a cold checkout so the one line a run prints says
+      // which of the two it was. `advance` has already re-based the slot on
+      // this lease's revision, so there is nothing left to materialise.
+      run.laps?.mark("checkout(warm)");
+    }
 
     // Hosted execution runs untrusted agents from different tenants on shared
     // compute, so the worker honours the project's sandbox configuration. With
@@ -1806,8 +2075,32 @@ export class Worker {
     const prepared = await this.options.client.claimRepository(
       assignment.lease.id,
     );
-    const context = [
-      assignment.task.context?.trim() ?? "",
+    // Two slots, and they are not interchangeable — see `StartTaskInput` in
+    // `packages/agent-protocol`. `task.context` is the conversation this was
+    // asked inside and nothing else: the codex and prompt-cli adapters read
+    // it back in every execution, replan and forced-question round as "the
+    // conversation this was asked inside", so a file list or a recent-touch
+    // hint placed there is presented to the model as something somebody
+    // said. `priorContext` is read by the planning prompt alone, labelled as
+    // notes to verify, which is the right frame for all of it. The thread
+    // goes first in it because it is about this request; the repository's
+    // standing context — the note its people wrote, which the claim route
+    // carries as the worker's substitute for the coordinator's seeding —
+    // comes next, and the planning hints last, exactly the in-process order.
+    // The note rides only here, never in `task.context`, so no adapter ever
+    // presents it as something said in the conversation.
+    //
+    // This used to join the two and pass the join in both slots. An adapter
+    // cannot take the join apart again, so the split has to happen here,
+    // exactly as the in-process coordinator does it.
+    const conversation = assignment.task.context?.trim() ?? "";
+    const priorContext = [
+      conversation,
+      // This task's own handoff, when a previous attempt left one — nearest
+      // to the request after the conversation itself, because it is about
+      // this objective rather than about the repository.
+      prepared.handoffContext ?? "",
+      prepared.standingContext ?? "",
       prepared.planningContext ?? "",
     ]
       .filter((part) => part !== "")
@@ -1818,11 +2111,20 @@ export class Worker {
         objective: assignment.task.objective,
         agentId: assignment.task.agentId,
         validationCommands: assignment.task.validationCommands,
-        ...(context === "" ? {} : { context }),
+        ...(conversation === "" ? {} : { context: conversation }),
       },
       canonicalVersion: assignment.canonicalVersion,
       repositoryId: assignment.repository.id,
-      ...(context === "" ? {} : { priorContext: context }),
+      ...(priorContext === "" ? {} : { priorContext }),
+      // Told before the session opens, as the coordinator tells it: some CLIs
+      // decide at invocation time whether a session persists at all (Codex's
+      // `--ephemeral`), and a turn of a conversation must keep its
+      // vendor-side state resumable where a one-shot task is better off
+      // hermetic. The worker never said so, and every conversational turn
+      // it ran was opened as a one-shot.
+      ...(assignment.task.conversationId === undefined
+        ? {}
+        : { conversational: true }),
     });
     run.session = { adapter, sessionId: session.id };
     // Listening starts here, not at execution.
@@ -1987,7 +2289,13 @@ export class Worker {
     assignment: WorkAssignment,
     planned: PlannedWork,
     admission: PlanAdmission,
-  ): Promise<{ plan: AgentPlan; changeSet: ChangeSet }> {
+  ): Promise<
+    | { plan: AgentPlan; changeSet: ChangeSet }
+    | {
+        plan: AgentPlan;
+        handoff: Extract<AgentEvent, { event: "context_handoff_requested" }>;
+      }
+  > {
     const { adapter, sessionId, plan } = planned;
     let eventError: unknown;
     let eventChain = Promise.resolve();
@@ -2066,6 +2374,19 @@ export class Worker {
             });
             return;
           }
+          if (event.event === "context_handoff_requested") {
+            // Stored rather than acted on here: `execute` decides, once the
+            // chain has drained, whether to collect a changeset or report a
+            // handoff. Narrated first, because a run that simply stops is a
+            // run a room reads as hung.
+            run.contextHandoff = event;
+            await this.options.client.progress(
+              assignment.lease.id,
+              `Context window nearly full — ${event.reason}. Stopping here ` +
+                "and handing the task back with a note of where it got to.",
+            );
+            return;
+          }
           if (event.event !== "scope_change_requested") {
             return;
           }
@@ -2101,6 +2422,13 @@ export class Worker {
     await eventChain;
     if (eventError !== undefined) {
       throw eventError;
+    }
+    // Deliberately before `collectChanges`, which would throw anyway: a
+    // stopped round has no completion, and its half-finished edits are not a
+    // changeset. The task is requeued and starts again from a fresh
+    // workspace with the handoff the control plane projects.
+    if (run.contextHandoff !== undefined) {
+      return { plan, handoff: run.contextHandoff };
     }
     return {
       plan,
@@ -2259,6 +2587,9 @@ export class Worker {
         ...(workerExecutionSandbox === undefined
           ? {}
           : { executionSandbox: workerExecutionSandbox }),
+        ...(agent.maximumContextTokens === undefined
+          ? {}
+          : { maximumContextTokens: agent.maximumContextTokens }),
         ...(mcp.codex === undefined ? {} : { mcpServers: mcp.codex.servers }),
         ...(agent.env === undefined ? {} : { env: { ...process.env, ...agent.env } }),
         ...(this.options.codexRunner === undefined
@@ -2316,6 +2647,23 @@ export class Worker {
           ? {}
           : { executionTimeoutMs: agent.executionTimeoutMs }),
         ...(promptEffort === undefined ? {} : { effort: promptEffort }),
+        ...(this.options.promptCliRunner === undefined
+          ? {}
+          : { runner: this.options.promptCliRunner }),
+        // Whether this run may stop itself, decided here rather than in the
+        // adapter: the deployment's configuration says whether it is allowed
+        // at all, and the assignment says whether this task has any budget
+        // left. A task on its last attempt runs to whatever ending it
+        // reaches, because a stop it cannot be requeued from is a failure
+        // dressed up as a handoff.
+        contextPressure: {
+          ...(agent.maximumContextTokens === undefined
+            ? {}
+            : { maximumContextTokens: agent.maximumContextTokens }),
+          handOff:
+            agent.contextHandoff !== false &&
+            (assignment.contextHandoffsRemaining ?? 0) > 0,
+        },
         ...(mcp.claude === undefined
           ? {}
           : { mcpConfigPath: mcp.claude.configPath }),
@@ -2360,6 +2708,12 @@ export class Worker {
    * exactly this reason.
    */
   public async run(): Promise<void> {
+    // Before anything can lease. A slot found on disk belongs to a process
+    // that is gone — the pool is a map in memory and nothing durable
+    // describes a slot — so there is no state here worth reasoning about,
+    // which is the same call crash recovery makes about the control plane's
+    // scratch roots.
+    await clearWarmSlots(this.options.workspaceRoot);
     await this.register();
     // Connected after registering, so a nudge can never arrive for a worker
     // the control plane does not yet know about.
@@ -2465,6 +2819,10 @@ export class Worker {
       })();
       slots.push(slot);
       if (!(await leased) && !this.stopping) {
+        // Swept here rather than on a timer of its own: this is the only
+        // moment the machine is known to be idle, and a directory nobody has
+        // asked for since this morning is disk rather than warmth.
+        await this.warm.closeIdle().catch(() => undefined);
         // Nothing queued that this machine can take. The nudge only ever
         // shortens this; with none supplied it is the same fixed backoff the
         // single-task loop always had.
@@ -2508,6 +2866,11 @@ export class Worker {
         this.options.client.release(run.leaseId).catch(() => undefined),
       ]),
     );
+    // After the runs, so a slot a finishing lease is still scrubbing is not
+    // removed underneath it. A stopped worker leaves no warm directories: the
+    // next process clears the root anyway, and a laptop that has been asked
+    // to shut down should not be holding checkouts.
+    await this.warm.drain().catch(() => undefined);
   }
 
   /**

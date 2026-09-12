@@ -28,6 +28,7 @@ import {
 } from "../authorization.js";
 import type { RefusalReason } from "../authorization.js";
 import {
+  contextPressureField,
   HttpError,
   objectBody,
   stringField,
@@ -736,7 +737,9 @@ export async function routeWorkers(
       // route existed, so every reason to say no — blanket claims switched
       // off, somebody else in the repository, an objective the estimator
       // could not anchor, a control plane too old to have the operation —
-      // is the same answer: 204, carry on.
+      // is the same answer: 204, carry on. A 204 means no plan and no
+      // context of any kind; a 200 without `plan` is not a claim, only
+      // something worth reading before planning.
       const claimOperation = gw.options.operations.claimWorkRepository;
       const body = objectBody(await gw.readJson(request));
       const prepared =
@@ -754,9 +757,15 @@ export async function routeWorkers(
                   ? Math.trunc(body["protocolVersion"])
                   : 0,
             });
+      // 204 means "nothing to carry", and every field the claim can answer
+      // with has to be counted in that — a 204 sent while one of them was set
+      // would drop it silently, which is how a worker ends up planning
+      // without the note its last attempt left.
       if (
         prepared.plan === undefined &&
-        (prepared.planningContext ?? "") === ""
+        (prepared.planningContext ?? "") === "" &&
+        (prepared.standingContext ?? "") === "" &&
+        (prepared.handoffContext ?? "") === ""
       ) {
         response.writeHead(204).end();
         return true;
@@ -766,6 +775,12 @@ export async function routeWorkers(
         ...(prepared.planningContext === undefined
           ? {}
           : { planningContext: prepared.planningContext }),
+        ...(prepared.standingContext === undefined
+          ? {}
+          : { standingContext: prepared.standingContext }),
+        ...(prepared.handoffContext === undefined
+          ? {}
+          : { handoffContext: prepared.handoffContext }),
       });
       return true;
     }
@@ -888,11 +903,15 @@ export async function routeWorkers(
         );
       }
       const status = body["status"];
-      if (status !== "completed" && status !== "failed") {
+      if (
+        status !== "completed" &&
+        status !== "failed" &&
+        status !== "handed_off"
+      ) {
         throw new HttpError(
           400,
           "invalid_request",
-          'status must be "completed" or "failed"',
+          'status must be "completed", "failed" or "handed_off"',
         );
       }
       const detail = stringField(body["detail"], "detail", {
@@ -909,6 +928,38 @@ export async function routeWorkers(
         max: 8000,
         optional: true,
       });
+      // Validated here rather than relayed as `unknown`, because what is in
+      // it becomes an audit record and then a handoff a person reads. The
+      // verdict is trace data and generously bounded; the figures are
+      // checked field by field.
+      //
+      // Absence is refused by name first. `objectBody` answers every
+      // non-object with "JSON body must be an object", which for a missing
+      // member would tell a worker its request body was malformed when the
+      // body was fine and one field was not there — a sender cannot act on
+      // that.
+      if (status === "handed_off" && body["handoff"] === undefined) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          'handoff is required when status is "handed_off"',
+        );
+      }
+      const reported =
+        status === "handed_off" ? objectBody(body["handoff"]) : undefined;
+      const handoff =
+        reported === undefined
+          ? undefined
+          : {
+              reason:
+                stringField(reported["reason"], "handoff.reason", {
+                  max: 2000,
+                }) ?? "",
+              pressure: contextPressureField(
+                reported["pressure"],
+                "handoff.pressure",
+              ),
+            };
       const resultOperation = gw.options.operations.acceptWorkResult;
       if (resultOperation === undefined) {
         throw new HttpError(
@@ -925,6 +976,7 @@ export async function routeWorkers(
         changeSet: body["changeSet"],
         ...(detail === undefined ? {} : { detail }),
         ...(answer === undefined ? {} : { answer }),
+        ...(handoff === undefined ? {} : { handoff }),
       });
       // An accepted answer goes back where somebody asked. Fire-and-forget
       // and after the response is decided: the worker's report has already

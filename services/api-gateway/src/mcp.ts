@@ -12,6 +12,13 @@
  *
  * So: `initialize`, `tools/list`, `tools/call`, `ping`, and nothing else.
  *
+ * The session id and the `DELETE` route do now exist — the route provides
+ * them, in `routes/session.ts`, against a record in the store. They are there
+ * rather than here because this module has no store, no principal and no
+ * response to set a header on, which is the same reason `instructions` arrives
+ * below as a string somebody else computed: the continuity hook is a fact
+ * about one person's history, and this file is the framing only.
+ *
  * ### Why there is no SSE
  *
  * The spec lets a server answer a POST with a plain JSON body instead of a
@@ -206,6 +213,13 @@ export async function handleMcpMessage(input: {
   readonly tools: readonly McpTool[];
   readonly serverName: string;
   readonly serverVersion: string;
+  /**
+   * What a returning client is told on its handshake, computed by the route
+   * because it needs the store and the principal. Absent or empty means the
+   * field is left out of the result entirely rather than sent as nothing,
+   * which a client would otherwise show the person as an empty instruction.
+   */
+  readonly instructions?: string;
 }): Promise<McpReply> {
   const { payload, tools } = input;
 
@@ -252,6 +266,9 @@ export async function handleMcpMessage(input: {
           : MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: input.serverName, version: input.serverVersion },
+      ...(input.instructions === undefined || input.instructions === ""
+        ? {}
+        : { instructions: input.instructions }),
     });
   }
 

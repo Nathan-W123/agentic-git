@@ -23,6 +23,7 @@ export interface SlashCommand {
     | "retry"
     | "cancel"
     | "stop"
+    | "context"
     | "help";
   /** One line, shown beside the name in the lookup. */
   summary: string;
@@ -114,6 +115,18 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: "stop",
     summary: "Stop an agent now and undo what its task changed",
     usage: "/stop @agent, or /stop on its own for everyone",
+    takesObjective: false,
+  },
+  {
+    name: "context",
+    // The repository's standing context: what every agent that plans here is
+    // told before it reads a file. Bare, it shows the note; with text, it sets
+    // it; `clear` is the one reserved word, because an empty message after
+    // the command already reads as "show me" and clearing needs a word of its
+    // own. Before `help` rather than after it, so the list of commands still
+    // ends with the one that lists the others.
+    summary: "Show or set what every agent here is told about this repository",
+    usage: "/context, /context <the note>, or /context clear",
     takesObjective: false,
   },
   {

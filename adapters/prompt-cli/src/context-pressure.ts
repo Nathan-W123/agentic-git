@@ -1,3 +1,5 @@
+import type { AgentContextPressure } from "@coord/shared-types";
+
 /**
  * Watching how full an agent's context window is, while it is still running.
  *
@@ -28,19 +30,18 @@
  *
  * ---
  *
- * STATUS: groundwork, deliberately paused. Nothing calls this yet.
- *
- * This reads a shape only Claude Code emits, and the work that would use it —
- * switching the Claude profile to `--output-format stream-json`, and requeueing
- * a task on a `long_running` handoff — is intentionally not built. Doing it now
- * would buy a context-aware handoff for one of the three supported CLIs and
- * quietly make the adapters asymmetric, which is not the shape this feature is
- * meant to end up in.
+ * This is wired in. The Claude profile runs `--output-format stream-json` in
+ * both phases and attaches a monitor per spawn, so occupancy and billed usage
+ * are readable while the agent is still working; during execution a verdict
+ * here stops the round at a tool boundary and the control plane requeues the
+ * task with a `long_running` handoff. Planning rounds are observed and never
+ * stopped — handing off a plan buys nothing.
  *
  * What each vendor can actually support, as measured rather than assumed:
  *
  * - **Claude Code** — works today. Per-turn `usage` and `compact_boundary` both
- *   arrive mid-run; verified live against a real compaction.
+ *   arrive mid-run; verified live against a real compaction and recorded in
+ *   `recorded-stream.fixture.ts`.
  * - **Gemini** — blocked on the vendor, not on effort. Its stream-json emits
  *   `init`/`message`/`tool_use`/`tool_result`/`error`/`result`, and token
  *   counts attach *only* to the terminal `result` event. `message` events carry
@@ -50,16 +51,14 @@
  * - **Codex** — unverified, not ruled out. It could not be exercised on the
  *   machine where this was written: the CLI is absent and its sandbox helper
  *   install is broken, so any claim about what `codex exec` streams would be a
- *   guess. Note also that the adapter passes `--ephemeral`, which disables the
- *   session persistence a resume would need.
+ *   guess. What the adapter reads today is `turn.completed`, one event per
+ *   exec, which says what a round cost rather than how full the window is —
+ *   hence `contextObservation: "per_round"` there and `"live"` only here.
  *
- * The detection layer landed on its own because it is the part everything else
- * blocked on and it is worth having regardless: `runProcess` could not observe
- * a running child at all before this, so no adapter could have reacted to
- * anything mid-execution. It is tested against a recorded real run and changes
- * no existing behaviour.
- *
- * See docs/architecture/context-window-handoff.md.
+ * The asymmetry is declared rather than left to behaviour: every adapter
+ * reports a `contextObservation`, so a driver can tell a vendor that will
+ * never ask to be handed off from one that has not asked yet. See the Protocol
+ * section of docs/architecture/context-window-handoff.md.
  */
 
 /** Occupancy at one turn, as the CLI reported it. */
@@ -214,6 +213,12 @@ export class ContextPressureMonitor {
   private readonly seenCompactions: ContextCompaction[] = [];
   private dropped = 0;
   private toolResultSinceTurn = false;
+  private readonly billedMessageIds = new Set<string>();
+  private billedTotal = 0;
+  private billedInput = 0;
+  private billedOutput = 0;
+  private billedCacheRead = 0;
+  private billedCacheCreation = 0;
 
   /**
    * Consumes a chunk of stdout and returns the signals it completed.
@@ -268,9 +273,11 @@ export class ContextPressureMonitor {
       // Claude repeats an assistant event per content block, so the same turn
       // arrives more than once with identical usage. Counting each repeat
       // would inflate the turn count without changing occupancy.
-      if (this.latest !== signal.contextTokens) {
+      const fresh = this.latest !== signal.contextTokens;
+      if (fresh) {
         this.turnCount += 1;
       }
+      this.bill(record, signal, fresh);
       this.latest = signal.contextTokens;
       this.peak = Math.max(this.peak, signal.contextTokens);
       this.toolResultSinceTurn = false;
@@ -295,6 +302,71 @@ export class ContextPressureMonitor {
       this.dropped +
         Math.max(0, signal.preTokens - (signal.postTokens ?? signal.preTokens));
     return signal;
+  }
+
+  /**
+   * Accumulates what the in-flight invocation has billed so far.
+   *
+   * Keyed on `message.id` rather than on the occupancy heuristic the turn
+   * count uses, because the two questions differ: two consecutive requests can
+   * legitimately cost the same and occupy the same window, and billing each
+   * repeated content block would multiply a round's cost by however many
+   * blocks the model happened to emit. When a release stops sending an id
+   * there is nothing to key on and the occupancy heuristic stands in, which
+   * under-counts two identical consecutive requests rather than over-counting
+   * every block — the safer side for a figure a budget is enforced against.
+   */
+  private bill(
+    record: Record<string, unknown> | undefined,
+    signal: ContextTurn,
+    fresh: boolean,
+  ): void {
+    const id = asRecord(record?.["message"])?.["id"];
+    if (typeof id === "string" && id.length > 0) {
+      if (this.billedMessageIds.has(id)) {
+        return;
+      }
+      this.billedMessageIds.add(id);
+    } else if (!fresh) {
+      return;
+    }
+    const usage = asRecord(asRecord(record?.["message"])?.["usage"]);
+    this.billedTotal += signal.contextTokens + signal.outputTokens;
+    this.billedOutput += signal.outputTokens;
+    if (usage === undefined) {
+      return;
+    }
+    this.billedInput += finiteNumber(usage, "input_tokens");
+    this.billedCacheRead += finiteNumber(usage, "cache_read_input_tokens");
+    this.billedCacheCreation += finiteNumber(
+      usage,
+      "cache_creation_input_tokens",
+    );
+  }
+
+  /**
+   * What the invocation has billed so far, in the shape the adapters report.
+   *
+   * The same split `parseClaudeUsage` produces from the result envelope —
+   * total counts cache traffic, `inputTokens` is fresh input only — so a round
+   * read live from the stream and the same round read from its envelope are
+   * the same number. That is what lets a heartbeat report a round that has not
+   * finished without a budget seeing the spend twice when it does.
+   */
+  public usage(): {
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  } {
+    return {
+      totalTokens: this.billedTotal,
+      inputTokens: this.billedInput,
+      outputTokens: this.billedOutput,
+      cacheReadTokens: this.billedCacheRead,
+      cacheCreationTokens: this.billedCacheCreation,
+    };
   }
 
   public pressure(): ContextPressure {
@@ -371,4 +443,29 @@ export function assessContextPressure(
   }
 
   return { shouldHandOff: false };
+}
+
+/**
+ * The wire shape of a pressure reading, for the control plane to record.
+ *
+ * Pure and separate from {@link assessContextPressure} because the verdict is
+ * the adapter's opinion and this is the evidence: the figures go into the
+ * `task_handed_off` audit event, and the handoff the control plane projects
+ * cites those rather than anything the adapter said in words.
+ */
+export function pressureSnapshot(
+  pressure: ContextPressure,
+  maximumContextTokens?: number,
+): AgentContextPressure {
+  return {
+    ...(pressure.latestTokens === undefined
+      ? {}
+      : { occupiedTokens: pressure.latestTokens }),
+    peakTokens: pressure.peakTokens,
+    ...(maximumContextTokens === undefined ? {} : { maximumContextTokens }),
+    turns: pressure.turns,
+    compactions: pressure.compactions.length,
+    droppedTokens: pressure.droppedTokens,
+    stale: pressure.staleAfterToolResult,
+  };
 }

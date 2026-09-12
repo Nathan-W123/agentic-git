@@ -394,3 +394,37 @@ test("a whole-file deferral is not a within-file split, whatever it drags along"
   assert.equal(metrics.sharing.withinFileAdmissions, 0);
   assert.equal(metrics.sharing.filesSharedBetweenTasks, 0);
 });
+
+/**
+ * Warm starts are counted per task start, not per run: `task_started` is the
+ * only event carrying the fields and there is no run-level event to hang them
+ * on, so a five-task run whose revision was already indexed contributes five.
+ * Anybody reading `indexWarm` as a count of runs is reading it wrong, which is
+ * why this test says the number out loud.
+ */
+test("warm starts are counted per task start, and absent fields count as neither", async () => {
+  const store = SqliteCoordinationStore.open(":memory:");
+
+  for (const taskId of ["task_1", "task_2", "task_3", "task_4", "task_5"]) {
+    await append(store, "task_started", taskId, {
+      workspaceStart: taskId === "task_1" ? "cold" : "warm",
+      indexStart: "warm",
+    });
+  }
+  await append(store, "task_started", "task_6", {
+    workspaceStart: "resumed",
+    indexStart: "cold",
+  });
+  // Recorded before the feature existed: guessing would make every historical
+  // start look cold and drown the change the numbers exist to show.
+  await append(store, "task_started", "task_7", {});
+
+  const metrics = await computeCoordinationMetrics(store);
+  assert.deepEqual(metrics.warmStarts, {
+    workspaceWarm: 4,
+    workspaceCold: 1,
+    workspaceResumed: 1,
+    indexWarm: 5,
+    indexCold: 1,
+  });
+});
