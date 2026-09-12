@@ -8,7 +8,7 @@
  * conversation it cannot see.
  */
 
-import { collapseWhitespace, textOverlap } from "./text.js";
+import { clipCodeUnits, collapseWhitespace, textOverlap } from "./text.js";
 
 /**
  * How much of a thread goes to the model when answering a follow-up.
@@ -72,7 +72,7 @@ export function truncateToTokens(value: string, maxTokens: number): string {
   }
   // Two characters back for the ellipsis the cut adds.
   const limit = Math.max(1, maxTokens * 4 - 2);
-  const clipped = value.slice(0, limit);
+  const clipped = clipCodeUnits(value, limit);
   const lastSpace = clipped.lastIndexOf(" ");
   // Only honour the word boundary when it is near the end; a single
   // enormous word would otherwise cut the entry down to nothing.
@@ -97,6 +97,24 @@ export function elidedHistoryNotice(count: number): string {
 }
 
 /**
+ * The line that says some of what *is* here arrived shortened.
+ *
+ * The ellipsis a clipped entry ends in is the only other sign, and an
+ * ellipsis is a thing people type. Without this, a thread whose one enormous
+ * entry was cut to fit reports `elided: 0` and reads as the whole
+ * conversation — so a model asked what a log said answers from the first
+ * quarter of it and has no reason to hedge. Naming the clip is what turns a
+ * silent partial read into a known one.
+ */
+export function clippedEntriesNotice(count: number): string {
+  return (
+    `(${String(count)} message${count === 1 ? "" : "s"} above ` +
+    `${count === 1 ? "was" : "were"} shortened to stay within context and ` +
+    "end mid-message at the …; what follows the … was said but is not here)"
+  );
+}
+
+/**
  * The part of a thread that is worth sending to a model, under a token budget.
  *
  * Three things decide it, in order. The opening message always stays — it is
@@ -106,32 +124,47 @@ export function elidedHistoryNotice(count: number): string {
  * left, older entries that have something in common with the request, so a
  * decision taken early in a long thread is not lost purely for being old.
  *
- * Returns how many entries were left out rather than dropping them silently,
- * so the caller can say so in the prompt.
+ * Returns what it could not carry rather than dropping it silently, in the
+ * two shapes loss takes here: `elided`, entries left out altogether, and
+ * `clipped`, entries that are present but shortened. Both go in the prompt.
+ * They are counted separately because they mislead a reader differently — a
+ * missing message leaves a gap, a clipped one leaves a sentence that looks
+ * finished — and because a selection can have one without the other.
  */
 export function selectThreadContext(input: {
   lines: readonly string[];
   /** The request or question this context is being assembled for. */
   focus?: string;
   budgetTokens?: number;
-}): { lines: string[]; elided: number } {
+}): { lines: string[]; elided: number; clipped: number } {
   const budget = input.budgetTokens ?? THREAD_CONTEXT_TOKEN_BUDGET;
-  const entries = input.lines
+  const said = input.lines
     .map((line) => collapseWhitespace(line))
-    .filter((line) => line.length > 0)
-    .map((line) => truncateToTokens(line, THREAD_CONTEXT_MAX_ENTRY_TOKENS));
+    .filter((line) => line.length > 0);
+  const entries = said.map((line) =>
+    truncateToTokens(line, THREAD_CONTEXT_MAX_ENTRY_TOKENS),
+  );
+  // Which entries arrived shortened, tracked from the first cut on: an entry
+  // clipped here and then dropped by the budget is elided, not clipped, and
+  // counting it as both would tell the reader the same loss twice.
+  const shortened = entries.map((line, index) => line !== said[index]);
   if (entries.length === 0 || budget <= 0) {
-    return { lines: [], elided: entries.length };
+    return { lines: [], elided: entries.length, clipped: 0 };
   }
   const costs = entries.map((line) => estimateTokens(line));
   const total = costs.reduce((sum, cost) => sum + cost, 0);
   if (total <= budget) {
-    return { lines: entries, elided: 0 };
+    return {
+      lines: entries,
+      elided: 0,
+      clipped: shortened.filter(Boolean).length,
+    };
   }
   // A root longer than the whole budget is cut to it rather than dropped.
   if ((costs[0] ?? 0) > budget) {
     entries[0] = truncateToTokens(entries[0] ?? "", budget);
     costs[0] = estimateTokens(entries[0] ?? "");
+    shortened[0] = true;
   }
   const kept = new Set<number>([0]);
   let spent = costs[0] ?? 0;
@@ -166,5 +199,8 @@ export function selectThreadContext(input: {
     }
   }
   const lines = entries.filter((_, index) => kept.has(index));
-  return { lines, elided: entries.length - lines.length };
+  const clipped = shortened.filter(
+    (was, index) => was && kept.has(index),
+  ).length;
+  return { lines, elided: entries.length - lines.length, clipped };
 }

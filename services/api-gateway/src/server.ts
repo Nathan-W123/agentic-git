@@ -238,6 +238,7 @@ import {
   type ProviderUsageWindow,
 } from "./vendors.js";
 import {
+  clippedEntriesNotice,
   elidedHistoryNotice,
   estimateTokens,
   selectThreadContext,
@@ -478,6 +479,7 @@ import { ArbitrationNoticeBoard } from "./arbitration-notices.js";
 import { AuditorWatch } from "./auditor-watch.js";
 export type { AgentVendor } from "./vendors.js";
 export {
+  clippedEntriesNotice,
   elidedHistoryNotice,
   estimateTokens,
   selectThreadContext,
@@ -7158,6 +7160,11 @@ export class ApiGateway {
       // After the opening message, which is where the gap always starts.
       bullets.splice(1, 0, `- ${elidedHistoryNotice(selected.elided)}`);
     }
+    if (selected.clipped > 0) {
+      // Last, because it is about the lines above it rather than a gap at
+      // any one point in them.
+      bullets.push(`- ${clippedEntriesNotice(selected.clipped)}`);
+    }
     return (
       "This request was made inside an ongoing conversation. What was said " +
       "in that thread before it, oldest first — background for what is " +
@@ -8350,6 +8357,11 @@ export class ApiGateway {
     if (selected.elided > 0) {
       // After the opening message, which is where the gap always starts.
       history.splice(1, 0, `- ${elidedHistoryNotice(selected.elided)}`);
+    }
+    if (selected.clipped > 0) {
+      // Last, because it is about the lines above it rather than a gap at
+      // any one point in them.
+      history.push(`- ${clippedEntriesNotice(selected.clipped)}`);
     }
     const prompt =
       `${agentIdentity(candidate)}\n\n` +
