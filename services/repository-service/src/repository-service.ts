@@ -596,11 +596,15 @@ async function namePushBranch(
     const written = await Promise.race([
       namer(prompt),
       new Promise<undefined>((resolve) => {
+        // The `finally` clears this the moment the namer answers, so it never
+        // holds a process open for a branch label — which is what unref'ing it
+        // was for. Refed, because a namer that stalls with nothing else pending
+        // would otherwise drain the loop before the timeout could hand back the
+        // deterministic name, and "nothing a model does is allowed to delay a
+        // push" is the promise above.
         timer = setTimeout(() => {
           resolve(undefined);
         }, PUSH_BRANCH_NAME_TIMEOUT_MS);
-        // Never a reason to hold a process open for a branch label.
-        timer.unref?.();
       }),
     ]);
     return sanitisePushBranchName(written);

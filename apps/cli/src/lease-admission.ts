@@ -140,8 +140,12 @@ async function answerWithin<T>(
     const outcome = await Promise.race([
       work.catch(() => undefined),
       new Promise<typeof timedOut>((resolve) => {
+        // Refed, and cleared in the `finally` as soon as the work wins, so it
+        // bounds the wait without outliving it. Unref'd it could not fire on
+        // a holder that stalls with nothing else pending: the loop drained and
+        // the caller was never told to wait, which is the whole answer this
+        // deadline exists to give.
         timer = setTimeout(() => resolve(timedOut), timeoutMs);
-        timer.unref?.();
       }),
     ]);
     if (outcome === timedOut) {

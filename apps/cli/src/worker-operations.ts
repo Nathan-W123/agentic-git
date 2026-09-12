@@ -1918,8 +1918,11 @@ async function withDeadline<T>(
     return await Promise.race([
       work,
       new Promise<T>((resolve) => {
+        // Refed, and cleared in the `finally` once the work wins. Unref'd, the
+        // fallback could not be reached when the work stalled with nothing
+        // else pending — the loop drained first — so the one case this exists
+        // for was the one it could not serve.
         timer = setTimeout(() => resolve(fallback), milliseconds);
-        timer.unref?.();
       }),
     ]);
   } finally {
