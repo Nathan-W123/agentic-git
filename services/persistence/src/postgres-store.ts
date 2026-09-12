@@ -256,13 +256,60 @@ function flag(row: Row, column: string): boolean {
   return value;
 }
 
+/**
+ * A JSON column, or a failure that says which column.
+ *
+ * `JSON.parse` alone raises "Unexpected token o in JSON at position 1", which
+ * names neither the column nor the row and leaves whoever is holding the pager
+ * reading the stack to find out which of a dozen JSON columns on the query's
+ * table was the unreadable one.
+ */
 function parseJson<T>(row: Row, column: string): T {
-  return JSON.parse(text(row, column)) as T;
+  const raw = text(row, column);
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    throw new Error(
+      `Column ${column} does not hold readable JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/**
+ * A JSON column that has to be a list.
+ *
+ * `parseJson<string[]>` is a cast, not a check: a column holding `{}` or `7`
+ * came back typed as an array and blew up at whatever `.map` or `.includes`
+ * first touched it, a stack frame or a service away from the row that was
+ * wrong. Refused here instead — a column nobody can read is an unknown, and an
+ * unknown reported as an empty list would read as "this worker supports no
+ * adapters" or "this token carries no scopes", which are answers, and wrong
+ * ones.
+ */
+function parseJsonArray<T>(row: Row, column: string): T[] {
+  const parsed = parseJson<unknown>(row, column);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Column ${column} was expected to hold a JSON array`);
+  }
+  return parsed as T[];
 }
 
 function optionalJson<T>(row: Row, column: string): T | undefined {
   const value = optionalText(row, column);
-  return value === undefined ? undefined : (JSON.parse(value) as T);
+  if (value === undefined) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(value) as T;
+  } catch (error) {
+    throw new Error(
+      `Column ${column} does not hold readable JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /**
@@ -284,14 +331,34 @@ function bind(values: unknown[], value: unknown): string {
 
 /**
  * BIGSERIAL and COUNT(*) come back as int8, which node-postgres returns as a
- * string to be safe near 2^63. Every int8 this store produces is a row
- * counter or sequence that fits a JS number, so parse it as one.
+ * string to be safe near 2^63. Every int8 this store produces is a row counter
+ * or sequence that fits a JS number, so parse it as one — but check that,
+ * rather than assume it.
+ *
+ * `Number("9007199254740993")` is 9007199254740992 and says nothing about the
+ * digit it dropped. An audit sequence, a token total or a `COUNT(*)` past 2^53
+ * would come back one short, compare equal to its neighbour, and be written
+ * back into the next row as if it were the number the server had. That is the
+ * one failure this store must never have: the sequence a chain hash is
+ * computed over silently ceasing to be the sequence in the table. A refusal
+ * that names the value is recoverable; a number that is quietly wrong is not.
  */
 const INT8_OID = 20;
 const queryTypes: pg.CustomTypesConfig = {
   getTypeParser: ((oid: number, format?: string) => {
     if (oid === INT8_OID && format !== "binary") {
-      return (value: string) => Number(value);
+      return (value: string) => {
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed)) {
+          // A `RangeError` naming the value, which is what `node:sqlite`
+          // raises for the same column in the same situation. Both backends
+          // refusing the same way is what lets one contract test assert it.
+          throw new RangeError(
+            `Value is too large to be represented as a JavaScript number: ${value}`,
+          );
+        }
+        return parsed;
+      };
     }
     return (
       pg.types.getTypeParser as (oid: number, format?: string) => unknown
@@ -419,6 +486,20 @@ export class PostgresCoordinationStore implements CoordinationStore {
    * migration and reports connection failures.
    */
   public static open(connectionString: string): PostgresCoordinationStore {
+    // A blank URL is falsy, and `pg.Pool` treats a falsy `connectionString` as
+    // "no connection string given": it falls back to PGHOST/PGUSER/PGDATABASE
+    // or, failing those, to a local server and a database named after the
+    // process owner. So a deployment whose database URL came through empty got
+    // a store that connected, migrated, accepted every write and reported them
+    // saved — into whatever database happened to be on the other side, which
+    // is not the one anybody meant. Refused here rather than in the caller,
+    // because the caller that gets this wrong is the one that thought it had a
+    // URL.
+    if (connectionString.trim().length === 0) {
+      throw new Error(
+        "A Postgres coordination store needs a connection URL; an empty one would connect to whatever the environment defaults to",
+      );
+    }
     return new PostgresCoordinationStore(
       new Pool({ connectionString, max: 10, types: queryTypes }),
     );
@@ -1508,7 +1589,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       userId: text(row, "user_id"),
       organizationId: optionalText(row, "organization_id"),
       name: text(row, "name"),
-      adapters: parseJson<string[]>(row, "adapters_json"),
+      adapters: parseJsonArray<string>(row, "adapters_json"),
       version: text(row, "version"),
       registeredAt: text(row, "registered_at"),
       lastSeenAt: text(row, "last_seen_at"),
@@ -2096,7 +2177,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       organizationId: optionalText(row, "organization_id"),
       name: text(row, "name"),
       secretHash: text(row, "secret_hash"),
-      scopes: parseJson<string[]>(row, "scopes_json"),
+      scopes: parseJsonArray<string>(row, "scopes_json"),
       createdAt: text(row, "created_at"),
       createdBySession: optionalText(row, "created_by_session"),
       createdByToken: optionalText(row, "created_by_token"),
@@ -2429,7 +2510,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       name: text(row, "name"),
       transport: text(row, "transport") as McpServerTransport,
       ...(command === undefined ? {} : { command }),
-      args: parseJson<string[]>(row, "args_json"),
+      args: parseJsonArray<string>(row, "args_json"),
       ...(url === undefined ? {} : { url }),
       values: parseJson<Record<string, string>>(row, "values_json"),
       // Names only. The triples in `secrets_json` leave this store through
@@ -2555,6 +2636,19 @@ export class PostgresCoordinationStore implements CoordinationStore {
     userId: string,
     options: { limit?: number; editorVendor?: string } = {},
   ): Promise<McpSessionRecord[]> {
+    // Refused here rather than by the server, so both backends answer a bad
+    // page size the same way. Postgres does reject `LIMIT -1` and `LIMIT 1.5`
+    // — but as a `DatabaseError` about bigint syntax raised from inside the
+    // driver, which reads as the store being broken rather than as the caller
+    // having asked for a page it cannot have.
+    if (
+      options.limit !== undefined &&
+      (!Number.isSafeInteger(options.limit) || options.limit < 0)
+    ) {
+      throw new RangeError(
+        "MCP session limit must be a non-negative safe integer",
+      );
+    }
     // See the SQLite copy: the vendor orders rather than filters, and NULL
     // matches nothing, which leaves plain recency.
     const rows = await this.rows(
@@ -2608,7 +2702,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         values.push(
           JSON.stringify(
             mergeMcpSessionTasks(
-              parseJson<McpSessionTask[]>(existing, "tasks_json"),
+              parseJsonArray<McpSessionTask>(existing, "tasks_json"),
               patch.noteTasks.tasks,
               patch.noteTasks.max,
             ),
@@ -3190,7 +3284,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       branch: optionalText(row, "branch"),
       objective: text(row, "objective"),
       agentId: text(row, "agent_id"),
-      validationCommands: parseJson<ValidationCommand[]>(
+      validationCommands: parseJsonArray<ValidationCommand>(
         row,
         "validation_commands_json",
       ),
@@ -4723,6 +4817,19 @@ export class PostgresCoordinationStore implements CoordinationStore {
     otherId: string,
     filter: DirectMessageFilter = {},
   ): Promise<DirectMessage[]> {
+    // Same refusal as the SQLite store, and the same reason for it: an absent
+    // limit means unlimited (that is what the `?? null` below says on
+    // purpose), but a limit that was asked for has to be one that can be
+    // honoured. Postgres would answer this one with a bigint syntax error
+    // from the driver, which says nothing about whose arithmetic slipped.
+    if (
+      filter.limit !== undefined &&
+      (!Number.isSafeInteger(filter.limit) || filter.limit < 0)
+    ) {
+      throw new RangeError(
+        "Direct message limit must be a non-negative safe integer",
+      );
+    }
     const conditions = ["project_id = $1", "pair_key = $2"];
     const values: unknown[] = [projectId, directPairKey(viewerId, otherId)];
     if (filter.before !== undefined) {
@@ -5327,7 +5434,21 @@ public async recordBranchClaim(
   public async holdEditorFile(
     input: HoldEditorFileInput,
   ): Promise<EditorHold> {
+    // Checked the way the SQLite store checks it, and for the same reasons. A
+    // hold is a promise about a window of time: zero or less writes one that
+    // has already lapsed, which the next `listEditorHolds` sweeps away and
+    // reports as nobody editing the file — an answer, and a wrong one. A
+    // non-finite or absurd TTL runs `toISOString` off the end of the
+    // representable range and surfaces as a bare "Invalid time value" thrown
+    // from inside the store, naming neither the input nor the caller.
+    if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs < 1) {
+      throw new RangeError("Editor hold TTL must be a positive integer");
+    }
     const now = new Date();
+    const expiresAt = new Date(now.getTime() + input.ttlMs);
+    if (Number.isNaN(expiresAt.getTime())) {
+      throw new RangeError("Editor hold TTL is too large to express as a date");
+    }
     const branch = input.branch ?? "";
     const ranges = (input.ranges ?? []).map((range) => ({ ...range }));
     // `acquired_at` is kept from the row already there — see the SQLite copy.
@@ -5349,7 +5470,7 @@ public async recordBranchClaim(
         JSON.stringify(ranges),
         now.toISOString(),
         now.toISOString(),
-        new Date(now.getTime() + input.ttlMs).toISOString(),
+        expiresAt.toISOString(),
       ],
     );
     return postgresEditorHold(held as Record<string, unknown>);
@@ -6262,7 +6383,7 @@ public async recordBranchClaim(
       clientVersion: optionalText(row, "client_version"),
       protocolVersion: text(row, "protocol_version"),
       focus: optionalJson<McpSessionFocus>(row, "focus_json"),
-      tasks: parseJson<McpSessionTask[]>(row, "tasks_json"),
+      tasks: parseJsonArray<McpSessionTask>(row, "tasks_json"),
       createdAt: text(row, "created_at"),
       lastSeenAt: text(row, "last_seen_at"),
       expiresAt: text(row, "expires_at"),
@@ -6305,7 +6426,7 @@ public async recordBranchClaim(
         row,
         "required_role",
       ) as ApprovalRequest["requiredRole"],
-      reasons: parseJson<string[]>(row, "reasons_json"),
+      reasons: parseJsonArray<string>(row, "reasons_json"),
       ...(changeSetId === undefined ? {} : { changeSetId }),
       ...(scopeChangeId === undefined ? {} : { scopeChangeId }),
       requestedAt: text(row, "requested_at"),
@@ -6352,7 +6473,7 @@ public async recordBranchClaim(
       id: text(row, "id"),
       objective: text(row, "objective"),
       agentId: text(row, "agent_id"),
-      validationCommands: parseJson<ValidationCommand[]>(
+      validationCommands: parseJsonArray<ValidationCommand>(
         row,
         "validation_commands_json",
       ),
@@ -6374,7 +6495,7 @@ public async recordBranchClaim(
       taskIds: [text(row, "first_task_id"), text(row, "second_task_id")],
       score: integer(row, "score"),
       disposition: text(row, "disposition") as ConflictDisposition,
-      evidence: parseJson<ConflictEvidence[]>(row, "evidence_json"),
+      evidence: parseJsonArray<ConflictEvidence>(row, "evidence_json"),
       explanation: text(row, "explanation"),
     }));
   }
@@ -6405,16 +6526,16 @@ public async recordBranchClaim(
         baseVersion: integer(row, "base_version"),
         baseRevision: text(row, "base_revision"),
         patches,
-        commandsRun: parseJson<CommandResult[]>(row, "commands_run_json"),
-        tests: parseJson<TestResult[]>(row, "tests_json"),
-        dependenciesChanged: parseJson<string[]>(
+        commandsRun: parseJsonArray<CommandResult>(row, "commands_run_json"),
+        tests: parseJsonArray<TestResult>(row, "tests_json"),
+        dependenciesChanged: parseJsonArray<string>(
           row,
           "dependencies_changed_json",
         ),
-        symbolsChanged: parseJson<string[]>(row, "symbols_changed_json"),
+        symbolsChanged: parseJsonArray<string>(row, "symbols_changed_json"),
         riskAssessment: {
           level: text(row, "risk_level") as RiskLevel,
-          reasons: parseJson<string[]>(row, "risk_reasons_json"),
+          reasons: parseJsonArray<string>(row, "risk_reasons_json"),
         },
         agentExplanation: text(row, "agent_explanation"),
         createdAt: text(row, "created_at"),
@@ -6431,7 +6552,7 @@ public async recordBranchClaim(
     return rows.map((row) => {
       const candidate = optionalText(row, "candidate_revision");
       const replayedFrom = optionalText(row, "replayed_from");
-      const cleanupWarnings = parseJson<string[]>(row, "cleanup_warnings_json");
+      const cleanupWarnings = parseJsonArray<string>(row, "cleanup_warnings_json");
       return {
         taskId: text(row, "task_id"),
         changeSetId: text(row, "changeset_id"),
@@ -6448,7 +6569,7 @@ public async recordBranchClaim(
           branch: text(row, "canonical_branch"),
           createdAt: text(row, "canonical_created_at"),
         },
-        validation: parseJson<CommandResult[]>(row, "validation_json"),
+        validation: parseJsonArray<CommandResult>(row, "validation_json"),
         ...(candidate === undefined ? {} : { candidateRevision: candidate }),
         ...(replayedFrom === undefined ? {} : { replayedFrom }),
         ...(cleanupWarnings.length === 0 ? {} : { cleanupWarnings }),

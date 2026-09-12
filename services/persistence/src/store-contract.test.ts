@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test, { after } from "node:test";
+
+import pg from "pg";
 
 import type {
   AgentPlan,
@@ -219,20 +222,70 @@ function present<T>(value: T | undefined, what: string): T {
   return value;
 }
 
+/**
+ * A way to put a value into a column that the store itself would never write.
+ *
+ * Some of what a store owes its callers is only visible when a row is wrong:
+ * a JSON column that is not readable, or is readable but is not the shape the
+ * reader assumed. No public method can produce one, so the suite reaches past
+ * the store — a second connection to the same database — writes the bad value
+ * and then asks the store to read it. What is being asserted is still
+ * behaviour through the interface: what the store answers when the table
+ * disagrees with it.
+ */
+type WriteRawColumn = (
+  table: string,
+  column: string,
+  value: string,
+  id: string,
+) => Promise<void>;
+
+interface OpenBackend {
+  store: CoordinationStore;
+  cleanup: () => Promise<void>;
+  writeRawColumn: WriteRawColumn;
+}
+
 interface Backend {
   name: string;
-  open: () => Promise<{ store: CoordinationStore; cleanup: () => Promise<void> }>;
+  open: () => Promise<OpenBackend>;
+  /**
+   * Opens a store at a blank location, the way a deployment does when its
+   * configured path or URL came through empty.
+   *
+   * Both backends have a default hiding behind an empty string — a private
+   * temporary database for SQLite, the ambient PG* environment for Postgres —
+   * and both of those accept every write and report it saved somewhere nobody
+   * meant. So "a blank location is refused" is a contract, not a detail of
+   * either driver, and it is asserted here against both.
+   */
+  openBlank: () => void;
 }
 
 const backends: Backend[] = [
   {
     name: "sqlite",
+    openBlank: () => {
+      SqliteCoordinationStore.open("");
+    },
     open: async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), "coord-store-"));
       const store = SqliteCoordinationStore.open(
         path.join(root, "coordination.db"),
       );
       return {
+        // A connection of its own, because the store keeps its handle
+        // private; SQLite is content with two on one file.
+        writeRawColumn: async (table, column, value, id) => {
+          const raw = new DatabaseSync(path.join(root, "coordination.db"));
+          try {
+            raw
+              .prepare(`UPDATE ${table} SET ${column} = ? WHERE id = ?`)
+              .run(value, id);
+          } finally {
+            raw.close();
+          }
+        },
         store,
         cleanup: async () => {
           // Closed before the file is removed. Windows refuses to unlink a
@@ -271,9 +324,24 @@ if (postgresServer === undefined) {
   });
   backends.push({
     name: "postgres",
+    openBlank: () => {
+      PostgresCoordinationStore.open("");
+    },
     open: async () => {
       const database = await createScratchDatabase(postgresServer.adminUrl);
       return {
+        writeRawColumn: async (table, column, value, id) => {
+          const raw = new pg.Client({ connectionString: database.url });
+          await raw.connect();
+          try {
+            await raw.query(
+              `UPDATE ${table} SET ${column} = $1 WHERE id = $2`,
+              [value, id],
+            );
+          } finally {
+            await raw.end();
+          }
+        },
         store: PostgresCoordinationStore.open(database.url),
         cleanup: async () => {
           await database.drop();
@@ -7942,4 +8010,231 @@ for (const backend of backends) {
       await cleanup();
     }
   });
+
+  test(`${backend.name}: an editor hold has to be given a lifetime it can keep`, async () => {
+    // A hold is a promise about a window of time. Zero or less writes one
+    // that lapsed before it was written, and the next reader sweeps it away
+    // and reports the file as unheld — indistinguishable from nobody having
+    // it open, which is an answer and the wrong one. A TTL past the
+    // representable range came out as a bare "Invalid time value" thrown from
+    // inside the store, naming neither the caller nor the input.
+    const { store, cleanup } = await backend.open();
+    try {
+      const hold = {
+        repositoryId: "repo_ttl",
+        userId: "user_nathan" as never,
+        file: "src/login.ts",
+      };
+      for (const ttlMs of [0, -1, -60_000, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await assert.rejects(
+          store.holdEditorFile({ ...hold, ttlMs }),
+          RangeError,
+          `a TTL of ${String(ttlMs)} is not a lifetime`,
+        );
+      }
+      // Representable as a number but not as a date: a lifetime of a hundred
+      // million years is a caller bug, not a very patient editor.
+      await assert.rejects(
+        store.holdEditorFile({ ...hold, ttlMs: 1e16 }),
+        RangeError,
+      );
+      // Nothing was written by any of those, so the file is still nobody's.
+      assert.deepEqual(await store.listEditorHolds("repo_ttl"), []);
+
+      const kept = await store.holdEditorFile({ ...hold, ttlMs: 60_000 });
+      assert.ok(kept.expiresAt > kept.acquiredAt, "a lifetime that lies ahead");
+      assert.equal((await store.listEditorHolds("repo_ttl")).length, 1);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a page size that cannot be honoured is refused`, async () => {
+    // Both backends have a way of reading a bad limit that is worse than
+    // refusing it: SQLite reads `LIMIT -1` as "no limit" and hands back the
+    // whole conversation, and Postgres raises a bigint syntax error from
+    // inside the driver that reads as the store being broken rather than as
+    // the caller having asked for a page nobody can serve. An absent limit
+    // still means all of them.
+    const { store, cleanup } = await backend.open();
+    try {
+      const nathan = await store.createUser({
+        email: "nathan@example.com",
+        displayName: "Nathan",
+        passwordDigest: "digest",
+      });
+      const kumi = await store.createUser({
+        email: "kumi@example.com",
+        displayName: "Kumi",
+        passwordDigest: "digest",
+      });
+      for (const body of ["first", "second", "third"]) {
+        await store.appendDirectMessage({
+          projectId: DEFAULT_PROJECT_ID,
+          authorId: nathan.id,
+          recipientId: kumi.id,
+          content: body,
+        });
+      }
+
+      for (const limit of [-1, -100, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await assert.rejects(
+          store.listDirectMessages(DEFAULT_PROJECT_ID, nathan.id, kumi.id, {
+            limit,
+          }),
+          RangeError,
+          `a page size of ${String(limit)} is not a page size`,
+        );
+        await assert.rejects(
+          store.listMcpSessions(nathan.id, { limit }),
+          RangeError,
+        );
+      }
+
+      // Zero is a page size — the smallest one — and has to stay
+      // distinguishable from not asking for a page at all.
+      assert.deepEqual(
+        await store.listDirectMessages(DEFAULT_PROJECT_ID, nathan.id, kumi.id, {
+          limit: 0,
+        }),
+        [],
+      );
+      assert.equal(
+        (await store.listDirectMessages(DEFAULT_PROJECT_ID, nathan.id, kumi.id))
+          .length,
+        3,
+      );
+      assert.deepEqual(await store.listMcpSessions(nathan.id, { limit: 0 }), []);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a counter too large to read is refused, not rounded`, async () => {
+    // Token totals are 64-bit columns and JavaScript numbers are not. A
+    // figure past 2^53 comes back from Postgres as the nearest double —
+    // 9007199254740993 reads as ...992 — and nothing anywhere says a digit
+    // was dropped. It is a bill, and a bill that is quietly wrong is worse
+    // than one that cannot be fetched, so both backends refuse the row
+    // rather than answer with a number that is not the one in the table.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const base = {
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryId: REPOSITORY.id,
+        taskId: TASK.id,
+        agentId: TASK.agentId,
+        phase: "execution" as const,
+        recordedAt: "2026-01-01T00:00:00.000Z",
+      };
+      await assert.rejects(
+        store.recordTokenUsage({
+          ...base,
+          leaseId: "lease_over",
+          usageKey: "lease_over:execution",
+          totalTokens: Number.MAX_SAFE_INTEGER + 1,
+        }),
+        (error: unknown) =>
+          error instanceof RangeError &&
+          /9007199254740992/u.test(error.message),
+      );
+
+      // And the largest number that can be read back exactly is still
+      // answered, because a guard that refuses everything large is a
+      // different bug. Its own lease, so the reader is not walking over the
+      // row the refusal above left behind.
+      const exact = await store.recordTokenUsage({
+        ...base,
+        leaseId: "lease_exact",
+        usageKey: "lease_exact:execution",
+        totalTokens: Number.MAX_SAFE_INTEGER,
+      });
+      assert.equal(exact.totalTokens, Number.MAX_SAFE_INTEGER);
+      assert.equal(
+        (await store.listTokenUsage({ leaseId: "lease_exact" }))[0]
+          ?.totalTokens,
+        Number.MAX_SAFE_INTEGER,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a blank database location is refused`, async () => {
+    // An empty string is a valid location to both drivers and means
+    // something different and silent in each: SQLite opens a private
+    // temporary database that is deleted when the connection closes, and
+    // node-postgres ignores the empty URL and connects to whatever the PG*
+    // environment or its own defaults point at. Either way the store comes
+    // up, migrates, accepts every write and reports it saved — into a
+    // database nobody configured. A deployment whose URL came through empty
+    // must be told, not served.
+    assert.throws(() => backend.openBlank(), /needs a (path|connection URL)/u);
+  });
+
+
+  test(`${backend.name}: a column that is not a list is refused, not emptied`, async () => {
+    // `parseJson<string[]>` is a cast, not a check. A column holding an
+    // object or a number came back typed as an array and failed at whatever
+    // `.map` or `.includes` touched it next — a service away from the row
+    // that was wrong, with nothing in the message naming the column.
+    //
+    // And it must not be softened into an empty list either. "This worker
+    // supports no adapters" is an answer, and the scheduler acts on it by
+    // handing the machine no work at all; a refusal that names the column is
+    // recoverable, a confident empty list is not.
+    const { store, cleanup, writeRawColumn } = await backend.open();
+    try {
+      const nathan = await store.createUser({
+        email: "nathan@example.com",
+        displayName: "Nathan",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: nathan.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "nathan-desktop",
+        adapters: ["claude-code", "codex"],
+        version: "1.0.0",
+      });
+      assert.deepEqual((await store.getWorker(worker.id))?.adapters, [
+        "claude-code",
+        "codex",
+      ]);
+
+      await writeRawColumn("workers", "adapters_json", "{}", worker.id);
+      await assert.rejects(
+        store.getWorker(worker.id),
+        /adapters_json/u,
+        "a JSON object where a list belongs is refused, by column name",
+      );
+
+      await writeRawColumn("workers", "adapters_json", "not json", worker.id);
+      await assert.rejects(
+        store.getWorker(worker.id),
+        /adapters_json/u,
+        "and so is a column that does not hold JSON at all",
+      );
+
+      // Restored, the same row reads normally again — the refusal was about
+      // the value, not about the worker.
+      await writeRawColumn(
+        "workers",
+        "adapters_json",
+        JSON.stringify(["claude-code"]),
+        worker.id,
+      );
+      assert.deepEqual((await store.getWorker(worker.id))?.adapters, [
+        "claude-code",
+      ]);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
 }
